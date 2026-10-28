@@ -8,8 +8,6 @@ Status: early. Not ready for use yet.
 
 ## Run it
 
-<!-- e2e y -->
-
 The spike polls GitHub (no webhooks yet) and has one queue per repo, on the default branch.
 
 1. Generate the secret key. It encrypts the GitHub App and the Anthropic API key in the database. Keep it: without it, you must set Mergepatrol up again.
@@ -111,5 +109,3 @@ The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for
 ## License
 
 Apache-2.0
-
-<!-- e2e x -->
