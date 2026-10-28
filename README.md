@@ -4,7 +4,7 @@ Mergepatrol is a merge queue for GitHub. Add a label to a pull request, and Merg
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
-Status: early. Not ready for use yet.
+Status: early. Being tested end to end.
 
 ## Run it
 
