@@ -57,6 +57,27 @@ verify:
   - cargo check
 ```
 
+## How jobs are isolated
+
+A rebase job runs the repo's code (the verify commands) and an agent with a shell. Mergepatrol treats it as untrusted:
+
+- The **orchestrator** holds the GitHub App key and the queue. It never runs repo code.
+- Each **job** runs `mergepatrol job` in its own container, from the job image. It gets a token that can only read the one repo, and the workspace's Anthropic key. It returns a git bundle.
+- The orchestrator checks the bundle before it publishes: the result must sit on the base branch, and change no file that the PR did not change.
+
+In production the job containers use gVisor (`runsc`) on a network that cannot reach the cloud metadata server, private ranges, or the host. `deploy/sandbox-host.sh` sets that up on a Linux VM. Then set:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `local` runs it as a process, without isolation, for development |
+| `MERGEPATROL_JOB_IMAGE` | `mergepatrol-job:latest` | The job image (`docker build --target job`) |
+| `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
+| `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
+| `MERGEPATROL_JOB_MEMORY` | `4g` | Memory limit per job |
+| `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
+
+The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for the verify commands.
+
 ## Crates
 
 | Crate | What it does |
@@ -65,10 +86,10 @@ verify:
 | `github` | GitHub App auth, the REST and GraphQL calls, and publishing commits through the Git Data API |
 | `git` | Local git: fetch, worktrees, rebase |
 | `resolver` | The `Resolver` trait, and the Claude implementation |
-| `executor` | Where a job's workspace and commands run |
+| `executor` | Runs a rebase job: as a local process, or in a container. The job protocol |
 | `store` | The `Store` trait, and SQLite |
 | `web` | The HTTP server: JSON API and the dashboard |
-| `mergepatrol` | The binary |
+| `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
 
 ## License
 

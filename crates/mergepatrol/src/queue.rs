@@ -5,21 +5,23 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use std::path::Path;
+
+use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
     Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, RepoName, Transition,
 };
 use mergepatrol_executor::Executor;
-use mergepatrol_git::{Git, RebaseStep, cache_path};
+use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec};
+use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
     App, AppCredentials, CheckState, Installation, MergeOutcome, PullRequest, RepoSnapshot,
 };
-use mergepatrol_resolver::{Resolution, ResolveRequest, Resolver};
-use mergepatrol_store::{GITHUB_APP, LaneKey, Store, Vault};
+use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Store, Vault};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use crate::config::{Config, REPO_CONFIG_PATH, RepoConfig};
+use crate::config::Config;
 use crate::publish::{Publish, publish};
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
@@ -27,16 +29,16 @@ const CHECKS_POLL: Duration = Duration::from_secs(15);
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
 /// How soon a repo turned on in the dashboard starts its queue.
 const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
+const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const RESOLVER_MAX_TURNS: u32 = 50;
+const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 
 pub struct Ctx {
     pub config: Config,
     pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
-    pub exec: Arc<dyn Executor>,
-    pub resolver: Arc<dyn Resolver>,
+    pub executor: Arc<dyn Executor>,
     pub jobs: Semaphore,
-    pub resolutions: Semaphore,
 }
 
 /// Runs a queue for each repo that is on in the dashboard, and stops the queues of repos that
@@ -345,10 +347,10 @@ async fn rebase_and_publish(
     pr: &PullRequest,
 ) -> Result<Event> {
     let repo = &key.repo;
-    let git = Git::new(ctx.exec.as_ref());
+    let git = Git;
     let cache = cache_path(&ctx.config.data_dir, &repo.owner, &repo.name);
-    git.ensure_cache(&cache, &format!("https://github.com/{repo}.git"))
-        .await?;
+    let clone_url = format!("https://github.com/{repo}.git");
+    git.ensure_cache(&cache, &clone_url).await?;
 
     let pr_ref = format!("refs/mergepatrol/pr/{}", pr.number);
     let trunk_ref = format!("refs/remotes/origin/{}", key.trunk);
@@ -361,155 +363,61 @@ async fn rebase_and_publish(
         ],
     )
     .await?;
-
-    let job_id = format!("{}-{}-{}", repo.owner, repo.name, pr.number);
-    let wt = ctx.exec.workspace(&job_id);
     let head = git.rev_parse(&cache, &pr_ref).await?;
     let trunk = git.rev_parse(&cache, &trunk_ref).await?;
-    git.add_worktree(&cache, &wt, &head).await?;
-
-    let result = rebase_in(ctx, gh, &git, &wt, key, snap, pr, &head, &trunk, &job_id).await;
-    if let Err(e) = git.remove_worktree(&cache, &wt).await {
-        tracing::warn!(error = %e, "could not remove worktree");
-    }
-    result
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn rebase_in(
-    ctx: &Ctx,
-    gh: &Installation,
-    git: &Git<'_>,
-    wt: &std::path::Path,
-    key: &LaneKey,
-    snap: &RepoSnapshot,
-    pr: &PullRequest,
-    head: &str,
-    trunk: &str,
-    job_id: &str,
-) -> Result<Event> {
-    if git.is_ancestor(wt, trunk, head).await? {
-        return Ok(Event::Rebased {
-            head: head.to_owned(),
-            base: trunk.to_owned(),
-        });
+    if git.is_ancestor(&cache, &trunk, &head).await? {
+        return Ok(Event::Rebased { head, base: trunk });
     }
 
-    let pr_files: BTreeSet<String> = git
-        .changed_files(wt, &git.merge_base(wt, trunk, head).await?, head)
-        .await?
-        .into_iter()
-        .collect();
-    let config = match git.file_at(wt, trunk, REPO_CONFIG_PATH).await? {
-        Some(yaml) => RepoConfig::parse(&yaml)?,
-        None => RepoConfig::default(),
+    let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
+    let out = ctx.config.data_dir.join("jobs").join(&job_id);
+    let _ = tokio::fs::remove_dir_all(&out).await;
+    let spec = JobSpec {
+        repo: repo.to_string(),
+        clone_url,
+        token: gh.read_token(repo).await?,
+        head_ref: pr.head_ref_name.clone(),
+        head_sha: head.clone(),
+        trunk: key.trunk.clone(),
+        trunk_sha: trunk.clone(),
+        pr_title: pr.title.clone(),
+        pr_body: pr.body.clone(),
+        resolver: ResolverSpec {
+            model: ctx.config.model.clone(),
+            effort: ctx.config.effort.clone(),
+            timeout_secs: RESOLVER_TIMEOUT.as_secs(),
+            max_turns: RESOLVER_MAX_TURNS,
+            anthropic_api_key: ctx.vault.get(ANTHROPIC_API_KEY).await?,
+        },
     };
-
-    let mut resolved: BTreeSet<String> = BTreeSet::new();
-    let mut step = git.rebase(wt, trunk).await?;
-    while let RebaseStep::Conflict { commit, files } = step {
+    ctx.store.record(key, pr.number, "job", &job_id).await?;
+    let result = match ctx.executor.run(&job_id, &spec, &out).await {
+        Ok(r) => r,
+        Err(e) => return Ok(Event::RebaseFailed(format!("the rebase job failed: {e:#}"))),
+    };
+    for e in &result.events {
         ctx.store
-            .record(key, pr.number, "conflict", &files.join(", "))
+            .record(key, pr.number, &e.kind, &e.message)
             .await?;
-        let _slot = ctx.resolutions.acquire().await?;
-        let commit_message = git.commit_message(wt, &commit).await?;
-        let transcript = ctx
-            .config
-            .data_dir
-            .join("transcripts")
-            .join(format!("{job_id}-{}.jsonl", &commit[..12]));
-        let outcome = ctx
-            .resolver
-            .resolve(ResolveRequest {
-                workdir: wt,
-                conflicted_files: &files,
-                pr_title: &pr.title,
-                pr_body: &pr.body,
-                commit_message: &commit_message,
-                trunk: &key.trunk,
-                verify_commands: &config.verify,
-                transcript: &transcript,
-            })
-            .await;
-        match outcome {
-            Ok(Resolution::Resolved { turns, cost_usd }) => {
-                let cost = cost_usd.map(|c| format!(", ${c:.2}")).unwrap_or_default();
-                ctx.store
-                    .record(
-                        key,
-                        pr.number,
-                        "resolved",
-                        &format!("{} in {turns} turns{cost}", files.join(", ")),
-                    )
-                    .await?;
-            }
-            Ok(Resolution::GaveUp(reason)) => {
-                return abort(git, wt, format!("the resolver gave up: {reason}")).await;
-            }
-            Err(e) => return abort(git, wt, format!("the resolver failed: {e:#}")).await,
-        }
-        for f in &files {
-            let content = tokio::fs::read_to_string(wt.join(f))
-                .await
-                .unwrap_or_default();
-            if content
-                .lines()
-                .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
-            {
-                return abort(git, wt, format!("conflict markers are left in {f}")).await;
-            }
-        }
-        git.commit_resolution(
-            wt,
-            &format!("Resolved-by: mergepatrol, {}", ctx.resolver.name()),
-        )
-        .await?;
-        resolved.extend(files);
-        step = git.rebase_continue(wt).await?;
+    }
+    if let JobOutcome::Failed { reason } = result.outcome {
+        return Ok(Event::RebaseFailed(reason));
     }
 
-    let local_head = git.rev_parse(wt, "HEAD").await?;
-    if !resolved.is_empty() {
-        let outside: Vec<String> = git
-            .changed_files(wt, trunk, &local_head)
-            .await?
-            .into_iter()
-            .filter(|f| !pr_files.contains(f) && !resolved.contains(f))
-            .collect();
-        if !outside.is_empty() {
-            return Ok(Event::RebaseFailed(format!(
-                "the resolution changed files outside the PR: {}",
-                outside.join(", ")
-            )));
-        }
-        for cmd in &config.verify {
-            ctx.store.record(key, pr.number, "verify", cmd).await?;
-            let mut c = ctx.exec.command("sh", wt);
-            c.args(["-c", cmd]);
-            let out = tokio::time::timeout(VERIFY_TIMEOUT, c.output())
-                .await
-                .context("verify timed out")??;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let lines: Vec<&str> = stderr.lines().collect();
-                let tail = lines[lines.len().saturating_sub(20)..].join("\n");
-                return Ok(Event::RebaseFailed(format!(
-                    "`{cmd}` failed after the resolution:\n```\n{tail}\n```"
-                )));
-            }
-        }
-    }
-
+    let local_head = match check_job_output(&git, &cache, &out, pr.number, &trunk, &head).await {
+        Ok(h) => h,
+        Err(e) => return Ok(Event::RebaseFailed(format!("{e:#}"))),
+    };
     let published = publish(
         gh,
-        git,
-        wt,
+        &git,
+        &cache,
         Publish {
             repo: &key.repo,
             repo_id: &snap.id,
             branch: &pr.head_ref_name,
-            expected_head: head,
-            base: trunk,
+            expected_head: &head,
+            base: &trunk,
             local_head: &local_head,
         },
     )
@@ -517,7 +425,7 @@ async fn rebase_in(
     match published {
         Ok(sha) => Ok(Event::Rebased {
             head: sha,
-            base: trunk.to_owned(),
+            base: trunk,
         }),
         // `updateRefs` refuses when the branch moved: the author pushed while we rebased.
         Err(_) if gh.branch_sha(&key.repo, &pr.head_ref_name).await? != head => {
@@ -527,7 +435,125 @@ async fn rebase_in(
     }
 }
 
-async fn abort(git: &Git<'_>, wt: &std::path::Path, reason: String) -> Result<Event> {
-    let _ = git.rebase_abort(wt).await;
-    Ok(Event::RebaseFailed(reason))
+/// The job is untrusted, so its output is checked here, not believed. A rebase only replays
+/// the PR's changes, and a conflict can only be in a file the PR changed: the result may touch
+/// no file outside the PR's own.
+async fn check_job_output(
+    git: &Git,
+    cache: &Path,
+    out: &Path,
+    number: PrNumber,
+    trunk: &str,
+    head: &str,
+) -> Result<String> {
+    let bundle = out.join(BUNDLE_FILE);
+    let size = tokio::fs::metadata(&bundle)
+        .await
+        .context("the job wrote no bundle")?
+        .len();
+    if size > MAX_BUNDLE_BYTES {
+        bail!("the job's result is {size} bytes, over the {MAX_BUNDLE_BYTES} limit");
+    }
+    let local_head = git
+        .import_bundle(cache, &bundle, &format!("refs/mergepatrol/result/{number}"))
+        .await?;
+    let _ = tokio::fs::remove_file(&bundle).await;
+    if !git.is_ancestor(cache, trunk, &local_head).await? {
+        bail!("the job's result does not sit on the base branch");
+    }
+    let pr_files: BTreeSet<String> = git
+        .changed_files(cache, &git.merge_base(cache, trunk, head).await?, head)
+        .await?
+        .into_iter()
+        .collect();
+    let outside: Vec<String> = git
+        .changed_files(cache, trunk, &local_head)
+        .await?
+        .into_iter()
+        .filter(|f| !pr_files.contains(f))
+        .collect();
+    if !outside.is_empty() {
+        bail!(
+            "the rebase changed files outside the PR: {}",
+            outside.join(", ")
+        );
+    }
+    Ok(local_head)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    fn commit(dir: &Path, files: &[(&str, &str)]) -> String {
+        for (f, c) in files {
+            std::fs::write(dir.join(f), c).unwrap();
+            git(dir, &["add", f]);
+        }
+        git(dir, &["commit", "-q", "-m", "c"]);
+        git(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// A job result that changes `files` on top of the trunk, checked against a PR that changed `a.txt`.
+    async fn check(files: &[(&str, &str)]) -> Result<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        let base = commit(&work, &[("a.txt", "1\n"), ("b.txt", "1\n")]);
+        let head = commit(&work, &[("a.txt", "pr\n")]);
+        git(&work, &["checkout", "-q", "--detach", &base]);
+        let trunk = commit(&work, &[("c.txt", "trunk\n")]);
+        let result = commit(&work, files);
+
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        git(&cache, &["init", "-q", "--bare"]);
+        git(
+            &cache,
+            &[
+                "fetch",
+                "-q",
+                work.to_str().unwrap(),
+                &format!("{head}:refs/pr"),
+                &format!("{trunk}:refs/trunk"),
+            ],
+        );
+
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        Git.create_bundle(&work, &out.join(BUNDLE_FILE), &result, &trunk)
+            .await
+            .unwrap();
+        check_job_output(&Git, &cache, &out, 1, &trunk, &head).await
+    }
+
+    #[tokio::test]
+    async fn job_output_inside_the_pr_files_passes() {
+        check(&[("a.txt", "pr, resolved\n")]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_output_outside_the_pr_files_is_rejected() {
+        let err = check(&[("a.txt", "pr\n"), ("b.txt", "sneaky\n")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the PR: b.txt"), "{err}");
+    }
 }

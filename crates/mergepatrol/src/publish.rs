@@ -16,15 +16,10 @@ pub struct Publish<'a> {
     pub local_head: &'a str,
 }
 
-/// Recreates the local commits `base..local_head` on GitHub through the Git Data API, then moves
+/// Recreates the commits `base..local_head` on GitHub through the Git Data API, then moves
 /// the branch. GitHub signs commits it creates for the App, so the branch passes
 /// "require signed commits". Original authors stay as `Co-authored-by:` trailers.
-pub async fn publish(
-    gh: &Installation,
-    git: &Git<'_>,
-    wt: &Path,
-    p: Publish<'_>,
-) -> Result<String> {
+pub async fn publish(gh: &Installation, git: &Git, wt: &Path, p: Publish<'_>) -> Result<String> {
     let commits = git.commits(wt, p.base, p.local_head).await?;
     if commits.is_empty() {
         bail!("the PR has no changes left after the rebase");

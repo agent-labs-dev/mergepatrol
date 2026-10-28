@@ -5,4 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-tokio = { version = "1.54.1", features = ["process"] }
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["fs", "io-util", "process", "time"] }
+tracing = "0.1.44"

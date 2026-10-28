@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0.104"
 base64 = "0.23.1"
-mergepatrol-executor = { version = "0.1.0", path = "../executor" }
 tokio = { version = "1.54.1", features = ["process", "fs", "io-util"] }
 
 [dev-dependencies]

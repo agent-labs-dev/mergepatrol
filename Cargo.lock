@@ -1221,7 +1221,6 @@ name = "mergepatrol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "mergepatrol-core",
  "mergepatrol-executor",
@@ -1233,6 +1232,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1249,7 +1249,12 @@ dependencies = [
 name = "mergepatrol-executor"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1258,7 +1263,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "mergepatrol-executor",
  "tempfile",
  "tokio",
 ]
@@ -1286,7 +1290,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "mergepatrol-executor",
  "reqwest",
  "serde_json",
  "tempfile",

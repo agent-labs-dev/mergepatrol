@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::process::Command;
 
-use mergepatrol_executor::LocalExecutor;
 use mergepatrol_git::{Git, RebaseStep};
 
 fn sh(dir: &Path, args: &[&str]) -> String {
@@ -39,9 +38,7 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     sh(wt, &["checkout", "-q", "--detach", &root]);
     commit(wt, "a.txt", "pr\n", "pr change");
     commit(wt, "b.txt", "new\n", "pr adds b");
-
-    let exec = LocalExecutor::new(tmp.path());
-    let git = Git::new(&exec);
+    let git = Git;
 
     let RebaseStep::Conflict { files, .. } = git.rebase(wt, &trunk).await.unwrap() else {
         panic!("expected a conflict");
@@ -67,4 +64,36 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     assert_eq!(commits[0].author, "Ada <ada@example.com>");
     assert_eq!(commits[1].changes.len(), 1);
     assert_eq!(commits[1].changes[0].path, "b.txt");
+}
+
+#[tokio::test]
+async fn bundles_carry_commits_between_repos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a");
+    std::fs::create_dir(&a).unwrap();
+    sh(&a, &["init", "-q", "-b", "main"]);
+    let base = commit(&a, "x.txt", "1\n", "base");
+    let head = commit(&a, "x.txt", "2\n", "change");
+
+    let b = tmp.path().join("b");
+    std::fs::create_dir(&b).unwrap();
+    sh(&b, &["init", "-q", "--bare"]);
+    sh(
+        &b,
+        &[
+            "fetch",
+            "-q",
+            a.to_str().unwrap(),
+            &format!("{base}:refs/heads/main"),
+        ],
+    );
+
+    let git = Git;
+    let bundle = tmp.path().join("r.bundle");
+    git.create_bundle(&a, &bundle, &head, &base).await.unwrap();
+    let got = git
+        .import_bundle(&b, &bundle, "refs/mergepatrol/result")
+        .await
+        .unwrap();
+    assert_eq!(got, head);
 }

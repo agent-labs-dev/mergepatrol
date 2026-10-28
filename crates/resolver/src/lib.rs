@@ -33,13 +33,6 @@ pub enum Resolution {
     GaveUp(String),
 }
 
-/// Where the resolver gets its API key at run time. The dashboard sets it, so it can change
-/// while Mergepatrol runs.
-#[async_trait]
-pub trait ApiKeys: Send + Sync {
-    async fn anthropic(&self) -> Result<Option<String>>;
-}
-
 #[async_trait]
 pub trait Resolver: Send + Sync {
     /// Goes in the `Resolved-by:` trailer, for example `claude (claude-opus-5-5)`.

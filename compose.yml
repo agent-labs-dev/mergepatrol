@@ -1,12 +1,28 @@
+# Self-hosting. Jobs run in their own containers on this machine's Docker.
 services:
   mergepatrol:
-    build: .
-    # The dashboard has its own sign-in, but it is a spike: keep it on this machine.
+    build: { context: ., target: orchestrator }
+    # The dashboard has its own sign-in, but this is a spike: keep it on this machine.
     ports: ["127.0.0.1:8080:8080"]
     volumes:
       - data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY:?generate one with openssl rand -base64 32}
       MERGEPATROL_PUBLIC_URL: ${MERGEPATROL_PUBLIC_URL:-http://localhost:8080}
+      MERGEPATROL_EXECUTOR: docker
+      MERGEPATROL_JOB_IMAGE: mergepatrol-job:latest
+      # On Linux with gVisor installed (see deploy/sandbox-host.sh): runsc and mergepatrol-jobs.
+      MERGEPATROL_JOB_RUNTIME: ${MERGEPATROL_JOB_RUNTIME:-}
+      MERGEPATROL_JOB_NETWORK: ${MERGEPATROL_JOB_NETWORK:-}
+    depends_on: [job-image]
+
+  # Only builds the job image. The orchestrator starts one container from it per job.
+  job-image:
+    build: { context: ., target: job }
+    image: mergepatrol-job:latest
+    entrypoint: ["true"]
+    restart: "no"
+
 volumes:
   data:

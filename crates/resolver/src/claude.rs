@@ -1,19 +1,17 @@
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use mergepatrol_executor::Executor;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::{ApiKeys, GIVE_UP, Resolution, ResolveRequest, Resolver, prompt};
+use crate::{GIVE_UP, Resolution, ResolveRequest, Resolver, prompt};
 
 /// Runs Claude Code headless (`claude -p`) in the rebase worktree.
 pub struct ClaudeResolver {
-    pub exec: Arc<dyn Executor>,
-    pub keys: Arc<dyn ApiKeys>,
+    /// The workspace's Anthropic API key.
+    pub api_key: Option<String>,
     pub model: String,
     pub effort: String,
     pub timeout: Duration,
@@ -42,11 +40,11 @@ impl Resolver for ClaudeResolver {
 
     async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution> {
         let key = self
-            .keys
-            .anthropic()
-            .await?
+            .api_key
+            .clone()
             .context("no Anthropic API key: add one in the dashboard settings")?;
-        let mut cmd = self.exec.command("claude", req.workdir);
+        let mut cmd = tokio::process::Command::new("claude");
+        cmd.current_dir(req.workdir).kill_on_drop(true);
         // `--bare` reads only ANTHROPIC_API_KEY, never a login on the machine.
         cmd.env("ANTHROPIC_API_KEY", key);
         cmd.arg("-p")

@@ -18,7 +18,21 @@ pub struct Config {
     pub model: String,
     pub effort: String,
     pub max_jobs: usize,
-    pub max_resolutions: usize,
+    pub executor: ExecutorConfig,
+}
+
+/// Where rebase jobs run.
+pub enum ExecutorConfig {
+    /// A subprocess on this machine. No isolation: for development.
+    Local,
+    /// A container per job. Production uses the gVisor runtime (`runsc`).
+    Docker {
+        image: String,
+        runtime: Option<String>,
+        network: Option<String>,
+        memory: String,
+        cpus: String,
+    },
 }
 
 pub struct Labels {
@@ -46,7 +60,17 @@ impl Config {
             model: opt("MERGEPATROL_MODEL", "claude-opus-5-5"),
             effort: opt("MERGEPATROL_EFFORT", "medium"),
             max_jobs: opt("MERGEPATROL_MAX_JOBS", "4").parse()?,
-            max_resolutions: opt("MERGEPATROL_MAX_RESOLUTIONS", "2").parse()?,
+            executor: match opt("MERGEPATROL_EXECUTOR", "local").as_str() {
+                "local" => ExecutorConfig::Local,
+                "docker" => ExecutorConfig::Docker {
+                    image: opt("MERGEPATROL_JOB_IMAGE", "mergepatrol-job:latest"),
+                    runtime: std::env::var("MERGEPATROL_JOB_RUNTIME").ok(),
+                    network: std::env::var("MERGEPATROL_JOB_NETWORK").ok(),
+                    memory: opt("MERGEPATROL_JOB_MEMORY", "4g"),
+                    cpus: opt("MERGEPATROL_JOB_CPUS", "2"),
+                },
+                other => bail!("MERGEPATROL_EXECUTOR: {other:?} is not local or docker"),
+            },
         })
     }
 }

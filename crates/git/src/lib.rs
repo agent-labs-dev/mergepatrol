@@ -5,15 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
-use mergepatrol_executor::Executor;
 use tokio::io::AsyncWriteExt;
 
 /// Committer of the local rebase. The published commits get GitHub's bot identity instead.
 const COMMITTER: (&str, &str) = ("mergepatrol", "mergepatrol@users.noreply.github.com");
 
-pub struct Git<'a> {
-    exec: &'a dyn Executor,
-}
+#[derive(Clone, Copy, Default)]
+pub struct Git;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RebaseStep {
@@ -48,11 +46,7 @@ impl TreeChange {
     }
 }
 
-impl<'a> Git<'a> {
-    pub fn new(exec: &'a dyn Executor) -> Self {
-        Self { exec }
-    }
-
+impl Git {
     /// A bare repo at `path` that caches the objects of one GitHub repo.
     pub async fn ensure_cache(&self, path: &Path, url: &str) -> Result<()> {
         if path.join("HEAD").exists() {
@@ -65,21 +59,73 @@ impl<'a> Git<'a> {
     }
 
     /// Fetches `refspecs`. The token goes in through the environment, not the arguments,
-    /// so it does not show in `ps`.
-    pub async fn fetch(&self, cache: &Path, token: &str, refspecs: &[&str]) -> Result<()> {
+    /// so it does not show in `ps`. An empty token fetches without auth.
+    pub async fn fetch(&self, repo: &Path, token: &str, refspecs: &[&str]) -> Result<()> {
         use base64::Engine;
-        let basic =
-            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
         let mut args = vec!["fetch", "-q", "--no-tags", "--force", "origin"];
         args.extend(refspecs);
-        let mut cmd = self.git(cache, &args);
-        cmd.env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-            .env(
-                "GIT_CONFIG_VALUE_0",
-                format!("Authorization: Basic {basic}"),
-            );
+        let mut cmd = self.git(repo, &args);
+        if !token.is_empty() {
+            let basic =
+                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+            cmd.env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                .env(
+                    "GIT_CONFIG_VALUE_0",
+                    format!("Authorization: Basic {basic}"),
+                );
+        }
         output(cmd, "git fetch").await?;
+        Ok(())
+    }
+
+    /// Writes the commits `exclude..rev` to `bundle`, under `refs/heads/result`.
+    pub async fn create_bundle(
+        &self,
+        repo: &Path,
+        bundle: &Path,
+        rev: &str,
+        exclude: &str,
+    ) -> Result<()> {
+        self.run(repo, &["update-ref", "refs/heads/result", rev])
+            .await?;
+        let not = format!("^{exclude}");
+        self.run(
+            repo,
+            &[
+                "bundle",
+                "create",
+                "-q",
+                path_str(bundle)?,
+                "refs/heads/result",
+                &not,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Imports the `refs/heads/result` of `bundle` as `into`. Returns the commit it points to.
+    pub async fn import_bundle(&self, repo: &Path, bundle: &Path, into: &str) -> Result<String> {
+        let refspec = format!("+refs/heads/result:{into}");
+        self.run(
+            repo,
+            &["fetch", "-q", "--no-tags", path_str(bundle)?, &refspec],
+        )
+        .await?;
+        self.rev_parse(repo, into).await
+    }
+
+    /// A fresh repo at `dir` with `url` as `origin`.
+    pub async fn init(&self, dir: &Path, url: &str) -> Result<()> {
+        tokio::fs::create_dir_all(dir).await?;
+        self.run(dir, &["init", "-q"]).await?;
+        self.run(dir, &["remote", "add", "origin", url]).await?;
+        Ok(())
+    }
+
+    pub async fn checkout_detached(&self, repo: &Path, rev: &str) -> Result<()> {
+        self.run(repo, &["checkout", "-q", "--detach", rev]).await?;
         Ok(())
     }
 
@@ -284,8 +330,10 @@ impl<'a> Git<'a> {
     }
 
     fn git(&self, cwd: &Path, args: &[&str]) -> tokio::process::Command {
-        let mut cmd = self.exec.command("git", cwd);
-        cmd.args(args)
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.current_dir(cwd)
+            .kill_on_drop(true)
+            .args(args)
             .env("GIT_COMMITTER_NAME", COMMITTER.0)
             .env("GIT_COMMITTER_EMAIL", COMMITTER.1)
             .env("GIT_TERMINAL_PROMPT", "0")

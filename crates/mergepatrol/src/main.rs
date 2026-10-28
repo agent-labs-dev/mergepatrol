@@ -1,24 +1,41 @@
 mod config;
+mod job;
 mod publish;
 mod queue;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
-use mergepatrol_executor::LocalExecutor;
+use anyhow::{Context, Result};
+use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
 use mergepatrol_github::setup::random_token;
-use mergepatrol_resolver::{ApiKeys, ClaudeResolver};
 use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, SqliteStore, Store, Vault};
 use mergepatrol_web::WebConfig;
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use crate::config::{Config, ExecutorConfig};
 use crate::queue::Ctx;
+
+/// Longer than the resolver's and the verify commands' own limits.
+const JOB_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("job") {
+        // `mergepatrol job --out <dir>`: runs inside the sandbox, with no config.
+        let out = match args.get(2..4) {
+            Some([flag, dir]) if flag == "--out" => PathBuf::from(dir),
+            _ => anyhow::bail!("usage: mergepatrol job --out <dir>"),
+        };
+        return job::main(out).await;
+    }
+    orchestrator().await
+}
+
+async fn orchestrator() -> Result<()> {
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -47,24 +64,40 @@ async fn main() -> Result<()> {
     if vault.status(ANTHROPIC_API_KEY).await?.is_none() {
         tracing::warn!("no Anthropic API key yet: add one in the dashboard settings");
     }
-    let exec = Arc::new(LocalExecutor::new(config.data_dir.join("work")));
-    let resolver = Arc::new(ClaudeResolver {
-        exec: exec.clone(),
-        keys: Arc::new(VaultKeys(vault.clone())),
-        model: config.model.clone(),
-        effort: config.effort.clone(),
-        timeout: Duration::from_secs(15 * 60),
-        max_turns: 50,
-    });
+
+    let executor: Arc<dyn Executor> = match &config.executor {
+        ExecutorConfig::Local => {
+            tracing::warn!("jobs run as local processes, without a sandbox");
+            Arc::new(LocalExecutor {
+                program: std::env::current_exe().context("find the mergepatrol binary")?,
+                timeout: JOB_TIMEOUT,
+            })
+        }
+        ExecutorConfig::Docker {
+            image,
+            runtime,
+            network,
+            memory,
+            cpus,
+        } => {
+            tracing::info!(%image, runtime = ?runtime, network = ?network, "jobs run in containers");
+            Arc::new(DockerExecutor {
+                image: image.clone(),
+                runtime: runtime.clone(),
+                network: network.clone(),
+                memory: memory.clone(),
+                cpus: cpus.clone(),
+                timeout: JOB_TIMEOUT,
+            })
+        }
+    };
 
     let bind = config.bind;
     let ctx = Arc::new(Ctx {
         vault: vault.clone(),
         store: store.clone(),
-        exec,
-        resolver,
+        executor,
         jobs: Semaphore::new(config.max_jobs),
-        resolutions: Semaphore::new(config.max_resolutions),
         config,
     });
 
@@ -78,13 +111,4 @@ async fn main() -> Result<()> {
     tracing::info!(%bind, "dashboard");
     axum::serve(listener, mergepatrol_web::router(store, vault, web)).await?;
     Ok(())
-}
-
-struct VaultKeys(Arc<Vault>);
-
-#[async_trait::async_trait]
-impl ApiKeys for VaultKeys {
-    async fn anthropic(&self) -> Result<Option<String>> {
-        self.0.get(ANTHROPIC_API_KEY).await
-    }
 }

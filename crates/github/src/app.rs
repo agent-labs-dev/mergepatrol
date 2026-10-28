@@ -160,6 +160,28 @@ impl Installation {
         Ok(tok.token)
     }
 
+    /// A token that can only read `repo`. It goes into the job sandbox.
+    pub async fn read_token(&self, repo: &RepoName) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Tok {
+            token: String,
+        }
+        let tok: Tok = self
+            .app
+            .http
+            .post(format!("{API}/app/installations/{}/access_tokens", self.id))
+            .bearer_auth(self.app.jwt()?)
+            .headers(api_headers())
+            .json(&json!({ "repositories": [repo.name], "permissions": { "contents": "read" } }))
+            .send()
+            .await?
+            .error_for_status()
+            .context("create a read-only token")?
+            .json()
+            .await?;
+        Ok(tok.token)
+    }
+
     /// The repos this installation can access.
     pub async fn repositories(&self) -> Result<Vec<RepoInfo>> {
         let mut repos = Vec::new();
