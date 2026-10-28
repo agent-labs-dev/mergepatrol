@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
+use mergepatrol_github::App;
 use mergepatrol_github::setup::random_token;
-use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, PgStore, Store, Vault};
+use mergepatrol_store::{GITHUB_APP, PgStore, Scope, Store, Vault};
 use mergepatrol_web::WebConfig;
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
@@ -47,10 +48,29 @@ async fn orchestrator() -> Result<()> {
     let store: Arc<dyn Store> = Arc::new(PgStore::connect(&config.database_url).await?);
     let vault = Arc::new(Vault::new(store.clone(), &config.secret_key)?);
 
-    // First run: whoever reads this log can set Mergepatrol up from the dashboard.
-    let setup_token = match vault.status(GITHUB_APP).await? {
-        Some(_) => None,
-        None => {
+    let hosted_app = match &config.hosted_app {
+        Some(h) => {
+            let app = App::new(h.id, h.private_key.as_bytes())?;
+            let creds = app
+                .credentials(
+                    h.private_key.clone(),
+                    h.client_id.clone(),
+                    h.client_secret.clone(),
+                )
+                .await?;
+            tracing::info!(app = %creds.slug, "hosted GitHub App");
+            Some(creds)
+        }
+        None => None,
+    };
+
+    // Self-hosted first run: whoever reads this log can set Mergepatrol up from the dashboard.
+    let setup_token = match (
+        &hosted_app,
+        vault.status(Scope::Instance, GITHUB_APP).await?,
+    ) {
+        (Some(_), _) | (None, Some(_)) => None,
+        (None, None) => {
             let token = random_token(18);
             tracing::warn!(
                 setup_token = %token,
@@ -60,9 +80,6 @@ async fn orchestrator() -> Result<()> {
             Some(token)
         }
     };
-    if vault.status(ANTHROPIC_API_KEY).await?.is_none() {
-        tracing::warn!("no Anthropic API key yet: add one in the dashboard settings");
-    }
 
     let executor: Arc<dyn Executor> = match &config.executor {
         ExecutorConfig::Local => {
@@ -96,6 +113,7 @@ async fn orchestrator() -> Result<()> {
     let bind = config.bind;
     let ctx = Arc::new(Ctx {
         vault: vault.clone(),
+        hosted_app: hosted_app.clone(),
         store: store.clone(),
         executor,
         jobs: Semaphore::new(config.max_jobs),
@@ -103,6 +121,7 @@ async fn orchestrator() -> Result<()> {
     });
 
     let web = WebConfig {
+        hosted_app,
         public_url: ctx.config.public_url.clone(),
         setup_token,
     };

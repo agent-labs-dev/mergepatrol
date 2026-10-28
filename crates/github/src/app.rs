@@ -49,6 +49,41 @@ impl App {
         Self::new(c.id, c.pem.as_bytes())
     }
 
+    /// Fills in the parts of the credentials that GitHub knows: slug, owner, and page.
+    pub async fn credentials(
+        &self,
+        pem: String,
+        client_id: String,
+        client_secret: String,
+    ) -> Result<crate::AppCredentials> {
+        let info: Value = self
+            .http
+            .get(format!("{API}/app"))
+            .bearer_auth(self.jwt()?)
+            .headers(api_headers())
+            .send()
+            .await?
+            .error_for_status()
+            .context("GET /app: is the App ID or private key wrong?")?
+            .json()
+            .await?;
+        let s = |v: &Value| {
+            v.as_str()
+                .map(str::to_owned)
+                .context("GET /app: missing field")
+        };
+        Ok(crate::AppCredentials {
+            id: self.app_id,
+            slug: s(&info["slug"])?,
+            client_id,
+            client_secret,
+            webhook_secret: None,
+            pem,
+            owner: s(&info["owner"]["login"])?,
+            html_url: s(&info["html_url"])?,
+        })
+    }
+
     pub async fn installations(&self) -> Result<Vec<InstallationInfo>> {
         let list: Vec<Value> = self
             .http

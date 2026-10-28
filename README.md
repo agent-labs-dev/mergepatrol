@@ -34,7 +34,20 @@ The spike polls GitHub (no webhooks yet) and has one queue per repo, on the defa
 
 4. Add the `mergepatrol` label to a PR to queue it.
 
-Anyone who can access the App's installation on its owner account can sign in.
+Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own Anthropic API key. A user sees the workspaces that GitHub lets them access, as of their sign-in. Sign in again after you install the App somewhere new.
+
+## Hosted
+
+The hosted Mergepatrol uses one public GitHub App, which we create by hand on GitHub, rather than with the setup in the dashboard. Set its credentials, and the setup token and the App creation are skipped:
+
+| Variable | What it is |
+| --- | --- |
+| `MERGEPATROL_GITHUB_APP_ID` | The App ID |
+| `MERGEPATROL_GITHUB_APP_PRIVATE_KEY` | The private key, PEM |
+| `MERGEPATROL_GITHUB_CLIENT_ID` | The OAuth client ID |
+| `MERGEPATROL_GITHUB_CLIENT_SECRET` | The OAuth client secret |
+
+The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), the callback URL `<public URL>/auth/callback`, and the setup URL `<public URL>/setup/installed`.
 
 If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it.
 

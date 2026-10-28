@@ -110,31 +110,30 @@ export function CreateApp() {
   );
 }
 
-export function SignIn({ app }: { app: AppView }) {
+export function SignIn() {
   return (
-    <Card title={app.installed ? "Sign in" : "Install the GitHub App"}>
-      {!app.installed && (
-        <>
-          <p className="mb-4 text-sm text-neutral-300">
-            The App <code>{app.slug}</code> exists. Install it on <b>{app.owner}</b> and choose the
-            repos it may use. GitHub then sends you back here to sign in.
-          </p>
-          <a className={primary} href={app.install_url}>
-            Install on GitHub
-          </a>
-        </>
-      )}
-      {app.installed && (
-        <>
-          <p className="mb-4 text-sm text-neutral-300">
-            Anyone who can access the <b>{app.owner}</b> installation of <code>{app.slug}</code> can
-            sign in.
-          </p>
-          <a className={primary} href="/auth/login">
-            Sign in with GitHub
-          </a>
-        </>
-      )}
+    <Card title="Sign in">
+      <p className="mb-4 text-sm text-neutral-300">
+        Mergepatrol rebases your pull requests and resolves conflicts with an agent.
+      </p>
+      <a className={primary} href="/auth/login">
+        Sign in with GitHub
+      </a>
+    </Card>
+  );
+}
+
+/** Signed in, but the App is on no account the user can access. */
+export function Install({ app }: { app: AppView }) {
+  return (
+    <Card title="Install Mergepatrol">
+      <p className="mb-4 text-sm text-neutral-300">
+        Install the <code>{app.slug}</code> App on an organization or on your account, and choose
+        its repos. Each installation is a workspace. GitHub sends you back here.
+      </p>
+      <a className={primary} href={app.install_url}>
+        Install on GitHub
+      </a>
     </Card>
   );
 }

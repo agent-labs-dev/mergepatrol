@@ -3,13 +3,15 @@ import { fetchRepos, setRepo } from "./api";
 import type { AppView } from "./api/AppView";
 import type { RepoView } from "./api/RepoView";
 
-export function Repos({ app }: { app: AppView }) {
+export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
   const queryClient = useQueryClient();
-  const repos = useQuery({ queryKey: ["repos"], queryFn: fetchRepos });
+  const repos = useQuery({
+    queryKey: ["repos", workspace],
+    queryFn: () => fetchRepos(workspace),
+  });
   const toggle = useMutation({
-    mutationFn: (r: RepoView) =>
-      setRepo(r.repo, { installation_id: r.installation_id, enabled: !r.enabled }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repos"] }),
+    mutationFn: (r: RepoView) => setRepo(workspace, r.repo, { enabled: !r.enabled }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repos", workspace] }),
   });
 
   return (

@@ -2,17 +2,26 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { deleteAnthropicKey, fetchSettings, setAnthropicKey } from "./api";
 
-export function Settings() {
+export function Settings({ workspace }: { workspace: number }) {
   const queryClient = useQueryClient();
-  const settings = useQuery({ queryKey: ["settings"], queryFn: fetchSettings });
+  const settings = useQuery({
+    queryKey: ["settings", workspace],
+    queryFn: () => fetchSettings(workspace),
+  });
   const [value, setValue] = useState("");
 
   const onSaved = (data: Awaited<ReturnType<typeof fetchSettings>>) => {
-    queryClient.setQueryData(["settings"], data);
+    queryClient.setQueryData(["settings", workspace], data);
     setValue("");
   };
-  const save = useMutation({ mutationFn: setAnthropicKey, onSuccess: onSaved });
-  const remove = useMutation({ mutationFn: deleteAnthropicKey, onSuccess: onSaved });
+  const save = useMutation({
+    mutationFn: (value: string) => setAnthropicKey(workspace, value),
+    onSuccess: onSaved,
+  });
+  const remove = useMutation({
+    mutationFn: () => deleteAnthropicKey(workspace),
+    onSuccess: onSaved,
+  });
 
   if (!settings.data) return null;
   const { anthropic_api_key: key } = settings.data;
@@ -26,8 +35,8 @@ export function Settings() {
     <section className="mb-8 rounded border border-neutral-800 p-4">
       <h2 className="mb-1 font-semibold">Anthropic API key</h2>
       <p className="mb-3 text-sm text-neutral-400">
-        The resolver uses it when a rebase has conflicts. It is stored encrypted, and never shown
-        again.
+        This workspace's own key. The resolver uses it when a rebase has conflicts. It is stored
+        encrypted, and never shown again.
       </p>
 
       <p className="mb-3 text-sm">

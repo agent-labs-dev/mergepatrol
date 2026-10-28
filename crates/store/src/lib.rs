@@ -43,33 +43,67 @@ pub struct SecretRecord {
 pub trait Store: Send + Sync {
     async fn load_lane(&self, key: &LaneKey) -> Result<Lane>;
     async fn save_lane(&self, key: &LaneKey, lane: &Lane) -> Result<()>;
-    async fn lanes(&self) -> Result<Vec<(LaneKey, Lane)>>;
+    /// The lanes of one workspace.
+    async fn lanes(&self, installation_id: u64) -> Result<Vec<(LaneKey, Lane)>>;
     async fn record(&self, key: &LaneKey, pr: PrNumber, kind: &str, message: &str) -> Result<()>;
     /// The newest events first.
     async fn events(
         &self,
+        installation_id: u64,
         repo: &RepoName,
         pr: Option<PrNumber>,
         limit: u32,
     ) -> Result<Vec<EventRecord>>;
-    async fn put_secret(&self, name: &str, secret: SecretRecord) -> Result<()>;
-    async fn secret(&self, name: &str) -> Result<Option<SecretRecord>>;
-    async fn delete_secret(&self, name: &str) -> Result<()>;
+    async fn put_secret(&self, scope: Scope, name: &str, secret: SecretRecord) -> Result<()>;
+    async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>>;
+    async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()>;
 
-    /// The repos that have a setting. Repos without one are off.
+    /// The repos that have a setting, in every workspace. Repos without one are off.
     async fn repo_settings(&self) -> Result<Vec<RepoSetting>>;
     async fn set_repo_enabled(
         &self,
-        repo: &RepoName,
         installation_id: u64,
+        repo: &RepoName,
         enabled: bool,
     ) -> Result<()>;
+
+    /// Remembers the account of each installation, as GitHub showed it at a sign-in.
+    async fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()>;
+    async fn workspaces(&self, installation_ids: &[u64]) -> Result<Vec<Workspace>>;
 
     /// `token_hash` is the SHA-256 of the cookie value, so a leaked database holds no live sessions.
     async fn create_session(&self, token_hash: &str, session: &Session) -> Result<()>;
     /// Only sessions that have not expired.
     async fn session(&self, token_hash: &str) -> Result<Option<Session>>;
     async fn delete_session(&self, token_hash: &str) -> Result<()>;
+}
+
+/// Who a secret belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// This Mergepatrol: the self-hosted GitHub App.
+    Instance,
+    /// One workspace: its Anthropic API key.
+    Installation(u64),
+}
+
+impl Scope {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Instance => "instance".into(),
+            Self::Installation(id) => format!("installation:{id}"),
+        }
+    }
+}
+
+/// One installation of the GitHub App, on an organization or a user account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace {
+    pub installation_id: u64,
+    pub account: String,
+    /// `Organization` or `User`.
+    pub account_type: String,
+    pub avatar_url: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -81,8 +115,12 @@ pub struct RepoSetting {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionKind {
-    /// Signed in with GitHub.
-    User { login: String, avatar_url: String },
+    /// Signed in with GitHub. `installations` are the ones the user could access then.
+    User {
+        login: String,
+        avatar_url: String,
+        installations: Vec<u64>,
+    },
     /// Unlocked with the setup token, before the GitHub App exists.
     Setup,
 }
@@ -148,16 +186,17 @@ impl Store for PgStore {
         Ok(())
     }
 
-    async fn lanes(&self) -> Result<Vec<(LaneKey, Lane)>> {
+    async fn lanes(&self, installation_id: u64) -> Result<Vec<(LaneKey, Lane)>> {
         let rows = sqlx::query(
-            "SELECT installation_id, repo, trunk, lane FROM lanes ORDER BY repo, trunk",
+            "SELECT repo, trunk, lane FROM lanes WHERE installation_id = $1 ORDER BY repo, trunk",
         )
+        .bind(installation_id as i64)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
             .map(|row| {
                 let key = LaneKey {
-                    installation_id: row.get::<i64, _>("installation_id") as u64,
+                    installation_id,
                     repo: RepoName::parse(row.get("repo")).context("bad repo in store")?,
                     trunk: row.get("trunk"),
                 };
@@ -167,19 +206,22 @@ impl Store for PgStore {
     }
 
     async fn record(&self, key: &LaneKey, pr: PrNumber, kind: &str, message: &str) -> Result<()> {
-        sqlx::query("INSERT INTO events (installation_id, repo, pr, kind, message) VALUES ($1, $2, $3, $4, $5)")
-            .bind(key.installation_id as i64)
-            .bind(key.repo.to_string())
-            .bind(pr as i64)
-            .bind(kind)
-            .bind(message)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO events (installation_id, repo, pr, kind, message) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(key.installation_id as i64)
+        .bind(key.repo.to_string())
+        .bind(pr as i64)
+        .bind(kind)
+        .bind(message)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     async fn events(
         &self,
+        installation_id: u64,
         repo: &RepoName,
         pr: Option<PrNumber>,
         limit: u32,
@@ -189,8 +231,10 @@ impl Store for PgStore {
             r#"SELECT repo, pr, to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
                 kind, message
              FROM events
-             WHERE repo = $1 AND ($2::BIGINT IS NULL OR pr = $2) ORDER BY id DESC LIMIT $3"#,
+             WHERE installation_id = $1 AND repo = $2 AND ($3::BIGINT IS NULL OR pr = $3)
+             ORDER BY id DESC LIMIT $4"#,
         )
+        .bind(installation_id as i64)
         .bind(repo.to_string())
         .bind(pr.map(|p| p as i64))
         .bind(limit as i64)
@@ -208,12 +252,13 @@ impl Store for PgStore {
             .collect())
     }
 
-    async fn put_secret(&self, name: &str, secret: SecretRecord) -> Result<()> {
+    async fn put_secret(&self, scope: Scope, name: &str, secret: SecretRecord) -> Result<()> {
         sqlx::query(
-            "INSERT INTO secrets (name, nonce, ciphertext, hint) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (name) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext,
-                hint = excluded.hint, updated_at = now()",
+            "INSERT INTO secrets (scope, name, nonce, ciphertext, hint) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (scope, name) DO UPDATE SET nonce = excluded.nonce,
+                ciphertext = excluded.ciphertext, hint = excluded.hint, updated_at = now()",
         )
+        .bind(scope.key())
         .bind(name)
         .bind(secret.nonce)
         .bind(secret.ciphertext)
@@ -223,12 +268,13 @@ impl Store for PgStore {
         Ok(())
     }
 
-    async fn secret(&self, name: &str) -> Result<Option<SecretRecord>> {
+    async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>> {
         let row = sqlx::query(
             r#"SELECT nonce, ciphertext, hint,
                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-             FROM secrets WHERE name = $1"#,
+             FROM secrets WHERE scope = $1 AND name = $2"#,
         )
+        .bind(scope.key())
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
@@ -240,8 +286,9 @@ impl Store for PgStore {
         }))
     }
 
-    async fn delete_secret(&self, name: &str) -> Result<()> {
-        sqlx::query("DELETE FROM secrets WHERE name = $1")
+    async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()> {
+        sqlx::query("DELETE FROM secrets WHERE scope = $1 AND name = $2")
+            .bind(scope.key())
             .bind(name)
             .execute(&self.pool)
             .await?;
@@ -249,9 +296,11 @@ impl Store for PgStore {
     }
 
     async fn repo_settings(&self) -> Result<Vec<RepoSetting>> {
-        let rows = sqlx::query("SELECT repo, installation_id, enabled FROM repos ORDER BY repo")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT repo, installation_id, enabled FROM repos ORDER BY installation_id, repo",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter()
             .map(|row| {
                 Ok(RepoSetting {
@@ -265,43 +314,93 @@ impl Store for PgStore {
 
     async fn set_repo_enabled(
         &self,
-        repo: &RepoName,
         installation_id: u64,
+        repo: &RepoName,
         enabled: bool,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO repos (repo, installation_id, enabled) VALUES ($1, $2, $3)
-             ON CONFLICT (repo) DO UPDATE SET installation_id = excluded.installation_id, enabled = excluded.enabled",
+            "INSERT INTO repos (installation_id, repo, enabled) VALUES ($1, $2, $3)
+             ON CONFLICT (installation_id, repo) DO UPDATE SET enabled = excluded.enabled",
         )
-        .bind(repo.to_string())
         .bind(installation_id as i64)
+        .bind(repo.to_string())
         .bind(enabled)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    async fn create_session(&self, token_hash: &str, session: &Session) -> Result<()> {
-        let (kind, login, avatar) = match &session.kind {
-            SessionKind::User { login, avatar_url } => {
-                ("user", Some(login.as_str()), Some(avatar_url.as_str()))
-            }
-            SessionKind::Setup => ("setup", None, None),
-        };
-        sqlx::query("INSERT INTO sessions (token_hash, kind, login, avatar_url, expires_at) VALUES ($1, $2, $3, $4, $5)")
-            .bind(token_hash)
-            .bind(kind)
-            .bind(login)
-            .bind(avatar)
-            .bind(session.expires_at)
+    async fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()> {
+        for w in workspaces {
+            sqlx::query(
+                "INSERT INTO workspaces (installation_id, account, account_type, avatar_url)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (installation_id) DO UPDATE SET account = excluded.account,
+                    account_type = excluded.account_type, avatar_url = excluded.avatar_url,
+                    updated_at = now()",
+            )
+            .bind(w.installation_id as i64)
+            .bind(&w.account)
+            .bind(&w.account_type)
+            .bind(&w.avatar_url)
             .execute(&self.pool)
             .await?;
+        }
+        Ok(())
+    }
+
+    async fn workspaces(&self, installation_ids: &[u64]) -> Result<Vec<Workspace>> {
+        let ids: Vec<i64> = installation_ids.iter().map(|&i| i as i64).collect();
+        let rows = sqlx::query(
+            "SELECT installation_id, account, account_type, avatar_url FROM workspaces
+             WHERE installation_id = ANY($1) ORDER BY lower(account)",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| Workspace {
+                installation_id: row.get::<i64, _>("installation_id") as u64,
+                account: row.get("account"),
+                account_type: row.get("account_type"),
+                avatar_url: row.get("avatar_url"),
+            })
+            .collect())
+    }
+
+    async fn create_session(&self, token_hash: &str, session: &Session) -> Result<()> {
+        let (kind, login, avatar, installations) = match &session.kind {
+            SessionKind::User {
+                login,
+                avatar_url,
+                installations,
+            } => (
+                "user",
+                Some(login.as_str()),
+                Some(avatar_url.as_str()),
+                installations.iter().map(|&i| i as i64).collect(),
+            ),
+            SessionKind::Setup => ("setup", None, None, Vec::new()),
+        };
+        sqlx::query(
+            "INSERT INTO sessions (token_hash, kind, login, avatar_url, installations, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(token_hash)
+        .bind(kind)
+        .bind(login)
+        .bind(avatar)
+        .bind(installations)
+        .bind(session.expires_at)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     async fn session(&self, token_hash: &str) -> Result<Option<Session>> {
         let row = sqlx::query(
-            "SELECT kind, login, avatar_url, expires_at FROM sessions
+            "SELECT kind, login, avatar_url, installations, expires_at FROM sessions
              WHERE token_hash = $1 AND expires_at > extract(epoch FROM now())",
         )
         .bind(token_hash)
@@ -312,6 +411,11 @@ impl Store for PgStore {
             "user" => SessionKind::User {
                 login: row.get("login"),
                 avatar_url: row.get("avatar_url"),
+                installations: row
+                    .get::<Vec<i64>, _>("installations")
+                    .into_iter()
+                    .map(|i| i as u64)
+                    .collect(),
             },
             _ => SessionKind::Setup,
         };
@@ -343,7 +447,11 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         let live = Session {
-            kind: SessionKind::Setup,
+            kind: SessionKind::User {
+                login: "ada".into(),
+                avatar_url: "a".into(),
+                installations: vec![1, 2],
+            },
             expires_at: now + 60,
         };
         let dead = Session {
@@ -360,15 +468,24 @@ mod tests {
     async fn repo_settings_upsert(pool: PgPool) {
         let store = PgStore::migrate(pool).await.unwrap();
         let repo = RepoName::parse("o/r").unwrap();
-        store.set_repo_enabled(&repo, 9, true).await.unwrap();
-        store.set_repo_enabled(&repo, 9, false).await.unwrap();
+        store.set_repo_enabled(9, &repo, true).await.unwrap();
+        store.set_repo_enabled(9, &repo, false).await.unwrap();
+        // The same repo name under another installation is its own setting.
+        store.set_repo_enabled(10, &repo, true).await.unwrap();
         assert_eq!(
             store.repo_settings().await.unwrap(),
-            [RepoSetting {
-                repo,
-                installation_id: 9,
-                enabled: false
-            }]
+            [
+                RepoSetting {
+                    repo: repo.clone(),
+                    installation_id: 9,
+                    enabled: false
+                },
+                RepoSetting {
+                    repo,
+                    installation_id: 10,
+                    enabled: true
+                },
+            ]
         );
     }
 
@@ -388,14 +505,40 @@ mod tests {
         }]);
         store.save_lane(&key, &lane).await.unwrap();
         assert_eq!(store.load_lane(&key).await.unwrap(), lane);
-        assert_eq!(store.lanes().await.unwrap(), [(key.clone(), lane)]);
+        assert_eq!(store.lanes(1).await.unwrap(), [(key.clone(), lane)]);
+        assert_eq!(store.lanes(2).await.unwrap(), []);
 
         store.record(&key, 4, "enqueued", "hi").await.unwrap();
         store.record(&key, 5, "enqueued", "other").await.unwrap();
-        let events = store.events(&key.repo, Some(4), 10).await.unwrap();
+        let events = store.events(1, &key.repo, Some(4), 10).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].message, "hi");
         assert!(events[0].at.ends_with('Z'), "{}", events[0].at);
-        assert_eq!(store.events(&key.repo, None, 10).await.unwrap().len(), 2);
+        assert_eq!(store.events(1, &key.repo, None, 10).await.unwrap().len(), 2);
+        assert_eq!(store.events(2, &key.repo, None, 10).await.unwrap().len(), 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn workspaces_upsert_and_filter(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let w = |id, account: &str| Workspace {
+            installation_id: id,
+            account: account.into(),
+            account_type: "Organization".into(),
+            avatar_url: String::new(),
+        };
+        store
+            .save_workspaces(&[w(1, "acme"), w(2, "beta")])
+            .await
+            .unwrap();
+        store
+            .save_workspaces(&[w(1, "acme-renamed")])
+            .await
+            .unwrap();
+        assert_eq!(
+            store.workspaces(&[1]).await.unwrap(),
+            [w(1, "acme-renamed")]
+        );
+        assert_eq!(store.workspaces(&[3]).await.unwrap(), []);
     }
 }

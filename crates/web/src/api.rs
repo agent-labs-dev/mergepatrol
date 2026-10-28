@@ -6,11 +6,11 @@ use axum::http::StatusCode;
 use mergepatrol_core::{EntryState, RepoName};
 use mergepatrol_github::App;
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
-use mergepatrol_store::ANTHROPIC_API_KEY;
+use mergepatrol_store::{ANTHROPIC_API_KEY, Scope};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::auth::Admin;
+use crate::auth::SignedIn;
 use crate::{ApiError, AppState};
 
 #[derive(Serialize, TS)]
@@ -54,7 +54,6 @@ pub struct EventView {
 #[ts(export)]
 pub struct RepoView {
     pub repo: String,
-    pub installation_id: u32,
     pub private: bool,
     pub enabled: bool,
 }
@@ -62,7 +61,6 @@ pub struct RepoView {
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct SetRepo {
-    pub installation_id: u32,
     pub enabled: bool,
 }
 
@@ -95,9 +93,11 @@ pub(crate) struct EventsQuery {
 
 pub(crate) async fn lanes(
     State(app): State<AppState>,
-    _: Admin,
+    user: SignedIn,
+    Path(id): Path<u64>,
 ) -> Result<Json<Vec<LaneView>>, ApiError> {
-    let lanes = app.store.lanes().await?;
+    let id = user.workspace(id)?;
+    let lanes = app.store.lanes(id).await?;
     Ok(Json(
         lanes
             .into_iter()
@@ -128,11 +128,13 @@ pub(crate) async fn lanes(
 
 pub(crate) async fn events(
     State(app): State<AppState>,
-    _: Admin,
+    user: SignedIn,
+    Path(id): Path<u64>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<Vec<EventView>>, ApiError> {
+    let id = user.workspace(id)?;
     let repo = RepoName::parse(&q.repo).ok_or(ApiError::bad_request("repo must be owner/name"))?;
-    let events = app.store.events(&repo, q.pr, 200).await?;
+    let events = app.store.events(id, &repo, q.pr, 200).await?;
     Ok(Json(
         events
             .into_iter()
@@ -147,60 +149,66 @@ pub(crate) async fn events(
     ))
 }
 
-/// Every repo the App's installations can access, and whether Mergepatrol runs on it.
+/// The repos this workspace's installation can access, and whether Mergepatrol runs on each.
 pub(crate) async fn repos(
     State(app): State<AppState>,
-    _: Admin,
+    user: SignedIn,
+    Path(id): Path<u64>,
 ) -> Result<Json<Vec<RepoView>>, ApiError> {
-    let creds = app.app_credentials().await?.ok_or_else(|| {
-        ApiError::Status(StatusCode::CONFLICT, "Create the GitHub App first.".into())
-    })?;
-    let gh = App::from_credentials(&creds)?;
+    let id = user.workspace(id)?;
+    let creds = app
+        .app_credentials()
+        .await?
+        .ok_or_else(|| ApiError::Status(StatusCode::CONFLICT, "No GitHub App yet.".into()))?;
     let enabled: HashMap<RepoName, bool> = app
         .store
         .repo_settings()
         .await?
         .into_iter()
+        .filter(|s| s.installation_id == id)
         .map(|s| (s.repo, s.enabled))
         .collect();
-    let mut views = Vec::new();
-    for inst in gh.installations().await? {
-        for r in gh.installation(inst.id).repositories().await? {
-            views.push(RepoView {
-                enabled: enabled.get(&r.repo).copied().unwrap_or(false),
-                repo: r.repo.to_string(),
-                installation_id: inst.id as u32,
-                private: r.private,
-            });
-        }
-    }
+    let mut views: Vec<RepoView> = App::from_credentials(&creds)?
+        .installation(id)
+        .repositories()
+        .await?
+        .into_iter()
+        .map(|r| RepoView {
+            enabled: enabled.get(&r.repo).copied().unwrap_or(false),
+            repo: r.repo.to_string(),
+            private: r.private,
+        })
+        .collect();
     views.sort_by(|a, b| a.repo.cmp(&b.repo));
     Ok(Json(views))
 }
 
 pub(crate) async fn set_repo(
     State(app): State<AppState>,
-    _: Admin,
-    Path((owner, name)): Path<(String, String)>,
+    user: SignedIn,
+    Path((id, owner, name)): Path<(u64, String, String)>,
     Json(body): Json<SetRepo>,
 ) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
     let repo = RepoName { owner, name };
-    app.store
-        .set_repo_enabled(&repo, body.installation_id as u64, body.enabled)
-        .await?;
-    tracing::info!(%repo, enabled = body.enabled, "repo setting changed");
+    app.store.set_repo_enabled(id, &repo, body.enabled).await?;
+    tracing::info!(installation = id, %repo, enabled = body.enabled, "repo setting changed");
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn settings(
     State(app): State<AppState>,
-    _: Admin,
+    user: SignedIn,
+    Path(id): Path<u64>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    settings_view(&app).await
+    settings_view(&app, user.workspace(id)?).await
 }
 
-async fn settings_view(app: &AppState) -> Result<Json<SettingsView>, ApiError> {
-    let key = app.vault.status(ANTHROPIC_API_KEY).await?;
+async fn settings_view(app: &AppState, id: u64) -> Result<Json<SettingsView>, ApiError> {
+    let key = app
+        .vault
+        .status(Scope::Installation(id), ANTHROPIC_API_KEY)
+        .await?;
     Ok(Json(SettingsView {
         anthropic_api_key: key.map(|k| SecretView {
             hint: k.hint,
@@ -212,9 +220,11 @@ async fn settings_view(app: &AppState) -> Result<Json<SettingsView>, ApiError> {
 /// Checks the key with Anthropic before it stores it, so a typo fails here and not in a rebase.
 pub(crate) async fn set_anthropic_key(
     State(app): State<AppState>,
-    _: Admin,
+    user: SignedIn,
+    Path(id): Path<u64>,
     Json(body): Json<SetSecret>,
 ) -> Result<Json<SettingsView>, ApiError> {
+    let id = user.workspace(id)?;
     let key = body.value.trim();
     if key.is_empty() {
         return Err(ApiError::bad_request("the key is empty"));
@@ -229,16 +239,22 @@ pub(crate) async fn set_anthropic_key(
         }
         Err(e) => return Err(ApiError::Status(StatusCode::BAD_GATEWAY, format!("{e:#}"))),
     }
-    app.vault.set(ANTHROPIC_API_KEY, key).await?;
-    tracing::info!("the Anthropic API key was changed");
-    settings_view(&app).await
+    app.vault
+        .set(Scope::Installation(id), ANTHROPIC_API_KEY, key)
+        .await?;
+    tracing::info!(installation = id, "the Anthropic API key was changed");
+    settings_view(&app, id).await
 }
 
 pub(crate) async fn delete_anthropic_key(
     State(app): State<AppState>,
-    _: Admin,
+    user: SignedIn,
+    Path(id): Path<u64>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    app.vault.delete(ANTHROPIC_API_KEY).await?;
-    tracing::info!("the Anthropic API key was removed");
-    settings_view(&app).await
+    let id = user.workspace(id)?;
+    app.vault
+        .delete(Scope::Installation(id), ANTHROPIC_API_KEY)
+        .await?;
+    tracing::info!(installation = id, "the Anthropic API key was removed");
+    settings_view(&app, id).await
 }

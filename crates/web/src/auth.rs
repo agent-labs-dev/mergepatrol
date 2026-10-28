@@ -1,8 +1,10 @@
 //! Who may use the dashboard.
 //!
-//! First run: the server logs a setup token. Whoever has it creates the GitHub App (the manifest
-//! flow) and installs it. From then on, users sign in with GitHub, and anyone who can access an
-//! installation of the App on its owner account gets in.
+//! Anyone with a GitHub account can sign in. A user sees the workspaces (installations of the
+//! App) that GitHub lets them access, as of their sign-in.
+//!
+//! Self-hosted, before the GitHub App exists: the server logs a setup token, and whoever has it
+//! creates the App (the manifest flow). The hosted App comes from the environment instead.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,9 +13,8 @@ use axum::extract::{FromRequestParts, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
-use mergepatrol_github::App;
 use mergepatrol_github::setup::{self, Pkce, random_token};
-use mergepatrol_store::{GITHUB_APP, Session, SessionKind};
+use mergepatrol_store::{GITHUB_APP, Scope, Session, SessionKind, Workspace};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ts_rs::TS;
@@ -22,7 +23,8 @@ use crate::{ApiError, AppState};
 
 const SESSION_COOKIE: &str = "mp_session";
 const OAUTH_COOKIE: &str = "mp_oauth";
-const USER_SESSION: Duration = Duration::from_secs(7 * 24 * 3600);
+/// As long as GitHub's user tokens. Signing in again picks up new installations.
+const USER_SESSION: Duration = Duration::from_secs(8 * 3600);
 const SETUP_SESSION: Duration = Duration::from_secs(3600);
 /// GitHub gives the manifest flow one hour.
 const PENDING: Duration = Duration::from_secs(3600);
@@ -58,6 +60,17 @@ pub struct SessionView {
     pub setup_unlocked: bool,
     pub user: Option<UserView>,
     pub app: Option<AppView>,
+    /// The installations the user can access, as of their sign-in.
+    pub workspaces: Vec<WorkspaceView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct WorkspaceView {
+    pub installation_id: u32,
+    pub account: String,
+    pub account_type: String,
+    pub avatar_url: String,
 }
 
 #[derive(Serialize, TS)]
@@ -71,11 +84,9 @@ pub struct UserView {
 #[ts(export)]
 pub struct AppView {
     pub slug: String,
-    pub owner: String,
     pub html_url: String,
+    /// Install the App on another account: a new workspace.
     pub install_url: String,
-    /// The App has at least one installation. Nobody can sign in before that.
-    pub installed: bool,
 }
 
 #[derive(Deserialize, TS)]
@@ -101,22 +112,38 @@ pub struct ManifestForm {
     pub manifest: String,
 }
 
-/// A request from someone who may use the dashboard: a signed-in user, or, before the GitHub
-/// App exists, the holder of the setup token.
-pub(crate) struct Admin;
+/// A signed-in user, and the installations they could access when they signed in.
+pub(crate) struct SignedIn {
+    installations: Vec<u64>,
+}
 
-impl FromRequestParts<AppState> for Admin {
+impl SignedIn {
+    /// Refuses workspaces the user cannot access.
+    pub(crate) fn workspace(&self, installation_id: u64) -> Result<u64, ApiError> {
+        if self.installations.contains(&installation_id) {
+            Ok(installation_id)
+        } else {
+            Err(ApiError::Status(
+                StatusCode::NOT_FOUND,
+                "no such workspace".into(),
+            ))
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for SignedIn {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let unauthorized = || ApiError::Status(StatusCode::UNAUTHORIZED, "sign in first".into());
-        let session = current_session(&parts.headers, state)
-            .await?
-            .ok_or_else(unauthorized)?;
-        match session.kind {
-            SessionKind::User { .. } => Ok(Admin),
-            SessionKind::Setup if state.app_credentials().await?.is_none() => Ok(Admin),
-            SessionKind::Setup => Err(unauthorized()),
+        match current_session(&parts.headers, state).await? {
+            Some(Session {
+                kind: SessionKind::User { installations, .. },
+                ..
+            }) => Ok(SignedIn { installations }),
+            _ => Err(ApiError::Status(
+                StatusCode::UNAUTHORIZED,
+                "sign in first".into(),
+            )),
         }
     }
 }
@@ -127,15 +154,23 @@ pub(crate) async fn session(
 ) -> Result<Json<SessionView>, ApiError> {
     let session = current_session(&headers, &state).await?;
     let creds = state.app_credentials().await?;
-    let user = match &session {
+    let (user, installations) = match &session {
         Some(Session {
-            kind: SessionKind::User { login, avatar_url },
+            kind:
+                SessionKind::User {
+                    login,
+                    avatar_url,
+                    installations,
+                },
             ..
-        }) => Some(UserView {
-            login: login.clone(),
-            avatar_url: avatar_url.clone(),
-        }),
-        _ => None,
+        }) => (
+            Some(UserView {
+                login: login.clone(),
+                avatar_url: avatar_url.clone(),
+            }),
+            installations.clone(),
+        ),
+        _ => (None, Vec::new()),
     };
     let setup_unlocked = matches!(
         &session,
@@ -149,30 +184,28 @@ pub(crate) async fn session(
         (Some(_), Some(_)) => SessionStatus::SignedIn,
         (Some(_), None) => SessionStatus::SignedOut,
     };
-    let app = match creds {
-        None => None,
-        Some(c) => {
-            let installed = match App::from_credentials(&c)?.installations().await {
-                Ok(list) => !list.is_empty(),
-                Err(e) => {
-                    tracing::warn!(error = %format!("{e:#}"), "could not list installations");
-                    false
-                }
-            };
-            Some(AppView {
-                install_url: c.install_url(),
-                slug: c.slug,
-                owner: c.owner,
-                html_url: c.html_url,
-                installed,
-            })
-        }
-    };
+    let workspaces = state
+        .store
+        .workspaces(&installations)
+        .await?
+        .into_iter()
+        .map(|w| WorkspaceView {
+            installation_id: w.installation_id as u32,
+            account: w.account,
+            account_type: w.account_type,
+            avatar_url: w.avatar_url,
+        })
+        .collect();
     Ok(Json(SessionView {
         status,
-        setup_unlocked: setup_unlocked && app.is_none(),
+        setup_unlocked: setup_unlocked && creds.is_none(),
         user,
-        app,
+        app: creds.map(|c| AppView {
+            install_url: c.install_url(),
+            slug: c.slug,
+            html_url: c.html_url,
+        }),
+        workspaces,
     }))
 }
 
@@ -203,9 +236,21 @@ pub(crate) async fn unlock(
 
 pub(crate) async fn start_manifest(
     State(state): State<AppState>,
-    _admin: Admin,
+    headers: HeaderMap,
     Json(body): Json<ManifestRequest>,
 ) -> Result<Json<ManifestForm>, ApiError> {
+    if !matches!(
+        current_session(&headers, &state).await?,
+        Some(Session {
+            kind: SessionKind::Setup,
+            ..
+        })
+    ) {
+        return Err(ApiError::Status(
+            StatusCode::UNAUTHORIZED,
+            "enter the setup token first".into(),
+        ));
+    }
     if state.app_credentials().await?.is_some() {
         return Err(ApiError::Status(
             StatusCode::CONFLICT,
@@ -251,13 +296,16 @@ pub(crate) async fn manifest_callback(
         if !matches!(take(&state, &token), Some(Pending::Manifest { .. })) {
             anyhow::bail!("this setup link expired: start again");
         }
+        if state.hosted_app.is_some() {
+            anyhow::bail!("this Mergepatrol uses the hosted GitHub App");
+        }
         let creds = setup::convert_manifest(&code).await?;
         state
             .vault
-            .set(GITHUB_APP, &serde_json::to_string(&creds)?)
+            .set(Scope::Instance, GITHUB_APP, &serde_json::to_string(&creds)?)
             .await?;
         *state.setup_token.lock().unwrap() = None;
-        tracing::info!(app = %creds.slug, owner = %creds.owner, "GitHub App created");
+        tracing::info!(app = %creds.slug, "GitHub App created");
         Ok(creds.install_url())
     }
     .await;
@@ -267,7 +315,8 @@ pub(crate) async fn manifest_callback(
     }
 }
 
-/// GitHub sends the user here after they install the App.
+/// GitHub sends the user here after they install the App. Signing in again adds the new
+/// workspace to the session.
 pub(crate) async fn installed() -> Redirect {
     Redirect::to("/auth/login")
 }
@@ -326,20 +375,28 @@ pub(crate) async fn login_callback(
         let user_token =
             setup::exchange_code(&creds, &code, &callback_url(&state), &verifier).await?;
         let user = setup::user(&user_token).await?;
-        if !setup::user_can_access(&user_token, &creds.owner).await? {
-            anyhow::bail!(
-                "{} cannot access the {} installation of {}",
-                user.login,
-                creds.owner,
-                creds.slug
-            );
-        }
-        tracing::info!(login = %user.login, "signed in");
+        let installations = setup::user_installations(&user_token).await?;
+        state
+            .store
+            .save_workspaces(
+                &installations
+                    .iter()
+                    .map(|i| Workspace {
+                        installation_id: i.id,
+                        account: i.account.clone(),
+                        account_type: i.account_type.clone(),
+                        avatar_url: i.avatar_url.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        tracing::info!(login = %user.login, workspaces = installations.len(), "signed in");
         create_session(
             &state,
             SessionKind::User {
                 login: user.login,
                 avatar_url: user.avatar_url,
+                installations: installations.iter().map(|i| i.id).collect(),
             },
             USER_SESSION,
         )
@@ -425,7 +482,7 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn hash(token: &str) -> String {
+pub(crate) fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))

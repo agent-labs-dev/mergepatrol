@@ -193,22 +193,44 @@ pub async fn user(token: &str) -> Result<GithubUser> {
         .await?)
 }
 
-/// Whether the user can see an installation of the App on `owner`: the sign-in rule.
-pub async fn user_can_access(token: &str, owner: &str) -> Result<bool> {
-    let res: Value = user_get(token, "/user/installations?per_page=100")
+/// An installation of the App that a signed-in user can access.
+#[derive(Clone, Debug)]
+pub struct UserInstallation {
+    pub id: u64,
+    pub account: String,
+    pub account_type: String,
+    pub avatar_url: String,
+}
+
+/// The installations of this App that the user can access: their workspaces.
+pub async fn user_installations(token: &str) -> Result<Vec<UserInstallation>> {
+    let mut all = Vec::new();
+    for page in 1.. {
+        let res: Value = user_get(
+            token,
+            &format!("/user/installations?per_page=100&page={page}"),
+        )
         .await?
         .error_for_status()?
         .json()
         .await?;
-    Ok(res["installations"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|i| {
-            i["account"]["login"]
-                .as_str()
-                .is_some_and(|l| l.eq_ignore_ascii_case(owner))
-        }))
+        let batch = res["installations"].as_array().cloned().unwrap_or_default();
+        all.extend(batch.iter().filter_map(|i| {
+            Some(UserInstallation {
+                id: i["id"].as_u64()?,
+                account: i["account"]["login"].as_str()?.to_owned(),
+                account_type: i["account"]["type"].as_str().unwrap_or("User").to_owned(),
+                avatar_url: i["account"]["avatar_url"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        }));
+        if batch.len() < 100 {
+            break;
+        }
+    }
+    Ok(all)
 }
 
 async fn user_get(token: &str, path: &str) -> Result<reqwest::Response> {

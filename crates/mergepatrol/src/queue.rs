@@ -17,7 +17,7 @@ use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
     App, AppCredentials, CheckState, Installation, MergeOutcome, PullRequest, RepoSnapshot,
 };
-use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Store, Vault};
+use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Scope, Store, Vault};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
@@ -35,6 +35,8 @@ const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 
 pub struct Ctx {
     pub config: Config,
+    /// The hosted GitHub App. `None` self-hosted: the App is in the vault.
+    pub hosted_app: Option<AppCredentials>,
     pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
     pub executor: Arc<dyn Executor>,
@@ -44,7 +46,7 @@ pub struct Ctx {
 /// Runs a queue for each repo that is on in the dashboard, and stops the queues of repos that
 /// are turned off. Waits until the GitHub App exists.
 pub async fn supervise(ctx: Arc<Ctx>) {
-    let mut running: HashMap<RepoName, (u64, JoinHandle<()>)> = HashMap::new();
+    let mut running = Running::new();
     loop {
         if let Err(e) = reconcile(&ctx, &mut running).await {
             tracing::error!(error = %format!("{e:#}"), "could not update the running queues");
@@ -53,58 +55,57 @@ pub async fn supervise(ctx: Arc<Ctx>) {
     }
 }
 
-async fn reconcile(
-    ctx: &Arc<Ctx>,
-    running: &mut HashMap<RepoName, (u64, JoinHandle<()>)>,
-) -> Result<()> {
-    let Some(json) = ctx.vault.get(GITHUB_APP).await? else {
+/// The GitHub App: the hosted one from the environment, or the self-hosted one from the vault.
+async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
+    if let Some(app) = &ctx.hosted_app {
+        return Ok(Some(app.clone()));
+    }
+    match ctx.vault.get(Scope::Instance, GITHUB_APP).await? {
+        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        None => Ok(None),
+    }
+}
+
+/// Keyed by (installation, repo). The value keeps the App ID the task started with.
+type Running = HashMap<(u64, RepoName), (u64, JoinHandle<()>)>;
+
+async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
+    let Some(creds) = app_credentials(ctx).await? else {
         return Ok(());
     };
-    let creds: AppCredentials = serde_json::from_str(&json)?;
-    let wanted: HashMap<RepoName, ()> = ctx
+    let wanted: Vec<(u64, RepoName)> = ctx
         .store
         .repo_settings()
         .await?
         .into_iter()
         .filter(|s| s.enabled)
-        .map(|s| (s.repo, ()))
+        .map(|s| (s.installation_id, s.repo))
         .collect();
 
-    running.retain(|repo, (app_id, task)| {
+    running.retain(|key, (app_id, task)| {
         // A new App (set up again) means new credentials: restart.
-        let keep = wanted.contains_key(repo) && *app_id == creds.id && !task.is_finished();
+        let keep = wanted.contains(key) && *app_id == creds.id && !task.is_finished();
         if !keep {
-            tracing::info!(%repo, "stopping");
+            tracing::info!(installation = key.0, repo = %key.1, "stopping");
             task.abort();
         }
         keep
     });
-    for repo in wanted.into_keys() {
-        if !running.contains_key(&repo) {
-            tracing::info!(%repo, "watching");
-            let app = App::from_credentials(&creds)?;
-            running.insert(
-                repo.clone(),
-                (creds.id, tokio::spawn(run_repo(ctx.clone(), app, repo))),
-            );
+    for key in wanted {
+        if let std::collections::hash_map::Entry::Vacant(slot) = running.entry(key) {
+            let (installation, repo) = slot.key().clone();
+            tracing::info!(installation, %repo, "watching");
+            let gh = App::from_credentials(&creds)?.installation(installation);
+            slot.insert((creds.id, tokio::spawn(run_repo(ctx.clone(), gh, repo))));
         }
     }
     Ok(())
 }
 
-async fn run_repo(ctx: Arc<Ctx>, app: App, repo: RepoName) {
-    let gh = loop {
-        match app.installation_for(&repo).await {
-            Ok(gh) => break gh,
-            Err(e) => {
-                tracing::error!(%repo, error = %format!("{e:#}"), "no installation, retrying");
-                tokio::time::sleep(ctx.config.poll).await;
-            }
-        }
-    };
+async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
     loop {
         if let Err(e) = tick(&ctx, &gh, &repo).await {
-            tracing::error!(%repo, error = %format!("{e:#}"), "tick failed");
+            tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "tick failed");
         }
         tokio::time::sleep(ctx.config.poll).await;
     }
@@ -387,7 +388,10 @@ async fn rebase_and_publish(
             effort: ctx.config.effort.clone(),
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
-            anthropic_api_key: ctx.vault.get(ANTHROPIC_API_KEY).await?,
+            anthropic_api_key: ctx
+                .vault
+                .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
+                .await?,
         },
     };
     ctx.store.record(key, pr.number, "job", &job_id).await?;

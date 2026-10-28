@@ -4,11 +4,15 @@ import { fetchEvents, fetchLanes } from "./api";
 import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
 
-type Selected = { repo: string; pr: number };
+type Selected = { workspace: number; repo: string; pr: number };
 
-export function Queue() {
+export function Queue({ workspace }: { workspace: number }) {
   const [selected, setSelected] = useState<Selected | null>(null);
-  const lanes = useQuery({ queryKey: ["lanes"], queryFn: fetchLanes, refetchInterval: 3000 });
+  const lanes = useQuery({
+    queryKey: ["lanes", workspace],
+    queryFn: () => fetchLanes(workspace),
+    refetchInterval: 3000,
+  });
 
   return (
     <>
@@ -22,16 +26,29 @@ export function Queue() {
       <div className="grid gap-6 md:grid-cols-[1fr_1.2fr]">
         <div className="space-y-6">
           {lanes.data?.map((lane) => (
-            <Lane key={`${lane.repo}:${lane.trunk}`} lane={lane} onSelect={setSelected} />
+            <Lane
+              key={`${lane.repo}:${lane.trunk}`}
+              workspace={workspace}
+              lane={lane}
+              onSelect={setSelected}
+            />
           ))}
         </div>
-        {selected && <Events {...selected} />}
+        {selected?.workspace === workspace && <Events {...selected} />}
       </div>
     </>
   );
 }
 
-function Lane({ lane, onSelect }: { lane: LaneView; onSelect: (s: Selected) => void }) {
+function Lane({
+  workspace,
+  lane,
+  onSelect,
+}: {
+  workspace: number;
+  lane: LaneView;
+  onSelect: (s: Selected) => void;
+}) {
   return (
     <section>
       <h2 className="mb-2 font-mono text-sm text-neutral-400">
@@ -44,7 +61,7 @@ function Lane({ lane, onSelect }: { lane: LaneView; onSelect: (s: Selected) => v
             <button
               type="button"
               className="flex w-full items-center gap-3 p-3 text-left hover:bg-neutral-900"
-              onClick={() => onSelect({ repo: lane.repo, pr: e.number })}
+              onClick={() => onSelect({ workspace, repo: lane.repo, pr: e.number })}
             >
               <span className="font-mono">#{e.number}</span>
               <State entry={e} />
@@ -70,10 +87,10 @@ function State({ entry }: { entry: EntryView }) {
   );
 }
 
-function Events({ repo, pr }: Selected) {
+function Events({ workspace, repo, pr }: Selected) {
   const events = useQuery({
-    queryKey: ["events", repo, pr],
-    queryFn: () => fetchEvents(repo, pr),
+    queryKey: ["events", workspace, repo, pr],
+    queryFn: () => fetchEvents(workspace, repo, pr),
     refetchInterval: 3000,
   });
   return (

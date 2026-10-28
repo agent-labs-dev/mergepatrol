@@ -2,9 +2,14 @@
 import type { AppView } from "./AppView";
 import type { SessionStatus } from "./SessionStatus";
 import type { UserView } from "./UserView";
+import type { WorkspaceView } from "./WorkspaceView";
 
 export type SessionView = { status: SessionStatus, 
 /**
  * The setup token was entered: the GitHub App can be created now.
  */
-setup_unlocked: boolean, user: UserView | null, app: AppView | null, };
+setup_unlocked: boolean, user: UserView | null, app: AppView | null, 
+/**
+ * The installations the user can access, as of their sign-in.
+ */
+workspaces: Array<WorkspaceView>, };

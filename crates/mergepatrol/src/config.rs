@@ -10,6 +10,8 @@ pub struct Config {
     /// Encrypts the secrets stored in the database: the GitHub App and the Anthropic API key.
     pub secret_key: String,
     pub database_url: String,
+    /// The hosted GitHub App. Without it, the App is created in the dashboard (self-hosting).
+    pub hosted_app: Option<HostedApp>,
     /// Where users reach the dashboard. GitHub redirects back here during setup and sign-in.
     pub public_url: String,
     pub labels: Labels,
@@ -37,6 +39,13 @@ pub enum ExecutorConfig {
     },
 }
 
+pub struct HostedApp {
+    pub id: u64,
+    pub private_key: String,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
 pub struct Labels {
     pub trigger: String,
     pub priority: String,
@@ -51,6 +60,7 @@ impl Config {
         Ok(Self {
             secret_key,
             database_url: req("MERGEPATROL_DATABASE_URL")?,
+            hosted_app: hosted_app()?,
             public_url: opt("MERGEPATROL_PUBLIC_URL", "http://localhost:8080"),
             labels: Labels {
                 priority: format!("{trigger}:priority"),
@@ -81,6 +91,30 @@ impl Config {
                 other => bail!("MERGEPATROL_EXECUTOR: {other:?} is not local or docker"),
             },
         })
+    }
+}
+
+/// All four variables, or none.
+fn hosted_app() -> Result<Option<HostedApp>> {
+    let names = [
+        "MERGEPATROL_GITHUB_APP_ID",
+        "MERGEPATROL_GITHUB_APP_PRIVATE_KEY",
+        "MERGEPATROL_GITHUB_CLIENT_ID",
+        "MERGEPATROL_GITHUB_CLIENT_SECRET",
+    ];
+    let values: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+    match values.as_slice() {
+        [None, None, None, None] => Ok(None),
+        [Some(id), Some(key), Some(client_id), Some(secret)] => Ok(Some(HostedApp {
+            id: id.parse().context("MERGEPATROL_GITHUB_APP_ID")?,
+            private_key: key.clone(),
+            client_id: client_id.clone(),
+            client_secret: secret.clone(),
+        })),
+        _ => bail!(
+            "set all of {} for the hosted GitHub App, or none",
+            names.join(", ")
+        ),
     }
 }
 

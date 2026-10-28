@@ -37,19 +37,23 @@ export const startManifest = (body: ManifestRequest) =>
 
 export const logout = () => call("POST", "/auth/logout");
 
-export const fetchLanes = () => get<LaneView[]>("/api/lanes");
+/** Workspace endpoints: `id` is the installation ID. */
+const w = (id: number, path: string) => `/api/w/${id}${path}`;
 
-export const fetchEvents = (repo: string, pr?: number) =>
-  get<EventView[]>(`/api/events?repo=${encodeURIComponent(repo)}${pr ? `&pr=${pr}` : ""}`);
+export const fetchLanes = (id: number) => get<LaneView[]>(w(id, "/lanes"));
 
-export const fetchRepos = () => get<RepoView[]>("/api/repos");
+export const fetchEvents = (id: number, repo: string, pr?: number) =>
+  get<EventView[]>(w(id, `/events?repo=${encodeURIComponent(repo)}${pr ? `&pr=${pr}` : ""}`));
 
-export const setRepo = (repo: string, body: SetRepo) => call("PUT", `/api/repos/${repo}`, body);
+export const fetchRepos = (id: number) => get<RepoView[]>(w(id, "/repos"));
 
-export const fetchSettings = () => get<SettingsView>("/api/settings");
+export const setRepo = (id: number, repo: string, body: SetRepo) =>
+  call("PUT", w(id, `/repos/${repo}`), body);
 
-export const setAnthropicKey = (value: string) =>
-  send<SettingsView>("PUT", "/api/settings/anthropic-api-key", { value } satisfies SetSecret);
+export const fetchSettings = (id: number) => get<SettingsView>(w(id, "/settings"));
 
-export const deleteAnthropicKey = () =>
-  send<SettingsView>("DELETE", "/api/settings/anthropic-api-key");
+export const setAnthropicKey = (id: number, value: string) =>
+  send<SettingsView>("PUT", w(id, "/settings/anthropic-api-key"), { value } satisfies SetSecret);
+
+export const deleteAnthropicKey = (id: number) =>
+  send<SettingsView>("DELETE", w(id, "/settings/anthropic-api-key"));
