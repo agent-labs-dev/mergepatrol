@@ -8,6 +8,7 @@ services:
       - data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      MERGEPATROL_DATABASE_URL: postgres://mergepatrol:mergepatrol@postgres:5432/mergepatrol
       MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY:?generate one with openssl rand -base64 32}
       MERGEPATROL_PUBLIC_URL: ${MERGEPATROL_PUBLIC_URL:-http://localhost:8080}
       MERGEPATROL_EXECUTOR: docker
@@ -17,7 +18,22 @@ services:
       MERGEPATROL_JOB_RUNTIME: ${MERGEPATROL_JOB_RUNTIME:-}
       MERGEPATROL_JOB_NETWORK: ${MERGEPATROL_JOB_NETWORK:-}
       MERGEPATROL_JOB_DNS: ${MERGEPATROL_JOB_DNS:-}
-    depends_on: [job-image]
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-image: { condition: service_started }
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: mergepatrol
+      POSTGRES_PASSWORD: mergepatrol
+      POSTGRES_DB: mergepatrol
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "mergepatrol"]
+      interval: 2s
+      retries: 30
 
   # Only builds the job image. The orchestrator starts one container from it per job.
   job-image:
@@ -28,3 +44,4 @@ services:
 
 volumes:
   data:
+  pgdata:

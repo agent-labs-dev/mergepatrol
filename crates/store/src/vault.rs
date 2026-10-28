@@ -107,13 +107,14 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SqliteStore;
+    use crate::PgStore;
+    use sqlx::PgPool;
 
     const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
-    #[tokio::test]
-    async fn round_trip_and_hint() {
-        let store = Arc::new(SqliteStore::in_memory().await.unwrap());
+    #[sqlx::test(migrations = false)]
+    async fn round_trip_and_hint(pool: PgPool) {
+        let store = Arc::new(PgStore::migrate(pool).await.unwrap());
         let vault = Vault::new(store.clone(), KEY).unwrap();
         vault
             .set(ANTHROPIC_API_KEY, "sk-ant-secret-wxyz")
@@ -135,9 +136,9 @@ mod tests {
         assert!(vault.get(ANTHROPIC_API_KEY).await.unwrap().is_none());
     }
 
-    #[tokio::test]
-    async fn wrong_key_fails_loudly() {
-        let store = Arc::new(SqliteStore::in_memory().await.unwrap());
+    #[sqlx::test(migrations = false)]
+    async fn wrong_key_fails_loudly(pool: PgPool) {
+        let store = Arc::new(PgStore::migrate(pool).await.unwrap());
         Vault::new(store.clone(), KEY)
             .unwrap()
             .set("x", "v")

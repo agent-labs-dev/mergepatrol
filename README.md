@@ -23,7 +23,7 @@ The spike polls GitHub (no webhooks yet) and has one queue per repo, on the defa
    docker compose logs mergepatrol | grep setup_token
    ```
 
-   Or without Docker: `(cd ui && pnpm install && pnpm build) && cargo run -p mergepatrol`.
+   Or without Docker: start the dev Postgres with `docker compose -f compose.dev.yml up -d`, then `(cd ui && pnpm install && pnpm build) && MERGEPATROL_DATABASE_URL=$DATABASE_URL cargo run -p mergepatrol`, where `DATABASE_URL` is the one in `.cargo/config.toml`.
 
 3. Open http://localhost:8080 and do the setup in the dashboard:
    1. Enter the setup token from the logs.
@@ -40,11 +40,12 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
 | `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64 |
 | `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
 | `MERGEPATROL_LABEL` | `mergepatrol` | The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub |
-| `MERGEPATROL_DATA_DIR` | `./data` | SQLite, the repo caches, the worktrees, and the transcripts |
+| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
 | `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's model |
 | `MERGEPATROL_EFFORT` | `medium` | The resolver's effort |
@@ -88,7 +89,7 @@ The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for
 | `git` | Local git: fetch, worktrees, rebase |
 | `resolver` | The `Resolver` trait, and the Claude implementation |
 | `executor` | Runs a rebase job: as a local process, or in a container. The job protocol |
-| `store` | The `Store` trait, and SQLite |
+| `store` | The `Store` trait, Postgres, and the encrypted secrets. Tests need the dev Postgres from `compose.dev.yml` |
 | `web` | The HTTP server: JSON API and the dashboard |
 | `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
 

@@ -1,18 +1,16 @@
-//! Persistence. `SqliteStore` is the only backend for now. Postgres comes with the hosted version.
+//! Persistence, in Postgres. Migrations are in `migrations/`, embedded, and run at startup.
 
 mod vault;
 
 pub use vault::{ANTHROPIC_API_KEY, GITHUB_APP, SecretStatus, Vault};
 
-use std::path::Path;
-use std::str::FromStr;
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{Lane, PrNumber, RepoName};
 use serde::Serialize;
+use sqlx::PgPool;
 use sqlx::Row;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool};
+use sqlx::postgres::PgPoolOptions;
 
 /// One lane: the queue of one trunk in one repo of one installation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -96,76 +94,34 @@ pub struct Session {
     pub expires_at: i64,
 }
 
-pub struct SqliteStore {
-    pool: SqlitePool,
+pub struct PgStore {
+    pool: PgPool,
 }
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS lanes (
-    installation_id INTEGER NOT NULL,
-    repo TEXT NOT NULL,
-    trunk TEXT NOT NULL,
-    lane TEXT NOT NULL,
-    PRIMARY KEY (installation_id, repo, trunk)
-);
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    installation_id INTEGER NOT NULL,
-    repo TEXT NOT NULL,
-    pr INTEGER NOT NULL,
-    at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    kind TEXT NOT NULL,
-    message TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS events_by_pr ON events (repo, pr, id);
-CREATE TABLE IF NOT EXISTS repos (
-    repo TEXT PRIMARY KEY,
-    installation_id INTEGER NOT NULL,
-    enabled INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    login TEXT,
-    avatar_url TEXT,
-    expires_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS secrets (
-    name TEXT PRIMARY KEY,
-    nonce BLOB NOT NULL,
-    ciphertext BLOB NOT NULL,
-    hint TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-";
-
-impl SqliteStore {
-    pub async fn open(path: &Path) -> Result<Self> {
-        let url = format!("sqlite://{}", path.to_str().context("non-UTF-8 path")?);
-        let opts = SqliteConnectOptions::from_str(&url)?
-            .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-        let pool = SqlitePool::connect_with(opts).await?;
-        sqlx::raw_sql(SCHEMA).execute(&pool).await?;
-        Ok(Self { pool })
+impl PgStore {
+    pub async fn connect(url: &str) -> Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(url)
+            .await
+            .context("connect to Postgres")?;
+        Self::migrate(pool).await
     }
 
-    pub async fn in_memory() -> Result<Self> {
-        // One connection: each in-memory connection is its own database.
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await?;
-        sqlx::raw_sql(SCHEMA).execute(&pool).await?;
+    pub async fn migrate(pool: PgPool) -> Result<Self> {
+        sqlx::migrate!()
+            .run(&pool)
+            .await
+            .context("migrate the database")?;
         Ok(Self { pool })
     }
 }
 
 #[async_trait]
-impl Store for SqliteStore {
+impl Store for PgStore {
     async fn load_lane(&self, key: &LaneKey) -> Result<Lane> {
         let row = sqlx::query(
-            "SELECT lane FROM lanes WHERE installation_id = ? AND repo = ? AND trunk = ?",
+            "SELECT lane FROM lanes WHERE installation_id = $1 AND repo = $2 AND trunk = $3",
         )
         .bind(key.installation_id as i64)
         .bind(key.repo.to_string())
@@ -173,20 +129,20 @@ impl Store for SqliteStore {
         .fetch_optional(&self.pool)
         .await?;
         match row {
-            Some(row) => Ok(serde_json::from_str(row.get::<&str, _>("lane"))?),
+            Some(row) => Ok(serde_json::from_value(row.get("lane"))?),
             None => Ok(Lane::default()),
         }
     }
 
     async fn save_lane(&self, key: &LaneKey, lane: &Lane) -> Result<()> {
         sqlx::query(
-            "INSERT INTO lanes (installation_id, repo, trunk, lane) VALUES (?, ?, ?, ?)
+            "INSERT INTO lanes (installation_id, repo, trunk, lane) VALUES ($1, $2, $3, $4)
              ON CONFLICT (installation_id, repo, trunk) DO UPDATE SET lane = excluded.lane",
         )
         .bind(key.installation_id as i64)
         .bind(key.repo.to_string())
         .bind(&key.trunk)
-        .bind(serde_json::to_string(lane)?)
+        .bind(serde_json::to_value(lane)?)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -200,28 +156,25 @@ impl Store for SqliteStore {
         .await?;
         rows.into_iter()
             .map(|row| {
-                let repo: &str = row.get("repo");
                 let key = LaneKey {
                     installation_id: row.get::<i64, _>("installation_id") as u64,
-                    repo: RepoName::parse(repo).context("bad repo in store")?,
+                    repo: RepoName::parse(row.get("repo")).context("bad repo in store")?,
                     trunk: row.get("trunk"),
                 };
-                Ok((key, serde_json::from_str(row.get::<&str, _>("lane"))?))
+                Ok((key, serde_json::from_value(row.get("lane"))?))
             })
             .collect()
     }
 
     async fn record(&self, key: &LaneKey, pr: PrNumber, kind: &str, message: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO events (installation_id, repo, pr, kind, message) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(key.installation_id as i64)
-        .bind(key.repo.to_string())
-        .bind(pr as i64)
-        .bind(kind)
-        .bind(message)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("INSERT INTO events (installation_id, repo, pr, kind, message) VALUES ($1, $2, $3, $4, $5)")
+            .bind(key.installation_id as i64)
+            .bind(key.repo.to_string())
+            .bind(pr as i64)
+            .bind(kind)
+            .bind(message)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -231,14 +184,16 @@ impl Store for SqliteStore {
         pr: Option<PrNumber>,
         limit: u32,
     ) -> Result<Vec<EventRecord>> {
+        // Timestamps leave the database as RFC 3339 strings in UTC.
         let rows = sqlx::query(
-            "SELECT repo, pr, at, kind, message FROM events
-             WHERE repo = ? AND (? IS NULL OR pr = ?) ORDER BY id DESC LIMIT ?",
+            r#"SELECT repo, pr, to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,
+                kind, message
+             FROM events
+             WHERE repo = $1 AND ($2::BIGINT IS NULL OR pr = $2) ORDER BY id DESC LIMIT $3"#,
         )
         .bind(repo.to_string())
         .bind(pr.map(|p| p as i64))
-        .bind(pr.map(|p| p as i64))
-        .bind(limit)
+        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -255,9 +210,9 @@ impl Store for SqliteStore {
 
     async fn put_secret(&self, name: &str, secret: SecretRecord) -> Result<()> {
         sqlx::query(
-            "INSERT INTO secrets (name, nonce, ciphertext, hint) VALUES (?, ?, ?, ?)
+            "INSERT INTO secrets (name, nonce, ciphertext, hint) VALUES ($1, $2, $3, $4)
              ON CONFLICT (name) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext,
-                hint = excluded.hint, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                hint = excluded.hint, updated_at = now()",
         )
         .bind(name)
         .bind(secret.nonce)
@@ -269,11 +224,14 @@ impl Store for SqliteStore {
     }
 
     async fn secret(&self, name: &str) -> Result<Option<SecretRecord>> {
-        let row =
-            sqlx::query("SELECT nonce, ciphertext, hint, updated_at FROM secrets WHERE name = ?")
-                .bind(name)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query(
+            r#"SELECT nonce, ciphertext, hint,
+                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
+             FROM secrets WHERE name = $1"#,
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|row| SecretRecord {
             nonce: row.get("nonce"),
             ciphertext: row.get("ciphertext"),
@@ -283,7 +241,7 @@ impl Store for SqliteStore {
     }
 
     async fn delete_secret(&self, name: &str) -> Result<()> {
-        sqlx::query("DELETE FROM secrets WHERE name = ?")
+        sqlx::query("DELETE FROM secrets WHERE name = $1")
             .bind(name)
             .execute(&self.pool)
             .await?;
@@ -299,7 +257,7 @@ impl Store for SqliteStore {
                 Ok(RepoSetting {
                     repo: RepoName::parse(row.get("repo")).context("bad repo in store")?,
                     installation_id: row.get::<i64, _>("installation_id") as u64,
-                    enabled: row.get::<i64, _>("enabled") != 0,
+                    enabled: row.get("enabled"),
                 })
             })
             .collect()
@@ -312,12 +270,12 @@ impl Store for SqliteStore {
         enabled: bool,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO repos (repo, installation_id, enabled) VALUES (?, ?, ?)
+            "INSERT INTO repos (repo, installation_id, enabled) VALUES ($1, $2, $3)
              ON CONFLICT (repo) DO UPDATE SET installation_id = excluded.installation_id, enabled = excluded.enabled",
         )
         .bind(repo.to_string())
         .bind(installation_id as i64)
-        .bind(enabled as i64)
+        .bind(enabled)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -330,7 +288,7 @@ impl Store for SqliteStore {
             }
             SessionKind::Setup => ("setup", None, None),
         };
-        sqlx::query("INSERT INTO sessions (token_hash, kind, login, avatar_url, expires_at) VALUES (?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO sessions (token_hash, kind, login, avatar_url, expires_at) VALUES ($1, $2, $3, $4, $5)")
             .bind(token_hash)
             .bind(kind)
             .bind(login)
@@ -344,7 +302,7 @@ impl Store for SqliteStore {
     async fn session(&self, token_hash: &str) -> Result<Option<Session>> {
         let row = sqlx::query(
             "SELECT kind, login, avatar_url, expires_at FROM sessions
-             WHERE token_hash = ? AND expires_at > unixepoch()",
+             WHERE token_hash = $1 AND expires_at > extract(epoch FROM now())",
         )
         .bind(token_hash)
         .fetch_optional(&self.pool)
@@ -364,7 +322,7 @@ impl Store for SqliteStore {
     }
 
     async fn delete_session(&self, token_hash: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+        sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
             .bind(token_hash)
             .execute(&self.pool)
             .await?;
@@ -377,9 +335,9 @@ mod tests {
     use super::*;
     use mergepatrol_core::Candidate;
 
-    #[tokio::test]
-    async fn sessions_expire() {
-        let store = SqliteStore::in_memory().await.unwrap();
+    #[sqlx::test(migrations = false)]
+    async fn sessions_expire(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -398,9 +356,9 @@ mod tests {
         assert_eq!(store.session("b").await.unwrap(), None);
     }
 
-    #[tokio::test]
-    async fn repo_settings_upsert() {
-        let store = SqliteStore::in_memory().await.unwrap();
+    #[sqlx::test(migrations = false)]
+    async fn repo_settings_upsert(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
         let repo = RepoName::parse("o/r").unwrap();
         store.set_repo_enabled(&repo, 9, true).await.unwrap();
         store.set_repo_enabled(&repo, 9, false).await.unwrap();
@@ -414,9 +372,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn lanes_and_events_round_trip() {
-        let store = SqliteStore::in_memory().await.unwrap();
+    #[sqlx::test(migrations = false)]
+    async fn lanes_and_events_round_trip(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
         let key = LaneKey {
             installation_id: 1,
             repo: RepoName::parse("o/r").unwrap(),
@@ -430,11 +388,14 @@ mod tests {
         }]);
         store.save_lane(&key, &lane).await.unwrap();
         assert_eq!(store.load_lane(&key).await.unwrap(), lane);
+        assert_eq!(store.lanes().await.unwrap(), [(key.clone(), lane)]);
 
         store.record(&key, 4, "enqueued", "hi").await.unwrap();
         store.record(&key, 5, "enqueued", "other").await.unwrap();
         let events = store.events(&key.repo, Some(4), 10).await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].message, "hi");
+        assert!(events[0].at.ends_with('Z'), "{}", events[0].at);
+        assert_eq!(store.events(&key.repo, None, 10).await.unwrap().len(), 2);
     }
 }

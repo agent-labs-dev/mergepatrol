@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub struct Config {
     /// Encrypts the secrets stored in the database: the GitHub App and the Anthropic API key.
     pub secret_key: String,
+    pub database_url: String,
     /// Where users reach the dashboard. GitHub redirects back here during setup and sign-in.
     pub public_url: String,
     pub labels: Labels,
@@ -49,6 +50,7 @@ impl Config {
         let trigger = opt("MERGEPATROL_LABEL", "mergepatrol");
         Ok(Self {
             secret_key,
+            database_url: req("MERGEPATROL_DATABASE_URL")?,
             public_url: opt("MERGEPATROL_PUBLIC_URL", "http://localhost:8080"),
             labels: Labels {
                 priority: format!("{trigger}:priority"),

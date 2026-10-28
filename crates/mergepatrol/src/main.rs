@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
 use mergepatrol_github::setup::random_token;
-use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, SqliteStore, Store, Vault};
+use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, PgStore, Store, Vault};
 use mergepatrol_web::WebConfig;
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
@@ -44,8 +44,7 @@ async fn orchestrator() -> Result<()> {
     let config = Config::from_env()?;
     tokio::fs::create_dir_all(&config.data_dir).await?;
 
-    let store: Arc<dyn Store> =
-        Arc::new(SqliteStore::open(&config.data_dir.join("mergepatrol.db")).await?);
+    let store: Arc<dyn Store> = Arc::new(PgStore::connect(&config.database_url).await?);
     let vault = Arc::new(Vault::new(store.clone(), &config.secret_key)?);
 
     // First run: whoever reads this log can set Mergepatrol up from the dashboard.
