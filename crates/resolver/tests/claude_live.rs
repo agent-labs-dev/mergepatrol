@@ -7,7 +7,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mergepatrol_executor::LocalExecutor;
-use mergepatrol_resolver::{ClaudeResolver, Resolution, ResolveRequest, Resolver};
+use mergepatrol_resolver::{ApiKeys, ClaudeResolver, Resolution, ResolveRequest, Resolver};
+
+struct EnvKey;
+
+#[async_trait::async_trait]
+impl ApiKeys for EnvKey {
+    async fn anthropic(&self) -> anyhow::Result<Option<String>> {
+        Ok(std::env::var("ANTHROPIC_API_KEY").ok())
+    }
+}
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -47,6 +56,7 @@ async fn claude_resolves_a_rename_conflict() {
     let exec = Arc::new(LocalExecutor::new(wt));
     let resolver = ClaudeResolver {
         exec,
+        keys: Arc::new(EnvKey),
         model: "claude-opus-5-5".into(),
         effort: "medium".into(),
         timeout: Duration::from_secs(300),

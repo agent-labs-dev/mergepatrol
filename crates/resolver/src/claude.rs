@@ -8,11 +8,12 @@ use mergepatrol_executor::Executor;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::{GIVE_UP, Resolution, ResolveRequest, Resolver, prompt};
+use crate::{ApiKeys, GIVE_UP, Resolution, ResolveRequest, Resolver, prompt};
 
 /// Runs Claude Code headless (`claude -p`) in the rebase worktree.
 pub struct ClaudeResolver {
     pub exec: Arc<dyn Executor>,
+    pub keys: Arc<dyn ApiKeys>,
     pub model: String,
     pub effort: String,
     pub timeout: Duration,
@@ -40,7 +41,14 @@ impl Resolver for ClaudeResolver {
     }
 
     async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution> {
+        let key = self
+            .keys
+            .anthropic()
+            .await?
+            .context("no Anthropic API key: add one in the dashboard settings")?;
         let mut cmd = self.exec.command("claude", req.workdir);
+        // `--bare` reads only ANTHROPIC_API_KEY, never a login on the machine.
+        cmd.env("ANTHROPIC_API_KEY", key);
         cmd.arg("-p")
             .arg(prompt(&req))
             .args([
@@ -128,5 +136,36 @@ impl Resolver for ClaudeResolver {
             turns,
             cost_usd: result["total_cost_usd"].as_f64(),
         })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyCheck {
+    Valid,
+    Invalid(String),
+}
+
+/// Asks the Anthropic API whether `key` works, with the cheapest call there is: list one model.
+pub async fn check_anthropic_key(key: &str) -> Result<KeyCheck> {
+    let res = reqwest::Client::new()
+        .get("https://api.anthropic.com/v1/models?limit=1")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .context("could not reach the Anthropic API")?;
+    let status = res.status();
+    if status.is_success() {
+        return Ok(KeyCheck::Valid);
+    }
+    let body: Value = res.json().await.unwrap_or_default();
+    let message = body["error"]["message"]
+        .as_str()
+        .unwrap_or("rejected")
+        .to_owned();
+    match status.as_u16() {
+        401 | 403 => Ok(KeyCheck::Invalid(message)),
+        _ => bail!("the Anthropic API answered {status}: {message}"),
     }
 }

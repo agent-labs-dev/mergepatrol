@@ -3,7 +3,7 @@
 
 mod claude;
 
-pub use claude::ClaudeResolver;
+pub use claude::{ClaudeResolver, KeyCheck, check_anthropic_key};
 
 use std::path::Path;
 
@@ -31,6 +31,13 @@ pub enum Resolution {
     },
     /// The agent was not sure, and said why. Mergepatrol ejects the PR rather than guess.
     GaveUp(String),
+}
+
+/// Where the resolver gets its API key at run time. The dashboard sets it, so it can change
+/// while Mergepatrol runs.
+#[async_trait]
+pub trait ApiKeys: Send + Sync {
+    async fn anthropic(&self) -> Result<Option<String>>;
 }
 
 #[async_trait]

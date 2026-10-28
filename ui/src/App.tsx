@@ -3,6 +3,7 @@ import { useState } from "react";
 import { fetchEvents, fetchLanes } from "./api";
 import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
+import { Settings } from "./Settings";
 
 type Selected = { repo: string; pr: number };
 
@@ -13,6 +14,7 @@ export function App() {
   return (
     <main className="mx-auto max-w-5xl p-8">
       <h1 className="mb-6 text-2xl font-semibold">Mergepatrol</h1>
+      <Settings />
       {lanes.isError && <p className="text-red-400">Could not load the queue.</p>}
       {lanes.data?.length === 0 && <p className="text-neutral-400">No labeled PRs yet.</p>}
       <div className="grid gap-6 md:grid-cols-[1fr_1.2fr]">

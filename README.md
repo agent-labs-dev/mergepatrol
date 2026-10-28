@@ -24,14 +24,16 @@ The spike is the thinnest end-to-end path. It polls GitHub (no webhooks yet), ha
 export MERGEPATROL_GITHUB_APP_ID=123456
 export MERGEPATROL_GITHUB_PRIVATE_KEY_PATH=./github-app.pem
 export MERGEPATROL_REPOS=owner/repo,owner/other
-export ANTHROPIC_API_KEY=...
+export MERGEPATROL_SECRET_KEY=$(openssl rand -base64 32)   # keep it: it decrypts the stored secrets
 (cd ui && pnpm install && pnpm build)
 cargo run -p mergepatrol
 ```
 
 Or with Docker: put the key in `./github-app.pem`, then run `docker compose up --build`.
 
-The dashboard is at http://127.0.0.1:8080. Add the `mergepatrol` label to a PR to queue it.
+The dashboard is at http://127.0.0.1:8080. Add your Anthropic API key there: Mergepatrol checks it with Anthropic, then stores it encrypted with `MERGEPATROL_SECRET_KEY`. Then add the `mergepatrol` label to a PR to queue it.
+
+The dashboard has no login yet, so do not expose it beyond your machine.
 
 | Variable | Default | What it does |
 | --- | --- | --- |

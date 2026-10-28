@@ -8,6 +8,7 @@ license.workspace = true
 anyhow = "1.0.104"
 axum = "0.8.9"
 mergepatrol-core = { version = "0.1.0", path = "../core" }
+mergepatrol-resolver = { version = "0.1.0", path = "../resolver" }
 mergepatrol-store = { version = "0.1.0", path = "../store" }
 mime_guess = "2.0.5"
 rust-embed = "8.13.0"

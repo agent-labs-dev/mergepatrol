@@ -1,7 +1,8 @@
 services:
   mergepatrol:
     build: .
-    ports: ["8080:8080"]
+    # The dashboard has no login yet: keep it on this machine.
+    ports: ["127.0.0.1:8080:8080"]
     volumes:
       - data:/data
       - ./github-app.pem:/run/secrets/github-app.pem:ro
@@ -9,6 +10,6 @@ services:
       MERGEPATROL_GITHUB_APP_ID: ${MERGEPATROL_GITHUB_APP_ID}
       MERGEPATROL_GITHUB_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
       MERGEPATROL_REPOS: ${MERGEPATROL_REPOS}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY}
 volumes:
   data:

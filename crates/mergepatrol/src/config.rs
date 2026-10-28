@@ -10,6 +10,8 @@ use serde::Deserialize;
 pub struct Config {
     pub app_id: u64,
     pub private_key: Vec<u8>,
+    /// Encrypts the secrets entered in the dashboard. 32 bytes, base64.
+    pub secret_key: Option<String>,
     pub repos: Vec<RepoName>,
     pub labels: Labels,
     pub data_dir: PathBuf,
@@ -48,6 +50,7 @@ impl Config {
                 .parse()
                 .context("MERGEPATROL_GITHUB_APP_ID")?,
             private_key: std::fs::read(&key_path).with_context(|| format!("read {key_path}"))?,
+            secret_key: std::env::var("MERGEPATROL_SECRET_KEY").ok(),
             repos,
             labels: Labels {
                 priority: format!("{trigger}:priority"),

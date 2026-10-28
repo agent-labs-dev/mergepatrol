@@ -1,5 +1,9 @@
 //! Persistence. `SqliteStore` is the only backend for now. Postgres comes with the hosted version.
 
+mod vault;
+
+pub use vault::{ANTHROPIC_API_KEY, SecretStatus, Vault};
+
 use std::path::Path;
 use std::str::FromStr;
 
@@ -27,6 +31,16 @@ pub struct EventRecord {
     pub message: String,
 }
 
+/// An encrypted secret, as stored. `Vault` encrypts and decrypts.
+#[derive(Clone, Debug)]
+pub struct SecretRecord {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+    pub hint: String,
+    /// Set by the store on write.
+    pub updated_at: String,
+}
+
 #[async_trait]
 pub trait Store: Send + Sync {
     async fn load_lane(&self, key: &LaneKey) -> Result<Lane>;
@@ -40,6 +54,9 @@ pub trait Store: Send + Sync {
         pr: Option<PrNumber>,
         limit: u32,
     ) -> Result<Vec<EventRecord>>;
+    async fn put_secret(&self, name: &str, secret: SecretRecord) -> Result<()>;
+    async fn secret(&self, name: &str) -> Result<Option<SecretRecord>>;
+    async fn delete_secret(&self, name: &str) -> Result<()>;
 }
 
 pub struct SqliteStore {
@@ -64,6 +81,13 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_by_pr ON events (repo, pr, id);
+CREATE TABLE IF NOT EXISTS secrets (
+    name TEXT PRIMARY KEY,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    hint TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
 ";
 
 impl SqliteStore {
@@ -178,6 +202,43 @@ impl Store for SqliteStore {
                 message: row.get("message"),
             })
             .collect())
+    }
+
+    async fn put_secret(&self, name: &str, secret: SecretRecord) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO secrets (name, nonce, ciphertext, hint) VALUES (?, ?, ?, ?)
+             ON CONFLICT (name) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext,
+                hint = excluded.hint, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        )
+        .bind(name)
+        .bind(secret.nonce)
+        .bind(secret.ciphertext)
+        .bind(secret.hint)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn secret(&self, name: &str) -> Result<Option<SecretRecord>> {
+        let row =
+            sqlx::query("SELECT nonce, ciphertext, hint, updated_at FROM secrets WHERE name = ?")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|row| SecretRecord {
+            nonce: row.get("nonce"),
+            ciphertext: row.get("ciphertext"),
+            hint: row.get("hint"),
+            updated_at: row.get("updated_at"),
+        }))
+    }
+
+    async fn delete_secret(&self, name: &str) -> Result<()> {
+        sqlx::query("DELETE FROM secrets WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 }
 
