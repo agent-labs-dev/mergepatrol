@@ -77,8 +77,8 @@ impl Config {
                 "local" => ExecutorConfig::Local,
                 "docker" => ExecutorConfig::Docker {
                     image: opt("MERGEPATROL_JOB_IMAGE", "mergepatrol-job:latest"),
-                    runtime: std::env::var("MERGEPATROL_JOB_RUNTIME").ok(),
-                    network: std::env::var("MERGEPATROL_JOB_NETWORK").ok(),
+                    runtime: var("MERGEPATROL_JOB_RUNTIME"),
+                    network: var("MERGEPATROL_JOB_NETWORK"),
                     dns: opt("MERGEPATROL_JOB_DNS", "")
                         .split(',')
                         .map(str::trim)
@@ -102,7 +102,7 @@ fn hosted_app() -> Result<Option<HostedApp>> {
         "MERGEPATROL_GITHUB_CLIENT_ID",
         "MERGEPATROL_GITHUB_CLIENT_SECRET",
     ];
-    let values: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+    let values: Vec<Option<String>> = names.iter().map(|n| var(n)).collect();
     match values.as_slice() {
         [None, None, None, None] => Ok(None),
         [Some(id), Some(key), Some(client_id), Some(secret)] => Ok(Some(HostedApp {
@@ -118,12 +118,17 @@ fn hosted_app() -> Result<Option<HostedApp>> {
     }
 }
 
+/// Empty is unset: compose's `${X:-}` passes an empty variable.
+fn var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
 fn req(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("{name} is not set"))
+    var(name).with_context(|| format!("{name} is not set"))
 }
 
 fn opt(name: &str, default: &str) -> String {
-    std::env::var(name).unwrap_or_else(|_| default.to_owned())
+    var(name).unwrap_or_else(|| default.to_owned())
 }
 
 /// `.mergepatrol/mergepatrol.yml` in the repo, read from the trunk so a PR cannot change it for itself.

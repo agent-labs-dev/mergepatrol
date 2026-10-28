@@ -67,6 +67,24 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
 }
 
 #[tokio::test]
+async fn trailer_on_a_subject_only_message_is_a_real_trailer() {
+    let tmp = tempfile::tempdir().unwrap();
+    sh(tmp.path(), &["init", "-q"]);
+    let message = Git
+        .add_trailer(
+            tmp.path(),
+            "docs: subject only",
+            "Co-authored-by: Ada <ada@example.com>",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        message,
+        "docs: subject only\n\nCo-authored-by: Ada <ada@example.com>\n"
+    );
+}
+
+#[tokio::test]
 async fn bundles_carry_commits_between_repos() {
     let tmp = tempfile::tempdir().unwrap();
     let a = tmp.path().join("a");
