@@ -246,6 +246,8 @@ impl Git {
     }
 
     pub async fn add_trailer(&self, wt: &Path, message: &str, trailer: &str) -> Result<String> {
+        // Without the newline, older git (2.39 in our bookworm images) puts the trailer right under the subject.
+        let message = format!("{}\n", message.trim_end());
         let mut cmd = self.git(
             wt,
             &[
