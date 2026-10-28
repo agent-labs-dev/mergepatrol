@@ -240,7 +240,7 @@ async fn record(
     kind: &str,
     message: &str,
 ) -> Result<()> {
-    tracing::info!(repo = %key.repo, pr = number, kind, message, "queue");
+    tracing::info!(repo = %key.repo, pr = number, kind, detail = message, "queue");
     ctx.store.record(key, number, kind, message).await
 }
 
