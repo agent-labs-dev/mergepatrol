@@ -47,6 +47,9 @@ pub struct DockerExecutor {
     pub runtime: Option<String>,
     /// A network whose host firewall blocks the metadata server and private ranges.
     pub network: Option<String>,
+    /// DNS servers for the job. Needed on the sandbox network, whose firewall blocks Docker's
+    /// embedded DNS. Empty uses Docker's default.
+    pub dns: Vec<String>,
     pub memory: String,
     pub cpus: String,
     pub timeout: Duration,
@@ -70,10 +73,10 @@ impl Executor for DockerExecutor {
         if let Some(network) = &self.network {
             create.args(["--network", network]);
         }
+        for server in &self.dns {
+            create.args(["--dns", server]);
+        }
         create
-            // Public resolvers: the host firewall blocks private ranges, so Docker's embedded
-            // DNS on the bridge may not answer.
-            .args(["--dns", "1.1.1.1", "--dns", "8.8.8.8"])
             .args([
                 "--memory",
                 &self.memory,

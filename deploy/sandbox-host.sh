@@ -4,7 +4,8 @@
 #   - A Docker network for jobs, whose traffic may reach the internet but not the cloud
 #     metadata server, private ranges, or this host.
 # Run as root. Safe to run again (for example from the VM's startup script).
-# Then set MERGEPATROL_JOB_RUNTIME=runsc and MERGEPATROL_JOB_NETWORK=mergepatrol-jobs.
+# Then set MERGEPATROL_JOB_RUNTIME=runsc, MERGEPATROL_JOB_NETWORK=mergepatrol-jobs, and
+# MERGEPATROL_JOB_DNS=1.1.1.1,8.8.8.8 (the firewall blocks Docker's embedded DNS).
 set -euo pipefail
 
 NETWORK=mergepatrol-jobs
@@ -34,4 +35,4 @@ done
 # Jobs to this host (the Docker API, the dashboard, anything listening): no.
 iptables -C INPUT -i mp-jobs -j DROP 2>/dev/null || iptables -I INPUT -i mp-jobs -j DROP
 
-echo "ready: MERGEPATROL_JOB_RUNTIME=runsc MERGEPATROL_JOB_NETWORK=$NETWORK"
+echo "ready: MERGEPATROL_JOB_RUNTIME=runsc MERGEPATROL_JOB_NETWORK=$NETWORK MERGEPATROL_JOB_DNS=1.1.1.1,8.8.8.8"

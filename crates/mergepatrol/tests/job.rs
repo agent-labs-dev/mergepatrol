@@ -132,11 +132,20 @@ async fn docker_executor_runs_a_job_in_a_container() {
     let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
 
     // The container reaches this machine's git daemon through Docker Desktop's host name.
-    let port = 19418;
-    let mut daemon = Command::new("git")
-        .args(["daemon", "--export-all", "--reuseaddr", "--listen=0.0.0.0"])
+    // Run `git-daemon` itself, not `git daemon`, so that killing it stops the server.
+    let port = std::net::TcpListener::bind("0.0.0.0:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let exec_path = git(tmp.path(), &["--exec-path"]);
+    let mut daemon = Command::new(Path::new(&exec_path).join("git-daemon"))
+        .args(["--export-all", "--reuseaddr", "--listen=0.0.0.0"])
         .arg(format!("--port={port}"))
-        .arg(format!("--base-path={}", tmp.path().display()))
+        .arg(format!(
+            "--base-path={}",
+            tmp.path().canonicalize().unwrap().display()
+        ))
         .spawn()
         .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -147,6 +156,7 @@ async fn docker_executor_runs_a_job_in_a_container() {
         image: "mergepatrol-job:latest".into(),
         runtime: None,
         network: None,
+        dns: vec![],
         memory: "1g".into(),
         cpus: "1".into(),
         timeout: Duration::from_secs(120),
