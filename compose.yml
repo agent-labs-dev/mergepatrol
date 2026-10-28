@@ -1,0 +1,14 @@
+services:
+  mergepatrol:
+    build: .
+    ports: ["8080:8080"]
+    volumes:
+      - data:/data
+      - ./github-app.pem:/run/secrets/github-app.pem:ro
+    environment:
+      MERGEPATROL_GITHUB_APP_ID: ${MERGEPATROL_GITHUB_APP_ID}
+      MERGEPATROL_GITHUB_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
+      MERGEPATROL_REPOS: ${MERGEPATROL_REPOS}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+volumes:
+  data:

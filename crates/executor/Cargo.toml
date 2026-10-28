@@ -5,3 +5,4 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+tokio = { version = "1.54.1", features = ["process"] }

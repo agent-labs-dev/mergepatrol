@@ -6,6 +6,50 @@ When a rebase has conflicts, an agent resolves them. Claude is the default. A pl
 
 Status: early. Not ready for use yet.
 
+## Run the spike
+
+The spike is the thinnest end-to-end path. It polls GitHub (no webhooks yet), has one lane per repo on the default branch, and has no settings in the dashboard.
+
+1. Create a GitHub App by hand (the manifest flow comes later). Give it these repository permissions:
+   - Contents: read and write
+   - Pull requests: read and write
+   - Issues: read and write (for labels and comments)
+   - Checks: read
+   - Commit statuses: read
+   - Administration: read (optional: without it, only rulesets count for required checks)
+2. Install the App on the repos, and download its private key.
+3. Run it:
+
+```bash
+export MERGEPATROL_GITHUB_APP_ID=123456
+export MERGEPATROL_GITHUB_PRIVATE_KEY_PATH=./github-app.pem
+export MERGEPATROL_REPOS=owner/repo,owner/other
+export ANTHROPIC_API_KEY=...
+(cd ui && pnpm install && pnpm build)
+cargo run -p mergepatrol
+```
+
+Or with Docker: put the key in `./github-app.pem`, then run `docker compose up --build`.
+
+The dashboard is at http://127.0.0.1:8080. Add the `mergepatrol` label to a PR to queue it.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `MERGEPATROL_LABEL` | `mergepatrol` | The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
+| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub |
+| `MERGEPATROL_DATA_DIR` | `./data` | SQLite, the repo caches, the worktrees, and the transcripts |
+| `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
+| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's model |
+| `MERGEPATROL_EFFORT` | `medium` | The resolver's effort |
+
+A repo can set verify commands in `.mergepatrol/mergepatrol.yml`. They run after an agent resolution, before the publish. Mergepatrol reads this file from the base branch, so a PR cannot change its own checks.
+
+```yaml
+version: 1
+verify:
+  - cargo check
+```
+
 ## Crates
 
 | Crate | What it does |
