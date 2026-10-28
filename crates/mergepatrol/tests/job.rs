@@ -164,6 +164,7 @@ async fn docker_executor_runs_a_job_in_a_container() {
     let out = tmp.path().join("out");
     let result = docker.run("test", &spec, &out).await;
     daemon.kill().unwrap();
+    daemon.wait().unwrap();
 
     let result = result.unwrap();
     assert_eq!(result.outcome, JobOutcome::Rebased, "{result:?}");
