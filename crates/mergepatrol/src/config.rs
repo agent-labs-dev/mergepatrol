@@ -3,16 +3,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mergepatrol_core::RepoName;
 use serde::Deserialize;
 
-/// Settings from the environment. The dashboard and the App manifest flow replace most of these later.
+/// Settings from the environment. Everything else is set up in the dashboard.
 pub struct Config {
-    pub app_id: u64,
-    pub private_key: Vec<u8>,
-    /// Encrypts the secrets entered in the dashboard. 32 bytes, base64.
-    pub secret_key: Option<String>,
-    pub repos: Vec<RepoName>,
+    /// Encrypts the secrets stored in the database: the GitHub App and the Anthropic API key.
+    pub secret_key: String,
+    /// Where users reach the dashboard. GitHub redirects back here during setup and sign-in.
+    pub public_url: String,
     pub labels: Labels,
     pub data_dir: PathBuf,
     pub poll: Duration,
@@ -31,27 +29,12 @@ pub struct Labels {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let key_path = req("MERGEPATROL_GITHUB_PRIVATE_KEY_PATH")?;
-        let repos = req("MERGEPATROL_REPOS")?
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                RepoName::parse(s)
-                    .with_context(|| format!("MERGEPATROL_REPOS: {s:?} is not owner/name"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if repos.is_empty() {
-            bail!("MERGEPATROL_REPOS is empty");
-        }
+        let secret_key = req("MERGEPATROL_SECRET_KEY")
+            .context("generate one with `openssl rand -base64 32`, and keep it: it decrypts the stored secrets")?;
         let trigger = opt("MERGEPATROL_LABEL", "mergepatrol");
         Ok(Self {
-            app_id: req("MERGEPATROL_GITHUB_APP_ID")?
-                .parse()
-                .context("MERGEPATROL_GITHUB_APP_ID")?,
-            private_key: std::fs::read(&key_path).with_context(|| format!("read {key_path}"))?,
-            secret_key: std::env::var("MERGEPATROL_SECRET_KEY").ok(),
-            repos,
+            secret_key,
+            public_url: opt("MERGEPATROL_PUBLIC_URL", "http://localhost:8080"),
             labels: Labels {
                 priority: format!("{trigger}:priority"),
                 failed: format!("{trigger}:failed"),

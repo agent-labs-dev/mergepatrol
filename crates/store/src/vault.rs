@@ -2,19 +2,20 @@ use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, Generate, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use serde::Serialize;
 
 use crate::{SecretRecord, Store};
 
 pub const ANTHROPIC_API_KEY: &str = "anthropic-api-key";
+/// The GitHub App, as JSON: `mergepatrol_github::AppCredentials`.
+pub const GITHUB_APP: &str = "github-app";
 
-/// Secrets that users enter in the dashboard, encrypted at rest with `MERGEPATROL_SECRET_KEY`.
-/// Without that key the vault is off: it reads and stores nothing.
+/// Secrets set up in the dashboard, encrypted at rest with `MERGEPATROL_SECRET_KEY`.
 pub struct Vault {
     store: Arc<dyn Store>,
-    cipher: Option<Aes256Gcm>,
+    cipher: Aes256Gcm,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,27 +27,20 @@ pub struct SecretStatus {
 
 impl Vault {
     /// `key` is 32 bytes in base64, for example from `openssl rand -base64 32`.
-    pub fn new(store: Arc<dyn Store>, key: Option<&str>) -> Result<Self> {
-        let cipher = match key {
-            None => None,
-            Some(b64) => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(b64.trim())
-                    .context("MERGEPATROL_SECRET_KEY is not base64")?;
-                let key = Key::<Aes256Gcm>::try_from(bytes.as_slice())
-                    .map_err(|_| anyhow!("MERGEPATROL_SECRET_KEY must be 32 bytes"))?;
-                Some(Aes256Gcm::new(&key))
-            }
-        };
-        Ok(Self { store, cipher })
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.cipher.is_some()
+    pub fn new(store: Arc<dyn Store>, key: &str) -> Result<Self> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(key.trim())
+            .context("MERGEPATROL_SECRET_KEY is not base64")?;
+        let key = Key::<Aes256Gcm>::try_from(bytes.as_slice())
+            .map_err(|_| anyhow!("MERGEPATROL_SECRET_KEY must be 32 bytes"))?;
+        Ok(Self {
+            store,
+            cipher: Aes256Gcm::new(&key),
+        })
     }
 
     pub async fn set(&self, name: &str, value: &str) -> Result<()> {
-        let cipher = self.cipher()?;
+        let cipher = &self.cipher;
         let nonce = Nonce::generate();
         // The name is the associated data, so a ciphertext cannot be moved to another name.
         let ciphertext = cipher
@@ -80,9 +74,7 @@ impl Vault {
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<String>> {
-        let Some(cipher) = &self.cipher else {
-            return Ok(None);
-        };
+        let cipher = &self.cipher;
         let Some(rec) = self.store.secret(name).await? else {
             return Ok(None);
         };
@@ -110,13 +102,6 @@ impl Vault {
     pub async fn delete(&self, name: &str) -> Result<()> {
         self.store.delete_secret(name).await
     }
-
-    fn cipher(&self) -> Result<&Aes256Gcm> {
-        match &self.cipher {
-            Some(c) => Ok(c),
-            None => bail!("MERGEPATROL_SECRET_KEY is not set, so secrets cannot be stored"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -129,7 +114,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_and_hint() {
         let store = Arc::new(SqliteStore::in_memory().await.unwrap());
-        let vault = Vault::new(store.clone(), Some(KEY)).unwrap();
+        let vault = Vault::new(store.clone(), KEY).unwrap();
         vault
             .set(ANTHROPIC_API_KEY, "sk-ant-secret-wxyz")
             .await
@@ -153,21 +138,12 @@ mod tests {
     #[tokio::test]
     async fn wrong_key_fails_loudly() {
         let store = Arc::new(SqliteStore::in_memory().await.unwrap());
-        Vault::new(store.clone(), Some(KEY))
+        Vault::new(store.clone(), KEY)
             .unwrap()
             .set("x", "v")
             .await
             .unwrap();
-        let other =
-            Vault::new(store, Some("HwECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")).unwrap();
+        let other = Vault::new(store, "HwECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=").unwrap();
         assert!(other.get("x").await.is_err());
-    }
-
-    #[tokio::test]
-    async fn without_a_key_the_vault_is_off() {
-        let store = Arc::new(SqliteStore::in_memory().await.unwrap());
-        let vault = Vault::new(store, None).unwrap();
-        assert!(!vault.enabled());
-        assert!(vault.set("x", "v").await.is_err());
     }
 }

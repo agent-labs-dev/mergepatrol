@@ -6,13 +6,18 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["macros"] }
+base64 = "0.23.1"
+getrandom = "0.4.3"
 mergepatrol-core = { version = "0.1.0", path = "../core" }
+mergepatrol-github = { version = "0.1.0", path = "../github" }
 mergepatrol-resolver = { version = "0.1.0", path = "../resolver" }
 mergepatrol-store = { version = "0.1.0", path = "../store" }
 mime_guess = "2.0.5"
 rust-embed = "8.13.0"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 tokio = { version = "1.54.1", features = ["net"] }
 tracing = "0.1.44"
 ts-rs = "12.0.1"

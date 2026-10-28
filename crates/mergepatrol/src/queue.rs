@@ -1,7 +1,7 @@
 //! Drives one repo: polls GitHub, keeps the lane in sync, and runs the PR at the head of the lane
 //! through rebase, checks, and merge.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,10 +11,13 @@ use mergepatrol_core::{
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_git::{Git, RebaseStep, cache_path};
-use mergepatrol_github::{App, CheckState, Installation, MergeOutcome, PullRequest, RepoSnapshot};
+use mergepatrol_github::{
+    App, AppCredentials, CheckState, Installation, MergeOutcome, PullRequest, RepoSnapshot,
+};
 use mergepatrol_resolver::{Resolution, ResolveRequest, Resolver};
-use mergepatrol_store::{LaneKey, Store};
+use mergepatrol_store::{GITHUB_APP, LaneKey, Store, Vault};
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 
 use crate::config::{Config, REPO_CONFIG_PATH, RepoConfig};
 use crate::publish::{Publish, publish};
@@ -22,11 +25,13 @@ use crate::publish::{Publish, publish};
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, a commit that has no checks at all after this long counts as green.
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
+/// How soon a repo turned on in the dashboard starts its queue.
+const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct Ctx {
     pub config: Config,
-    pub app: App,
+    pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
     pub exec: Arc<dyn Executor>,
     pub resolver: Arc<dyn Resolver>,
@@ -34,9 +39,60 @@ pub struct Ctx {
     pub resolutions: Semaphore,
 }
 
-pub async fn run_repo(ctx: Arc<Ctx>, repo: RepoName) {
+/// Runs a queue for each repo that is on in the dashboard, and stops the queues of repos that
+/// are turned off. Waits until the GitHub App exists.
+pub async fn supervise(ctx: Arc<Ctx>) {
+    let mut running: HashMap<RepoName, (u64, JoinHandle<()>)> = HashMap::new();
+    loop {
+        if let Err(e) = reconcile(&ctx, &mut running).await {
+            tracing::error!(error = %format!("{e:#}"), "could not update the running queues");
+        }
+        tokio::time::sleep(SUPERVISE_EVERY).await;
+    }
+}
+
+async fn reconcile(
+    ctx: &Arc<Ctx>,
+    running: &mut HashMap<RepoName, (u64, JoinHandle<()>)>,
+) -> Result<()> {
+    let Some(json) = ctx.vault.get(GITHUB_APP).await? else {
+        return Ok(());
+    };
+    let creds: AppCredentials = serde_json::from_str(&json)?;
+    let wanted: HashMap<RepoName, ()> = ctx
+        .store
+        .repo_settings()
+        .await?
+        .into_iter()
+        .filter(|s| s.enabled)
+        .map(|s| (s.repo, ()))
+        .collect();
+
+    running.retain(|repo, (app_id, task)| {
+        // A new App (set up again) means new credentials: restart.
+        let keep = wanted.contains_key(repo) && *app_id == creds.id && !task.is_finished();
+        if !keep {
+            tracing::info!(%repo, "stopping");
+            task.abort();
+        }
+        keep
+    });
+    for repo in wanted.into_keys() {
+        if !running.contains_key(&repo) {
+            tracing::info!(%repo, "watching");
+            let app = App::from_credentials(&creds)?;
+            running.insert(
+                repo.clone(),
+                (creds.id, tokio::spawn(run_repo(ctx.clone(), app, repo))),
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_repo(ctx: Arc<Ctx>, app: App, repo: RepoName) {
     let gh = loop {
-        match ctx.app.installation_for(&repo).await {
+        match app.installation_for(&repo).await {
             Ok(gh) => break gh,
             Err(e) => {
                 tracing::error!(%repo, error = %format!("{e:#}"), "no installation, retrying");

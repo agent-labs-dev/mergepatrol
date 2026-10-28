@@ -121,6 +121,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "axum-macros",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -164,6 +165,17 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aa268c23bfbbd2c4363b9cd302a4f504fb2a9dfe7e3451d66f35dd392e20aca"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1219,6 +1231,7 @@ dependencies = [
  "mergepatrol-store",
  "mergepatrol-web",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "tracing",
@@ -1256,11 +1269,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "getrandom 0.4.3",
  "jsonwebtoken",
  "mergepatrol-core",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tracing",
 ]
@@ -1300,12 +1315,17 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.23.1",
+ "getrandom 0.4.3",
  "mergepatrol-core",
+ "mergepatrol-github",
  "mergepatrol-resolver",
  "mergepatrol-store",
  "mime_guess",
  "rust-embed",
  "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "tokio",
  "tracing",
  "ts-rs",
@@ -1652,6 +1672,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

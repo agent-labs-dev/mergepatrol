@@ -1,15 +1,12 @@
 services:
   mergepatrol:
     build: .
-    # The dashboard has no login yet: keep it on this machine.
+    # The dashboard has its own sign-in, but it is a spike: keep it on this machine.
     ports: ["127.0.0.1:8080:8080"]
     volumes:
       - data:/data
-      - ./github-app.pem:/run/secrets/github-app.pem:ro
     environment:
-      MERGEPATROL_GITHUB_APP_ID: ${MERGEPATROL_GITHUB_APP_ID}
-      MERGEPATROL_GITHUB_PRIVATE_KEY_PATH: /run/secrets/github-app.pem
-      MERGEPATROL_REPOS: ${MERGEPATROL_REPOS}
-      MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY}
+      MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY:?generate one with openssl rand -base64 32}
+      MERGEPATROL_PUBLIC_URL: ${MERGEPATROL_PUBLIC_URL:-http://localhost:8080}
 volumes:
   data:

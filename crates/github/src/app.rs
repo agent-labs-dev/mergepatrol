@@ -45,6 +45,40 @@ impl App {
         )?)
     }
 
+    pub fn from_credentials(c: &crate::AppCredentials) -> Result<Self> {
+        Self::new(c.id, c.pem.as_bytes())
+    }
+
+    pub async fn installations(&self) -> Result<Vec<InstallationInfo>> {
+        let list: Vec<Value> = self
+            .http
+            .get(format!("{API}/app/installations?per_page=100"))
+            .bearer_auth(self.jwt()?)
+            .headers(api_headers())
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(list
+            .iter()
+            .filter_map(|i| {
+                Some(InstallationInfo {
+                    id: i["id"].as_u64()?,
+                    account: i["account"]["login"].as_str()?.to_owned(),
+                })
+            })
+            .collect())
+    }
+
+    pub fn installation(&self, id: u64) -> Installation {
+        Installation {
+            id,
+            app: self.clone(),
+            token: Arc::new(Mutex::new(None)),
+        }
+    }
+
     /// The installation of this App on `repo`.
     pub async fn installation_for(&self, repo: &RepoName) -> Result<Installation> {
         #[derive(Deserialize)]
@@ -68,6 +102,18 @@ impl App {
             token: Arc::new(Mutex::new(None)),
         })
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct InstallationInfo {
+    pub id: u64,
+    pub account: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct RepoInfo {
+    pub repo: RepoName,
+    pub private: bool,
 }
 
 /// A client that acts as one installation of the App. Tokens refresh before they expire.
@@ -112,6 +158,33 @@ impl Installation {
             SystemTime::now() + Duration::from_secs(3600),
         ));
         Ok(tok.token)
+    }
+
+    /// The repos this installation can access.
+    pub async fn repositories(&self) -> Result<Vec<RepoInfo>> {
+        let mut repos = Vec::new();
+        for page in 1.. {
+            let res: Value = self
+                .rest(
+                    Method::GET,
+                    &format!("/installation/repositories?per_page=100&page={page}"),
+                    None,
+                )
+                .await?;
+            let batch = res["repositories"].as_array().cloned().unwrap_or_default();
+            for r in &batch {
+                if let Some(repo) = r["full_name"].as_str().and_then(RepoName::parse) {
+                    repos.push(RepoInfo {
+                        repo,
+                        private: r["private"].as_bool().unwrap_or(true),
+                    });
+                }
+            }
+            if batch.len() < 100 {
+                break;
+            }
+        }
+        Ok(repos)
     }
 
     /// A REST call that returns the status and the body, for callers that branch on the status.

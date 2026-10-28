@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use mergepatrol_executor::LocalExecutor;
-use mergepatrol_github::App;
+use mergepatrol_github::setup::random_token;
 use mergepatrol_resolver::{ApiKeys, ClaudeResolver};
-use mergepatrol_store::{ANTHROPIC_API_KEY, SqliteStore, Store, Vault};
+use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, SqliteStore, Store, Vault};
+use mergepatrol_web::WebConfig;
 use tokio::sync::Semaphore;
 use tracing_subscriber::EnvFilter;
 
@@ -28,12 +29,22 @@ async fn main() -> Result<()> {
 
     let store: Arc<dyn Store> =
         Arc::new(SqliteStore::open(&config.data_dir.join("mergepatrol.db")).await?);
-    let vault = Arc::new(Vault::new(store.clone(), config.secret_key.as_deref())?);
-    if !vault.enabled() {
-        tracing::warn!(
-            "MERGEPATROL_SECRET_KEY is not set: the dashboard cannot store the Anthropic API key"
-        );
-    } else if vault.status(ANTHROPIC_API_KEY).await?.is_none() {
+    let vault = Arc::new(Vault::new(store.clone(), &config.secret_key)?);
+
+    // First run: whoever reads this log can set Mergepatrol up from the dashboard.
+    let setup_token = match vault.status(GITHUB_APP).await? {
+        Some(_) => None,
+        None => {
+            let token = random_token(18);
+            tracing::warn!(
+                setup_token = %token,
+                url = %config.public_url,
+                "no GitHub App yet: open the dashboard and enter this setup token"
+            );
+            Some(token)
+        }
+    };
+    if vault.status(ANTHROPIC_API_KEY).await?.is_none() {
         tracing::warn!("no Anthropic API key yet: add one in the dashboard settings");
     }
     let exec = Arc::new(LocalExecutor::new(config.data_dir.join("work")));
@@ -48,7 +59,7 @@ async fn main() -> Result<()> {
 
     let bind = config.bind;
     let ctx = Arc::new(Ctx {
-        app: App::new(config.app_id, &config.private_key)?,
+        vault: vault.clone(),
         store: store.clone(),
         exec,
         resolver,
@@ -57,14 +68,15 @@ async fn main() -> Result<()> {
         config,
     });
 
-    for repo in ctx.config.repos.clone() {
-        tracing::info!(%repo, "watching");
-        tokio::spawn(queue::run_repo(ctx.clone(), repo));
-    }
+    let web = WebConfig {
+        public_url: ctx.config.public_url.clone(),
+        setup_token,
+    };
+    tokio::spawn(queue::supervise(ctx.clone()));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");
-    axum::serve(listener, mergepatrol_web::router(store, vault)).await?;
+    axum::serve(listener, mergepatrol_web::router(store, vault, web)).await?;
     Ok(())
 }
 

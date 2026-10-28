@@ -1,225 +1,84 @@
-//! The HTTP server: the JSON API under `/api`, and the dashboard (the built `ui/`, embedded).
-//! The API types derive `TS`. `cargo test` writes them to `ui/src/api/`.
+//! The HTTP server: the JSON API under `/api`, sign-in and setup, and the dashboard (the built
+//! `ui/`, embedded). The API types derive `TS`. `cargo test` writes them to `ui/src/api/`.
 
-use std::sync::Arc;
+mod api;
+mod auth;
+mod ui;
 
-use axum::extract::{Query, State};
-use axum::http::{StatusCode, Uri, header};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use axum::Router;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
-use axum::{Json, Router};
-use mergepatrol_core::{EntryState, RepoName};
-use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
-use mergepatrol_store::{ANTHROPIC_API_KEY, Store, Vault};
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
+use axum::routing::{get, post, put};
+use mergepatrol_github::AppCredentials;
+use mergepatrol_store::{GITHUB_APP, Store, Vault};
 
-#[derive(Serialize, TS)]
-#[ts(export)]
-pub struct LaneView {
-    pub repo: String,
-    pub trunk: String,
-    pub entries: Vec<EntryView>,
-}
+pub use api::*;
+pub use auth::{
+    AppView, ManifestForm, ManifestRequest, SessionStatus, SessionView, Unlock, UserView,
+};
 
-#[derive(Serialize, TS)]
-#[ts(export)]
-pub struct EntryView {
-    pub number: u32,
-    pub priority: bool,
-    pub state: EntryStateView,
-    /// Why the PR is held.
-    pub detail: Option<String>,
-}
-
-#[derive(Serialize, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(export)]
-pub enum EntryStateView {
-    Waiting,
-    Held,
-    Active,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export)]
-pub struct EventView {
-    pub repo: String,
-    pub pr: u32,
-    pub at: String,
-    pub kind: String,
-    pub message: String,
-}
-
-#[derive(Serialize, TS)]
-#[ts(export)]
-pub struct SettingsView {
-    /// False when MERGEPATROL_SECRET_KEY is not set: secrets cannot be stored.
-    pub secrets_enabled: bool,
-    pub anthropic_api_key: Option<SecretView>,
-}
-
-/// A stored secret. The API never returns the value.
-#[derive(Serialize, TS)]
-#[ts(export)]
-pub struct SecretView {
-    /// The last four characters.
-    pub hint: String,
-    pub updated_at: String,
-}
-
-#[derive(Deserialize, TS)]
-#[ts(export)]
-pub struct SetSecret {
-    pub value: String,
+pub struct WebConfig {
+    /// Where users reach the dashboard, for example `http://localhost:8080`. GitHub redirects here.
+    pub public_url: String,
+    /// Unlocks the first-run setup. `None` once the GitHub App exists.
+    pub setup_token: Option<String>,
 }
 
 #[derive(Clone)]
 struct AppState {
     store: Arc<dyn Store>,
     vault: Arc<Vault>,
+    public_url: Arc<str>,
+    setup_token: Arc<Mutex<Option<String>>>,
+    /// OAuth and manifest flows in progress, by their `state` parameter.
+    pending: Arc<Mutex<HashMap<String, auth::Pending>>>,
 }
 
-#[derive(Deserialize)]
-struct EventsQuery {
-    repo: String,
-    pr: Option<u64>,
+impl AppState {
+    async fn app_credentials(&self) -> anyhow::Result<Option<AppCredentials>> {
+        match self.vault.get(GITHUB_APP).await? {
+            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn secure_cookies(&self) -> bool {
+        self.public_url.starts_with("https://")
+    }
 }
 
-pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>) -> Router {
+pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Router {
+    let state = AppState {
+        store,
+        vault,
+        public_url: config.public_url.trim_end_matches('/').into(),
+        setup_token: Arc::new(Mutex::new(config.setup_token)),
+        pending: Arc::default(),
+    };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
-        .route("/api/lanes", get(lanes))
-        .route("/api/events", get(events))
-        .route("/api/settings", get(settings))
+        .route("/api/session", get(auth::session))
+        .route("/api/setup/unlock", post(auth::unlock))
+        .route("/api/setup/manifest", post(auth::start_manifest))
+        .route("/setup/callback", get(auth::manifest_callback))
+        .route("/setup/installed", get(auth::installed))
+        .route("/auth/login", get(auth::login))
+        .route("/auth/callback", get(auth::login_callback))
+        .route("/auth/logout", post(auth::logout))
+        .route("/api/lanes", get(api::lanes))
+        .route("/api/events", get(api::events))
+        .route("/api/repos", get(api::repos))
+        .route("/api/repos/{owner}/{name}", put(api::set_repo))
+        .route("/api/settings", get(api::settings))
         .route(
             "/api/settings/anthropic-api-key",
-            put(set_anthropic_key).delete(delete_anthropic_key),
+            put(api::set_anthropic_key).delete(api::delete_anthropic_key),
         )
-        .fallback(ui)
-        .with_state(AppState { store, vault })
-}
-
-async fn lanes(State(app): State<AppState>) -> Result<Json<Vec<LaneView>>, ApiError> {
-    let lanes = app.store.lanes().await?;
-    Ok(Json(
-        lanes
-            .into_iter()
-            .map(|(key, lane)| LaneView {
-                repo: key.repo.to_string(),
-                trunk: key.trunk,
-                entries: lane
-                    .entries
-                    .into_iter()
-                    .map(|e| {
-                        let (state, detail) = match e.state {
-                            EntryState::Waiting => (EntryStateView::Waiting, None),
-                            EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
-                            EntryState::Active => (EntryStateView::Active, None),
-                        };
-                        EntryView {
-                            number: e.number as u32,
-                            priority: e.priority,
-                            state,
-                            detail,
-                        }
-                    })
-                    .collect(),
-            })
-            .collect(),
-    ))
-}
-
-async fn events(
-    State(app): State<AppState>,
-    Query(q): Query<EventsQuery>,
-) -> Result<Json<Vec<EventView>>, ApiError> {
-    let repo = RepoName::parse(&q.repo).ok_or(ApiError::bad_request("repo must be owner/name"))?;
-    let events = app.store.events(&repo, q.pr, 200).await?;
-    Ok(Json(
-        events
-            .into_iter()
-            .map(|e| EventView {
-                repo: e.repo,
-                pr: e.pr as u32,
-                at: e.at,
-                kind: e.kind,
-                message: e.message,
-            })
-            .collect(),
-    ))
-}
-
-async fn settings(State(app): State<AppState>) -> Result<Json<SettingsView>, ApiError> {
-    let key = app.vault.status(ANTHROPIC_API_KEY).await?;
-    Ok(Json(SettingsView {
-        secrets_enabled: app.vault.enabled(),
-        anthropic_api_key: key.map(|k| SecretView {
-            hint: k.hint,
-            updated_at: k.updated_at,
-        }),
-    }))
-}
-
-/// Checks the key with Anthropic before it stores it, so a typo fails here and not in a rebase.
-async fn set_anthropic_key(
-    State(app): State<AppState>,
-    Json(body): Json<SetSecret>,
-) -> Result<Json<SettingsView>, ApiError> {
-    if !app.vault.enabled() {
-        return Err(ApiError::Status(
-            StatusCode::CONFLICT,
-            "Set MERGEPATROL_SECRET_KEY first. Generate one with `openssl rand -base64 32`.".into(),
-        ));
-    }
-    let key = body.value.trim();
-    if key.is_empty() {
-        return Err(ApiError::bad_request("the key is empty"));
-    }
-    match check_anthropic_key(key).await {
-        Ok(KeyCheck::Valid) => {}
-        Ok(KeyCheck::Invalid(why)) => {
-            return Err(ApiError::Status(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Anthropic rejected the key: {why}"),
-            ));
-        }
-        Err(e) => return Err(ApiError::Status(StatusCode::BAD_GATEWAY, format!("{e:#}"))),
-    }
-    app.vault.set(ANTHROPIC_API_KEY, key).await?;
-    tracing::info!("the Anthropic API key was changed");
-    settings(State(app)).await
-}
-
-async fn delete_anthropic_key(State(app): State<AppState>) -> Result<Json<SettingsView>, ApiError> {
-    app.vault.delete(ANTHROPIC_API_KEY).await?;
-    tracing::info!("the Anthropic API key was removed");
-    settings(State(app)).await
-}
-
-#[derive(rust_embed::RustEmbed)]
-#[folder = "../../ui/dist"]
-#[allow_missing = true]
-struct UiAssets;
-
-/// Serves the dashboard. Unknown paths get `index.html`, so client-side routes work.
-async fn ui(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let (path, file) = match UiAssets::get(path) {
-        Some(f) if !path.is_empty() => (path, f),
-        _ => match UiAssets::get("index.html") {
-            Some(f) => ("index.html", f),
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    "The dashboard is not built. Run `pnpm build` in ui/.",
-                )
-                    .into_response();
-            }
-        },
-    };
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
-    ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response()
+        .fallback(ui::serve)
+        .with_state(state)
 }
 
 enum ApiError {
@@ -245,7 +104,7 @@ impl IntoResponse for ApiError {
         match self {
             Self::Status(code, m) => (code, m).into_response(),
             Self::Internal(e) => {
-                tracing::error!(error = %e, "API error");
+                tracing::error!(error = %format!("{e:#}"), "API error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
             }
         }

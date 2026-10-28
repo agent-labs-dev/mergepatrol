@@ -2,7 +2,7 @@
 
 mod vault;
 
-pub use vault::{ANTHROPIC_API_KEY, SecretStatus, Vault};
+pub use vault::{ANTHROPIC_API_KEY, GITHUB_APP, SecretStatus, Vault};
 
 use std::path::Path;
 use std::str::FromStr;
@@ -57,6 +57,43 @@ pub trait Store: Send + Sync {
     async fn put_secret(&self, name: &str, secret: SecretRecord) -> Result<()>;
     async fn secret(&self, name: &str) -> Result<Option<SecretRecord>>;
     async fn delete_secret(&self, name: &str) -> Result<()>;
+
+    /// The repos that have a setting. Repos without one are off.
+    async fn repo_settings(&self) -> Result<Vec<RepoSetting>>;
+    async fn set_repo_enabled(
+        &self,
+        repo: &RepoName,
+        installation_id: u64,
+        enabled: bool,
+    ) -> Result<()>;
+
+    /// `token_hash` is the SHA-256 of the cookie value, so a leaked database holds no live sessions.
+    async fn create_session(&self, token_hash: &str, session: &Session) -> Result<()>;
+    /// Only sessions that have not expired.
+    async fn session(&self, token_hash: &str) -> Result<Option<Session>>;
+    async fn delete_session(&self, token_hash: &str) -> Result<()>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoSetting {
+    pub repo: RepoName,
+    pub installation_id: u64,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionKind {
+    /// Signed in with GitHub.
+    User { login: String, avatar_url: String },
+    /// Unlocked with the setup token, before the GitHub App exists.
+    Setup,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Session {
+    pub kind: SessionKind,
+    /// Unix seconds.
+    pub expires_at: i64,
 }
 
 pub struct SqliteStore {
@@ -81,6 +118,18 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_by_pr ON events (repo, pr, id);
+CREATE TABLE IF NOT EXISTS repos (
+    repo TEXT PRIMARY KEY,
+    installation_id INTEGER NOT NULL,
+    enabled INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    login TEXT,
+    avatar_url TEXT,
+    expires_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS secrets (
     name TEXT PRIMARY KEY,
     nonce BLOB NOT NULL,
@@ -240,12 +289,130 @@ impl Store for SqliteStore {
             .await?;
         Ok(())
     }
+
+    async fn repo_settings(&self) -> Result<Vec<RepoSetting>> {
+        let rows = sqlx::query("SELECT repo, installation_id, enabled FROM repos ORDER BY repo")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(RepoSetting {
+                    repo: RepoName::parse(row.get("repo")).context("bad repo in store")?,
+                    installation_id: row.get::<i64, _>("installation_id") as u64,
+                    enabled: row.get::<i64, _>("enabled") != 0,
+                })
+            })
+            .collect()
+    }
+
+    async fn set_repo_enabled(
+        &self,
+        repo: &RepoName,
+        installation_id: u64,
+        enabled: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO repos (repo, installation_id, enabled) VALUES (?, ?, ?)
+             ON CONFLICT (repo) DO UPDATE SET installation_id = excluded.installation_id, enabled = excluded.enabled",
+        )
+        .bind(repo.to_string())
+        .bind(installation_id as i64)
+        .bind(enabled as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn create_session(&self, token_hash: &str, session: &Session) -> Result<()> {
+        let (kind, login, avatar) = match &session.kind {
+            SessionKind::User { login, avatar_url } => {
+                ("user", Some(login.as_str()), Some(avatar_url.as_str()))
+            }
+            SessionKind::Setup => ("setup", None, None),
+        };
+        sqlx::query("INSERT INTO sessions (token_hash, kind, login, avatar_url, expires_at) VALUES (?, ?, ?, ?, ?)")
+            .bind(token_hash)
+            .bind(kind)
+            .bind(login)
+            .bind(avatar)
+            .bind(session.expires_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn session(&self, token_hash: &str) -> Result<Option<Session>> {
+        let row = sqlx::query(
+            "SELECT kind, login, avatar_url, expires_at FROM sessions
+             WHERE token_hash = ? AND expires_at > unixepoch()",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let kind = match row.get::<&str, _>("kind") {
+            "user" => SessionKind::User {
+                login: row.get("login"),
+                avatar_url: row.get("avatar_url"),
+            },
+            _ => SessionKind::Setup,
+        };
+        Ok(Some(Session {
+            kind,
+            expires_at: row.get("expires_at"),
+        }))
+    }
+
+    async fn delete_session(&self, token_hash: &str) -> Result<()> {
+        sqlx::query("DELETE FROM sessions WHERE token_hash = ?")
+            .bind(token_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mergepatrol_core::Candidate;
+
+    #[tokio::test]
+    async fn sessions_expire() {
+        let store = SqliteStore::in_memory().await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let live = Session {
+            kind: SessionKind::Setup,
+            expires_at: now + 60,
+        };
+        let dead = Session {
+            kind: SessionKind::Setup,
+            expires_at: now - 1,
+        };
+        store.create_session("a", &live).await.unwrap();
+        store.create_session("b", &dead).await.unwrap();
+        assert_eq!(store.session("a").await.unwrap(), Some(live));
+        assert_eq!(store.session("b").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn repo_settings_upsert() {
+        let store = SqliteStore::in_memory().await.unwrap();
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_repo_enabled(&repo, 9, true).await.unwrap();
+        store.set_repo_enabled(&repo, 9, false).await.unwrap();
+        assert_eq!(
+            store.repo_settings().await.unwrap(),
+            [RepoSetting {
+                repo,
+                installation_id: 9,
+                enabled: false
+            }]
+        );
+    }
 
     #[tokio::test]
     async fn lanes_and_events_round_trip() {

@@ -6,37 +6,42 @@ When a rebase has conflicts, an agent resolves them. Claude is the default. A pl
 
 Status: early. Not ready for use yet.
 
-## Run the spike
+## Run it
 
-The spike is the thinnest end-to-end path. It polls GitHub (no webhooks yet), has one lane per repo on the default branch, and has no settings in the dashboard.
+The spike polls GitHub (no webhooks yet) and has one queue per repo, on the default branch.
 
-1. Create a GitHub App by hand (the manifest flow comes later). Give it these repository permissions:
-   - Contents: read and write
-   - Pull requests: read and write
-   - Issues: read and write (for labels and comments)
-   - Checks: read
-   - Commit statuses: read
-   - Administration: read (optional: without it, only rulesets count for required checks)
-2. Install the App on the repos, and download its private key.
-3. Run it:
+1. Generate the secret key. It encrypts the GitHub App and the Anthropic API key in the database. Keep it: without it, you must set Mergepatrol up again.
 
-```bash
-export MERGEPATROL_GITHUB_APP_ID=123456
-export MERGEPATROL_GITHUB_PRIVATE_KEY_PATH=./github-app.pem
-export MERGEPATROL_REPOS=owner/repo,owner/other
-export MERGEPATROL_SECRET_KEY=$(openssl rand -base64 32)   # keep it: it decrypts the stored secrets
-(cd ui && pnpm install && pnpm build)
-cargo run -p mergepatrol
-```
+   ```bash
+   export MERGEPATROL_SECRET_KEY=$(openssl rand -base64 32)
+   ```
 
-Or with Docker: put the key in `./github-app.pem`, then run `docker compose up --build`.
+2. Start Mergepatrol:
 
-The dashboard is at http://127.0.0.1:8080. Add your Anthropic API key there: Mergepatrol checks it with Anthropic, then stores it encrypted with `MERGEPATROL_SECRET_KEY`. Then add the `mergepatrol` label to a PR to queue it.
+   ```bash
+   docker compose up --build -d
+   docker compose logs mergepatrol | grep setup_token
+   ```
 
-The dashboard has no login yet, so do not expose it beyond your machine.
+   Or without Docker: `(cd ui && pnpm install && pnpm build) && cargo run -p mergepatrol`.
+
+3. Open http://localhost:8080 and do the setup in the dashboard:
+   1. Enter the setup token from the logs.
+   2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs.
+   3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
+   4. In **Repos**, turn on the repos to queue.
+   5. In **Settings**, add your Anthropic API key. Mergepatrol checks it with Anthropic, then stores it encrypted.
+
+4. Add the `mergepatrol` label to a PR to queue it.
+
+Anyone who can access the App's installation on its owner account can sign in.
+
+If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
+| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64 |
+| `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
 | `MERGEPATROL_LABEL` | `mergepatrol` | The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub |
 | `MERGEPATROL_DATA_DIR` | `./data` | SQLite, the repo caches, the worktrees, and the transcripts |
