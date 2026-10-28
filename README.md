@@ -8,6 +8,8 @@ Status: early. Not ready for use yet.
 
 ## Run it
 
+<!-- e2e A -->
+
 The spike polls GitHub (no webhooks yet) and has one queue per repo, on the default branch.
 
 1. Generate the secret key. It encrypts the GitHub App and the Anthropic API key in the database. Keep it: without it, you must set Mergepatrol up again.
