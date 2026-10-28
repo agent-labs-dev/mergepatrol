@@ -1,14 +1,11 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! GitHub, as a GitHub App: auth, the queue snapshot, the Git Data API, checks, and merges.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod app;
+mod checks;
+mod repo;
+pub mod setup;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use app::{App, Installation, InstallationInfo, RepoInfo};
+pub use checks::{CheckState, Checks};
+pub use repo::{MergeOutcome, PullRequest, RepoSnapshot, TreeEntry};
+pub use setup::{AppCredentials, GithubUser};

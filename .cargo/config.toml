@@ -1,0 +1,5 @@
+[env]
+# ts-rs writes the API types here when `cargo test` runs.
+TS_RS_EXPORT_DIR = { value = "ui/src/api", relative = true }
+# The dev Postgres from compose.dev.yml. `#[sqlx::test]` creates a database per test in it.
+DATABASE_URL = "postgres://mergepatrol:mergepatrol@127.0.0.1:54329/mergepatrol"

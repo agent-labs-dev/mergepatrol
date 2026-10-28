@@ -5,3 +5,23 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+mergepatrol-core = { version = "0.1.0", path = "../core" }
+mergepatrol-executor = { version = "0.1.0", path = "../executor" }
+mergepatrol-git = { version = "0.1.0", path = "../git" }
+mergepatrol-github = { version = "0.1.0", path = "../github" }
+mergepatrol-resolver = { version = "0.1.0", path = "../resolver" }
+mergepatrol-store = { version = "0.1.0", path = "../store" }
+mergepatrol-web = { version = "0.1.0", path = "../web" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_yaml = "0.9.34"
+tokio = { version = "1.54.1", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+
+[dev-dependencies]
+mergepatrol-executor = { path = "../executor" }
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }

@@ -1,0 +1,47 @@
+# Self-hosting. Jobs run in their own containers on this machine's Docker.
+services:
+  mergepatrol:
+    build: { context: ., target: orchestrator }
+    # The dashboard has its own sign-in, but this is a spike: keep it on this machine.
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      MERGEPATROL_DATABASE_URL: postgres://mergepatrol:mergepatrol@postgres:5432/mergepatrol
+      MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY:?generate one with openssl rand -base64 32}
+      MERGEPATROL_PUBLIC_URL: ${MERGEPATROL_PUBLIC_URL:-http://localhost:8080}
+      MERGEPATROL_EXECUTOR: docker
+      MERGEPATROL_JOB_IMAGE: mergepatrol-job:latest
+      # On Linux with gVisor installed (see deploy/sandbox-host.sh): runsc, mergepatrol-jobs,
+      # and public DNS servers such as 1.1.1.1,8.8.8.8.
+      MERGEPATROL_JOB_RUNTIME: ${MERGEPATROL_JOB_RUNTIME:-}
+      MERGEPATROL_JOB_NETWORK: ${MERGEPATROL_JOB_NETWORK:-}
+      MERGEPATROL_JOB_DNS: ${MERGEPATROL_JOB_DNS:-}
+    depends_on:
+      postgres: { condition: service_healthy }
+      job-image: { condition: service_started }
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: mergepatrol
+      POSTGRES_PASSWORD: mergepatrol
+      POSTGRES_DB: mergepatrol
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "mergepatrol"]
+      interval: 2s
+      retries: 30
+
+  # Only builds the job image. The orchestrator starts one container from it per job.
+  job-image:
+    build: { context: ., target: job }
+    image: mergepatrol-job:latest
+    entrypoint: ["true"]
+    restart: "no"
+
+volumes:
+  data:
+  pgdata:

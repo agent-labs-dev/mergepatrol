@@ -1,0 +1,14 @@
+# Postgres for development and tests: `docker compose -f compose.dev.yml up -d`.
+# .cargo/config.toml points DATABASE_URL here, and `#[sqlx::test]` makes a database per test.
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports: ["127.0.0.1:54329:5432"]
+    environment:
+      POSTGRES_USER: mergepatrol
+      POSTGRES_PASSWORD: mergepatrol
+      POSTGRES_DB: mergepatrol
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+volumes:
+  pgdata:
