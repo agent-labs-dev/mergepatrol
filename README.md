@@ -109,3 +109,5 @@ The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for
 ## License
 
 Apache-2.0
+
+<!-- e2e x -->
