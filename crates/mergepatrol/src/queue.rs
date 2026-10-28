@@ -104,11 +104,21 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
     loop {
-        if let Err(e) = tick(&ctx, &gh, &repo).await {
-            tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "tick failed");
+        match tick(&ctx, &gh, &repo).await {
+            // The lane may have a next PR: start it now, not a poll later.
+            Ok(Ran::Job) => continue,
+            Ok(Ran::Idle) => {}
+            Err(e) => {
+                tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "tick failed")
+            }
         }
         tokio::time::sleep(ctx.config.poll).await;
     }
+}
+
+enum Ran {
+    Job,
+    Idle,
 }
 
 enum Outcome {
@@ -119,7 +129,7 @@ enum Outcome {
     Cancelled,
 }
 
-async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<()> {
+async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<Ran> {
     let labels = &ctx.config.labels;
     let snap = gh.snapshot(repo, &labels.trigger).await?;
     let key = LaneKey {
@@ -160,14 +170,10 @@ async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<()> {
     for change in lane.sync(&candidates) {
         match change {
             LaneChange::Enqueued(n) => {
-                ctx.store
-                    .record(&key, n, "enqueued", "added to the queue")
-                    .await?
+                record(ctx, &key, n, "enqueued", "added to the queue").await?
             }
             LaneChange::Dequeued { number, .. } => {
-                ctx.store
-                    .record(&key, number, "dequeued", "left the queue")
-                    .await?
+                record(ctx, &key, number, "dequeued", "left the queue").await?
             }
         }
     }
@@ -175,7 +181,7 @@ async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<()> {
 
     // Jobs run inside the tick, so an active entry here was cut short by a restart: run it again.
     let Some(number) = lane.active().or_else(|| lane.next()) else {
-        return Ok(());
+        return Ok(Ran::Idle);
     };
     lane.activate(number);
     ctx.store.save_lane(&key, &lane).await?;
@@ -185,7 +191,8 @@ async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<()> {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
-    finish(ctx, gh, &key, &mut lane, number, outcome).await
+    finish(ctx, gh, &key, &mut lane, number, outcome).await?;
+    Ok(Ran::Job)
 }
 
 async fn finish(
@@ -199,7 +206,7 @@ async fn finish(
     match outcome {
         Outcome::Merged(sha) => {
             lane.remove(number);
-            ctx.store.record(key, number, "merged", &sha).await?;
+            record(ctx, key, number, "merged", &sha).await?;
             gh.sticky_comment(&key.repo, number, &format!("Merged as {sha}."))
                 .await?;
         }
@@ -209,7 +216,7 @@ async fn finish(
         }
         Outcome::Held(reason) => {
             lane.hold(number, reason.clone());
-            ctx.store.record(key, number, "held", &reason).await?;
+            record(ctx, key, number, "held", &reason).await?;
             gh.sticky_comment(
                 &key.repo,
                 number,
@@ -219,12 +226,22 @@ async fn finish(
         }
         Outcome::Cancelled => {
             lane.remove(number);
-            ctx.store
-                .record(key, number, "cancelled", "the label was removed")
-                .await?;
+            record(ctx, key, number, "cancelled", "the label was removed").await?;
         }
     }
     ctx.store.save_lane(key, lane).await
+}
+
+/// A queue event: shown on the dashboard, and logged.
+async fn record(
+    ctx: &Ctx,
+    key: &LaneKey,
+    number: PrNumber,
+    kind: &str,
+    message: &str,
+) -> Result<()> {
+    tracing::info!(repo = %key.repo, pr = number, kind, detail = message, "queue");
+    ctx.store.record(key, number, kind, message).await
 }
 
 async fn eject(
@@ -243,7 +260,7 @@ async fn eject(
         &format!("{why}\n\nAdd `{}` again to retry.", labels.trigger),
     )
     .await?;
-    ctx.store.record(key, number, "ejected", why).await
+    record(ctx, key, number, "ejected", why).await
 }
 
 async fn run_job(
@@ -266,15 +283,13 @@ async fn run_job(
 
         let event = match &job.phase {
             Phase::Rebasing => {
-                ctx.store
-                    .record(key, number, "rebasing", &format!("onto {}", key.trunk))
-                    .await?;
+                record(ctx, key, number, "rebasing", &format!("onto {}", key.trunk)).await?;
                 gh.sticky_comment(repo, number, &format!("Rebasing onto `{}`.", key.trunk))
                     .await?;
                 let event = rebase_and_publish(ctx, gh, key, snap, &pr).await?;
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
-                    ctx.store.record(key, number, "published", head).await?;
+                    record(ctx, key, number, "published", head).await?;
                     gh.sticky_comment(
                         repo,
                         number,
@@ -286,17 +301,26 @@ async fn run_job(
             }
             Phase::AwaitingChecks { head, base } => {
                 let trunk = gh.branch_sha(repo, &key.trunk).await?;
-                if pr.head_ref_oid != *head {
+                // The ref, not `pr.head_ref_oid`: the PR lags behind our own publish for a few seconds.
+                if gh.branch_sha(repo, &pr.head_ref_name).await? != *head {
+                    record(
+                        ctx,
+                        key,
+                        number,
+                        "head-moved",
+                        "the PR branch was pushed to",
+                    )
+                    .await?;
                     Event::HeadMoved
                 } else if trunk != *base {
-                    ctx.store
-                        .record(
-                            key,
-                            number,
-                            "base-moved",
-                            "the trunk moved outside the queue",
-                        )
-                        .await?;
+                    record(
+                        ctx,
+                        key,
+                        number,
+                        "base-moved",
+                        "the trunk moved outside the queue",
+                    )
+                    .await?;
                     Event::BaseMoved
                 } else {
                     let checks = gh.checks(repo, head).await?;
@@ -394,15 +418,13 @@ async fn rebase_and_publish(
                 .await?,
         },
     };
-    ctx.store.record(key, pr.number, "job", &job_id).await?;
+    record(ctx, key, pr.number, "job", &job_id).await?;
     let result = match ctx.executor.run(&job_id, &spec, &out).await {
         Ok(r) => r,
         Err(e) => return Ok(Event::RebaseFailed(format!("the rebase job failed: {e:#}"))),
     };
     for e in &result.events {
-        ctx.store
-            .record(key, pr.number, &e.kind, &e.message)
-            .await?;
+        record(ctx, key, pr.number, &e.kind, &e.message).await?;
     }
     if let JobOutcome::Failed { reason } = result.outcome {
         return Ok(Event::RebaseFailed(reason));
