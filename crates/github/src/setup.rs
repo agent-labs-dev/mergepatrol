@@ -39,7 +39,7 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
     json!({
         "name": name,
         "url": public_url,
-        "description": "Merge queue that rebases PRs and resolves conflicts with an agent.",/webhooks/github"), "active": false },
+        "description": "Merge queue that rebases PRs and resolves conflicts with an agent.",
         "redirect_url": format!("{public_url}/setup/callback"),
         "callback_urls": [format!("{public_url}/auth/callback")],
         "setup_url": format!("{public_url}/setup/installed"),
