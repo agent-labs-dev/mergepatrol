@@ -1,8 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, Navigate, Outlet, useNavigate, useParams } from "@tanstack/react-router";
+import {
+  Link,
+  Navigate,
+  Outlet,
+  useMatchRoute,
+  useNavigate,
+  useParams,
+} from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
-import { fetchSession, logout } from "./api";
+import { fetchSession, fetchSettings, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
@@ -99,6 +106,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
 
   return (
     <div className="flex h-screen flex-col">
+      <NoKeyBanner workspace={current.installation_id} account={current.account} />
       <header className="border-b border-line bg-surface">
         <div className="flex h-12 items-center gap-3 px-5">
           <Mark />
@@ -165,6 +173,36 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
           <Outlet />
         </WorkspaceContext>
       </main>
+    </div>
+  );
+}
+
+/** Across every page while the workspace has no Anthropic API key, until one is added. */
+function NoKeyBanner({ workspace, account }: { workspace: number; account: string }) {
+  const settings = useQuery({
+    queryKey: ["settings", workspace],
+    queryFn: () => fetchSettings(workspace),
+  });
+  const onSettings = useMatchRoute()({ to: "/$account/settings" });
+  if (!settings.data || settings.data.anthropic_api_key) return null;
+  return (
+    <div className="flex items-center gap-3 bg-amber-400 px-5 py-2 text-sm text-amber-950">
+      <svg viewBox="0 0 16 16" className="size-4 shrink-0 fill-current" aria-hidden>
+        <path d="M8.9 1.5a1 1 0 0 0-1.8 0L.6 13a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L8.9 1.5ZM7.25 6h1.5v4h-1.5V6Zm0 5.25h1.5v1.5h-1.5v-1.5Z" />
+      </svg>
+      <span>
+        <span className="font-semibold">No Anthropic API key.</span> Without it, Mergepatrol can't
+        resolve rebase conflicts or fix failed checks, so those PRs leave the queue.
+      </span>
+      {!onSettings && (
+        <Link
+          to="/$account/settings"
+          params={{ account }}
+          className="ml-auto shrink-0 rounded-md bg-amber-950 px-3 py-1 font-medium text-amber-50 hover:bg-amber-900"
+        >
+          Add a key →
+        </Link>
+      )}
     </div>
   );
 }
