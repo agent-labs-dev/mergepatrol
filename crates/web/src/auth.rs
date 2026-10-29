@@ -13,6 +13,7 @@ use axum::extract::{FromRequestParts, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
+use mergepatrol_analytics::WorkspaceInfo;
 use mergepatrol_github::setup::{self, Pkce, random_token};
 use mergepatrol_store::{GITHUB_APP, Scope, Session, SessionKind, Workspace};
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,16 @@ pub struct SessionView {
     pub app: Option<AppView>,
     /// The installations the user can access, as of their sign-in.
     pub workspaces: Vec<WorkspaceView>,
+    /// Product analytics in PostHog. `None` when off, as when self-hosted.
+    pub analytics: Option<AnalyticsView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct AnalyticsView {
+    /// The PostHog project key.
+    pub key: String,
+    pub host: String,
 }
 
 #[derive(Serialize, TS)]
@@ -206,6 +217,10 @@ pub(crate) async fn session(
             html_url: c.html_url,
         }),
         workspaces,
+        analytics: state.analytics.browser().map(|(key, host)| AnalyticsView {
+            key: key.to_owned(),
+            host: host.to_owned(),
+        }),
     }))
 }
 
@@ -391,6 +406,18 @@ pub(crate) async fn login_callback(
             )
             .await?;
         tracing::info!(login = %user.login, workspaces = installations.len(), "signed in");
+        state.analytics.signed_in(
+            &user.login,
+            &user.avatar_url,
+            &installations
+                .iter()
+                .map(|i| WorkspaceInfo {
+                    installation_id: i.id,
+                    account: &i.account,
+                    account_type: &i.account_type,
+                })
+                .collect::<Vec<_>>(),
+        );
         create_session(
             &state,
             SessionKind::User {

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use mergepatrol_analytics::Analytics;
 use mergepatrol_executor::remote::{CloudRunLaunch, Mailbox, RemoteExecutor};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
 use mergepatrol_github::App;
@@ -135,6 +136,7 @@ async fn orchestrator() -> Result<()> {
     };
 
     let bind = config.bind;
+    let analytics = Analytics::new(config.posthog_key.clone(), &config.posthog_host);
     let ctx = Arc::new(Ctx {
         vault: vault.clone(),
         hosted_app: hosted_app.clone(),
@@ -142,6 +144,7 @@ async fn orchestrator() -> Result<()> {
         executor,
         jobs: Semaphore::new(config.max_jobs),
         wakers: Arc::default(),
+        analytics: analytics.clone(),
         config,
     });
 
@@ -151,6 +154,7 @@ async fn orchestrator() -> Result<()> {
         setup_token,
         wake: ctx.wakers.clone(),
         repo_defaults: ctx.config.repo_defaults.clone(),
+        analytics,
     };
     tokio::spawn(queue::supervise(ctx.clone()));
     tokio::spawn(queue::discover(ctx.clone()));

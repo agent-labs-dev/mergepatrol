@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
     Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, REPO_CONFIG_PATH,
     RepoName, RepoSettings, Transition,
@@ -52,6 +53,7 @@ pub struct Ctx {
     pub executor: Arc<dyn Executor>,
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
+    pub analytics: Analytics,
 }
 
 /// Webhooks wake a repo's queue before its poll is due. Polling still runs, in case one is lost.
@@ -719,7 +721,7 @@ async fn merge_retrying(
     }
 }
 
-/// A queue event: shown on the dashboard, and logged.
+/// A queue event: shown on the dashboard, logged, and counted for its workspace.
 async fn record(
     ctx: &Ctx,
     key: &LaneKey,
@@ -728,6 +730,13 @@ async fn record(
     message: &str,
 ) -> Result<()> {
     tracing::info!(repo = %key.repo, pr = number, kind, detail = message, "queue");
+    ctx.analytics.queue_event(
+        key.installation_id,
+        &key.repo.to_string(),
+        &key.trunk,
+        number,
+        kind,
+    );
     ctx.store.record(key, number, kind, message).await
 }
 

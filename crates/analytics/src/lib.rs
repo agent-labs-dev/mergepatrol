@@ -1,0 +1,127 @@
+//! Product analytics for the hosted Mergepatrol, in PostHog. Off without a project key, so a
+//! self-hosted Mergepatrol sends nothing.
+//!
+//! A person is a GitHub login. A group of type `workspace` is an installation of the App, keyed
+//! by its installation ID: the organization or account that uses Mergepatrol.
+
+use std::sync::Arc;
+
+use serde_json::{Value, json};
+
+pub const WORKSPACE: &str = "workspace";
+
+#[derive(Clone, Default)]
+pub struct Analytics(Option<Arc<Inner>>);
+
+struct Inner {
+    key: String,
+    host: String,
+    http: reqwest::Client,
+}
+
+/// A workspace the signed-in user can access.
+pub struct WorkspaceInfo<'a> {
+    pub installation_id: u64,
+    pub account: &'a str,
+    pub account_type: &'a str,
+}
+
+impl Analytics {
+    /// `key` is the PostHog project key. `host` is the ingestion host, such as
+    /// `https://us.i.posthog.com`.
+    pub fn new(key: Option<String>, host: &str) -> Self {
+        Self(key.map(|key| {
+            Arc::new(Inner {
+                key,
+                host: host.trim_end_matches('/').to_owned(),
+                http: reqwest::Client::new(),
+            })
+        }))
+    }
+
+    /// The project key and host, for the dashboard. The key is public: browsers send it.
+    pub fn browser(&self) -> Option<(&str, &str)> {
+        self.0.as_deref().map(|i| (i.key.as_str(), i.host.as_str()))
+    }
+
+    /// A user signed in: sets their person, and the workspaces they can access.
+    pub fn signed_in(&self, login: &str, avatar_url: &str, workspaces: &[WorkspaceInfo]) {
+        let mut batch = vec![json!({
+            "event": "signed in",
+            "distinct_id": login,
+            "properties": {
+                "workspaces": workspaces.len(),
+                "$set": { "login": login, "name": login, "avatar_url": avatar_url },
+            },
+        })];
+        batch.extend(workspaces.iter().map(|w| {
+            json!({
+                "event": "$groupidentify",
+                "distinct_id": login,
+                "properties": {
+                    "$group_type": WORKSPACE,
+                    "$group_key": w.installation_id.to_string(),
+                    "$group_set": { "name": w.account, "account_type": w.account_type },
+                },
+            })
+        }));
+        self.send(batch);
+    }
+
+    /// A queue event, such as `merged` or `ejected`, as `pr <kind>`. It belongs to the
+    /// workspace, not to a person: the queue acts on its own.
+    pub fn queue_event(&self, installation_id: u64, repo: &str, trunk: &str, pr: u64, kind: &str) {
+        let workspace = installation_id.to_string();
+        self.send(vec![json!({
+            "event": format!("pr {kind}"),
+            "distinct_id": format!("workspace:{workspace}"),
+            "properties": {
+                "repo": repo,
+                "trunk": trunk,
+                "pr": pr,
+                "$groups": { WORKSPACE: workspace },
+                "$process_person_profile": false,
+            },
+        })]);
+    }
+
+    /// Fire and forget: analytics never hold up or fail the caller.
+    fn send(&self, batch: Vec<Value>) {
+        let Some(inner) = self.0.clone() else { return };
+        tokio::spawn(async move {
+            let body = json!({ "api_key": inner.key, "batch": batch });
+            let sent = inner
+                .http
+                .post(format!("{}/batch/", inner.host))
+                .json(&body)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+            if let Err(e) = sent {
+                tracing::warn!(error = %e, "analytics not sent");
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn without_a_key_it_is_off() {
+        let analytics = Analytics::new(None, "https://us.i.posthog.com");
+        assert!(analytics.browser().is_none());
+        // Nothing to send to, and nothing spawned.
+        analytics.queue_event(1, "o/r", "main", 2, "merged");
+    }
+
+    #[test]
+    fn the_dashboard_gets_the_key_and_host() {
+        let analytics = Analytics::new(Some("phc_x".into()), "https://us.i.posthog.com/");
+        assert_eq!(
+            analytics.browser(),
+            Some(("phc_x", "https://us.i.posthog.com"))
+        );
+    }
+}
