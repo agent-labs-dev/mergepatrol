@@ -13,8 +13,9 @@ use mergepatrol_github::{
     BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
 };
 use mergepatrol_store::{
-    BillingStore, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse, LoginCode, RepoState,
-    SecretRecord, Session, StepStats, Subscription, Unsynced, Workspace,
+    BillingStore, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse,
+    LoginCode, RepoState, SecretRecord, Session, Slice, StepStats, Subscription, Unsynced,
+    Workspace,
 };
 
 use super::*;
@@ -709,16 +710,19 @@ impl Store for Mem {
     async fn exits(&self, _: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
         unreachable!()
     }
-    async fn exit_stats(&self, _: u64, _: u32, _: u32) -> Result<Vec<ExitStats>> {
+    async fn exit_stats(&self, _: u64, _: Slice<'_>, _: u32, _: u32) -> Result<Vec<ExitStats>> {
         unreachable!()
     }
-    async fn step_stats(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<StepStats>> {
+    async fn developer_stats(&self, _: u64, _: Slice<'_>, _: u32) -> Result<Vec<DeveloperStats>> {
         unreachable!()
     }
-    async fn spends(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<Spend>> {
+    async fn step_stats(&self, _: u64, _: Slice<'_>, _: u32) -> Result<Vec<StepStats>> {
         unreachable!()
     }
-    async fn merged_by_day(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<u64>> {
+    async fn spends(&self, _: u64, _: Slice<'_>, _: u32) -> Result<Vec<Spend>> {
+        unreachable!()
+    }
+    async fn merged_by_day(&self, _: u64, _: Slice<'_>, _: u32) -> Result<Vec<u64>> {
         unreachable!()
     }
     async fn put_secret(&self, _: Scope, _: &str, _: SecretRecord) -> Result<()> {
