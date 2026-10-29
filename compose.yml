@@ -11,6 +11,12 @@ services:
       MERGEPATROL_DATABASE_URL: postgres://mergepatrol:mergepatrol@postgres:5432/mergepatrol
       MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY:?generate one with openssl rand -base64 32}
       MERGEPATROL_PUBLIC_URL: ${MERGEPATROL_PUBLIC_URL:-http://localhost:8080}
+      # Optional; empty uses the default (see the README).
+      MERGEPATROL_LABEL: ${MERGEPATROL_LABEL:-}
+      MERGEPATROL_POLL_SECS: ${MERGEPATROL_POLL_SECS:-}
+      MERGEPATROL_MODEL: ${MERGEPATROL_MODEL:-}
+      MERGEPATROL_EFFORT: ${MERGEPATROL_EFFORT:-}
+      MERGEPATROL_MAX_JOBS: ${MERGEPATROL_MAX_JOBS:-}
       MERGEPATROL_EXECUTOR: docker
       MERGEPATROL_JOB_IMAGE: mergepatrol-job:latest
       # On Linux with gVisor installed (see deploy/sandbox-host.sh): runsc, mergepatrol-jobs,
@@ -18,6 +24,8 @@ services:
       MERGEPATROL_JOB_RUNTIME: ${MERGEPATROL_JOB_RUNTIME:-}
       MERGEPATROL_JOB_NETWORK: ${MERGEPATROL_JOB_NETWORK:-}
       MERGEPATROL_JOB_RESOLV_CONF: ${MERGEPATROL_JOB_RESOLV_CONF:-}
+      MERGEPATROL_JOB_MEMORY: ${MERGEPATROL_JOB_MEMORY:-}
+      MERGEPATROL_JOB_CPUS: ${MERGEPATROL_JOB_CPUS:-}
     depends_on:
       postgres: { condition: service_healthy }
       job-image: { condition: service_started }
