@@ -78,8 +78,9 @@ steps:
       - --args=--version
       - --wait
 
-  # One instance, always on: the queue runs in the background, not per request, and two
-  # instances would run every queue twice. The repo caches live in memory, hence 4Gi.
+  # One instance, always on: the queue runs in the background, not per request. A second one,
+  # as during a deploy, serves requests and waits for the queue lock in Postgres. The repo
+  # caches live in memory, hence 4Gi.
   # Public without an allUsers binding, which the org's domain-restricted sharing refuses.
   - id: deploy-orchestrator
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim

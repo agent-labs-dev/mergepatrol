@@ -15,4 +15,4 @@ serde_json = "1.0.154"
 sqlx = { version = "0.9", default-features = false, features = ["postgres", "runtime-tokio", "migrate", "macros", "json"] }
 
 [dev-dependencies]
-tokio = { version = "1.54.1", features = ["macros", "rt"] }
+tokio = { version = "1.54.1", features = ["macros", "rt", "time"] }
