@@ -47,10 +47,12 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
 
     // What the resolver does.
     std::fs::write(wt.join("a.txt"), "trunk\npr\n").unwrap();
-    git.commit_resolution(wt, "Resolved-by: mergepatrol (test)")
-        .await
-        .unwrap();
-    assert_eq!(git.rebase_continue(wt).await.unwrap(), RebaseStep::Done);
+    assert_eq!(
+        git.continue_resolution(wt, "Resolved-by: mergepatrol (test)")
+            .await
+            .unwrap(),
+        RebaseStep::Done
+    );
 
     let commits = git.commits(wt, &trunk, "HEAD").await.unwrap();
     assert_eq!(commits.len(), 2);
@@ -64,6 +66,37 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     assert_eq!(commits[0].author, "Ada <ada@example.com>");
     assert_eq!(commits[1].changes.len(), 1);
     assert_eq!(commits[1].changes[0].path, "b.txt");
+}
+
+#[tokio::test]
+async fn resolution_that_keeps_the_trunk_drops_the_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wt = tmp.path();
+    sh(wt, &["init", "-q", "-b", "main"]);
+    let root = commit(wt, "a.txt", "one\n", "root");
+    // The trunk has the PR's change already, as a squash of it with more.
+    let trunk = commit(wt, "a.txt", "pr\nsquashed\n", "squash of the pr");
+    sh(wt, &["checkout", "-q", "--detach", &root]);
+    commit(wt, "a.txt", "pr\n", "pr change");
+    commit(wt, "b.txt", "new\n", "pr adds b");
+    let git = Git;
+
+    let RebaseStep::Conflict { files, .. } = git.rebase(wt, &trunk, None).await.unwrap() else {
+        panic!("expected a conflict");
+    };
+    assert_eq!(files, ["a.txt"]);
+
+    std::fs::write(wt.join("a.txt"), "pr\nsquashed\n").unwrap();
+    assert_eq!(
+        git.continue_resolution(wt, "Resolved-by: mergepatrol (test)")
+            .await
+            .unwrap(),
+        RebaseStep::Done
+    );
+
+    let commits = git.commits(wt, &trunk, "HEAD").await.unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].message, "pr adds b");
 }
 
 #[tokio::test]
