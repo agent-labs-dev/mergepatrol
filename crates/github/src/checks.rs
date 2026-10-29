@@ -22,7 +22,8 @@ pub struct Checks {
 }
 
 impl Checks {
-    /// The verdict for `required`. With no required checks, every check on the commit counts.
+    /// The verdict for `required`, with the checks that failed, or else those still pending. With
+    /// no required checks, every check on the commit counts.
     pub fn verdict(&self, required: &[String]) -> (CheckState, Vec<String>) {
         let relevant: Vec<(&String, CheckState)> = if required.is_empty() {
             self.by_name.iter().map(|(n, s)| (n, *s)).collect()
@@ -37,15 +38,18 @@ impl Checks {
                 })
                 .collect()
         };
-        let failed: Vec<String> = relevant
-            .iter()
-            .filter(|(_, s)| *s == CheckState::Failed)
-            .map(|(n, _)| (*n).clone())
-            .collect();
+        let named = |state: CheckState| -> Vec<String> {
+            relevant
+                .iter()
+                .filter(|(_, s)| *s == state)
+                .map(|(n, _)| (*n).clone())
+                .collect()
+        };
+        let (failed, pending) = (named(CheckState::Failed), named(CheckState::Pending));
         if !failed.is_empty() {
             (CheckState::Failed, failed)
-        } else if relevant.iter().any(|(_, s)| *s == CheckState::Pending) {
-            (CheckState::Pending, vec![])
+        } else if !pending.is_empty() {
+            (CheckState::Pending, pending)
         } else {
             (CheckState::Passed, vec![])
         }
@@ -119,14 +123,13 @@ impl Installation {
     pub async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         let mut checks = Checks::default();
 
-        let runs: Value = self
-            .rest(
-                Method::GET,
-                &format!("/repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest"),
-                None,
+        let runs = self
+            .all_pages(
+                &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
+                "check_runs",
             )
             .await?;
-        for run in runs["check_runs"].as_array().into_iter().flatten() {
+        for run in &runs {
             let state = match (run["status"].as_str(), run["conclusion"].as_str()) {
                 (Some("completed"), Some("success" | "neutral" | "skipped")) => CheckState::Passed,
                 (Some("completed"), _) => CheckState::Failed,
@@ -137,14 +140,10 @@ impl Installation {
             }
         }
 
-        let status: Value = self
-            .rest(
-                Method::GET,
-                &format!("/repos/{repo}/commits/{sha}/status"),
-                None,
-            )
+        let statuses = self
+            .all_pages(&format!("/repos/{repo}/commits/{sha}/status?"), "statuses")
             .await?;
-        for s in status["statuses"].as_array().into_iter().flatten() {
+        for s in &statuses {
             let state = match s["state"].as_str() {
                 Some("success") => CheckState::Passed,
                 Some("failure" | "error") => CheckState::Failed,
@@ -156,6 +155,34 @@ impl Installation {
         }
 
         Ok(checks)
+    }
+}
+
+/// The most a page of a list holds.
+const PER_PAGE: usize = 100;
+
+impl Installation {
+    /// Every item of the list under `key`, page by page. `path` has its query started.
+    async fn all_pages(&self, path: &str, key: &str) -> Result<Vec<Value>> {
+        let mut all = Vec::new();
+        for page in 1.. {
+            let sep = if path.ends_with('?') { "" } else { "&" };
+            let res: Value = self
+                .rest(
+                    Method::GET,
+                    &format!("{path}{sep}per_page={PER_PAGE}&page={page}"),
+                    None,
+                )
+                .await?;
+            let items = res[key].as_array().cloned().unwrap_or_default();
+            let last = items.len() < PER_PAGE;
+            all.extend(items);
+            let total = res["total_count"].as_u64().unwrap_or(0) as usize;
+            if last || all.len() >= total {
+                break;
+            }
+        }
+        Ok(all)
     }
 }
 
@@ -172,14 +199,13 @@ impl Installation {
         names: &[String],
     ) -> Result<Vec<CheckFailure>> {
         let mut found: BTreeMap<String, String> = BTreeMap::new();
-        let runs: Value = self
-            .rest(
-                Method::GET,
-                &format!("/repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest"),
-                None,
+        let runs = self
+            .all_pages(
+                &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
+                "check_runs",
             )
             .await?;
-        for run in runs["check_runs"].as_array().into_iter().flatten() {
+        for run in &runs {
             let Some(name) = run["name"]
                 .as_str()
                 .filter(|n| names.iter().any(|m| m == n))
@@ -188,14 +214,10 @@ impl Installation {
             };
             found.insert(name.to_owned(), self.check_run_details(repo, run).await?);
         }
-        let status: Value = self
-            .rest(
-                Method::GET,
-                &format!("/repos/{repo}/commits/{sha}/status"),
-                None,
-            )
+        let statuses = self
+            .all_pages(&format!("/repos/{repo}/commits/{sha}/status?"), "statuses")
             .await?;
-        for s in status["statuses"].as_array().into_iter().flatten() {
+        for s in &statuses {
             let Some(name) = s["context"]
                 .as_str()
                 .filter(|n| names.iter().any(|m| m == n))
@@ -349,6 +371,92 @@ mod tests {
         assert_eq!(
             log_tail(&log),
             "error[E0425]: cannot find value `x`\nplain line"
+        );
+    }
+
+    #[test]
+    fn a_pending_verdict_names_the_checks_it_waits_for() {
+        let c = checks(&[("lint", CheckState::Passed), ("test", CheckState::Pending)]);
+        let required = ["lint".into(), "test".into(), "e2e".into()];
+        assert_eq!(
+            c.verdict(&required),
+            (
+                CheckState::Pending,
+                vec!["test".to_owned(), "e2e".to_owned()]
+            )
+        );
+    }
+
+    /// A page of `n` items under `key`, named `<prefix><i>`, of `total` in all.
+    fn page(
+        key: &str,
+        field: &str,
+        prefix: &str,
+        n: usize,
+        total: usize,
+        extra: &str,
+    ) -> &'static str {
+        let items: Vec<String> = (0..n)
+            .map(|i| format!(r#"{{"{field}":"{prefix}{i}",{extra}}}"#))
+            .collect();
+        let body = format!(r#"{{"total_count":{total},"{key}":[{}]}}"#, items.join(","));
+        Box::leak(body.into_boxed_str())
+    }
+
+    #[tokio::test]
+    async fn checks_past_the_first_page_count() {
+        let passed = r#""status":"completed","conclusion":"success""#;
+        let (gh, requests) = crate::app::fake::serve(vec![
+            (200, "", page("check_runs", "name", "run", 100, 101, passed)),
+            (
+                200,
+                "",
+                page("check_runs", "name", "late", 1, 101, r#""status":"queued""#),
+            ),
+            (
+                200,
+                "",
+                page(
+                    "statuses",
+                    "context",
+                    "ctx",
+                    100,
+                    101,
+                    r#""state":"success""#,
+                ),
+            ),
+            (
+                200,
+                "",
+                page(
+                    "statuses",
+                    "context",
+                    "slow",
+                    1,
+                    101,
+                    r#""state":"pending""#,
+                ),
+            ),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let checks = gh.checks(&repo, "abc").await.unwrap();
+        assert_eq!(checks.by_name.len(), 202);
+        assert_eq!(
+            checks.verdict(&["late0".into(), "slow0".into(), "run99".into()]),
+            (
+                CheckState::Pending,
+                vec!["late0".to_owned(), "slow0".to_owned()]
+            )
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /repos/o/r/commits/abc/check-runs?filter=latest&per_page=100&page=1 HTTP/1.1",
+                "GET /repos/o/r/commits/abc/check-runs?filter=latest&per_page=100&page=2 HTTP/1.1",
+                "GET /repos/o/r/commits/abc/status?per_page=100&page=1 HTTP/1.1",
+                "GET /repos/o/r/commits/abc/status?per_page=100&page=2 HTTP/1.1",
+            ]
         );
     }
 

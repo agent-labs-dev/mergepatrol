@@ -6,7 +6,7 @@ mod lane;
 mod repo_config;
 mod steps;
 
-pub use job::{EjectReason, Event, Job, Phase, Transition};
+pub use job::{CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
     BatchStep, Bisect, BuiltBatch, Candidate, Entry, EntryState, Lane, LaneChange, LayerHead,
     PendingMerge, Person, PrSummary, Review,

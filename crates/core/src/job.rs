@@ -36,7 +36,13 @@ pub enum EjectReason {
     /// The trunk moved twice while the PR was in flight. Someone merges outside the queue.
     BaseMovedOutsideQueue,
     MergeRejected(String),
+    /// These required checks had not finished `CHECKS_TIMEOUT` after the publish.
+    ChecksTimedOut(Vec<String>),
 }
+
+/// How long a PR's required checks may take, after a publish. A check that never reports, as a
+/// required check that no workflow runs, would otherwise hold the queue forever.
+pub const CHECKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3 * 60 * 60);
 
 impl EjectReason {
     /// What kind of reason it is, for analytics.
@@ -47,6 +53,7 @@ impl EjectReason {
             Self::FixFailed { .. } => "fix-failed",
             Self::BaseMovedOutsideQueue => "base-moved",
             Self::MergeRejected(_) => "merge-rejected",
+            Self::ChecksTimedOut(_) => "checks-timed-out",
         }
     }
 }
@@ -75,6 +82,12 @@ impl std::fmt::Display for EjectReason {
                 )
             }
             Self::MergeRejected(r) => write!(f, "GitHub rejected the merge: {r}"),
+            Self::ChecksTimedOut(names) => write!(
+                f,
+                "required checks did not finish within {} hours: {}",
+                CHECKS_TIMEOUT.as_secs() / 3600,
+                names.join(", ")
+            ),
         }
     }
 }
@@ -88,6 +101,8 @@ pub enum Event {
     RebaseFailed(String),
     ChecksPassed,
     ChecksFailed(Vec<String>),
+    /// These required checks are still pending, `CHECKS_TIMEOUT` after the publish.
+    ChecksTimedOut(Vec<String>),
     /// The fix is published: `head` is the new PR head, on the same base.
     Fixed {
         head: String,
@@ -158,6 +173,9 @@ impl Job {
                     fixes: self.fixes + 1,
                     ..self
                 })
+            }
+            (P::AwaitingChecks { .. }, E::ChecksTimedOut(names)) => {
+                Transition::Ejected(EjectReason::ChecksTimedOut(names))
             }
             (P::AwaitingChecks { .. }, E::ChecksFailed(names)) => {
                 Transition::Ejected(EjectReason::ChecksFailed {
@@ -304,6 +322,15 @@ mod tests {
                 names: vec!["ci".into()],
                 fixes: 2
             })
+        );
+    }
+
+    #[test]
+    fn checks_that_never_finish_eject_without_a_fix() {
+        let job = rebased(Job::start(7, 2));
+        assert_eq!(
+            job.step(Event::ChecksTimedOut(vec!["ci".into()])),
+            Transition::Ejected(EjectReason::ChecksTimedOut(vec!["ci".into()]))
         );
     }
 

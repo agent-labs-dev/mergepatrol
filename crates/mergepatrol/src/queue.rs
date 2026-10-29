@@ -12,9 +12,9 @@ use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_core::{
-    BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
-    LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings,
-    Transition,
+    BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Job, Lane,
+    LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName,
+    RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -963,7 +963,8 @@ async fn build_batch(
 /// How a batch's checks ended.
 enum Tested {
     Passed,
-    Failed(Vec<String>),
+    /// Why: the checks that failed, or those that did not finish in time.
+    Failed(String),
     /// Something changed under the batch, so what it tested is stale.
     Stale(String),
 }
@@ -1057,7 +1058,13 @@ async fn test_and_merge(
         }
         match checks_verdict(gh, key, head, opened).await? {
             (CheckState::Passed, _) => break Tested::Passed,
-            (CheckState::Failed, names) => break Tested::Failed(names),
+            (CheckState::Failed, names) => {
+                break Tested::Failed(format!("required checks failed: {}", names.join(", ")));
+            }
+            // As a failure: a smaller batch, then the PR alone, runs its checks again.
+            (CheckState::Pending, names) if opened.elapsed() >= CHECKS_TIMEOUT => {
+                break Tested::Failed(EjectReason::ChecksTimedOut(names).to_string());
+            }
             (CheckState::Pending, _) => {}
         }
         ctx.wakers
@@ -1072,9 +1079,8 @@ async fn test_and_merge(
             }
             Ok(())
         }
-        Tested::Failed(names) => {
+        Tested::Failed(why) => {
             lane.batch_failed(&batch.members());
-            let why = format!("required checks failed: {}", names.join(", "));
             try_join_all(batch.steps.iter().map(|(unit, _)| {
                 let why = &why;
                 async move {
@@ -1358,13 +1364,21 @@ async fn run_job(
                                 verdict = (CheckState::Failed, names);
                                 break;
                             }
-                            (CheckState::Pending, _) => verdict.0 = CheckState::Pending,
+                            (CheckState::Pending, names) => {
+                                verdict.0 = CheckState::Pending;
+                                verdict.1.extend(names);
+                            }
                             (CheckState::Passed, _) => {}
                         }
                     }
                     match verdict {
                         (CheckState::Passed, _) => Event::ChecksPassed,
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
+                        (CheckState::Pending, names)
+                            if published_at.elapsed() >= CHECKS_TIMEOUT =>
+                        {
+                            Event::ChecksTimedOut(names)
+                        }
                         (CheckState::Pending, _) => {
                             ctx.wakers
                                 .wait(key.installation_id, repo, CHECKS_POLL)

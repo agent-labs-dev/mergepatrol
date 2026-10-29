@@ -6,6 +6,8 @@ When a rebase has conflicts, an agent resolves them. Claude is the default. A pl
 
 When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
 
+Required checks that have not finished 3 hours after a rebase or a fix also eject the PR, with no fix: a required check that no workflow runs would hold the queue forever. In a batch, it counts as a failure.
+
 An error outside the PR's job does not eject it. That covers GitHub being down, or slow to answer, as well as a rate limit. The PR keeps its place at the head of the queue, and its job runs again. Only after 30 minutes of such errors is it ejected.
 
 ## Batches
@@ -163,7 +165,7 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 
 - A person is a GitHub login. The dashboard identifies the signed-in user, and the server sends `signed in`.
 - A `workspace` group is an installation of the App, keyed by its installation ID, with the account's name. The dashboard groups what the user does under the workspace in view.
-- Each queue event goes to its PR's author and workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number. When a PR leaves the queue, the event also has `queue_seconds`, the seconds in each step (`waiting_seconds`, `held_seconds`, `rebasing_seconds`, `checks_seconds`, `fixing_seconds`), and, for `pr ejected`, the `reason`: `fork`, `rebase-failed`, `checks-failed`, `fix-failed`, `base-moved` or `merge-rejected`.
+- Each queue event goes to its PR's author and workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number. When a PR leaves the queue, the event also has `queue_seconds`, the seconds in each step (`waiting_seconds`, `held_seconds`, `rebasing_seconds`, `checks_seconds`, `fixing_seconds`), and, for `pr ejected`, the `reason`: `fork`, `rebase-failed`, `checks-failed`, `fix-failed`, `base-moved`, `merge-rejected` or `checks-timed-out`.
 - Installing the App sends `app installed`, for the person who installed it, and uninstalling it `app uninstalled`.
 - The dashboard sends `api key set`, `api key removed` and `repo config proposed`.
 
