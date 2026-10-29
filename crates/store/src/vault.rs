@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 use mergepatrol_core::Provider;
 
-use crate::{Scope, SecretRecord, Store};
+use crate::{Scope, Sealed, SecretRecord, Store};
 
 pub const ANTHROPIC_API_KEY: &str = "anthropic-api-key";
 
@@ -85,7 +85,23 @@ impl Vault {
         let Some(rec) = self.store.secret(scope, name).await? else {
             return Ok(None);
         };
-        Ok(Some(self.decrypt(scope, name, &rec)?.0))
+        Ok(Some(
+            self.decrypt(scope, name, &rec.nonce, &rec.ciphertext)?.0,
+        ))
+    }
+
+    /// Encrypts a value kept outside the secrets table, such as a session's GitHub token.
+    /// `name` is bound in: the value opens only under the same name.
+    pub fn seal(&self, name: &str, value: &str) -> Result<Sealed> {
+        let (nonce, ciphertext) = self.encrypt(Scope::Instance, name, value)?;
+        Ok(Sealed { nonce, ciphertext })
+    }
+
+    /// Fails for a value sealed under another name, or with a key that is no longer set.
+    pub fn open(&self, name: &str, sealed: &Sealed) -> Result<SecretString> {
+        Ok(self
+            .decrypt(Scope::Instance, name, &sealed.nonce, &sealed.ciphertext)?
+            .0)
     }
 
     /// Encrypts every secret with the current key, so the keys after it can be dropped.
@@ -99,7 +115,7 @@ impl Vault {
             let Some(rec) = self.store.secret(scope, &name).await? else {
                 continue;
             };
-            let (value, current) = self.decrypt(scope, &name, &rec)?;
+            let (value, current) = self.decrypt(scope, &name, &rec.nonce, &rec.ciphertext)?;
             if current {
                 continue;
             }
@@ -134,10 +150,10 @@ impl Vault {
         &self,
         scope: Scope,
         name: &str,
-        rec: &SecretRecord,
+        nonce: &[u8],
+        ciphertext: &[u8],
     ) -> Result<(SecretString, bool)> {
-        let nonce =
-            Nonce::try_from(rec.nonce.as_slice()).map_err(|_| anyhow!("bad nonce for {name}"))?;
+        let nonce = Nonce::try_from(nonce).map_err(|_| anyhow!("bad nonce for {name}"))?;
         let aad = aad(scope, name);
         let (i, plain) = self
             .ciphers
@@ -145,7 +161,7 @@ impl Vault {
             .enumerate()
             .find_map(|(i, cipher)| {
                 let payload = Payload {
-                    msg: &rec.ciphertext,
+                    msg: ciphertext,
                     aad: aad.as_bytes(),
                 };
                 cipher
@@ -181,6 +197,19 @@ mod tests {
 
     const W: Scope = Scope::Installation(7);
     const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    #[sqlx::test(migrations = false)]
+    async fn a_sealed_value_opens_only_under_its_name(pool: PgPool) {
+        let store = Arc::new(PgStore::migrate(pool).await.unwrap());
+        let vault = Vault::new(store, KEY).unwrap();
+        let sealed = vault.seal("session/a", "ghu_token").unwrap();
+        assert!(!String::from_utf8_lossy(&sealed.ciphertext).contains("ghu_"));
+        assert_eq!(
+            vault.open("session/a", &sealed).unwrap().expose_secret(),
+            "ghu_token"
+        );
+        assert!(vault.open("session/b", &sealed).is_err());
+    }
 
     #[sqlx::test(migrations = false)]
     async fn round_trip_and_hint(pool: PgPool) {

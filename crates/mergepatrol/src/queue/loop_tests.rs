@@ -12,8 +12,8 @@ use mergepatrol_github::{
     BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
 };
 use mergepatrol_store::{
-    EventRecord, ExitQuery, ExitRecord, ExitStats, RepoState, SecretRecord, Session, StepStats,
-    Workspace,
+    EventRecord, ExitQuery, ExitRecord, ExitStats, LoginCode, RepoState, SecretRecord, Session,
+    StepStats, Workspace,
 };
 
 use super::*;
@@ -793,6 +793,18 @@ impl Store for Mem {
         unreachable!()
     }
     async fn delete_expired_sessions(&self, _: i64) -> Result<u64> {
+        unreachable!()
+    }
+    async fn claim_session_check(&self, _: &str, _: i64, _: i64) -> Result<bool> {
+        unreachable!()
+    }
+    async fn update_session(&self, _: &str, _: &Session) -> Result<()> {
+        unreachable!()
+    }
+    async fn create_login_code(&self, _: &str, _: &LoginCode) -> Result<()> {
+        unreachable!()
+    }
+    async fn take_login_code(&self, _: &str, _: i64) -> Result<Option<LoginCode>> {
         unreachable!()
     }
 }
