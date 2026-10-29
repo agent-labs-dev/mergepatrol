@@ -8,7 +8,7 @@ Status: early. Not ready for use yet.
 
 ## Run it
 
-The spike polls GitHub (no webhooks yet) and has one queue per repo, on the default branch.
+The spike has one queue per repo, on the default branch. GitHub webhooks wake a queue as soon as something changes, but GitHub only delivers them to a public https URL. On localhost, Mergepatrol polls.
 
 1. Generate the secret key. It encrypts the GitHub App and the Anthropic API key in the database. Keep it: without it, you must set Mergepatrol up again.
 
@@ -46,10 +46,11 @@ The hosted Mergepatrol uses one public GitHub App, which we create by hand on Gi
 | `MERGEPATROL_GITHUB_APP_PRIVATE_KEY` | The private key, PEM |
 | `MERGEPATROL_GITHUB_CLIENT_ID` | The OAuth client ID |
 | `MERGEPATROL_GITHUB_CLIENT_SECRET` | The OAuth client secret |
+| `MERGEPATROL_GITHUB_WEBHOOK_SECRET` | The webhook secret. Optional: without it, Mergepatrol only polls |
 
-The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), the callback URL `<public URL>/auth/callback`, and the setup URL `<public URL>/setup/installed`.
+The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file.
 
-If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it.
+If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -57,7 +58,7 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64 |
 | `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
 | `MERGEPATROL_LABEL` | `mergepatrol` | The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
-| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub |
+| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
 | `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
 | `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's model |

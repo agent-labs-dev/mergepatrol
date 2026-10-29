@@ -1319,6 +1319,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "getrandom 0.4.3",
+ "hmac",
  "mergepatrol-core",
  "mergepatrol-github",
  "mergepatrol-resolver",
