@@ -329,7 +329,7 @@ function RowActions({ item, actions, busy }: { item: Item; actions: Actions; bus
   const quiet = "text-faint/60 group-hover:text-muted group-focus-within:text-muted";
   const open = item.state === "open";
   return (
-    <span className="flex shrink-0 items-start gap-0.5 pt-2.5 pr-3">
+    <span className="flex shrink-0 items-center gap-0.5 pr-3">
       <IconButton
         icon="priority"
         label={open ? "Priority queue" : item.priority ? "Drop priority" : "Make priority"}
