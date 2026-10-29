@@ -386,13 +386,13 @@ where
         match poll().await {
             Ok(None) => failed = 0,
             Ok(Some(ended)) => return ended,
-            Err(e) if failed < MAX_FAILED_POLLS => {
-                failed += 1;
-                tracing::warn!(error = %format!("{e:#}"), "could not read the job's execution");
-            }
             Err(e) => {
-                cancel();
-                return Err(e.context("read the job's execution"));
+                failed += 1;
+                if failed == MAX_FAILED_POLLS {
+                    cancel();
+                    return Err(e.context("read the job's execution"));
+                }
+                tracing::warn!(error = %format!("{e:#}"), "could not read the job's execution");
             }
         }
     }
@@ -597,9 +597,9 @@ mod tests {
             let ended = watch(poll, cancel).await;
             (ended, cancelled.into_inner())
         }
-        let (ended, cancelled) = watched(MAX_FAILED_POLLS).await;
+        let (ended, cancelled) = watched(MAX_FAILED_POLLS - 1).await;
         assert!(ended.is_ok() && !cancelled, "{ended:?}");
-        let (ended, cancelled) = watched(MAX_FAILED_POLLS + 1).await;
+        let (ended, cancelled) = watched(MAX_FAILED_POLLS).await;
         assert!(ended.is_err() && cancelled, "{ended:?}");
     }
 
