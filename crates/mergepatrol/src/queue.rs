@@ -13,7 +13,7 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
-    Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
+    LayerHead, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
@@ -29,7 +29,7 @@ use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::github::GitHub;
-use crate::publish::{Publish, publish};
+use crate::publish::{Publish, create_commits, publish};
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
@@ -247,6 +247,8 @@ enum Outcome {
     Held(String),
     /// The label was removed while the job ran.
     Cancelled,
+    /// A stack gained or lost a PR while the job ran: it runs again, in its place.
+    Restarted(String),
 }
 
 async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName) -> Result<Ran> {
@@ -278,59 +280,63 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         trunk: snap.default_branch.clone(),
     };
     let mut lane = ctx.store.load_lane(&key).await?;
-    ctx.prs.update(&key, &lane, &snap.labeled);
+    let units = units(gh, repo, &snap.labeled).await?;
+    let layers: Vec<PullRequest> = units.iter().flat_map(|u| u.layers.clone()).collect();
+    ctx.prs.update(&key, &lane, &layers);
 
     let mut candidates = Vec::new();
-    for pr in &snap.labeled {
-        if pr.is_cross_repository {
-            eject(
-                ctx,
-                &settings,
-                gh,
-                &key,
-                pr.number,
-                "PRs from forks are not supported yet.",
-            )
-            .await?;
+    for unit in &units {
+        if unit.layers.iter().any(|pr| pr.is_cross_repository) {
+            let why = "PRs from forks are not supported yet.";
+            eject(ctx, &settings, gh, &key, &unit.prs(), why).await?;
             continue;
         }
-        let hold = if pr.base_ref_name != snap.default_branch {
+        let hold = if unit.base != snap.default_branch {
             Some(format!(
                 "targets `{}`; only `{}` has a queue for now",
-                pr.base_ref_name, snap.default_branch
+                unit.base, snap.default_branch
             ))
         } else {
-            pr.hold_reason()
+            unit.hold_reason()
         };
         candidates.push(Candidate {
-            number: pr.number,
-            priority: pr.has_label(&labels.priority),
+            number: unit.number,
+            priority: unit.layers.iter().any(|pr| pr.has_label(&labels.priority)),
             hold,
-            summary: pr.summary(),
+            summary: unit.layers[0].summary(),
+            layers: if unit.stacked { unit.prs() } else { Vec::new() },
         });
     }
 
+    // The PRs of each entry, also of those that leave the lane now.
+    let mut prs_of: HashMap<PrNumber, Vec<PrNumber>> =
+        lane.entries.iter().map(|e| (e.number, e.prs())).collect();
+    prs_of.extend(units.iter().map(|u| (u.number, u.prs())));
     for change in lane.sync(&candidates) {
-        match change {
-            LaneChange::Enqueued(n) => {
-                record(ctx, &key, n, "enqueued", "added to the queue").await?
-            }
+        let (number, kind, message, comment) = match change {
+            LaneChange::Enqueued(n) => (n, "enqueued", "added to the queue".to_owned(), None),
             LaneChange::Dequeued { number, .. } => {
-                exit(ctx, &key, number, "dequeued", "left the queue").await?
+                (number, "dequeued", "left the queue".to_owned(), None)
             }
             LaneChange::Held { number, reason } => {
-                record(ctx, &key, number, "held", &reason).await?;
-                gh.sticky_comment(repo, number, &on_hold(&reason)).await?;
+                let comment = on_hold(&reason);
+                (number, "held", reason, Some(comment))
             }
-            LaneChange::Released(n) => {
-                record(ctx, &key, n, "released", "can merge again").await?;
-                gh.sticky_comment(
-                    repo,
-                    n,
-                    "No longer on hold. Waiting in its place in the queue.",
-                )
-                .await?;
-            }
+            LaneChange::Released(n) => (
+                n,
+                "released",
+                "can merge again".to_owned(),
+                Some("No longer on hold. Waiting in its place in the queue.".to_owned()),
+            ),
+        };
+        let prs = prs_of.get(&number).cloned().unwrap_or(vec![number]);
+        if kind == "dequeued" {
+            exit_all(ctx, &key, &prs, kind, &message).await?;
+        } else {
+            record_all(ctx, &key, &prs, kind, &message).await?;
+        }
+        if let Some(comment) = comment {
+            comment_all(gh, repo, &prs, &comment).await?;
         }
     }
     ctx.store.save_lane(&key, &lane).await?;
@@ -339,7 +345,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     // PR runs again. A batch picks up where it was, unless what it tests changed: then it is
     // built again.
     if let Some(branch) = lane.batch_branch.clone() {
-        if let Some(batch) = built_batch(&lane, &snap, branch.clone()) {
+        if let Some(batch) = built_batch(&lane, &snap, &units, branch.clone()) {
             run_batch(ctx, &settings, gh, &key, &snap, &mut lane, batch).await?;
             return Ok(Ran::Job);
         }
@@ -354,12 +360,17 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     let Some(&number) = next.first() else {
         return Ok(Ran::Idle);
     };
+    let unit = units
+        .iter()
+        .find(|u| u.number == number)
+        .context("the lane's next entry is not on GitHub")?
+        .clone();
     let required = gh.required_checks(repo, &key.trunk).await?;
 
     // GitHub merges a PR behind the trunk, which a batch's PRs are, unless the trunk is strict.
     if next.len() > 1 && !required.strict {
-        let prs = batchable(gh, repo, &snap, &required.names, &next).await?;
-        if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &prs).await? {
+        let ready = batchable(gh, repo, &units, &required.names, &next).await?;
+        if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &ready).await? {
             run_batch(ctx, &settings, gh, &key, &snap, &mut lane, batch).await?;
             return Ok(Ran::Job);
         }
@@ -368,35 +379,184 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     lane.activate(number);
     ctx.store.save_lane(&key, &lane).await?;
 
-    let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, number).await {
+    let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, &unit).await {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
-    finish(ctx, &settings, gh, &key, &mut lane, number, outcome).await?;
+    finish(ctx, &settings, gh, &key, &mut lane, &unit, outcome).await?;
     Ok(Ran::Job)
 }
 
-/// The PRs of `next` that can join a batch as they are, in order, up to the first that cannot:
-/// GitHub must merge each without a rebase, so its own required checks have passed.
+/// What the queue merges as one: a PR, or a stack of PRs, which GitHub merges all at once.
+#[derive(Clone, Debug)]
+struct Unit {
+    /// The PR's number, or the stack's.
+    number: PrNumber,
+    /// The branch it merges into: the PR's base, or the stack's.
+    base: String,
+    /// A stack's open PRs, bottom to top, or the PR alone.
+    layers: Vec<PullRequest>,
+    stacked: bool,
+}
+
+impl Unit {
+    /// The PR that GitHub merges: a stack's top layer, which merges every layer below it.
+    fn top(&self) -> &PullRequest {
+        self.layers.last().expect("a unit has a PR")
+    }
+
+    fn prs(&self) -> Vec<PrNumber> {
+        self.layers.iter().map(|pr| pr.number).collect()
+    }
+
+    /// How comments name it: `#7`, or a stack's layers, `#7, #8, #9`.
+    fn refs(&self) -> String {
+        let refs: Vec<String> = self
+            .layers
+            .iter()
+            .map(|pr| format!("#{}", pr.number))
+            .collect();
+        refs.join(", ")
+    }
+
+    fn has_label(&self, label: &str) -> bool {
+        self.layers.iter().any(|pr| pr.has_label(label))
+    }
+
+    /// Why GitHub would not merge it yet: a stack waits for every layer.
+    fn hold_reason(&self) -> Option<String> {
+        self.layers.iter().find_map(|pr| {
+            let reason = pr.hold_reason()?;
+            Some(if self.stacked {
+                format!("#{} is not ready: {reason}", pr.number)
+            } else {
+                reason
+            })
+        })
+    }
+
+    /// The unit as GitHub shows it now.
+    async fn refreshed(&self, gh: &dyn GitHub, repo: &RepoName) -> Result<Unit> {
+        let mut layers = Vec::with_capacity(self.layers.len());
+        for pr in &self.layers {
+            layers.push(gh.pull_request(repo, pr.number).await?);
+        }
+        Ok(Unit {
+            layers,
+            ..self.clone()
+        })
+    }
+
+    /// How the stack changed since this unit was read: a PR joined or left it.
+    async fn reshaped(&self, gh: &dyn GitHub, repo: &RepoName) -> Result<Option<String>> {
+        if !self.stacked || gh.stack_layers(repo, self.number).await? == self.prs() {
+            return Ok(None);
+        }
+        Ok(Some(format!("the stack of {} changed", self.refs())))
+    }
+
+    /// Each layer's branch head on GitHub, bottom to top.
+    async fn branch_heads(&self, gh: &dyn GitHub, repo: &RepoName) -> Result<Vec<String>> {
+        let mut heads = Vec::with_capacity(self.layers.len());
+        for pr in &self.layers {
+            heads.push(gh.branch_sha(repo, &pr.head_ref_name).await?);
+        }
+        Ok(heads)
+    }
+}
+
+/// The queue's units: each labeled PR, and each stack with a labeled layer, with all its open
+/// layers. In the order of `labeled`, a stack where its first labeled layer is.
+async fn units(gh: &dyn GitHub, repo: &RepoName, labeled: &[PullRequest]) -> Result<Vec<Unit>> {
+    let mut units: Vec<Unit> = Vec::new();
+    for pr in labeled {
+        let Some(stack) = &pr.stack else {
+            units.push(Unit {
+                number: pr.number,
+                base: pr.base_ref_name.clone(),
+                layers: vec![pr.clone()],
+                stacked: false,
+            });
+            continue;
+        };
+        if units.iter().any(|u| u.number == stack.number) {
+            continue;
+        }
+        let mut layers = Vec::new();
+        for n in gh.stack_layers(repo, stack.number).await? {
+            layers.push(match labeled.iter().find(|p| p.number == n) {
+                Some(p) => p.clone(),
+                None => gh.pull_request(repo, n).await?,
+            });
+        }
+        if layers.is_empty() {
+            continue;
+        }
+        units.push(Unit {
+            number: stack.number,
+            base: stack.base_ref_name.clone(),
+            layers,
+            stacked: true,
+        });
+    }
+    Ok(units)
+}
+
+async fn record_all(
+    ctx: &Ctx,
+    key: &LaneKey,
+    prs: &[PrNumber],
+    kind: &str,
+    message: &str,
+) -> Result<()> {
+    for n in prs {
+        record(ctx, key, *n, kind, message).await?;
+    }
+    Ok(())
+}
+
+/// Each of `prs` left the queue.
+async fn exit_all(
+    ctx: &Ctx,
+    key: &LaneKey,
+    prs: &[PrNumber],
+    outcome: &str,
+    detail: &str,
+) -> Result<()> {
+    for n in prs {
+        exit(ctx, key, *n, outcome, detail).await?;
+    }
+    Ok(())
+}
+
+async fn comment_all(gh: &dyn GitHub, repo: &RepoName, prs: &[PrNumber], body: &str) -> Result<()> {
+    try_join_all(prs.iter().map(|n| gh.sticky_comment(repo, *n, body))).await?;
+    Ok(())
+}
+
+/// The units of `next` that can join a batch as they are, in order, up to the first that cannot:
+/// GitHub must merge each without a rebase, so the required checks of each of its PRs passed.
 async fn batchable(
     gh: &dyn GitHub,
     repo: &RepoName,
-    snap: &RepoSnapshot,
+    units: &[Unit],
     required: &[String],
     next: &[PrNumber],
-) -> Result<Vec<PullRequest>> {
-    let mut prs = Vec::new();
-    for number in next {
-        let Some(pr) = snap.labeled.iter().find(|p| p.number == *number) else {
+) -> Result<Vec<Unit>> {
+    let mut ready = Vec::new();
+    'next: for number in next {
+        let Some(unit) = units.iter().find(|u| u.number == *number) else {
             break;
         };
-        let checks = gh.checks(repo, &pr.head_ref_oid).await?;
-        if checks.verdict(required).0 != CheckState::Passed {
-            break;
+        for pr in &unit.layers {
+            let checks = gh.checks(repo, &pr.head_ref_oid).await?;
+            if checks.verdict(required).0 != CheckState::Passed {
+                break 'next;
+            }
         }
-        prs.push(pr.clone());
+        ready.push(unit.clone());
     }
-    Ok(prs)
+    Ok(ready)
 }
 
 async fn finish(
@@ -405,42 +565,41 @@ async fn finish(
     gh: &dyn GitHub,
     key: &LaneKey,
     lane: &mut Lane,
-    number: PrNumber,
+    unit: &Unit,
     outcome: Outcome,
 ) -> Result<()> {
+    let repo = &key.repo;
+    let prs = unit.prs();
     match outcome {
         Outcome::Merged(sha) => {
-            lane.remove(number);
-            exit(ctx, key, number, "merged", &sha).await?;
+            lane.remove(unit.number);
+            exit_all(ctx, key, &prs, "merged", &sha).await?;
             let labels = settings.labels();
             let comment = format!("Merged as {sha}.");
-            tokio::try_join!(
-                gh.sticky_comment(&key.repo, number, &comment),
-                gh.remove_label(&key.repo, number, &labels.trigger),
-                gh.remove_label(&key.repo, number, &labels.priority),
-            )?;
+            comment_all(gh, repo, &prs, &comment).await?;
+            for n in &prs {
+                tokio::try_join!(
+                    gh.remove_label(repo, *n, &labels.trigger),
+                    gh.remove_label(repo, *n, &labels.priority),
+                )?;
+            }
         }
         Outcome::Ejected(reason) => {
-            lane.eject(number);
-            eject(
-                ctx,
-                settings,
-                gh,
-                key,
-                number,
-                &format!("Ejected: {reason}."),
-            )
-            .await?;
+            lane.eject(unit.number);
+            eject(ctx, settings, gh, key, &prs, &format!("Ejected: {reason}.")).await?;
         }
         Outcome::Held(reason) => {
-            lane.hold(number, reason.clone());
-            record(ctx, key, number, "held", &reason).await?;
-            gh.sticky_comment(&key.repo, number, &on_hold(&reason))
-                .await?;
+            lane.hold(unit.number, reason.clone());
+            record_all(ctx, key, &prs, "held", &reason).await?;
+            comment_all(gh, repo, &prs, &on_hold(&reason)).await?;
         }
         Outcome::Cancelled => {
-            lane.remove(number);
-            exit(ctx, key, number, "cancelled", "the label was removed").await?;
+            lane.remove(unit.number);
+            exit_all(ctx, key, &prs, "cancelled", "the label was removed").await?;
+        }
+        Outcome::Restarted(why) => {
+            lane.stop();
+            record_all(ctx, key, &prs, "restarted", &why).await?;
         }
     }
     ctx.store.save_lane(key, lane).await
@@ -452,13 +611,13 @@ fn on_hold(reason: &str) -> String {
     )
 }
 
-/// PRs merged together on a branch of their own, which a draft PR puts through CI.
+/// PRs and stacks merged together on a branch of their own, which a draft PR puts through CI.
 struct Batch {
     branch: String,
     /// The trunk commit the branch starts from.
     trunk_sha: String,
-    /// Each PR, with the merge commit it made on the branch.
-    steps: Vec<(PullRequest, BranchMerge)>,
+    /// Each unit, as tested, with the merge commit its top head made on the branch.
+    steps: Vec<(Unit, BranchMerge)>,
 }
 
 impl Batch {
@@ -468,34 +627,68 @@ impl Batch {
             steps: self
                 .steps
                 .iter()
-                .map(|(pr, m)| BatchStep {
-                    number: pr.number,
-                    head_sha: pr.head_ref_oid.clone(),
+                .map(|(unit, m)| BatchStep {
+                    number: unit.number,
+                    head_sha: unit.top().head_ref_oid.clone(),
                     sha: m.sha.clone(),
                     tree: m.tree.clone(),
+                    layers: match unit.stacked {
+                        true => unit
+                            .layers
+                            .iter()
+                            .map(|pr| LayerHead {
+                                number: pr.number,
+                                head_sha: pr.head_ref_oid.clone(),
+                            })
+                            .collect(),
+                        false => Vec::new(),
+                    },
                 })
                 .collect(),
         }
     }
+
+    fn members(&self) -> Vec<PrNumber> {
+        self.steps.iter().map(|(u, _)| u.number).collect()
+    }
+
+    /// The other units of the batch, as comments name them.
+    fn others(&self, unit: &Unit) -> String {
+        let refs: Vec<String> = self
+            .steps
+            .iter()
+            .filter(|(u, _)| u.number != unit.number)
+            .map(|(u, _)| u.refs())
+            .collect();
+        refs.join(", ")
+    }
 }
 
 /// The lane's batch, as it was built on `branch`, while it still tests what is queued now.
-fn built_batch(lane: &Lane, snap: &RepoSnapshot, branch: String) -> Option<Batch> {
+fn built_batch(lane: &Lane, snap: &RepoSnapshot, units: &[Unit], branch: String) -> Option<Batch> {
     let built = lane.batch_built.as_ref()?;
     let steps = built
         .steps
         .iter()
         .map(|s| {
-            let pr = snap.labeled.iter().find(|p| p.number == s.number)?;
-            let pr = PullRequest {
-                head_ref_oid: s.head_sha.clone(),
-                ..pr.clone()
-            };
+            let mut unit = units.iter().find(|u| u.number == s.number)?.clone();
+            // As tested: `stale` compares them with GitHub now.
+            if unit.stacked {
+                let tested: Vec<PrNumber> = s.layers.iter().map(|l| l.number).collect();
+                if tested != unit.prs() {
+                    return None;
+                }
+                for (pr, l) in unit.layers.iter_mut().zip(&s.layers) {
+                    pr.head_ref_oid = l.head_sha.clone();
+                }
+            } else {
+                unit.layers[0].head_ref_oid = s.head_sha.clone();
+            }
             let merge = BranchMerge {
                 sha: s.sha.clone(),
                 tree: s.tree.clone(),
             };
-            Some((pr, merge))
+            Some((unit, merge))
         })
         .collect::<Option<Vec<_>>>()?;
     let batch = Batch {
@@ -503,24 +696,26 @@ fn built_batch(lane: &Lane, snap: &RepoSnapshot, branch: String) -> Option<Batch
         trunk_sha: built.trunk_sha.clone(),
         steps,
     };
-    stale(snap, &batch).is_none().then_some(batch)
+    stale(&snap.trunk_sha, units, &batch)
+        .is_none()
+        .then_some(batch)
 }
 
-/// Merges `prs` one after the other onto a new branch at the trunk, up to the first that
-/// conflicts. `None` when fewer than two merged: the first PR then runs alone.
+/// Merges the top head of each unit one after the other onto a new branch at the trunk, up to
+/// the first that conflicts. `None` when fewer than two merged: the first unit then runs alone.
 async fn build_batch(
     ctx: &Ctx,
     gh: &dyn GitHub,
     key: &LaneKey,
     snap: &RepoSnapshot,
     lane: &mut Lane,
-    prs: &[PullRequest],
+    units: &[Unit],
 ) -> Result<Option<Batch>> {
-    if prs.len() < 2 {
+    if units.len() < 2 {
         return Ok(None);
     }
     let repo = &key.repo;
-    let numbers: Vec<String> = prs.iter().map(|p| p.number.to_string()).collect();
+    let numbers: Vec<String> = units.iter().map(|u| u.number.to_string()).collect();
     let branch = format!("mergepatrol/batch-{}", numbers.join("-"));
     lane.batch_branch = Some(branch.clone());
     ctx.store.save_lane(key, lane).await?;
@@ -529,13 +724,13 @@ async fn build_batch(
     gh.delete_branch(repo, &branch).await?;
     gh.create_branch(repo, &branch, &snap.trunk_sha).await?;
     let mut steps = Vec::new();
-    for pr in prs {
-        let message = format!("Merge #{} into the batch", pr.number);
+    for unit in units {
+        let message = format!("Merge {} into the batch", unit.refs());
         match gh
-            .merge_into_branch(repo, &branch, &pr.head_ref_oid, &message)
+            .merge_into_branch(repo, &branch, &unit.top().head_ref_oid, &message)
             .await?
         {
-            Some(m) => steps.push((pr.clone(), m)),
+            Some(m) => steps.push((unit.clone(), m)),
             None => break,
         }
     }
@@ -563,10 +758,9 @@ enum Tested {
     Stale(String),
 }
 
-/// Puts a batch through CI on a draft PR. When it passes, merges its PRs in order, each only
-/// while the trunk comes out as the tree the batch tested. The PRs it does not finish go back
+/// Puts a batch through CI on a draft PR. When it passes, merges its units in order, each only
+/// while the trunk comes out as the tree the batch tested. The units it does not finish go back
 /// to their places.
-#[allow(clippy::too_many_arguments)]
 async fn run_batch(
     ctx: &Ctx,
     settings: &RepoSettings,
@@ -577,13 +771,12 @@ async fn run_batch(
     batch: Batch,
 ) -> Result<()> {
     let repo = &key.repo;
-    let members: Vec<PrNumber> = batch.steps.iter().map(|(pr, _)| pr.number).collect();
-    for n in &members {
-        lane.activate(*n);
+    for n in batch.members() {
+        lane.activate(n);
     }
     ctx.store.save_lane(key, lane).await?;
 
-    let result = test_and_merge(ctx, settings, gh, key, snap, lane, &batch, &members).await;
+    let result = test_and_merge(ctx, settings, gh, key, snap, lane, &batch).await;
     // Deleting the branch closes the draft PR.
     gh.delete_branch(repo, &batch.branch).await?;
     lane.stop();
@@ -591,7 +784,6 @@ async fn run_batch(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn test_and_merge(
     ctx: &Ctx,
     settings: &RepoSettings,
@@ -600,29 +792,14 @@ async fn test_and_merge(
     snap: &RepoSnapshot,
     lane: &mut Lane,
     batch: &Batch,
-    members: &[PrNumber],
 ) -> Result<()> {
     let repo = &key.repo;
-    let refs = |except: PrNumber| -> String {
-        members
-            .iter()
-            .filter(|n| **n != except)
-            .map(|n| format!("#{n}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     match lane.batch_pr {
         // Picked up after a restart: the draft PR and the comments are there.
         Some(draft) => {
-            for n in members {
-                record(
-                    ctx,
-                    key,
-                    *n,
-                    "batch-resumed",
-                    &format!("still tested in #{draft}"),
-                )
-                .await?;
+            for (unit, _) in &batch.steps {
+                let why = format!("still tested in #{draft}");
+                record_all(ctx, key, &unit.prs(), "batch-resumed", &why).await?;
             }
         }
         None => {
@@ -631,13 +808,14 @@ async fn test_and_merge(
             let list: Vec<String> = batch
                 .steps
                 .iter()
-                .map(|(pr, _)| format!("- `#{}` {}", pr.number, pr.title))
+                .flat_map(|(u, _)| &u.layers)
+                .map(|pr| format!("- `#{}` {}", pr.number, pr.title))
                 .collect();
-            let (first, _) = &batch.steps[0];
+            let first = &batch.steps[0].0.layers[0];
             let title = format!(
                 "{} (+{} in a Mergepatrol batch)",
                 first.title,
-                members.len() - 1
+                list.len() - 1
             );
             let body = format!(
                 "Mergepatrol tests these PRs together, then merges them one by one. It closes this PR when it is done: do not merge it.\n\n{}",
@@ -648,21 +826,12 @@ async fn test_and_merge(
                 .await?;
             lane.batch_pr = Some(draft);
             ctx.store.save_lane(key, lane).await?;
-            try_join_all(members.iter().map(|n| async move {
-                record(
-                    ctx,
-                    key,
-                    *n,
-                    "batch",
-                    &format!("tested with {} in #{draft}", refs(*n)),
-                )
-                .await?;
-                gh.sticky_comment(
-                    repo,
-                    *n,
-                    &format!("Testing together with {} in #{draft}.", refs(*n)),
-                )
-                .await
+            try_join_all(batch.steps.iter().map(|(unit, _)| async move {
+                let others = batch.others(unit);
+                let why = format!("tested with {others} in #{draft}");
+                record_all(ctx, key, &unit.prs(), "batch", &why).await?;
+                let comment = format!("Testing together with {others} in #{draft}.");
+                comment_all(gh, repo, &unit.prs(), &comment).await
             }))
             .await?;
         }
@@ -672,7 +841,8 @@ async fn test_and_merge(
     let opened = Instant::now();
     let tested = loop {
         let now = gh.snapshot(repo, &settings.labels()).await?;
-        if let Some(why) = stale(&now, batch) {
+        let now_units = units(gh, repo, &now.labeled).await?;
+        if let Some(why) = stale(&now.trunk_sha, &now_units, batch) {
             break Tested::Stale(why);
         }
         match checks_verdict(gh, key, head, opened).await? {
@@ -687,22 +857,24 @@ async fn test_and_merge(
 
     match tested {
         Tested::Stale(why) => {
-            for n in members {
-                record(ctx, key, *n, "batch-stopped", &why).await?;
+            for (unit, _) in &batch.steps {
+                record_all(ctx, key, &unit.prs(), "batch-stopped", &why).await?;
             }
             Ok(())
         }
         Tested::Failed(names) => {
-            lane.batch_failed(members);
+            lane.batch_failed(&batch.members());
             let why = format!("required checks failed: {}", names.join(", "));
-            try_join_all(members.iter().map(|n| async {
-                record(ctx, key, *n, "batch-failed", &why).await?;
-                gh.sticky_comment(
-                    repo,
-                    *n,
-                    &format!("The batch with {} failed: {why}. Mergepatrol now tests these PRs in smaller batches, to find the one that broke it.", refs(*n)),
-                )
-                .await
+            try_join_all(batch.steps.iter().map(|(unit, _)| {
+                let why = &why;
+                async move {
+                    record_all(ctx, key, &unit.prs(), "batch-failed", why).await?;
+                    let comment = format!(
+                        "The batch with {} failed: {why}. Mergepatrol now tests these PRs in smaller batches, to find the one that broke it.",
+                        batch.others(unit)
+                    );
+                    comment_all(gh, repo, &unit.prs(), &comment).await
+                }
             }))
             .await?;
             Ok(())
@@ -711,27 +883,33 @@ async fn test_and_merge(
     }
 }
 
-/// Why what the batch tested no longer stands: the trunk moved, or one of its PRs changed.
-fn stale(now: &RepoSnapshot, batch: &Batch) -> Option<String> {
-    if now.trunk_sha != batch.trunk_sha {
+/// Why what the batch tested no longer stands: the trunk moved, or one of its units changed.
+fn stale(trunk_sha: &str, units: &[Unit], batch: &Batch) -> Option<String> {
+    if trunk_sha != batch.trunk_sha {
         return Some("the trunk moved outside the queue".into());
     }
-    for (pr, _) in &batch.steps {
-        let Some(current) = now.labeled.iter().find(|p| p.number == pr.number) else {
-            return Some(format!("#{} left the queue", pr.number));
+    for (tested, _) in &batch.steps {
+        let Some(current) = units.iter().find(|u| u.number == tested.number) else {
+            return Some(format!("{} left the queue", tested.refs()));
         };
-        if current.head_ref_oid != pr.head_ref_oid {
-            return Some(format!("#{} was pushed to", pr.number));
+        if current.prs() != tested.prs() {
+            return Some(format!("the stack of {} changed", tested.refs()));
+        }
+        for (now, then) in current.layers.iter().zip(&tested.layers) {
+            if now.head_ref_oid != then.head_ref_oid {
+                return Some(format!("#{} was pushed to", now.number));
+            }
         }
         if let Some(hold) = current.hold_reason() {
-            return Some(format!("#{} is on hold: {hold}", pr.number));
+            return Some(format!("{} is on hold: {hold}", tested.refs()));
         }
     }
     None
 }
 
-/// Merges the PRs of a batch that passed, in its order. Each merge must leave the trunk at the
-/// tree of the batch's commit for that PR; otherwise the rest would merge untested.
+/// Merges the units of a batch that passed, in its order: a stack all at once. Each merge must
+/// leave the trunk at the tree of the batch's commit for that unit; otherwise the rest would
+/// merge untested.
 async fn merge_batch(
     ctx: &Ctx,
     settings: &RepoSettings,
@@ -743,59 +921,49 @@ async fn merge_batch(
 ) -> Result<()> {
     let repo = &key.repo;
     for (tested, step) in &batch.steps {
-        let n = tested.number;
-        let pr = gh.pull_request(repo, n).await?;
-        if !pr.has_label(&settings.label)
-            || gh.branch_sha(repo, &pr.head_ref_name).await? != tested.head_ref_oid
+        let now = tested.refreshed(gh, repo).await?;
+        if !now.has_label(&settings.label) || now.branch_heads(gh, repo).await? != head_shas(tested)
         {
-            record(
-                ctx,
-                key,
-                n,
-                "batch-stopped",
-                "the PR changed before its merge",
-            )
-            .await?;
+            let why = "the PR changed before its merge";
+            record_all(ctx, key, &tested.prs(), "batch-stopped", why).await?;
             return Ok(());
         }
-        if let Some(reason) = pr.hold_reason() {
-            return finish(ctx, settings, gh, key, lane, n, Outcome::Held(reason)).await;
+        if let Some(why) = now.reshaped(gh, repo).await? {
+            record_all(ctx, key, &tested.prs(), "batch-stopped", &why).await?;
+            return Ok(());
         }
-        match merge_retrying(gh, repo, n, &tested.head_ref_oid, &snap.merge_method).await? {
+        if let Some(reason) = now.hold_reason() {
+            return finish(ctx, settings, gh, key, lane, tested, Outcome::Held(reason)).await;
+        }
+        let top = tested.top();
+        match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &snap.merge_method).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
-                finish(
-                    ctx,
-                    settings,
-                    gh,
-                    key,
-                    lane,
-                    n,
-                    Outcome::Merged(sha.clone()),
-                )
-                .await?;
+                let merged = Outcome::Merged(sha.clone());
+                finish(ctx, settings, gh, key, lane, tested, merged).await?;
                 if tree != step.tree {
-                    record(
-                        ctx,
-                        key,
-                        n,
-                        "diverged",
-                        &format!(
-                            "the trunk came out as tree {tree}, not the batch's {}",
-                            step.tree
-                        ),
-                    )
-                    .await?;
+                    let why = format!(
+                        "the trunk came out as tree {tree}, not the batch's {}",
+                        step.tree
+                    );
+                    record_all(ctx, key, &tested.prs(), "diverged", &why).await?;
                     return Ok(());
                 }
             }
             MergeOutcome::Rejected(r) => {
-                let reason = EjectReason::MergeRejected(r);
-                return finish(ctx, settings, gh, key, lane, n, Outcome::Ejected(reason)).await;
+                let reason = Outcome::Ejected(EjectReason::MergeRejected(r));
+                return finish(ctx, settings, gh, key, lane, tested, reason).await;
             }
         }
     }
     Ok(())
+}
+
+fn head_shas(unit: &Unit) -> Vec<String> {
+    unit.layers
+        .iter()
+        .map(|pr| pr.head_ref_oid.clone())
+        .collect()
 }
 
 /// The verdict on `head`'s checks, against the trunk's required checks as they are now, not as
@@ -878,19 +1046,18 @@ async fn eject(
     settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
-    number: PrNumber,
+    prs: &[PrNumber],
     why: &str,
 ) -> Result<()> {
     let labels = settings.labels();
-    gh.remove_label(&key.repo, number, &labels.trigger).await?;
-    gh.add_label(&key.repo, number, &labels.failed).await?;
-    gh.sticky_comment(
-        &key.repo,
-        number,
-        &format!("{why}\n\nAdd `{}` again to retry.", labels.trigger),
-    )
-    .await?;
-    exit(ctx, key, number, "ejected", why).await
+    let comment = format!("{why}\n\nAdd `{}` again to retry.", labels.trigger);
+    for n in prs {
+        gh.remove_label(&key.repo, *n, &labels.trigger).await?;
+        gh.add_label(&key.repo, *n, &labels.failed).await?;
+        gh.sticky_comment(&key.repo, *n, &comment).await?;
+        exit(ctx, key, *n, "ejected", why).await?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -901,61 +1068,67 @@ async fn run_job(
     sandbox: &dyn Sandbox,
     key: &LaneKey,
     snap: &RepoSnapshot,
-    number: PrNumber,
+    unit: &Unit,
 ) -> Result<Outcome> {
     let repo = &key.repo;
-    let mut job = Job::start(number, settings.fix_ci.allowed());
+    let prs = unit.prs();
+    let mut job = Job::start(unit.number, settings.fix_ci.allowed());
     let mut published_at = Instant::now();
+    // Each layer's head as published, bottom to top, and the layer whose checks failed.
+    let mut heads: Vec<String> = Vec::new();
+    let mut failing = 0;
 
     loop {
-        let pr = gh.pull_request(repo, number).await?;
-        if !pr.has_label(&settings.label) {
+        let now = unit.refreshed(gh, repo).await?;
+        if !now.has_label(&settings.label) {
             return Ok(Outcome::Cancelled);
+        }
+        if let Some(why) = now.reshaped(gh, repo).await? {
+            return Ok(Outcome::Restarted(why));
         }
 
         let event = match &job.phase {
             Phase::Rebasing => {
-                record(ctx, key, number, "rebasing", &format!("onto {}", key.trunk)).await?;
-                gh.sticky_comment(repo, number, &format!("Rebasing onto `{}`.", key.trunk))
-                    .await?;
-                let event = sandbox.rebase(key, snap, &pr, settings).await?;
+                record_all(ctx, key, &prs, "rebasing", &format!("onto {}", key.trunk)).await?;
+                let comment = format!("Rebasing onto `{}`.", key.trunk);
+                comment_all(gh, repo, &prs, &comment).await?;
+                let event = sandbox.rebase(key, snap, &now, settings).await?;
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
-                    record(ctx, key, number, "published", head).await?;
-                    gh.sticky_comment(
-                        repo,
-                        number,
-                        &format!("Rebased to {head}. Waiting for checks."),
-                    )
-                    .await?;
+                    heads = now.branch_heads(gh, repo).await?;
+                    record_all(ctx, key, &prs, "published", head).await?;
+                    let comment = format!("Rebased to {head}. Waiting for checks.");
+                    comment_all(gh, repo, &prs, &comment).await?;
                 }
                 event
             }
-            Phase::AwaitingChecks { head, base } => {
+            Phase::AwaitingChecks { base, .. } => {
                 let trunk = gh.branch_sha(repo, &key.trunk).await?;
-                // The ref, not `pr.head_ref_oid`: the PR lags behind our own publish for a few seconds.
-                if gh.branch_sha(repo, &pr.head_ref_name).await? != *head {
-                    record(
-                        ctx,
-                        key,
-                        number,
-                        "head-moved",
-                        "the PR branch was pushed to",
-                    )
-                    .await?;
+                // The refs, not `head_ref_oid`: the PR lags behind our own publish for a few
+                // seconds.
+                if now.branch_heads(gh, repo).await? != heads {
+                    let why = "the PR branch was pushed to";
+                    record_all(ctx, key, &prs, "head-moved", why).await?;
                     Event::HeadMoved
                 } else if trunk != *base {
-                    record(
-                        ctx,
-                        key,
-                        number,
-                        "base-moved",
-                        "the trunk moved outside the queue",
-                    )
-                    .await?;
+                    let why = "the trunk moved outside the queue";
+                    record_all(ctx, key, &prs, "base-moved", why).await?;
                     Event::BaseMoved
                 } else {
-                    match checks_verdict(gh, key, head, published_at).await? {
+                    // GitHub merges a stack only when every layer's required checks passed.
+                    let mut verdict = (CheckState::Passed, Vec::new());
+                    for (i, head) in heads.iter().enumerate() {
+                        match checks_verdict(gh, key, head, published_at).await? {
+                            (CheckState::Failed, names) => {
+                                failing = i;
+                                verdict = (CheckState::Failed, names);
+                                break;
+                            }
+                            (CheckState::Pending, _) => verdict.0 = CheckState::Pending,
+                            (CheckState::Passed, _) => {}
+                        }
+                    }
+                    match verdict {
                         (CheckState::Passed, _) => Event::ChecksPassed,
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
                         (CheckState::Pending, _) => {
@@ -967,46 +1140,45 @@ async fn run_job(
                     }
                 }
             }
-            Phase::Fixing { head, base, failed } => {
+            Phase::Fixing { base, failed, .. } => {
                 let attempt = format!("attempt {} of {}", job.fixes, job.fix_attempts);
-                record(
-                    ctx,
-                    key,
-                    number,
-                    "fixing",
-                    &format!("{}, {attempt}", failed.join(", ")),
-                )
-                .await?;
-                gh.sticky_comment(
-                    repo,
-                    number,
-                    &format!(
-                        "Required checks failed: {}. Fixing them, {attempt}.",
-                        failed.join(", ")
-                    ),
-                )
-                .await?;
+                let layer = &now.layers[failing];
+                let on = match now.stacked {
+                    true => format!(" on #{}", layer.number),
+                    false => String::new(),
+                };
+                let what = format!("{}{on}, {attempt}", failed.join(", "));
+                record_all(ctx, key, &prs, "fixing", &what).await?;
+                let comment = format!(
+                    "Required checks failed{on}: {}. Fixing them, {attempt}.",
+                    failed.join(", ")
+                );
+                comment_all(gh, repo, &prs, &comment).await?;
+                let head = &heads[failing];
+                let below = if failing == 0 {
+                    base
+                } else {
+                    &heads[failing - 1]
+                };
                 let failures = gh.check_failures(repo, head, failed).await?;
                 let event = sandbox
-                    .fix(key, snap, &pr, settings, head, base, &failures)
+                    .fix(key, snap, &now, failing, settings, head, below, &failures)
                     .await?;
                 published_at = Instant::now();
                 if let Event::Fixed { head } = &event {
-                    record(ctx, key, number, "published", head).await?;
-                    gh.sticky_comment(
-                        repo,
-                        number,
-                        &format!("Pushed a fix as {head}. Waiting for checks."),
-                    )
-                    .await?;
+                    heads = now.branch_heads(gh, repo).await?;
+                    record_all(ctx, key, &prs, "published", head).await?;
+                    let comment = format!("Pushed a fix as {head}. Waiting for checks.");
+                    comment_all(gh, repo, &prs, &comment).await?;
                 }
                 event
             }
             Phase::Merging { head } => {
-                if let Some(reason) = pr.hold_reason() {
+                if let Some(reason) = now.hold_reason() {
                     Event::OnHold(reason)
                 } else {
-                    match gh.merge(repo, number, head, &snap.merge_method).await? {
+                    let top = now.top().number;
+                    match gh.merge(repo, top, head, &snap.merge_method).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),
                         MergeOutcome::Rejected(r) => Event::MergeRejected(r),
                     }
@@ -1023,26 +1195,29 @@ async fn run_job(
     }
 }
 
-/// The jobs that change a PR's branch, and publish the result to it.
+/// The jobs that change a unit's branches, and publish the result to them.
 #[async_trait]
 trait Sandbox: Send + Sync {
-    /// Rebases the PR onto the trunk: `Event::Rebased` with the new head, or why it could not.
+    /// Rebases the unit onto the trunk, a stack layer by layer: `Event::Rebased` with the new
+    /// head of the top layer, or why it could not.
     async fn rebase(
         &self,
         key: &LaneKey,
         snap: &RepoSnapshot,
-        pr: &PullRequest,
+        unit: &Unit,
         settings: &RepoSettings,
     ) -> Result<Event>;
 
-    /// Commits a fix for `failures` on top of `head`, which sits on `base`: `Event::Fixed` with
-    /// the new head, or why it could not.
+    /// Commits a fix for `failures` on top of `head`, the head of `unit.layers[layer]`, which
+    /// sits on `base`. A stack's layers above it are rebased onto the fix. `Event::Fixed` with
+    /// the new head of the top layer, or why it could not.
     #[allow(clippy::too_many_arguments)]
     async fn fix(
         &self,
         key: &LaneKey,
         snap: &RepoSnapshot,
-        pr: &PullRequest,
+        unit: &Unit,
+        layer: usize,
         settings: &RepoSettings,
         head: &str,
         base: &str,
@@ -1050,8 +1225,8 @@ trait Sandbox: Send + Sync {
     ) -> Result<Event>;
 }
 
-/// A sandboxed job, whose result is checked, then published through the Git Data API. A rebase
-/// of a PR already on the trunk needs no job.
+/// A sandboxed job, whose result is checked, then published through the Git Data API. A layer
+/// already on its base needs no job.
 struct JobSandbox<'a> {
     ctx: &'a Ctx,
     gh: &'a Installation,
@@ -1063,61 +1238,88 @@ impl Sandbox for JobSandbox<'_> {
         &self,
         key: &LaneKey,
         snap: &RepoSnapshot,
-        pr: &PullRequest,
+        unit: &Unit,
         settings: &RepoSettings,
     ) -> Result<Event> {
-        rebase_and_publish(self.ctx, self.gh, key, snap, pr, settings).await
+        rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await
     }
 
     async fn fix(
         &self,
         key: &LaneKey,
         snap: &RepoSnapshot,
-        pr: &PullRequest,
+        unit: &Unit,
+        layer: usize,
         settings: &RepoSettings,
         head: &str,
         base: &str,
         failures: &[CheckFailure],
     ) -> Result<Event> {
-        fix_and_publish(
-            self.ctx, self.gh, key, snap, pr, settings, head, base, failures,
+        let fixed = fix_and_publish(
+            self.ctx, self.gh, key, snap, unit, layer, settings, head, base, failures,
         )
-        .await
+        .await?;
+        if !matches!(fixed, Event::Fixed { .. }) || layer + 1 == unit.layers.len() {
+            return Ok(fixed);
+        }
+        // The layers above the fix go onto it.
+        Ok(
+            match rebase_and_publish(self.ctx, self.gh, key, snap, unit, layer + 1, settings)
+                .await?
+            {
+                Event::Rebased { head, .. } => Event::Fixed { head },
+                Event::RebaseFailed(r) => Event::FixFailed(format!("restacking after it: {r}")),
+                event => event,
+            },
+        )
     }
 }
 
-/// The repo's object cache, with the trunk and the PR branch fetched: their heads.
-async fn fetch_pr(
+/// The repo's object cache, with the trunk and each layer's branch fetched: the layers' heads,
+/// bottom to top, and the trunk's.
+async fn fetch_layers(
     ctx: &Ctx,
     gh: &Installation,
     git: &Git,
     key: &LaneKey,
-    pr: &PullRequest,
-) -> Result<(std::path::PathBuf, String, String)> {
+    layers: &[PullRequest],
+) -> Result<(std::path::PathBuf, Vec<String>, String)> {
     let repo = &key.repo;
     let cache = cache_path(&ctx.config.data_dir, &repo.owner, &repo.name);
     git.ensure_cache(&cache, &clone_url(repo)).await?;
-    let pr_ref = format!("refs/mergepatrol/pr/{}", pr.number);
     let trunk_ref = format!("refs/remotes/origin/{}", key.trunk);
-    git.fetch(
-        &cache,
-        &gh.token().await?,
-        &[
-            &format!("+refs/heads/{}:{trunk_ref}", key.trunk),
-            &format!("+refs/heads/{}:{pr_ref}", pr.head_ref_name),
-        ],
-    )
-    .await?;
-    let head = git.rev_parse(&cache, &pr_ref).await?;
+    let mut refspecs = vec![format!("+refs/heads/{}:{trunk_ref}", key.trunk)];
+    refspecs.extend(layers.iter().map(|pr| {
+        format!(
+            "+refs/heads/{}:refs/mergepatrol/pr/{}",
+            pr.head_ref_name, pr.number
+        )
+    }));
+    let refspecs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
+    git.fetch(&cache, &gh.token().await?, &refspecs).await?;
+    let mut heads = Vec::with_capacity(layers.len());
+    for pr in layers {
+        heads.push(
+            git.rev_parse(&cache, &format!("refs/mergepatrol/pr/{}", pr.number))
+                .await?,
+        );
+    }
     let trunk = git.rev_parse(&cache, &trunk_ref).await?;
-    Ok((cache, head, trunk))
+    Ok((cache, heads, trunk))
 }
 
 fn clone_url(repo: &RepoName) -> String {
     format!("https://github.com/{repo}.git")
 }
 
-/// The spec of a job on the PR at `head`, which sits on, or goes onto, `trunk`.
+/// Where a job on a stack layer starts from: the layer below's branch, which holds what it goes
+/// onto, and the commit the layer's own changes start from. `None` for a PR or a stack's bottom.
+struct Below<'a> {
+    branch: &'a str,
+    upstream: &'a str,
+}
+
+/// The spec of a job on the PR at `head`, which sits on, or goes onto, `onto`.
 #[allow(clippy::too_many_arguments)]
 async fn job_spec(
     ctx: &Ctx,
@@ -1126,7 +1328,8 @@ async fn job_spec(
     pr: &PullRequest,
     settings: &RepoSettings,
     head: &str,
-    trunk: &str,
+    onto: &str,
+    below: Option<Below<'_>>,
     task: Task,
 ) -> Result<JobSpec> {
     Ok(JobSpec {
@@ -1136,7 +1339,9 @@ async fn job_spec(
         head_ref: pr.head_ref_name.clone(),
         head_sha: head.to_owned(),
         trunk: key.trunk.clone(),
-        trunk_sha: trunk.to_owned(),
+        trunk_sha: onto.to_owned(),
+        base_ref: below.as_ref().map(|b| b.branch.to_owned()),
+        upstream: below.as_ref().map(|b| b.upstream.to_owned()),
         pr_title: pr.title.clone(),
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
@@ -1223,7 +1428,8 @@ async fn fix_and_publish(
     gh: &Installation,
     key: &LaneKey,
     snap: &RepoSnapshot,
-    pr: &PullRequest,
+    unit: &Unit,
+    layer: usize,
     settings: &RepoSettings,
     head: &str,
     base: &str,
@@ -1231,8 +1437,9 @@ async fn fix_and_publish(
 ) -> Result<Event> {
     let repo = &key.repo;
     let git = Git;
-    let (cache, fetched, _) = fetch_pr(ctx, gh, &git, key, pr).await?;
-    if fetched != head {
+    let pr = &unit.layers[layer];
+    let (cache, fetched, _) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+    if fetched[layer] != head {
         return Ok(Event::HeadMoved);
     }
     let job_id = format!(
@@ -1246,7 +1453,11 @@ async fn fix_and_publish(
     let task = Task::FixChecks {
         failures: failures.to_vec(),
     };
-    let spec = job_spec(ctx, gh, key, pr, settings, head, base, task).await?;
+    let below = (layer > 0).then(|| Below {
+        branch: &unit.layers[layer - 1].head_ref_name,
+        upstream: base,
+    });
+    let spec = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
@@ -1259,61 +1470,189 @@ async fn fix_and_publish(
     })
 }
 
+/// Rebases the unit's layers from `from` up and publishes them: the bottom onto the trunk, each
+/// other onto the layer below it as rebased. A layer already on what it goes onto is left as it
+/// is.
+///
+/// The layers' branches move together, in one atomic update at the end. Until then a rebased
+/// layer is on a branch of its own, for the next layer's job to fetch. So a restart, or an
+/// author's push, never leaves a layer rebased under one that is not: each layer's own commits
+/// still start at the layer below, as it is on GitHub.
 async fn rebase_and_publish(
     ctx: &Ctx,
     gh: &Installation,
     key: &LaneKey,
     snap: &RepoSnapshot,
-    pr: &PullRequest,
+    unit: &Unit,
+    from: usize,
     settings: &RepoSettings,
 ) -> Result<Event> {
-    let repo = &key.repo;
     let git = Git;
-    let (cache, head, trunk) = fetch_pr(ctx, gh, &git, key, pr).await?;
-    if git.is_ancestor(&cache, &trunk, &head).await? {
-        return Ok(Event::Rebased { head, base: trunk });
+    let (cache, heads, trunk) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+    let mut rebased: Vec<String> = heads[..from].to_vec();
+    let mut moved: Vec<usize> = Vec::new();
+    let result = rebase_layers(
+        ctx,
+        gh,
+        &git,
+        &cache,
+        key,
+        snap,
+        unit,
+        settings,
+        &heads,
+        &trunk,
+        &mut rebased,
+        &mut moved,
+    )
+    .await;
+    for i in &moved {
+        gh.delete_branch(&key.repo, &restack_branch(&unit.layers[*i]))
+            .await?;
+    }
+    if let Err(e) = result {
+        let failed = rebased.len();
+        return Ok(Event::RebaseFailed(match unit.stacked {
+            true => format!("#{}: {e:#}", unit.layers[failed].number),
+            false => format!("{e:#}"),
+        }));
     }
 
-    let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
-    let out = ctx.config.data_dir.join("jobs").join(&job_id);
-    let spec = job_spec(ctx, gh, key, pr, settings, &head, &trunk, Task::Rebase).await?;
-    let rebased = async {
-        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
-        let local_head = check_job_output(&git, &cache, &out, pr.number, &trunk, &head).await?;
-        publish_to_pr(gh, &git, &cache, key, snap, pr, &head, &trunk, &local_head).await
-    };
-    Ok(match rebased.await {
-        Ok(Ok(sha)) => Event::Rebased {
-            head: sha,
-            base: trunk,
-        },
-        Ok(Err(event)) => event,
-        Err(e) => Event::RebaseFailed(format!("{e:#}")),
+    // Every layer, so that the update also fails if an author pushed to one left as it is: a
+    // layer's update to the head it has is its lease.
+    let moves: Vec<(&str, &str, &str)> = unit
+        .layers
+        .iter()
+        .zip(heads.iter().zip(&rebased))
+        .map(|(pr, (before, after))| (pr.head_ref_name.as_str(), before.as_str(), after.as_str()))
+        .collect();
+    if !moved.is_empty()
+        && let Err(e) = gh.force_update_branches(&snap.id, &moves).await
+    {
+        // `updateRefs` refuses when a branch moved: an author pushed while the jobs ran.
+        if unit.branch_heads(gh, &key.repo).await? != heads {
+            return Ok(Event::HeadMoved);
+        }
+        bail!("publishing failed: {e:#}");
+    }
+    Ok(Event::Rebased {
+        head: rebased.pop().expect("a unit has a PR"),
+        base: trunk,
     })
+}
+
+/// The branch a rebased stack layer waits on, until the layers' branches move.
+fn restack_branch(pr: &PullRequest) -> String {
+    format!("mergepatrol/restack-{}", pr.number)
+}
+
+/// Rebases each layer from `rebased.len()` up, and creates its commits on GitHub: pushes its new
+/// head to `rebased`, and its index to `moved` when it changed.
+#[allow(clippy::too_many_arguments)]
+async fn rebase_layers(
+    ctx: &Ctx,
+    gh: &Installation,
+    git: &Git,
+    cache: &Path,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    unit: &Unit,
+    settings: &RepoSettings,
+    heads: &[String],
+    trunk: &str,
+    rebased: &mut Vec<String>,
+    moved: &mut Vec<usize>,
+) -> Result<()> {
+    let repo = &key.repo;
+    for i in rebased.len()..unit.layers.len() {
+        let pr = &unit.layers[i];
+        let head = &heads[i];
+        let onto = match i {
+            0 => trunk.to_owned(),
+            _ => rebased[i - 1].clone(),
+        };
+        if git.is_ancestor(cache, &onto, head).await? {
+            rebased.push(head.clone());
+            continue;
+        }
+        // The layer's own commits start at the layer below, as it is on GitHub. What they go
+        // onto is that layer rebased, on its own branch, or as it is.
+        let below_branch = match i {
+            0 => None,
+            _ if moved.contains(&(i - 1)) => Some(restack_branch(&unit.layers[i - 1])),
+            _ => Some(unit.layers[i - 1].head_ref_name.clone()),
+        };
+        let below = below_branch.as_deref().map(|branch| Below {
+            branch,
+            upstream: &heads[i - 1],
+        });
+        let upstream = below.as_ref().map(|b| b.upstream.to_owned());
+        let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
+        let out = ctx.config.data_dir.join("jobs").join(&job_id);
+        let spec = job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
+        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
+        let local_head = check_job_output(
+            git,
+            cache,
+            &out,
+            pr.number,
+            &onto,
+            head,
+            upstream.as_deref(),
+        )
+        .await?;
+        let publish = Publish {
+            repo,
+            repo_id: &snap.id,
+            branch: &pr.head_ref_name,
+            expected_head: head,
+            base: &onto,
+            local_head: &local_head,
+        };
+        let sha = create_commits(gh, git, cache, &publish).await?;
+        rebased.push(sha.clone());
+        moved.push(i);
+        if i + 1 < unit.layers.len() {
+            // For the next layer's job, and for this cache, which the next layer's output
+            // must sit on.
+            let branch = restack_branch(pr);
+            gh.delete_branch(repo, &branch).await?;
+            gh.create_branch(repo, &branch, &sha).await?;
+            let refspec = format!("+refs/heads/{branch}:refs/mergepatrol/{branch}");
+            git.fetch(cache, &gh.token().await?, &[&refspec]).await?;
+        }
+    }
+    Ok(())
 }
 
 /// The job is untrusted, so its output is checked here, not believed. A rebase only replays
 /// the PR's changes, and a conflict can only be in a file the PR changed: the result may touch
-/// no file outside the PR's own.
+/// no file outside the PR's own. A stack layer's own changes start at `upstream`, the layer
+/// below as it was.
 async fn check_job_output(
     git: &Git,
     cache: &Path,
     out: &Path,
     number: PrNumber,
-    trunk: &str,
+    onto: &str,
     head: &str,
+    upstream: Option<&str>,
 ) -> Result<String> {
     let local_head = import_job_output(git, cache, out, number).await?;
-    if !git.is_ancestor(cache, trunk, &local_head).await? {
+    if !git.is_ancestor(cache, onto, &local_head).await? {
         bail!("the job's result does not sit on the base branch");
     }
+    let start = match upstream {
+        Some(upstream) => upstream.to_owned(),
+        None => git.merge_base(cache, onto, head).await?,
+    };
     let pr_files: BTreeSet<String> = git
-        .changed_files(cache, &git.merge_base(cache, trunk, head).await?, head)
+        .changed_files(cache, &start, head)
         .await?
         .into_iter()
         .collect();
     let outside: Vec<String> = git
-        .changed_files(cache, trunk, &local_head)
+        .changed_files(cache, onto, &local_head)
         .await?
         .into_iter()
         .filter(|f| !pr_files.contains(f))
@@ -1436,7 +1775,7 @@ mod tests {
         Git.create_bundle(&work, &out.join(BUNDLE_FILE), &result, &trunk)
             .await
             .unwrap();
-        check_job_output(&Git, &cache, &out, 1, &trunk, &head).await
+        check_job_output(&Git, &cache, &out, 1, &trunk, &head, None).await
     }
 
     /// A fix job result that changes `files` on top of the PR head.

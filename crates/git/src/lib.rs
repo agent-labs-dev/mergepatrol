@@ -174,13 +174,19 @@ impl Git {
         ))
     }
 
-    pub async fn rebase(&self, wt: &Path, onto: &str) -> Result<RebaseStep> {
-        let ok = self
-            .git(wt, &["rebase", "-q", onto])
-            .output()
-            .await?
-            .status
-            .success();
+    /// Rebases HEAD onto `onto`: the commits from `upstream`, or those not on `onto` when
+    /// `upstream` is `None`.
+    pub async fn rebase(
+        &self,
+        wt: &Path,
+        onto: &str,
+        upstream: Option<&str>,
+    ) -> Result<RebaseStep> {
+        let args = match upstream {
+            Some(upstream) => vec!["rebase", "-q", "--onto", onto, upstream],
+            None => vec!["rebase", "-q", onto],
+        };
+        let ok = self.git(wt, &args).output().await?.status.success();
         self.rebase_step(wt, ok).await
     }
 
@@ -488,7 +494,10 @@ mod tests {
         sh(dir, &["checkout", "-q", "--detach", &base]);
         let trunk = commit(dir, "both.txt", "trunk\n2\n3\n4\n5\n");
         sh(dir, &["checkout", "-q", "--detach", &head]);
-        assert_eq!(Git.rebase(dir, &trunk).await.unwrap(), RebaseStep::Done);
+        assert_eq!(
+            Git.rebase(dir, &trunk, None).await.unwrap(),
+            RebaseStep::Done
+        );
 
         let known: Vec<String> = Git.objects(dir, &trunk, &head).await.unwrap();
         let commits = Git.commits(dir, &trunk, "HEAD").await.unwrap();

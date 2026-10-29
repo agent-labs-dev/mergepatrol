@@ -9,5 +9,7 @@ pub mod setup;
 pub use app::{App, Installation, InstallationInfo, RepoInfo};
 pub use checks::{CheckState, Checks, RequiredChecks};
 pub use files::{BranchFile, Proposal, PullRef};
-pub use repo::{BranchMerge, MergeOutcome, PrDetails, PullRequest, RepoSnapshot, TreeEntry};
+pub use repo::{
+    BranchMerge, MergeOutcome, PrDetails, PullRequest, RepoSnapshot, StackRef, TreeEntry,
+};
 pub use setup::{AppCredentials, GithubUser};

@@ -66,18 +66,18 @@ fn event(events: &mut Vec<JobEvent>, kind: &str, message: impl Into<String>) {
 async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>) -> Result<()> {
     let git = Git;
     git.init(dir, &spec.clone_url).await?;
-    git.fetch(
-        dir,
-        &spec.token,
-        &[
-            &format!(
-                "+refs/heads/{}:refs/remotes/origin/{}",
-                spec.trunk, spec.trunk
-            ),
-            &format!("+refs/heads/{}:refs/mergepatrol/head", spec.head_ref),
-        ],
-    )
-    .await?;
+    let mut refspecs = vec![
+        format!(
+            "+refs/heads/{}:refs/remotes/origin/{}",
+            spec.trunk, spec.trunk
+        ),
+        format!("+refs/heads/{}:refs/mergepatrol/head", spec.head_ref),
+    ];
+    if let Some(base_ref) = &spec.base_ref {
+        refspecs.push(format!("+refs/heads/{base_ref}:refs/mergepatrol/base"));
+    }
+    let refspecs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
+    git.fetch(dir, &spec.token, &refspecs).await?;
     for sha in [&spec.head_sha, &spec.trunk_sha] {
         if git
             .rev_parse(dir, &format!("{sha}^{{commit}}"))
@@ -125,7 +125,9 @@ async fn rebase(
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     let mut resolved_any = false;
-    let mut step = git.rebase(dir, &spec.trunk_sha).await?;
+    let mut step = git
+        .rebase(dir, &spec.trunk_sha, spec.upstream.as_deref())
+        .await?;
     while let RebaseStep::Conflict { commit, files } = step {
         event(events, "conflict", files.join(", "));
         let commit_message = git.commit_message(dir, &commit).await?;

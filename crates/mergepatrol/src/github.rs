@@ -15,6 +15,8 @@ pub trait GitHub: Send + Sync {
     async fn config_file(&self, repo: &RepoName) -> Result<Option<String>>;
     async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot>;
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest>;
+    /// The open PRs of a stack, bottom to top.
+    async fn stack_layers(&self, repo: &RepoName, stack: PrNumber) -> Result<Vec<PrNumber>>;
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String>;
     async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks>;
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks>;
@@ -69,6 +71,9 @@ impl GitHub for Installation {
     }
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest> {
         Installation::pull_request(self, repo, number).await
+    }
+    async fn stack_layers(&self, repo: &RepoName, stack: PrNumber) -> Result<Vec<PrNumber>> {
+        Installation::stack_layers(self, repo, stack).await
     }
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String> {
         Installation::branch_sha(self, repo, branch).await

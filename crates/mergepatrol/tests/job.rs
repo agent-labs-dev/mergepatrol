@@ -50,6 +50,8 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
         head_sha: head.into(),
         trunk: "main".into(),
         trunk_sha: trunk.into(),
+        base_ref: None,
+        upstream: None,
         pr_title: "t".into(),
         pr_body: String::new(),
         verify: Vec::new(),
@@ -101,6 +103,54 @@ async fn clean_rebase_comes_back_as_a_bundle() {
     );
     assert_eq!(git(&check, &["rev-parse", "result~1"]), trunk);
     assert_eq!(git(&check, &["show", "result:feature.txt"]), "from the pr");
+}
+
+#[tokio::test]
+async fn a_stack_layer_replays_only_its_own_commits_onto_the_layer_below() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    commit(&origin, "shared.txt", "base\n");
+    git(&origin, &["checkout", "-q", "-b", "l1"]);
+    let l1 = commit(&origin, "l1.txt", "layer 1\n");
+    git(&origin, &["checkout", "-q", "-b", "l2"]);
+    let l2 = commit(&origin, "l2.txt", "layer 2\n");
+    // The layer below, rebased onto a trunk that moved: other commits than `l1`.
+    git(&origin, &["checkout", "-q", "main"]);
+    commit(&origin, "other.txt", "from main\n");
+    git(&origin, &["checkout", "-q", "-b", "l1-rebased"]);
+    let l1_rebased = commit(&origin, "l1.txt", "layer 1\n");
+
+    let spec = JobSpec {
+        head_ref: "l2".into(),
+        base_ref: Some("l1-rebased".into()),
+        upstream: Some(l1),
+        ..spec(&origin, &l2, &l1_rebased)
+    };
+    let out = tmp.path().join("out");
+    let result = executor().run("t-stack", &spec, &out).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(
+        &check,
+        &["fetch", "-q", origin.to_str().unwrap(), "l1-rebased"],
+    );
+    git(
+        &check,
+        &[
+            "fetch",
+            "-q",
+            out.join(BUNDLE_FILE).to_str().unwrap(),
+            "refs/heads/result:refs/heads/result",
+        ],
+    );
+    // One commit, layer 2's, on the rebased layer 1.
+    assert_eq!(git(&check, &["rev-parse", "result~1"]), l1_rebased);
+    assert_eq!(git(&check, &["show", "result:l2.txt"]), "layer 2");
 }
 
 #[tokio::test]

@@ -136,7 +136,11 @@ function State({ entry }: { entry: EntryView }) {
 }
 
 /** A PR saved before the queue kept its details has no title until the next tick. */
-const titleOf = (e: EntryView) => e.title || `Pull request #${e.number}`;
+const titleOf = (e: EntryView) => e.title || `Pull request #${prOf(e)}`;
+/** A PR's own number, or a stack's top layer: the queue records a stack's events on each layer. */
+const prOf = (e: EntryView) => e.layers.at(-1) ?? e.number;
+const refsOf = (e: EntryView) =>
+  e.layers.length ? `Stack ${e.layers.map((n) => `#${n}`).join(" ")}` : `#${e.number}`;
 
 function Row({
   entry: e,
@@ -165,7 +169,7 @@ function Row({
           <State entry={e} />
         </span>
         <span className="mt-1 flex items-center gap-2 text-xs text-muted">
-          <span className="tabular-nums">#{e.number}</span>
+          <span className="tabular-nums">{refsOf(e)}</span>
           {e.author && (
             <span className="flex items-center gap-1">
               <Avatar src={e.author.avatar_url} alt={e.author.login} size="size-4" />
@@ -223,18 +227,18 @@ function Detail({
   onSelect: (pr: number) => void;
 }) {
   const events = useQuery({
-    queryKey: ["events", workspace, lane.repo, e.number],
-    queryFn: () => fetchEvents(workspace, lane.repo, e.number),
+    queryKey: ["events", workspace, lane.repo, prOf(e)],
+    queryFn: () => fetchEvents(workspace, lane.repo, prOf(e)),
     refetchInterval: 3000,
   });
-  const url = e.url || `https://github.com/${lane.repo}/pull/${e.number}`;
+  const url = e.url || `https://github.com/${lane.repo}/pull/${prOf(e)}`;
   return (
     <div className="p-6">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <h2 className="text-lg font-semibold tracking-tight">{titleOf(e)}</h2>
           <p className="mt-0.5 text-muted">
-            {lane.repo} #{e.number}
+            {lane.repo} {refsOf(e)}
             {e.author && e.created_at && (
               <>
                 {" "}
