@@ -96,7 +96,8 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
-| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64 |
+| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64. To rotate it, see below |
+| `MERGEPATROL_SECRET_KEY_FILE` | | A file that holds the secret key, instead of `MERGEPATROL_SECRET_KEY`. Compose uses one |
 | `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
 | `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
@@ -105,6 +106,17 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
 | `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model |
 | `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
+
+### Rotate the secret key
+
+Generate a new key, and set it in front of the old one, separated by a comma: `MERGEPATROL_SECRET_KEY=<new>,<old>`. Restart Mergepatrol. At startup, it re-encrypts every stored secret with the new key, and logs how many. Then set only the new key, and restart again.
+
+On GCP, a deploy runs the old revision beside the new one for a while, and each must read what the other writes. Add each step as a version of the `mergepatrol-secret-key` secret, and deploy it:
+
+1. `<old>,<new>`: every revision can read both keys, and still encrypts with the old one.
+2. `<new>,<old>`: the new revision re-encrypts with the new key.
+3. `<new>,<old>` again, once the revision from step 1 has stopped: it re-encrypts what that one wrote with the old key meanwhile.
+4. `<new>`.
 
 ## Repo settings
 

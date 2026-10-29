@@ -63,6 +63,13 @@ async fn orchestrator() -> Result<()> {
     let pg = Arc::new(PgStore::connect(&config.database_url).await?);
     let store: Arc<dyn Store> = pg.clone();
     let vault = Arc::new(Vault::new(store.clone(), &config.secret_key)?);
+    let rotated = vault.rotate().await?;
+    if rotated > 0 {
+        tracing::info!(
+            rotated,
+            "re-encrypted secrets with the first MERGEPATROL_SECRET_KEY: the others can go"
+        );
+    }
 
     let hosted_app = match &config.hosted_app {
         Some(h) => {

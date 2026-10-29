@@ -147,6 +147,16 @@ pub trait Store: Send + Sync {
     async fn put_secret(&self, scope: Scope, name: &str, secret: SecretRecord) -> Result<()>;
     async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>>;
     async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()>;
+    async fn secret_names(&self) -> Result<Vec<(Scope, String)>>;
+    /// Keeps the hint and `updated_at`. Does nothing if the ciphertext is no longer `was`.
+    async fn replace_ciphertext(
+        &self,
+        scope: Scope,
+        name: &str,
+        was: &[u8],
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    ) -> Result<()>;
 
     /// The repos Mergepatrol knows of, in every workspace. Repos without a row are off.
     async fn repos(&self) -> Result<Vec<RepoState>>;
@@ -214,6 +224,14 @@ impl Scope {
         match self {
             Self::Instance => "instance".into(),
             Self::Installation(id) => format!("installation:{id}"),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Result<Self> {
+        match key.strip_prefix("installation:") {
+            Some(id) => Ok(Self::Installation(id.parse()?)),
+            None if key == "instance" => Ok(Self::Instance),
+            None => anyhow::bail!("unknown secret scope {key:?}"),
         }
     }
 }
@@ -649,6 +667,37 @@ impl Store for PgStore {
             .bind(name)
             .execute(&self.pool)
             .await?;
+        Ok(())
+    }
+
+    async fn secret_names(&self) -> Result<Vec<(Scope, String)>> {
+        sqlx::query("SELECT scope, name FROM secrets ORDER BY scope, name")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|row| Ok((Scope::from_key(row.get("scope"))?, row.get("name"))))
+            .collect()
+    }
+
+    async fn replace_ciphertext(
+        &self,
+        scope: Scope,
+        name: &str,
+        was: &[u8],
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE secrets SET nonce = $4, ciphertext = $5
+             WHERE scope = $1 AND name = $2 AND ciphertext = $3",
+        )
+        .bind(scope.key())
+        .bind(name)
+        .bind(was)
+        .bind(nonce)
+        .bind(ciphertext)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
