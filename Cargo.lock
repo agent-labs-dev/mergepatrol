@@ -1245,6 +1245,7 @@ dependencies = [
 name = "mergepatrol-analytics"
 version = "0.1.0"
 dependencies = [
+ "mergepatrol-core",
  "reqwest",
  "serde_json",
  "tokio",

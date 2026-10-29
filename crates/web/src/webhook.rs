@@ -5,6 +5,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
+use mergepatrol_analytics::{Analytics, WorkspaceInfo};
 use mergepatrol_core::{REPO_CONFIG_PATH, RepoName};
 use serde_json::Value;
 use sha2::Sha256;
@@ -44,18 +45,17 @@ pub(crate) async fn receive(
 
     let payload: Value =
         serde_json::from_slice(&body).map_err(|_| ApiError::bad_request("not JSON"))?;
+    let event = headers.get("x-github-event").and_then(|v| v.to_str().ok());
+    if event == Some("installation") {
+        installation(&state.analytics, &payload);
+    }
     let installation = payload["installation"]["id"].as_u64();
     let repo = payload["repository"]["full_name"]
         .as_str()
         .and_then(RepoName::parse);
     if let (Some(installation), Some(repo)) = (installation, repo) {
-        tracing::debug!(
-            event = headers.get("x-github-event").and_then(|v| v.to_str().ok()),
-            installation,
-            %repo,
-            "webhook"
-        );
-        if headers.get("x-github-event").and_then(|v| v.to_str().ok()) == Some("push")
+        tracing::debug!(event, installation, %repo, "webhook");
+        if event == Some("push")
             && let Some(has) = config_after_push(&payload)
         {
             state.store.set_has_config(installation, &repo, has).await?;
@@ -63,6 +63,33 @@ pub(crate) async fn receive(
         state.wake.wake(installation, repo);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The App was installed or uninstalled, for analytics.
+fn installation(analytics: &Analytics, payload: &Value) {
+    let i = &payload["installation"];
+    let (Some(installation_id), Some(action), Some(sender)) = (
+        i["id"].as_u64(),
+        payload["action"].as_str(),
+        payload["sender"]["login"].as_str(),
+    ) else {
+        return;
+    };
+    tracing::info!(
+        installation = installation_id,
+        action,
+        sender,
+        "installation"
+    );
+    analytics.installation(
+        action,
+        sender,
+        &WorkspaceInfo {
+            installation_id,
+            account: i["account"]["login"].as_str().unwrap_or_default(),
+            account_type: i["account"]["type"].as_str().unwrap_or_default(),
+        },
+    );
 }
 
 /// Whether a push to the default branch leaves it with the config file, if the push touched the

@@ -158,7 +158,9 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 
 - A person is a GitHub login. The dashboard identifies the signed-in user, and the server sends `signed in`.
 - A `workspace` group is an installation of the App, keyed by its installation ID, with the account's name. The dashboard groups what the user does under the workspace in view.
-- Each queue event goes to its workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number, and no person.
+- Each queue event goes to its PR's author and workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number. When a PR leaves the queue, the event also has `queue_seconds`, the seconds in each step (`waiting_seconds`, `held_seconds`, `rebasing_seconds`, `checks_seconds`, `fixing_seconds`), and, for `pr ejected`, the `reason`: `fork`, `rebase-failed`, `checks-failed`, `fix-failed`, `base-moved` or `merge-rejected`.
+- Installing the App sends `app installed`, for the person who installed it, and uninstalling it `app uninstalled`.
+- The dashboard sends `api key set`, `api key removed` and `repo config proposed`.
 
 ## Crates
 
