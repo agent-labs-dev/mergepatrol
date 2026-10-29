@@ -6,3 +6,6 @@ resolver:
   model: claude-opus-5-5
   effort: medium
 verify: []
+fix_ci:
+  enabled: true
+  attempts: 2
