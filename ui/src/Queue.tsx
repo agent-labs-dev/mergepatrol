@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
+import { Activity } from "./Activity";
 import { fetchEvents, fetchLanes } from "./api";
 import type { ChecksView } from "./api/ChecksView";
 import type { EntryView } from "./api/EntryView";
@@ -288,30 +289,22 @@ function Detail({
       )}
       <h3 className="mt-8 mb-3 text-xs font-medium text-muted">Activity</h3>
       {events.data?.length === 0 && <p className="text-faint">Nothing yet.</p>}
-      <ol className="overflow-hidden rounded-lg border border-line bg-surface empty:hidden">
-        {events.data?.map((ev) => (
-          // Events have no ID in the API yet.
-          <li
-            key={`${ev.at} ${ev.kind}`}
-            className="flex items-baseline gap-3 border-line-soft px-4 py-2.5 not-first:border-t"
-          >
-            <span className="w-20 shrink-0 font-medium capitalize">{ev.kind}</span>
-            <span className="min-w-0 flex-1 font-mono text-xs break-words whitespace-pre-wrap text-muted">
-              {ev.message.split(/(#\d+)/).map((part, i) =>
-                i % 2 ? (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: the parts of a message never move.
-                  <PrLink key={i} lane={lane} number={Number(part.slice(1))} onSelect={onSelect} />
-                ) : (
-                  part
-                ),
-              )}
-            </span>
-            <time className="shrink-0 text-xs text-faint" title={ev.at}>
-              {timeAgo(ev.at)}
-            </time>
-          </li>
-        ))}
-      </ol>
+      {!!events.data?.length && (
+        <Activity
+          events={events.data}
+          repo={lane.repo}
+          renderMessage={(message) =>
+            message.split(/(#\d+)/).map((part, i) =>
+              i % 2 ? (
+                // biome-ignore lint/suspicious/noArrayIndexKey: the parts of a message never move.
+                <PrLink key={i} lane={lane} number={Number(part.slice(1))} onSelect={onSelect} />
+              ) : (
+                part
+              ),
+            )
+          }
+        />
+      )}
     </div>
   );
 }

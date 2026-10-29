@@ -94,6 +94,14 @@ export function Narrow({
   );
 }
 
+/** "42s", "12m", "3.4h", "2.1d". */
+export function duration(secs: number) {
+  if (secs < 60) return `${Math.round(secs)}s`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m`;
+  if (secs < 86400) return `${(secs / 3600).toFixed(1)}h`;
+  return `${(secs / 86400).toFixed(1)}d`;
+}
+
 export function timeAgo(iso: string) {
   const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60) return "just now";
