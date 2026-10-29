@@ -8,12 +8,14 @@ services:
       # The Anthropic proxy, for the jobs. On the sandbox network, only its gateway reaches
       # the host: deploy/sandbox-host.sh says what to set.
       - "${MERGEPATROL_JOB_PROXY_PUBLISH:-8081}:8081"
+    secrets: [secret_key]
     volumes:
       - data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       MERGEPATROL_DATABASE_URL: postgres://mergepatrol:mergepatrol@postgres:5432/mergepatrol
-      MERGEPATROL_SECRET_KEY: ${MERGEPATROL_SECRET_KEY:?generate one with openssl rand -base64 32}
+      # A file, so the key stays out of the container's environment and `docker inspect`.
+      MERGEPATROL_SECRET_KEY_FILE: /run/secrets/secret_key
       MERGEPATROL_PUBLIC_URL: ${MERGEPATROL_PUBLIC_URL:-http://localhost:8080}
       # Optional; empty uses the default (see the README).
       MERGEPATROL_LABEL: ${MERGEPATROL_LABEL:-}
@@ -57,6 +59,11 @@ services:
     image: mergepatrol-job:latest
     entrypoint: ["true"]
     restart: "no"
+
+# Generate it with `openssl rand -base64 32`, and set MERGEPATROL_SECRET_KEY when you start.
+secrets:
+  secret_key:
+    environment: MERGEPATROL_SECRET_KEY
 
 volumes:
   data:

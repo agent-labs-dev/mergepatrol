@@ -702,6 +702,19 @@ impl Store for Mem {
     async fn delete_secret(&self, _: Scope, _: &str) -> Result<()> {
         unreachable!()
     }
+    async fn secret_names(&self) -> Result<Vec<(Scope, String)>> {
+        unreachable!()
+    }
+    async fn replace_ciphertext(
+        &self,
+        _: Scope,
+        _: &str,
+        _: &[u8],
+        _: Vec<u8>,
+        _: Vec<u8>,
+    ) -> Result<()> {
+        unreachable!()
+    }
     async fn repos(&self) -> Result<Vec<RepoState>> {
         unreachable!()
     }

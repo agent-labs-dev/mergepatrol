@@ -9,6 +9,7 @@ use mergepatrol_core::{RepoSettings, ResolverSettings};
 /// config file.
 pub struct Config {
     /// Encrypts the secrets stored in the database: the GitHub App and the Anthropic API key.
+    /// The current key, then any it replaces.
     pub secret_key: String,
     pub database_url: String,
     /// The hosted GitHub App. Without it, the App is created in the dashboard (self-hosting).
@@ -63,8 +64,7 @@ pub struct HostedApp {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let secret_key = req("MERGEPATROL_SECRET_KEY")
-            .context("generate one with `openssl rand -base64 32`, and keep it: it decrypts the stored secrets")?;
+        let secret_key = secret_key()?;
         let repo_defaults = RepoSettings {
             label: opt("MERGEPATROL_LABEL", "mergepatrol"),
             batch_size: opt("MERGEPATROL_BATCH_SIZE", "8").parse()?,
@@ -138,6 +138,29 @@ fn hosted_app() -> Result<Option<HostedApp>> {
             names.join(", ")
         ),
     }
+}
+
+/// From `MERGEPATROL_SECRET_KEY`, or the file at `MERGEPATROL_SECRET_KEY_FILE`.
+fn secret_key() -> Result<String> {
+    let key = match (
+        var("MERGEPATROL_SECRET_KEY"),
+        var("MERGEPATROL_SECRET_KEY_FILE"),
+    ) {
+        (Some(_), Some(_)) => {
+            bail!("set MERGEPATROL_SECRET_KEY or MERGEPATROL_SECRET_KEY_FILE, not both")
+        }
+        (Some(key), None) => key,
+        (None, Some(path)) => std::fs::read_to_string(&path)
+            .with_context(|| format!("MERGEPATROL_SECRET_KEY_FILE: read {path}"))?,
+        (None, None) => String::new(),
+    };
+    let key = key.trim();
+    if key.is_empty() {
+        bail!(
+            "MERGEPATROL_SECRET_KEY is not set: generate one with `openssl rand -base64 32`, and keep it: it decrypts the stored secrets"
+        );
+    }
+    Ok(key.to_owned())
 }
 
 /// Empty is unset: compose's `${X:-}` passes an empty variable.
