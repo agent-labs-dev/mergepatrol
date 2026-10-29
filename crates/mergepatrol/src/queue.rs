@@ -13,14 +13,14 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Job, Lane,
-    LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName,
-    RepoSettings, Transition,
+    LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, Provider, REPO_CONFIG_PATH,
+    RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
     AnthropicAccess, BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task,
 };
-use mergepatrol_executor::proxy::{AnthropicProxy, Granted, PREFIX, REQUESTS_PER_JOB};
+use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
@@ -70,8 +70,8 @@ pub struct Ctx {
     pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
     pub executor: Arc<dyn Executor>,
-    /// Holds the workspaces' Anthropic keys for the jobs, which get tokens.
-    pub anthropic: Arc<AnthropicProxy>,
+    /// Holds the workspaces' model API keys for the jobs, which get tokens.
+    pub proxy: Arc<ApiProxy>,
     /// Sandboxed jobs running at once, across repos. A PR waiting for its checks holds none.
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
@@ -1871,7 +1871,7 @@ async fn job_spec(
             .vault
             .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
             .await?
-            .map(|k| ctx.anthropic.grant(k, REQUESTS_PER_JOB)),
+            .map(|k| ctx.proxy.grant(Provider::Anthropic, k, REQUESTS_PER_JOB)),
     };
     let spec = JobSpec {
         repo: key.repo.to_string(),
@@ -1892,7 +1892,11 @@ async fn job_spec(
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
             anthropic: granted.as_ref().map(|g| AnthropicAccess {
-                base_url: format!("{}{PREFIX}", ctx.config.job_proxy_url.trim_end_matches('/')),
+                base_url: format!(
+                    "{}{}",
+                    ctx.config.job_proxy_url.trim_end_matches('/'),
+                    Api::Messages.prefix()
+                ),
                 token: g.token.clone(),
             }),
         },
