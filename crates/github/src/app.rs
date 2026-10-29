@@ -394,7 +394,8 @@ fn retry_after(
         || (status == StatusCode::FORBIDDEN
             && (exhausted
                 || header("retry-after").is_some()
-                || body.contains("secondary rate limit")));
+                || body.contains("secondary rate limit")))
+        || (status.is_success() && graphql_rate_limited(body));
     if !limited {
         return status.is_server_error().then_some(backoff);
     }
@@ -404,6 +405,22 @@ fn retry_after(
         _ => 60,
     };
     Some(Duration::from_secs(secs))
+}
+
+/// GraphQL answers its rate limit with a 200 whose errors say so: `RATE_LIMITED`, or
+/// `RATE_LIMIT` once the limit was already exceeded.
+fn graphql_rate_limited(body: &str) -> bool {
+    if !body.contains("RATE_LIMIT") {
+        return false;
+    }
+    let Ok(res) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    res["errors"].as_array().is_some_and(|errors| {
+        errors
+            .iter()
+            .any(|e| matches!(e["type"].as_str(), Some("RATE_LIMITED" | "RATE_LIMIT")))
+    })
 }
 
 fn unix_now() -> u64 {
@@ -570,6 +587,33 @@ mod tests {
         assert_eq!(wait(403, &told, ""), Some(Duration::from_secs(5)));
         let secondary = "You have exceeded a secondary rate limit.";
         assert_eq!(wait(403, &none, secondary), Some(Duration::from_secs(60)));
+        let graphql =
+            r#"{"errors":[{"type":"RATE_LIMIT","message":"API rate limit already exceeded"}]}"#;
+        assert_eq!(
+            wait(200, &exhausted, graphql),
+            Some(Duration::from_secs(30))
+        );
+        let limited = r#"{"errors":[{"type":"RATE_LIMITED"}]}"#;
+        assert_eq!(wait(200, &none, limited), Some(Duration::from_secs(60)));
+        // Any other GraphQL error is the query's own.
+        let other = r#"{"errors":[{"type":"NOT_FOUND","message":"RATE_LIMIT"}]}"#;
+        assert_eq!(wait(200, &none, other), None);
+    }
+
+    #[tokio::test]
+    async fn a_graphql_rate_limit_waits_then_sends_again() {
+        let (gh, requests) = fake::serve(vec![
+            (
+                200,
+                "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 0\r\n",
+                r#"{"errors":[{"type":"RATE_LIMIT"}]}"#,
+            ),
+            (200, "", r#"{"data":{"ok":true}}"#),
+        ])
+        .await;
+        let v: Value = gh.graphql("{ ok }", json!({})).await.unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
