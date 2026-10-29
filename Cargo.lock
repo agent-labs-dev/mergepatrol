@@ -1222,6 +1222,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "futures-util",
  "mergepatrol-analytics",
  "mergepatrol-core",
  "mergepatrol-executor",

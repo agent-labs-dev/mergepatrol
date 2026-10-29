@@ -63,12 +63,27 @@ steps:
       - --cpu=4
       - --memory=8Gi
 
+  # Cloud Run imports a job's new image on its first execution, which held the first rebase
+  # after each deploy for 20 to 45 seconds. This no-op execution takes that wait instead.
+  - id: warm-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    waitFor: [deploy-job]
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - execute
+      - mergepatrol-job
+      - --region=${_REGION}
+      - --args=--version
+      - --wait
+
   # One instance, always on: the queue runs in the background, not per request, and two
   # instances would run every queue twice. The repo caches live in memory, hence 4Gi.
   # Public without an allUsers binding, which the org's domain-restricted sharing refuses.
   - id: deploy-orchestrator
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    waitFor: [push, deploy-job]
+    waitFor: [push, warm-job]
     entrypoint: gcloud
     args:
       - run

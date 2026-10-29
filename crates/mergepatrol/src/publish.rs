@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use mergepatrol_core::RepoName;
 use mergepatrol_git::Git;
 use mergepatrol_github::{Installation, TreeEntry};
@@ -16,6 +17,9 @@ pub struct Publish<'a> {
     pub local_head: &'a str,
 }
 
+/// Blob uploads in flight at once.
+const UPLOADS: usize = 8;
+
 /// Recreates the commits `base..local_head` on GitHub through the Git Data API, then moves
 /// the branch. GitHub signs commits it creates for the App, so the branch passes
 /// "require signed commits". Original authors stay as `Co-authored-by:` trailers.
@@ -25,9 +29,36 @@ pub async fn publish(gh: &Installation, git: &Git, wt: &Path, p: Publish<'_>) ->
         bail!("the PR has no changes left after the rebase");
     }
 
+    // A clean rebase reuses the PR's own blobs, which GitHub has: only resolutions and files
+    // that both sides changed are new.
+    let on_github: HashSet<String> = git
+        .objects(wt, p.base, p.expected_head)
+        .await?
+        .into_iter()
+        .collect();
+    let new_blobs: HashSet<String> = commits
+        .iter()
+        .flat_map(|c| &c.changes)
+        .filter(|c| !c.is_submodule())
+        .filter_map(|c| c.sha.clone())
+        .filter(|sha| !on_github.contains(sha))
+        .collect();
+    stream::iter(new_blobs)
+        .map(|sha| async move {
+            let remote = gh
+                .create_blob(p.repo, &git.read_blob(wt, &sha).await?)
+                .await?;
+            if remote != sha {
+                bail!("blob {sha} uploaded as {remote}");
+            }
+            Ok(())
+        })
+        .buffer_unordered(UPLOADS)
+        .try_collect::<Vec<()>>()
+        .await?;
+
     let mut parent = p.base.to_owned();
     let mut parent_tree = git.rev_parse(wt, &format!("{}^{{tree}}", p.base)).await?;
-    let mut uploaded = HashSet::new();
 
     for commit in commits {
         let mut entries = Vec::with_capacity(commit.changes.len());
@@ -45,22 +76,12 @@ pub async fn publish(gh: &Installation, git: &Git, wt: &Path, p: Publish<'_>) ->
                     kind: "commit",
                     sha: Some(sha.clone()),
                 },
-                Some(sha) => {
-                    if uploaded.insert(sha.clone()) {
-                        let remote = gh
-                            .create_blob(p.repo, &git.read_blob(wt, sha).await?)
-                            .await?;
-                        if &remote != sha {
-                            bail!("blob {} uploaded as {remote}, expected {sha}", change.path);
-                        }
-                    }
-                    TreeEntry {
-                        path: change.path.clone(),
-                        mode: change.mode.clone(),
-                        kind: "blob",
-                        sha: Some(sha.clone()),
-                    }
-                }
+                Some(sha) => TreeEntry {
+                    path: change.path.clone(),
+                    mode: change.mode.clone(),
+                    kind: "blob",
+                    sha: Some(sha.clone()),
+                },
             };
             entries.push(entry);
         }
