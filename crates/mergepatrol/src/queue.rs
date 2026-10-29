@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
-    Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber,
-    REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
+    BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
+    Phase, PrNumber, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
@@ -305,8 +305,13 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     ctx.store.save_lane(&key, &lane).await?;
 
     // Jobs run inside the tick, so a job still active here was cut short by a restart. A single
-    // PR runs again; a batch is built again.
-    if let Some(branch) = lane.batch_branch.take() {
+    // PR runs again. A batch picks up where it was, unless what it tests changed: then it is
+    // built again.
+    if let Some(branch) = lane.batch_branch.clone() {
+        if let Some(batch) = built_batch(&lane, &snap, branch.clone()) {
+            run_batch(ctx, &settings, gh, &key, &snap, &mut lane, batch).await?;
+            return Ok(Ran::Job);
+        }
         gh.delete_branch(repo, &branch).await?;
         lane.stop();
         ctx.store.save_lane(&key, &lane).await?;
@@ -420,8 +425,55 @@ fn on_hold(reason: &str) -> String {
 /// PRs merged together on a branch of their own, which a draft PR puts through CI.
 struct Batch {
     branch: String,
+    /// The trunk commit the branch starts from.
+    trunk_sha: String,
     /// Each PR, with the merge commit it made on the branch.
     steps: Vec<(PullRequest, BranchMerge)>,
+}
+
+impl Batch {
+    fn built(&self) -> BuiltBatch {
+        BuiltBatch {
+            trunk_sha: self.trunk_sha.clone(),
+            steps: self
+                .steps
+                .iter()
+                .map(|(pr, m)| BatchStep {
+                    number: pr.number,
+                    head_sha: pr.head_ref_oid.clone(),
+                    sha: m.sha.clone(),
+                    tree: m.tree.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The lane's batch, as it was built on `branch`, while it still tests what is queued now.
+fn built_batch(lane: &Lane, snap: &RepoSnapshot, branch: String) -> Option<Batch> {
+    let built = lane.batch_built.as_ref()?;
+    let steps = built
+        .steps
+        .iter()
+        .map(|s| {
+            let pr = snap.labeled.iter().find(|p| p.number == s.number)?;
+            let pr = PullRequest {
+                head_ref_oid: s.head_sha.clone(),
+                ..pr.clone()
+            };
+            let merge = BranchMerge {
+                sha: s.sha.clone(),
+                tree: s.tree.clone(),
+            };
+            Some((pr, merge))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let batch = Batch {
+        branch,
+        trunk_sha: built.trunk_sha.clone(),
+        steps,
+    };
+    stale(snap, &batch).is_none().then_some(batch)
 }
 
 /// Merges `prs` one after the other onto a new branch at the trunk, up to the first that
@@ -463,7 +515,14 @@ async fn build_batch(
         ctx.store.save_lane(key, lane).await?;
         return Ok(None);
     }
-    Ok(Some(Batch { branch, steps }))
+    let batch = Batch {
+        branch,
+        trunk_sha: snap.trunk_sha.clone(),
+        steps,
+    };
+    lane.batch_built = Some(batch.built());
+    ctx.store.save_lane(key, lane).await?;
+    Ok(Some(batch))
 }
 
 /// How a batch's checks ended.
@@ -497,7 +556,6 @@ async fn run_batch(
     let result = test_and_merge(ctx, settings, gh, key, snap, lane, &batch, &members).await;
     // Deleting the branch closes the draft PR.
     gh.delete_branch(repo, &batch.branch).await?;
-    lane.batch_branch = None;
     lane.stop();
     ctx.store.save_lane(key, lane).await?;
     result
@@ -515,7 +573,6 @@ async fn test_and_merge(
     members: &[PrNumber],
 ) -> Result<()> {
     let repo = &key.repo;
-    let (first, _) = &batch.steps[0];
     let refs = |except: PrNumber| -> String {
         members
             .iter()
@@ -524,49 +581,68 @@ async fn test_and_merge(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    // `#n` in code spans: plain references would add a timeline event to every PR, on every batch.
-    let list: Vec<String> = batch
-        .steps
-        .iter()
-        .map(|(pr, _)| format!("- `#{}` {}", pr.number, pr.title))
-        .collect();
-    let title = format!(
-        "{} (+{} in a Mergepatrol batch)",
-        first.title,
-        members.len() - 1
-    );
-    let body = format!(
-        "Mergepatrol tests these PRs together, then merges them one by one. It closes this PR when it is done: do not merge it.\n\n{}",
-        list.join("\n")
-    );
-    let draft = gh
-        .open_draft_pr(repo, &batch.branch, &key.trunk, &title, &body)
-        .await?;
-    lane.batch_pr = Some(draft);
-    ctx.store.save_lane(key, lane).await?;
-    try_join_all(members.iter().map(|n| async move {
-        record(
-            ctx,
-            key,
-            *n,
-            "batch",
-            &format!("tested with {} in #{draft}", refs(*n)),
-        )
-        .await?;
-        gh.sticky_comment(
-            repo,
-            *n,
-            &format!("Testing together with {} in #{draft}.", refs(*n)),
-        )
-        .await
-    }))
-    .await?;
+    match lane.batch_pr {
+        // Picked up after a restart: the draft PR and the comments are there.
+        Some(draft) => {
+            for n in members {
+                record(
+                    ctx,
+                    key,
+                    *n,
+                    "batch-resumed",
+                    &format!("still tested in #{draft}"),
+                )
+                .await?;
+            }
+        }
+        None => {
+            // `#n` in code spans: plain references would add a timeline event to every PR, on
+            // every batch.
+            let list: Vec<String> = batch
+                .steps
+                .iter()
+                .map(|(pr, _)| format!("- `#{}` {}", pr.number, pr.title))
+                .collect();
+            let (first, _) = &batch.steps[0];
+            let title = format!(
+                "{} (+{} in a Mergepatrol batch)",
+                first.title,
+                members.len() - 1
+            );
+            let body = format!(
+                "Mergepatrol tests these PRs together, then merges them one by one. It closes this PR when it is done: do not merge it.\n\n{}",
+                list.join("\n")
+            );
+            let draft = gh
+                .open_draft_pr(repo, &batch.branch, &key.trunk, &title, &body)
+                .await?;
+            lane.batch_pr = Some(draft);
+            ctx.store.save_lane(key, lane).await?;
+            try_join_all(members.iter().map(|n| async move {
+                record(
+                    ctx,
+                    key,
+                    *n,
+                    "batch",
+                    &format!("tested with {} in #{draft}", refs(*n)),
+                )
+                .await?;
+                gh.sticky_comment(
+                    repo,
+                    *n,
+                    &format!("Testing together with {} in #{draft}.", refs(*n)),
+                )
+                .await
+            }))
+            .await?;
+        }
+    }
 
     let head = &batch.steps.last().expect("a batch has PRs").1.sha;
     let opened = Instant::now();
     let tested = loop {
         let now = gh.snapshot(repo, &settings.labels()).await?;
-        if let Some(why) = stale(&now, snap, batch) {
+        if let Some(why) = stale(&now, batch) {
             break Tested::Stale(why);
         }
         match checks_verdict(gh, key, head, opened).await? {
@@ -606,8 +682,8 @@ async fn test_and_merge(
 }
 
 /// Why what the batch tested no longer stands: the trunk moved, or one of its PRs changed.
-fn stale(now: &RepoSnapshot, then: &RepoSnapshot, batch: &Batch) -> Option<String> {
-    if now.trunk_sha != then.trunk_sha {
+fn stale(now: &RepoSnapshot, batch: &Batch) -> Option<String> {
+    if now.trunk_sha != batch.trunk_sha {
         return Some("the trunk moved outside the queue".into());
     }
     for (pr, _) in &batch.steps {

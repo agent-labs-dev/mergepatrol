@@ -91,12 +91,31 @@ pub struct Lane {
     #[serde(default)]
     pub bisect: Option<Bisect>,
     /// The branch of the batch being tested. Still set at startup means a restart cut the batch
-    /// short: delete the branch, which closes its PR.
+    /// short.
     #[serde(default)]
     pub batch_branch: Option<String>,
     /// The draft PR that tests the batch, once it is open.
     #[serde(default)]
     pub batch_pr: Option<PrNumber>,
+    /// What the batch's branch holds, once built: what a restart needs to pick the batch up.
+    #[serde(default)]
+    pub batch_built: Option<BuiltBatch>,
+}
+
+/// A batch's branch: the trunk commit it starts from, then each PR merged onto it in order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuiltBatch {
+    pub trunk_sha: String,
+    pub steps: Vec<BatchStep>,
+}
+
+/// One PR of a batch: the head it merged, and the merge commit it made on the branch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchStep {
+    pub number: PrNumber,
+    pub head_sha: String,
+    pub sha: String,
+    pub tree: String,
 }
 
 /// The search for the PR that broke a batch: the next batches take only suspects, and at most
@@ -230,7 +249,9 @@ impl Lane {
 
     /// Ends the active job, and puts its PRs that are still active back in their places.
     pub fn stop(&mut self) {
+        self.batch_branch = None;
         self.batch_pr = None;
+        self.batch_built = None;
         for e in &mut self.entries {
             if e.state == EntryState::Active {
                 e.state = EntryState::Waiting;

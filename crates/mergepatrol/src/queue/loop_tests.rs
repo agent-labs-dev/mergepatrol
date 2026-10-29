@@ -1214,3 +1214,45 @@ async fn a_batch_cut_short_by_a_restart_is_built_again() {
     run.tick().await;
     assert_eq!(run.merged(), [1, 2]);
 }
+
+/// Ticks until the batch of 1 and 2 waits for its checks, then drops the tick, as a restart
+/// does.
+async fn cut_short_while_testing(run: &Run) {
+    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    run.gh.with_mut(|s| {
+        s.checks_on
+            .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
+    });
+    let cut = tokio::time::timeout(CHECKS_POLL * 4, run.tick()).await;
+    assert!(cut.is_err(), "the batch is still testing");
+    run.gh.with_mut(|s| s.checks_on.remove(BATCH));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_cut_short_by_a_restart_picks_up_where_it_was() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    cut_short_while_testing(&run).await;
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+    // The same branch and draft PR, which CI kept testing.
+    assert_eq!(run.gh.with(|s| s.drafts.len()), 1);
+    assert_eq!(
+        run.gh.with(|s| s.deleted.clone()),
+        ["mergepatrol/batch-1-2"]
+    );
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "batch", "batch-resumed", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_trunk_moved_during_a_restart_is_built_again() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    cut_short_while_testing(&run).await;
+    run.gh.with_mut(|s| s.trunk = "outside".into());
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(run.gh.with(|s| s.drafts.len()), 2);
+    assert_eq!(run.kinds(1), ["enqueued", "batch", "batch", "merged"]);
+}
