@@ -14,6 +14,7 @@ import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
+import { TraySignedIn } from "./TraySignedIn";
 import { type ThemeProps, useTheme } from "./theme";
 import { Avatar, feedbackUrl, Mark, ThemeToggle } from "./ui";
 import { WorkspaceContext } from "./workspace";
@@ -33,6 +34,10 @@ export function App() {
   const [error, dismiss] = useRedirectError();
   const [theme, setTheme] = useTheme();
 
+  // The menu bar app's sign-in, whatever this browser's own session is.
+  if (location.pathname === "/tray") {
+    return <TraySignedIn error={error} theme={theme} setTheme={setTheme} />;
+  }
   return (
     <>
       {error && (

@@ -1,0 +1,36 @@
+# Checks the menu bar app, which builds on macOS only: Apple silicon, on Blacksmith. Its own
+# workflow, so a change to the server alone does not pay for a GPUI build.
+name: tray
+
+on:
+  pull_request:
+    paths: ["apps/tray/**", ".github/workflows/tray.yml"]
+  push:
+    branches: [main]
+    paths: ["apps/tray/**", ".github/workflows/tray.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tray-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: apps/tray
+
+jobs:
+  check:
+    runs-on: blacksmith-6vcpu-macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rustup reads the toolchain GPUI needs from apps/tray/rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/tray
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked

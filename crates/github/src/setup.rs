@@ -139,12 +139,16 @@ pub struct Pkce {
 impl Pkce {
     pub fn new() -> Self {
         let verifier = random_token(32);
-        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(Sha256::digest(verifier.as_bytes()));
+        let challenge = Self::challenge(&verifier);
         Self {
             verifier,
             challenge,
         }
+    }
+
+    /// S256: base64url of the verifier's SHA-256, unpadded.
+    pub fn challenge(verifier: &str) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
     }
 }
 
@@ -173,38 +177,114 @@ pub fn authorize_url(
     .into())
 }
 
-/// Trades the code from the OAuth callback for a user access token.
+/// A user's GitHub token. A session keeps it, encrypted, to check the user's installations
+/// again. Apps that expire user tokens give an 8-hour token and a 6-month refresh token;
+/// others give a token that lasts until it is revoked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserToken {
+    pub access_token: String,
+    /// Unix seconds. `None` for a token that does not expire.
+    pub expires_at: Option<i64>,
+    pub refresh_token: Option<String>,
+}
+
+impl UserToken {
+    /// Expired, or about to: a minute's margin covers the calls made with it.
+    pub fn expired(&self, now: i64) -> bool {
+        self.expires_at.is_some_and(|at| at - 60 <= now)
+    }
+}
+
+/// GitHub no longer accepts the user's token: they revoked it, or the refresh token expired.
+/// Their session is over.
+#[derive(Debug)]
+pub struct Revoked;
+
+impl std::fmt::Display for Revoked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GitHub revoked the user's token")
+    }
+}
+
+impl std::error::Error for Revoked {}
+
+/// Trades the code from the OAuth callback for a user token.
 pub async fn exchange_code(
     app: &AppCredentials,
     code: &str,
     redirect_uri: &str,
     verifier: &str,
-) -> Result<String> {
-    let res: Value = client()?
-        .post("https://github.com/login/oauth/access_token")
-        .header("accept", "application/json")
-        .form(&[
-            ("client_id", app.client_id.as_str()),
-            ("client_secret", app.client_secret.as_str()),
+) -> Result<UserToken> {
+    let res = token_request(
+        app,
+        &[
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("code_verifier", verifier),
-        ])
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        ],
+    )
+    .await?;
     if let Some(err) = res["error"].as_str() {
         bail!(
             "GitHub sign-in failed: {err}: {}",
             res["error_description"].as_str().unwrap_or("")
         );
     }
-    Ok(res["access_token"]
-        .as_str()
-        .context("no access_token")?
-        .to_owned())
+    user_token(&res, now())
+}
+
+/// A new user token for an expired one.
+pub async fn refresh_user_token(app: &AppCredentials, refresh_token: &str) -> Result<UserToken> {
+    let res = token_request(
+        app,
+        &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ],
+    )
+    .await?;
+    match res["error"].as_str() {
+        Some("bad_refresh_token") => Err(Revoked.into()),
+        Some(err) => bail!(
+            "GitHub refused to refresh the user's token: {err}: {}",
+            res["error_description"].as_str().unwrap_or("")
+        ),
+        None => user_token(&res, now()),
+    }
+}
+
+async fn token_request(app: &AppCredentials, params: &[(&str, &str)]) -> Result<Value> {
+    let mut form = vec![
+        ("client_id", app.client_id.as_str()),
+        ("client_secret", app.client_secret.as_str()),
+    ];
+    form.extend_from_slice(params);
+    Ok(client()?
+        .post("https://github.com/login/oauth/access_token")
+        .header("accept", "application/json")
+        .form(&form)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+fn user_token(res: &Value, now: i64) -> Result<UserToken> {
+    Ok(UserToken {
+        access_token: res["access_token"]
+            .as_str()
+            .context("no access_token")?
+            .to_owned(),
+        expires_at: res["expires_in"].as_i64().map(|secs| now + secs),
+        refresh_token: res["refresh_token"].as_str().map(str::to_owned),
+    })
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -261,13 +341,18 @@ pub async fn user_installations(token: &str) -> Result<Vec<UserInstallation>> {
     Ok(all)
 }
 
+/// A 401 is `Revoked`: GitHub no longer takes the token.
 async fn user_get(token: &str, path: &str) -> Result<reqwest::Response> {
-    Ok(client()?
+    let res = client()?
         .get(format!("{API}{path}"))
         .bearer_auth(token)
         .header("accept", "application/vnd.github+json")
         .send()
-        .await?)
+        .await?;
+    if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(Revoked.into());
+    }
+    Ok(res)
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -280,6 +365,36 @@ fn client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_an_expiring_token_and_a_lasting_one() {
+        let expiring = json!({
+            "access_token": "ghu_a", "expires_in": 28800,
+            "refresh_token": "ghr_b", "refresh_token_expires_in": 15811200,
+        });
+        assert_eq!(
+            user_token(&expiring, 1000).unwrap(),
+            UserToken {
+                access_token: "ghu_a".into(),
+                expires_at: Some(29800),
+                refresh_token: Some("ghr_b".into()),
+            }
+        );
+        let lasting = user_token(&json!({"access_token": "gho_c"}), 1000).unwrap();
+        assert_eq!(lasting.expires_at, None);
+        assert!(!lasting.expired(i64::MAX));
+    }
+
+    #[test]
+    fn a_token_expires_a_minute_early() {
+        let token = UserToken {
+            access_token: String::new(),
+            expires_at: Some(1000),
+            refresh_token: None,
+        };
+        assert!(!token.expired(939));
+        assert!(token.expired(940));
+    }
 
     #[test]
     fn manifest_points_back_at_us() {

@@ -91,6 +91,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::login_callback))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/tray/token", post(auth::tray_token))
         .route(
             "/webhooks/github",
             post(webhook::receive).layer(DefaultBodyLimit::max(webhook::MAX_BODY_BYTES)),
@@ -151,11 +152,19 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
-    use mergepatrol_store::{PgStore, Session, SessionKind};
+    use mergepatrol_github::setup::{Pkce, UserToken};
+    use mergepatrol_store::{LoginCode, PgStore, Session, SessionKind};
     use sqlx::PgPool;
     use tower::ServiceExt;
 
     const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    fn now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
 
     #[derive(Default)]
     struct Woken(Mutex<Vec<(u64, String)>>);
@@ -191,8 +200,14 @@ mod tests {
             avatar_url: String::new(),
             installations: vec![1],
         };
+        let session = Session {
+            kind,
+            expires_at,
+            checked_at: now(),
+            github: None,
+        };
         store
-            .create_session(&auth::hash("tok"), &Session { kind, expires_at })
+            .create_session(&auth::hash("tok"), &session)
             .await
             .unwrap();
         let config = web_config(hosted_app, wake);
@@ -283,6 +298,196 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn a_tray_sign_in_returns_to_the_app(pool: PgPool) {
+        let (router, _) = with_app(pool, Some(app(None)), Arc::default()).await;
+        let app_state = "s".repeat(24);
+        let challenge = Pkce::new().challenge;
+        let login = Request::get(format!(
+            "/auth/login?tray_port=4567&tray_state={app_state}&tray_challenge={challenge}"
+        ))
+        .body(Body::empty())
+        .unwrap();
+        let (to_github, cookies) = redirect(&send(&router, login).await);
+        let state = query_param(&to_github, "state");
+        let both = cookies.join("; ");
+        assert!(
+            both.contains(&format!("mp_tray=4567.{app_state}.{challenge}")),
+            "{both}"
+        );
+
+        // Up to GitHub's exchange of the code, which fails here: the error goes to the app.
+        let callback = Request::get(format!("/auth/callback?code=c&state={state}"))
+            .header("cookie", &both)
+            .body(Body::empty())
+            .unwrap();
+        let (back, cookies) = redirect(&send(&router, callback).await);
+        assert!(
+            back.starts_with(&format!(
+                "http://127.0.0.1:4567/callback?state={app_state}&error="
+            )),
+            "{back}"
+        );
+        assert!(cookies.contains(&"mp_tray=".to_owned()), "{cookies:?}");
+
+        // A malformed request never reaches GitHub.
+        for bad in [
+            format!("tray_port=4567&tray_state=x%26y&tray_challenge={challenge}"),
+            format!("tray_port=4567&tray_state={app_state}"),
+            format!("tray_port=4567&tray_state={app_state}&tray_challenge=short"),
+        ] {
+            let req = Request::get(format!("/auth/login?{bad}"))
+                .body(Body::empty())
+                .unwrap();
+            let (back, _) = redirect(&send(&router, req).await);
+            assert!(back.starts_with("/?error="), "{bad}: {back}");
+        }
+    }
+
+    /// A store and vault on the router's database, as the router sees them.
+    async fn store_and_vault(pool: PgPool) -> (Arc<dyn Store>, Vault) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool).await.unwrap());
+        let vault = Vault::new(store.clone(), KEY).unwrap();
+        (store, vault)
+    }
+
+    fn trade(code: &str, verifier: &str) -> Request<Body> {
+        Request::post("/auth/tray/token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "code": code, "verifier": verifier }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_app_trades_its_code_once_with_its_verifier(pool: PgPool) {
+        let (router, _) = signed_in(pool.clone()).await;
+        let (store, vault) = store_and_vault(pool).await;
+        let pkce = Pkce::new();
+        // The callback's work: the session "tok" (from `signed_in`), sealed under a code.
+        let code = |name: &str| LoginCode {
+            token_hash: auth::hash("tok"),
+            challenge: pkce.challenge.clone(),
+            token: vault
+                .seal(&format!("login-code/{}", auth::hash(name)), "tok")
+                .unwrap(),
+            expires_at: now() + 60,
+        };
+        store
+            .create_login_code(&auth::hash("c"), &code("c"))
+            .await
+            .unwrap();
+
+        let res = send(&router, trade("c", &pkce.verifier)).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"token":"tok"}"#);
+        // Once only.
+        let again = send(&router, trade("c", &pkce.verifier)).await;
+        assert_eq!(again.status(), StatusCode::BAD_REQUEST);
+
+        // Without the verifier, the code fails, and the session it carried goes with it.
+        store
+            .create_login_code(&auth::hash("d"), &code("d"))
+            .await
+            .unwrap();
+        let stolen = send(&router, trade("d", &Pkce::new().verifier)).await;
+        assert_eq!(stolen.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(store.session(&auth::hash("tok")).await.unwrap(), None);
+    }
+
+    /// The user session "old" for installation 1, as of `checked_at`, keeping `github`.
+    async fn old_session(
+        store: &dyn Store,
+        vault: &Vault,
+        checked_at: i64,
+        github: Option<UserToken>,
+    ) {
+        let hash = auth::hash("old");
+        let github = github.map(|g| {
+            vault
+                .seal(
+                    &format!("session/{hash}"),
+                    &serde_json::to_string(&g).unwrap(),
+                )
+                .unwrap()
+        });
+        let session = Session {
+            kind: SessionKind::User {
+                login: "ada".into(),
+                avatar_url: String::new(),
+                installations: vec![1],
+            },
+            expires_at: now() + 600,
+            checked_at,
+            github,
+        };
+        store.create_session(&hash, &session).await.unwrap();
+    }
+
+    fn expired_token() -> UserToken {
+        UserToken {
+            access_token: "ghu_x".into(),
+            expires_at: Some(now() - 10),
+            refresh_token: None,
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_session_ends_when_its_github_token_does(pool: PgPool) {
+        let (router, _) = signed_in(pool.clone()).await;
+        let (store, vault) = store_and_vault(pool).await;
+        // Due a check, with an expired token and no refresh token: GitHub would refuse it, so
+        // the session ends without asking.
+        old_session(&*store, &vault, now() - 2 * 3600, Some(expired_token())).await;
+        assert_eq!(
+            get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(store.session(&auth::hash("old")).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_session_checked_lately_or_from_before_is_not_checked(pool: PgPool) {
+        let (router, _) = signed_in(pool.clone()).await;
+        let (store, vault) = store_and_vault(pool).await;
+        // An hour has not passed: the token, which GitHub would refuse, is not even read.
+        old_session(&*store, &vault, now() - 60, Some(expired_token())).await;
+        assert_eq!(
+            get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
+            StatusCode::OK
+        );
+        // A session from before sessions kept the token lasts out its time as it is.
+        store.delete_session(&auth::hash("old")).await.unwrap();
+        old_session(&*store, &vault, 0, None).await;
+        assert_eq!(
+            get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
+            StatusCode::OK
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_tray_reads_the_api_with_a_bearer_token(pool: PgPool) {
+        let (router, _) = signed_in(pool).await;
+        let req = |auth: &str| {
+            Request::get("/api/w/1/lanes")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            send(&router, req("Bearer tok")).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&router, req("Bearer nope")).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn creating_the_app_survives_a_restart(pool: PgPool) {
         let (before, _) = with_app(pool.clone(), None, Arc::default()).await;
         let store = PgStore::migrate(pool.clone()).await.unwrap();
@@ -294,6 +499,8 @@ mod tests {
         let setup = Session {
             kind: SessionKind::Setup,
             expires_at,
+            checked_at: 0,
+            github: None,
         };
         store
             .create_session(&auth::hash("setup"), &setup)

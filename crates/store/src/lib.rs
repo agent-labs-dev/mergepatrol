@@ -222,6 +222,15 @@ pub trait Store: Send + Sync {
     async fn delete_session(&self, token_hash: &str) -> Result<()>;
     /// Deletes the sessions that expired by `now`, in Unix seconds: how many.
     async fn delete_expired_sessions(&self, now: i64) -> Result<u64>;
+    /// Holds the session until `until` to read its installations again, unless another
+    /// request holds it at `now`. Whether this one got it.
+    async fn claim_session_check(&self, token_hash: &str, now: i64, until: i64) -> Result<bool>;
+    /// Saves a check's result. The hold stays until it runs out: a check that saved has moved
+    /// `checked_at`, so no request is due another for an hour anyway.
+    async fn update_session(&self, token_hash: &str, session: &Session) -> Result<()>;
+    async fn create_login_code(&self, code_hash: &str, code: &LoginCode) -> Result<()>;
+    /// Deletes the code and returns it, if it has not expired by `now`: a code works once.
+    async fn take_login_code(&self, code_hash: &str, now: i64) -> Result<Option<LoginCode>>;
 }
 
 /// Who a secret belongs to.
@@ -296,6 +305,30 @@ pub struct Session {
     pub kind: SessionKind,
     /// Unix seconds.
     pub expires_at: i64,
+    /// When the user's installations were last read from GitHub, in Unix seconds.
+    pub checked_at: i64,
+    /// The user's GitHub token, sealed by the vault. `None` for a setup session, and for a
+    /// session from before sessions kept it.
+    pub github: Option<Sealed>,
+}
+
+/// A one-time code that hands a session to the menu bar app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginCode {
+    pub token_hash: String,
+    /// The app's PKCE challenge: base64url SHA-256 of its verifier.
+    pub challenge: String,
+    /// The session token, sealed by the vault.
+    pub token: Sealed,
+    /// Unix seconds.
+    pub expires_at: i64,
+}
+
+/// A value the vault encrypted: `Vault::seal` and `Vault::open`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sealed {
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
 }
 
 pub struct PgStore {
@@ -959,8 +992,9 @@ impl Store for PgStore {
             SessionKind::Setup => ("setup", None, None, Vec::new()),
         };
         sqlx::query(
-            "INSERT INTO sessions (token_hash, kind, login, avatar_url, installations, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO sessions (token_hash, kind, login, avatar_url, installations, expires_at,
+                checked_at, github_nonce, github_ciphertext)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(token_hash)
         .bind(kind)
@@ -968,6 +1002,9 @@ impl Store for PgStore {
         .bind(avatar)
         .bind(installations)
         .bind(session.expires_at)
+        .bind(session.checked_at)
+        .bind(session.github.as_ref().map(|g| &g.nonce))
+        .bind(session.github.as_ref().map(|g| &g.ciphertext))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -975,8 +1012,9 @@ impl Store for PgStore {
 
     async fn session(&self, token_hash: &str) -> Result<Option<Session>> {
         let row = sqlx::query(
-            "SELECT kind, login, avatar_url, installations, expires_at FROM sessions
-             WHERE token_hash = $1 AND expires_at > extract(epoch FROM now())",
+            "SELECT kind, login, avatar_url, installations, expires_at, checked_at, github_nonce,
+                github_ciphertext
+             FROM sessions WHERE token_hash = $1 AND expires_at > extract(epoch FROM now())",
         )
         .bind(token_hash)
         .fetch_optional(&self.pool)
@@ -994,9 +1032,18 @@ impl Store for PgStore {
             },
             _ => SessionKind::Setup,
         };
+        let github = match (
+            row.get::<Option<Vec<u8>>, _>("github_nonce"),
+            row.get::<Option<Vec<u8>>, _>("github_ciphertext"),
+        ) {
+            (Some(nonce), Some(ciphertext)) => Some(Sealed { nonce, ciphertext }),
+            _ => None,
+        };
         Ok(Some(Session {
             kind,
             expires_at: row.get("expires_at"),
+            checked_at: row.get("checked_at"),
+            github,
         }))
     }
 
@@ -1009,11 +1056,89 @@ impl Store for PgStore {
     }
 
     async fn delete_expired_sessions(&self, now: i64) -> Result<u64> {
-        let done = sqlx::query("DELETE FROM sessions WHERE expires_at <= $1")
-            .bind(now)
-            .execute(&self.pool)
-            .await?;
+        // A code nobody took leaves a session nobody holds.
+        let done = sqlx::query(
+            "WITH codes AS (DELETE FROM login_codes WHERE expires_at <= $1 RETURNING token_hash)
+             DELETE FROM sessions
+             WHERE expires_at <= $1 OR token_hash IN (SELECT token_hash FROM codes)",
+        )
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
         Ok(done.rows_affected())
+    }
+
+    async fn claim_session_check(&self, token_hash: &str, now: i64, until: i64) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE sessions SET checking_until = $3 WHERE token_hash = $1 AND checking_until <= $2",
+        )
+        .bind(token_hash)
+        .bind(now)
+        .bind(until)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    async fn update_session(&self, token_hash: &str, session: &Session) -> Result<()> {
+        let installations: Vec<i64> = match &session.kind {
+            SessionKind::User { installations, .. } => {
+                installations.iter().map(|&i| i as i64).collect()
+            }
+            SessionKind::Setup => Vec::new(),
+        };
+        sqlx::query(
+            "UPDATE sessions SET installations = $2, expires_at = $3, checked_at = $4,
+                github_nonce = $5, github_ciphertext = $6
+             WHERE token_hash = $1",
+        )
+        .bind(token_hash)
+        .bind(installations)
+        .bind(session.expires_at)
+        .bind(session.checked_at)
+        .bind(session.github.as_ref().map(|g| &g.nonce))
+        .bind(session.github.as_ref().map(|g| &g.ciphertext))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn create_login_code(&self, code_hash: &str, code: &LoginCode) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO login_codes
+                (code_hash, token_hash, challenge, token_nonce, token_ciphertext, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(code_hash)
+        .bind(&code.token_hash)
+        .bind(&code.challenge)
+        .bind(&code.token.nonce)
+        .bind(&code.token.ciphertext)
+        .bind(code.expires_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn take_login_code(&self, code_hash: &str, now: i64) -> Result<Option<LoginCode>> {
+        let row = sqlx::query(
+            "DELETE FROM login_codes WHERE code_hash = $1
+             RETURNING token_hash, challenge, token_nonce, token_ciphertext, expires_at",
+        )
+        .bind(code_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .map(|row| LoginCode {
+                token_hash: row.get("token_hash"),
+                challenge: row.get("challenge"),
+                token: Sealed {
+                    nonce: row.get("token_nonce"),
+                    ciphertext: row.get("token_ciphertext"),
+                },
+                expires_at: row.get("expires_at"),
+            })
+            .filter(|code| code.expires_at > now))
     }
 }
 
@@ -1047,6 +1172,8 @@ mod tests {
         let session = |expires_at| Session {
             kind: SessionKind::Setup,
             expires_at,
+            checked_at: 0,
+            github: None,
         };
         store.create_session("old", &session(100)).await.unwrap();
         store.create_session("live", &session(300)).await.unwrap();
@@ -1097,15 +1224,113 @@ mod tests {
                 installations: vec![1, 2],
             },
             expires_at: now + 60,
+            checked_at: now,
+            github: Some(Sealed {
+                nonce: vec![1],
+                ciphertext: vec![2],
+            }),
         };
         let dead = Session {
             kind: SessionKind::Setup,
-            expires_at: now - 1,
+            // Well past: the database's clock can trail this one by a second.
+            expires_at: now - 3600,
+            checked_at: 0,
+            github: None,
         };
         store.create_session("a", &live).await.unwrap();
         store.create_session("b", &dead).await.unwrap();
         assert_eq!(store.session("a").await.unwrap(), Some(live));
         assert_eq!(store.session("b").await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_login_code_works_once_and_takes_its_session_when_it_expires(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let session = Session {
+            kind: SessionKind::Setup,
+            expires_at: 10_000,
+            checked_at: 0,
+            github: None,
+        };
+        let code = |token_hash: &str| LoginCode {
+            token_hash: token_hash.into(),
+            challenge: "ch".into(),
+            token: Sealed {
+                nonce: vec![1],
+                ciphertext: vec![2],
+            },
+            expires_at: 100,
+        };
+        store.create_session("taken", &session).await.unwrap();
+        store.create_session("left", &session).await.unwrap();
+        store.create_login_code("c1", &code("taken")).await.unwrap();
+        store.create_login_code("c2", &code("left")).await.unwrap();
+
+        assert_eq!(
+            store.take_login_code("c1", 50).await.unwrap(),
+            Some(code("taken"))
+        );
+        assert_eq!(store.take_login_code("c1", 50).await.unwrap(), None);
+        // Nobody took c2 in time: it and its session go.
+        assert_eq!(store.delete_expired_sessions(100).await.unwrap(), 1);
+        let left: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM sessions")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, ["taken"]);
+        assert_eq!(store.take_login_code("c2", 50).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn one_request_at_a_time_checks_a_session(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut session = Session {
+            kind: SessionKind::User {
+                login: "ada".into(),
+                avatar_url: String::new(),
+                installations: vec![1],
+            },
+            expires_at: now + 60,
+            checked_at: 0,
+            github: None,
+        };
+        store.create_session("a", &session).await.unwrap();
+        assert!(store.claim_session_check("a", now, now + 30).await.unwrap());
+        assert!(
+            !store
+                .claim_session_check("a", now + 1, now + 31)
+                .await
+                .unwrap()
+        );
+        // A check that never finished lets go when its hold runs out.
+        assert!(
+            store
+                .claim_session_check("a", now + 30, now + 60)
+                .await
+                .unwrap()
+        );
+
+        session.kind = SessionKind::User {
+            login: "ada".into(),
+            avatar_url: String::new(),
+            installations: vec![1, 2],
+        };
+        session.checked_at = now;
+        session.expires_at = now + 3600;
+        store.update_session("a", &session).await.unwrap();
+        assert_eq!(store.session("a").await.unwrap(), Some(session));
+        // Saving keeps the hold: a request that read the session before the save cannot check
+        // again with what it read.
+        assert!(
+            !store
+                .claim_session_check("a", now + 31, now + 61)
+                .await
+                .unwrap()
+        );
     }
 
     #[sqlx::test(migrations = false)]
