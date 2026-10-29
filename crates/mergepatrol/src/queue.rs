@@ -570,7 +570,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         };
         let prs = prs_of.get(&number).cloned().unwrap_or(vec![number]);
         if kind == "dequeued" {
-            exit_all(ctx, &key, &prs, kind, &message, None).await?;
+            exit_once(ctx, &key, &prs, kind, &message).await?;
         } else {
             record_all(ctx, &key, &prs, kind, &message).await?;
         }
@@ -937,6 +937,26 @@ async fn exit_all(
     Ok(())
 }
 
+/// `exit_all`, but for the PRs whose exit is not recorded yet. A tick cut short after an exit,
+/// before it saved the lane, left the PR in it: the next tick sees it leave again, or sees its
+/// merge through again.
+async fn exit_once(
+    ctx: &Ctx,
+    key: &LaneKey,
+    prs: &[PrNumber],
+    outcome: &str,
+    detail: &str,
+) -> Result<()> {
+    let mut fresh = Vec::new();
+    for n in prs {
+        match ctx.store.has_left(key, *n).await? {
+            true => tracing::info!(repo = %key.repo, pr = n, outcome, "already left the queue"),
+            false => fresh.push(*n),
+        }
+    }
+    exit_all(ctx, key, &fresh, outcome, detail, None).await
+}
+
 async fn comment_all(gh: &dyn GitHub, repo: &RepoName, prs: &[PrNumber], body: &str) -> Result<()> {
     try_join_all(prs.iter().map(|n| gh.sticky_comment(repo, *n, body))).await?;
     Ok(())
@@ -1036,7 +1056,7 @@ async fn merged(
 ) -> Result<()> {
     let repo = &key.repo;
     lane.remove(number);
-    exit_all(ctx, key, prs, "merged", sha, None).await?;
+    exit_once(ctx, key, prs, "merged", sha).await?;
     let labels = settings.labels();
     comment_all(gh, repo, prs, &format!("Merged as {sha}.")).await?;
     for n in prs {
@@ -1547,11 +1567,6 @@ async fn exit(
     detail: &str,
     reason: Option<&str>,
 ) -> Result<()> {
-    // A tick cut short after the exit, before it saved the lane, sees the PR leave again.
-    if ctx.store.has_left(key, number).await? {
-        tracing::info!(repo = %key.repo, pr = number, outcome, "already left the queue");
-        return Ok(());
-    }
     log(ctx, key, number, outcome, detail).await?;
     forget_refs(ctx, key, number).await;
     let summary = ctx.prs.get(key, number).unwrap_or_default();

@@ -1327,6 +1327,26 @@ async fn a_tick_cut_short_after_a_merge_records_it_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pr_that_left_before_is_ejected_again_before_it_joins() {
+    let mut run = Run::new(Fake::new(|s| s.add_pr(1)));
+    run.rebase.fail = Some("conflict".into());
+    run.tick().await;
+    // Labeled again, now in a stack with a PR from a fork: ejected before it joins.
+    run.gh.with_mut(|s| {
+        s.add_stack(10, &[1, 2], &[1]);
+        s.prs.get_mut(&2).unwrap().is_cross_repository = true;
+    });
+    run.tick().await;
+    let of_1: Vec<String> = run
+        .exits()
+        .iter()
+        .filter(|e| e.0 == 1)
+        .map(|e| e.1.clone())
+        .collect();
+    assert_eq!(of_1, ["ejected", "ejected"]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_github_outage_keeps_the_pr_in_its_place() {
     let run = Run::new(Fake::new(|s| {
         s.add_pr(1);
