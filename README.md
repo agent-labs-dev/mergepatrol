@@ -33,6 +33,18 @@ A stack of PRs, made with `gh stack`, is one item of the queue: the label on any
 
 Every merge goes through the asynchronous merge API, stacked or not. A merge still pending when Mergepatrol restarts is waited for, not requested again.
 
+## PRs from forks
+
+A maintainer queues a PR from a fork with the label, as any other. Its author is not trusted as the repo's own are, so the queue treats it differently:
+
+- It merges the PR only as it was when the label went on. Mergepatrol reads that head from the `labeled` webhook, or, without webhooks, from when it first sees the PR. If the author pushes after that, the PR leaves the queue, and a maintainer adds the label again to queue the new commits.
+- It never tests the PR in a batch, whose draft PR runs CI with the repo's secrets. The PR runs alone, with the fork's own CI.
+- It runs no agent on the PR: a plain `git rebase` only. A conflict, or a failed required check, ejects the PR, for its author to fix.
+- It pushes the rebase to the fork, which GitHub allows while the author allows edits by maintainers. Without that, a PR that needs a rebase waits on hold until they allow it. GitHub does not let the App push to a fork that an organization owns, nor push changes to workflow files to a fork: such a PR that needs a rebase is ejected, for its author to rebase.
+- While GitHub waits for a maintainer to approve the fork's workflow runs, the PR waits on hold.
+
+A stack with a PR from a fork is not supported yet.
+
 Status: early. Not ready for use yet.
 
 ## Run it

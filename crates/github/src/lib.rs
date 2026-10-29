@@ -10,6 +10,7 @@ pub use app::{App, Installation, InstallationInfo, RepoInfo, revoke_token};
 pub use checks::{CheckState, Checks, RequiredChecks};
 pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{
-    BranchMerge, MergeOutcome, PrDetails, PullRequest, RepoSnapshot, StackRef, TreeEntry,
+    BranchMerge, HeadRepository, MergeOutcome, PrDetails, PullRequest, RepoOwner, RepoSnapshot,
+    StackRef, TreeEntry,
 };
 pub use setup::{AppCredentials, GithubUser};

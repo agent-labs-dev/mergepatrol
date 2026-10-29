@@ -310,6 +310,29 @@ mod tests {
         assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_owned())]);
     }
 
+    #[sqlx::test(migrations = false)]
+    async fn labeling_a_fork_pr_keeps_its_head_then(pool: PgPool) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;
+        let labeled = |number: u32, head_repo: &str| {
+            format!(
+                r#"{{"action":"labeled","installation":{{"id":7}},"repository":{{"full_name":"o/r"}},"label":{{"name":"mp"}},"pull_request":{{"number":{number},"head":{{"sha":"s{number}","repo":{{"full_name":"{head_repo}"}}}}}}}}"#
+            )
+        };
+        for body in [labeled(1, "fork/r"), labeled(2, "o/r")] {
+            let signature = webhook::sign("hush", body.as_bytes());
+            assert_eq!(
+                deliver(&router, &body, &signature).await,
+                StatusCode::NO_CONTENT
+            );
+        }
+        let repo = mergepatrol_core::RepoName::parse("o/r").unwrap();
+        let head = async |pr| store.label_head(7, &repo, pr, "mp").await.unwrap();
+        assert_eq!(head(1).await.as_deref(), Some("s1"));
+        // A PR from the repo itself needs no pin.
+        assert_eq!(head(2).await, None);
+    }
+
     async fn deliver_push(router: &Router, body: &str) -> StatusCode {
         let req = Request::post("/webhooks/github")
             .header("x-github-event", "push")

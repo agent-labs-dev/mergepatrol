@@ -40,6 +40,8 @@ pub struct EntryView {
     pub author: Option<PersonView>,
     pub created_at: String,
     pub head_ref: String,
+    /// From a fork.
+    pub fork: bool,
     pub additions: u32,
     pub deletions: u32,
     pub changed_files: u32,
@@ -103,6 +105,7 @@ impl EntryView {
             state,
             summary: pr,
             layers,
+            heads: _,
         } = e;
         let (state, detail) = match state {
             EntryState::Waiting => (EntryStateView::Waiting, None),
@@ -119,6 +122,7 @@ impl EntryView {
             author: pr.author.map(PersonView::from),
             created_at: pr.created_at,
             head_ref: pr.head_ref,
+            fork: pr.fork,
             additions: pr.additions as u32,
             deletions: pr.deletions as u32,
             changed_files: pr.changed_files as u32,
@@ -257,7 +261,9 @@ pub struct ExitView {
     pub title: String,
     pub url: String,
     pub author: Option<PersonView>,
-    /// `None` for a PR ejected before it joined, such as one from a fork.
+    /// From a fork.
+    pub fork: bool,
+    /// `None` for a PR ejected before it joined, such as a fork PR the queue cannot rebase.
     pub enqueued_at: Option<String>,
     /// Seconds in each step, in the queue's order. Empty with no `enqueued_at`.
     pub steps: Vec<StepTimeView>,
@@ -590,6 +596,7 @@ impl From<ExitRecord> for ExitView {
             title: e.summary.title,
             url: e.summary.url,
             author: e.summary.author.map(Into::into),
+            fork: e.summary.fork,
             enqueued_at: e.enqueued_at,
             steps: e
                 .steps
@@ -890,6 +897,7 @@ mod tests {
             state,
             summary: PrSummary::default(),
             layers: Vec::new(),
+            heads: Vec::new(),
         }
     }
 

@@ -384,6 +384,7 @@ function Row({ exit: e, showRepo }: { exit: ExitView; showRepo: boolean }) {
         <span className="mt-1 flex items-center gap-2 text-xs text-muted">
           {showRepo && <span>{e.repo}</span>}
           <span className="tabular-nums">#{e.number}</span>
+          {e.fork && <span title="From a fork">Fork</span>}
           {e.author && (
             <span className="flex items-center gap-1">
               <Avatar src={e.author.avatar_url} alt={e.author.login} size="size-4" />

@@ -13,6 +13,8 @@ pub struct Candidate {
     pub summary: PrSummary,
     /// A stack's PRs, bottom to top. Empty for a PR.
     pub layers: Vec<PrNumber>,
+    /// A fork PR's head as it was when the label went on: the code a maintainer queued.
+    pub pin: Option<String>,
 }
 
 /// What the dashboard shows of a PR, as of the last tick. The queue never reads it.
@@ -24,6 +26,9 @@ pub struct PrSummary {
     pub author: Option<Person>,
     pub created_at: String,
     pub head_ref: String,
+    /// From a fork.
+    #[serde(default)]
+    pub fork: bool,
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
@@ -72,6 +77,10 @@ pub struct Entry {
     /// A stack's PRs, bottom to top. Empty for a PR.
     #[serde(default)]
     pub layers: Vec<PrNumber>,
+    /// A fork PR's heads that the queue may merge: the one it was queued at, and each the queue
+    /// published since. Empty for a PR from the repo itself.
+    #[serde(default)]
+    pub heads: Vec<String>,
 }
 
 impl Entry {
@@ -216,6 +225,7 @@ impl Lane {
                         state: hold_state(c),
                         summary: c.summary.clone(),
                         layers: c.layers.clone(),
+                        heads: c.pin.iter().cloned().collect(),
                     });
                     changes.push(LaneChange::Enqueued(c.number));
                     if let Some(reason) = &c.hold {
@@ -305,6 +315,13 @@ impl Lane {
         }
     }
 
+    /// The queue published `head` to a fork PR: it may merge it too.
+    pub fn accept(&mut self, number: PrNumber, head: &str) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.number == number) {
+            e.heads.push(head.to_owned());
+        }
+    }
+
     pub fn remove(&mut self, number: PrNumber) {
         self.entries.retain(|e| e.number != number);
         self.clear_suspect(number);
@@ -351,7 +368,22 @@ mod tests {
             hold: None,
             summary: PrSummary::default(),
             layers: Vec::new(),
+            pin: None,
         }
+    }
+
+    #[test]
+    fn a_fork_pr_joins_with_its_pin_and_takes_the_heads_the_queue_publishes() {
+        let mut lane = Lane::default();
+        lane.sync(&[Candidate {
+            pin: Some("labeled".into()),
+            ..c(1)
+        }]);
+        lane.accept(1, "rebased");
+        assert_eq!(lane.entries[0].heads, ["labeled", "rebased"]);
+        // A later sync keeps them.
+        lane.sync(&[c(1)]);
+        assert_eq!(lane.entries[0].heads, ["labeled", "rebased"]);
     }
 
     #[test]

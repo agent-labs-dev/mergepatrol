@@ -46,7 +46,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
         repo: "o/r".into(),
         clone_url: url.to_str().unwrap().into(),
         token: String::new(),
-        head_ref: "pr".into(),
+        head_ref: "refs/heads/pr".into(),
         head_sha: head.into(),
         trunk: "main".into(),
         trunk_sha: trunk.into(),
@@ -123,7 +123,7 @@ async fn a_stack_layer_replays_only_its_own_commits_onto_the_layer_below() {
     let l1_rebased = commit(&origin, "l1.txt", "layer 1\n");
 
     let spec = JobSpec {
-        head_ref: "l2".into(),
+        head_ref: "refs/heads/l2".into(),
         base_ref: Some("l1-rebased".into()),
         upstream: Some(l1),
         ..spec(&origin, &l2, &l1_rebased)

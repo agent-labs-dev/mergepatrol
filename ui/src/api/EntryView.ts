@@ -13,7 +13,11 @@ detail: string | null, title: string, url: string,
 /**
  * `None` for a deleted account.
  */
-author: PersonView | null, created_at: string, head_ref: string, additions: number, deletions: number, changed_files: number, review_decision: ReviewDecisionView | null, 
+author: PersonView | null, created_at: string, head_ref: string, 
+/**
+ * From a fork.
+ */
+fork: boolean, additions: number, deletions: number, changed_files: number, review_decision: ReviewDecisionView | null, 
 /**
  * Each reviewer's latest approval or change request.
  */

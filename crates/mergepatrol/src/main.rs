@@ -155,6 +155,7 @@ async fn orchestrator() -> Result<()> {
         analytics: analytics.clone(),
         prs: Default::default(),
         job_errors: Default::default(),
+        unpinned: Default::default(),
         config,
     });
 

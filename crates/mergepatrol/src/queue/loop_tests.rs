@@ -8,7 +8,9 @@ use std::sync::Mutex;
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step, StepTimes};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::UPSTREAM;
-use mergepatrol_github::{BranchMerge, Checks, RequiredChecks, StackRef};
+use mergepatrol_github::{
+    BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
+};
 use mergepatrol_store::{
     EventRecord, ExitQuery, ExitRecord, ExitStats, RepoState, SecretRecord, Session, StepStats,
     Workspace,
@@ -77,6 +79,12 @@ struct State {
     merge_hangs: Option<MergeHang>,
     /// Each merged PR's merge commit.
     merge_commits: HashMap<PrNumber, String>,
+    /// Heads that need a rebase onto the trunk. Every other head is on it.
+    behind: Vec<String>,
+    /// Heads whose workflow runs wait for a maintainer's approval.
+    awaiting_approval: Vec<String>,
+    /// PRs that change workflow files.
+    change_workflows: Vec<PrNumber>,
 }
 
 #[derive(Clone, Copy)]
@@ -104,9 +112,25 @@ impl State {
                 head_ref_oid: head,
                 labels: vec![TRIGGER.into()],
                 stack: None,
+                maintainer_can_modify: false,
+                head_repository: None,
                 details: Default::default(),
             },
         );
+    }
+
+    /// A PR from a user's fork, whose author allows edits by maintainers.
+    fn add_fork_pr(&mut self, number: PrNumber) {
+        self.add_pr(number);
+        let pr = self.prs.get_mut(&number).unwrap();
+        pr.is_cross_repository = true;
+        pr.maintainer_can_modify = true;
+        pr.head_repository = Some(HeadRepository {
+            name_with_owner: "someone/r".into(),
+            owner: RepoOwner {
+                kind: "User".into(),
+            },
+        });
     }
 
     /// Stacks the PRs `layers`, bottom to top, as stack `number`. Only `labeled` keep the label.
@@ -314,6 +338,29 @@ impl GitHub for Fake {
         } else {
             s.branches[branch].clone()
         })
+    }
+
+    async fn pull_head(&self, _: &RepoName, number: PrNumber) -> Result<String> {
+        Ok(self.state.lock().unwrap().head(number))
+    }
+
+    async fn behind(&self, _: &RepoName, _: &str, head: &str) -> Result<bool> {
+        Ok(self.state.lock().unwrap().behind.iter().any(|h| h == head))
+    }
+
+    async fn awaiting_approval(&self, _: &RepoName, sha: &str) -> Result<bool> {
+        let s = self.state.lock().unwrap();
+        Ok(s.awaiting_approval.iter().any(|h| h == sha))
+    }
+
+    async fn changes_under(&self, _: &RepoName, number: PrNumber, dir: &str) -> Result<bool> {
+        assert_eq!(dir, ".github/workflows/");
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .change_workflows
+            .contains(&number))
     }
 
     async fn required_checks(&self, _: &RepoName, _: &str) -> Result<RequiredChecks> {
@@ -583,6 +630,8 @@ struct Mem {
     /// Each exit's PR, outcome, and title.
     exits: Mutex<Vec<(PrNumber, String, String)>>,
     config_error: Mutex<Option<String>>,
+    /// The head each PR had when the trigger label went on, as the webhook told.
+    label_heads: Mutex<HashMap<PrNumber, String>>,
 }
 
 #[async_trait]
@@ -646,8 +695,9 @@ impl Store for Mem {
     async fn put_secret(&self, _: Scope, _: &str, _: SecretRecord) -> Result<()> {
         unreachable!()
     }
+    /// None: no self-hosted App, so no webhooks unless a test sets the hosted one.
     async fn secret(&self, _: Scope, _: &str) -> Result<Option<SecretRecord>> {
-        unreachable!()
+        Ok(None)
     }
     async fn delete_secret(&self, _: Scope, _: &str) -> Result<()> {
         unreachable!()
@@ -667,6 +717,26 @@ impl Store for Mem {
     async fn set_config_error(&self, _: u64, _: &RepoName, error: Option<&str>) -> Result<()> {
         *self.config_error.lock().unwrap() = error.map(str::to_owned);
         Ok(())
+    }
+    async fn set_label_head(
+        &self,
+        _: u64,
+        _: &RepoName,
+        _: PrNumber,
+        _: &str,
+        _: &str,
+    ) -> Result<()> {
+        unreachable!()
+    }
+    async fn label_head(
+        &self,
+        _: u64,
+        _: &RepoName,
+        pr: PrNumber,
+        label: &str,
+    ) -> Result<Option<String>> {
+        assert_eq!(label, TRIGGER);
+        Ok(self.label_heads.lock().unwrap().get(&pr).cloned())
     }
     async fn save_workspaces(&self, _: &[Workspace]) -> Result<()> {
         unreachable!()
@@ -726,6 +796,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         analytics: Analytics::default(),
         prs: Default::default(),
         job_errors: Default::default(),
+        unpinned: Default::default(),
     }
 }
 
@@ -1819,4 +1890,285 @@ async fn a_stack_that_gains_a_pr_while_it_runs_runs_again_whole() {
     run.tick().await;
     assert_eq!(run.merged(), [1, 2, 3]);
     assert_eq!(run.gh.with(|s| s.merges), 1);
+}
+
+fn fork_pr(s: &mut State) {
+    s.required = vec!["ci".into()];
+    s.add_fork_pr(1);
+}
+
+fn last_comment(run: &Run) -> String {
+    run.gh.with(|s| s.comments.last().unwrap().1.clone())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_is_rebased_checked_and_merged() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        // The PR API lags behind the queue's own publish to the fork.
+        s.lag_reads = 2;
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_is_never_tested_in_a_batch() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.add_fork_pr(3);
+        s.add_pr(4);
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1, 2, 3, 4]);
+    // The batch stops before the fork PR, which runs alone. The PR after it runs alone too: a
+    // batch needs two.
+    assert_eq!(
+        run.gh.with(|s| s.drafts.clone()),
+        ["PR 1 (+1 in a Mergepatrol batch)"]
+    );
+    assert!(run.kinds(3).contains(&"rebasing".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_push_to_a_fork_pr_after_it_was_queued_takes_it_out_of_the_queue() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.checks.insert("ci".into(), CheckState::Pending);
+    }));
+    run.gh.then(|s| s.push(1, "untrusted"));
+    run.drain().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(&run.kinds(1)[3..], ["pushed", "dequeued"]);
+    assert!(run.labels(1).is_empty(), "{:?}", run.labels(1));
+    let comment = last_comment(&run);
+    assert!(
+        comment.contains("Dequeued: new commits were pushed"),
+        "{comment}"
+    );
+    assert!(
+        run.exits()
+            .iter()
+            .any(|(n, o, _)| *n == 1 && o == "dequeued")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_pushed_to_since_its_label_went_on_is_not_queued() {
+    let run = Run::new(Fake::new(fork_pr));
+    run.store
+        .label_heads
+        .lock()
+        .unwrap()
+        .insert(1, "what-the-maintainer-saw".into());
+    // The pull ref may only lag behind the label: it waits a while first.
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert!(run.kinds(1).is_empty());
+    tokio::time::advance(PIN_WAIT).await;
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["pushed"]);
+    assert!(run.labels(1).is_empty());
+    assert!(run.merged().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_goes_by_its_pull_ref_which_the_pr_lags_behind() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        // Pushed just before the label went on: GraphQL still shows the head before.
+        s.branches.insert("pr-1".into(), "pr-1-v1".into());
+    }));
+    run.store
+        .label_heads
+        .lock()
+        .unwrap()
+        .insert(1, "pr-1-v1".into());
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+/// A Mergepatrol that GitHub delivers webhooks to.
+fn with_webhooks(run: &mut Run) {
+    run.ctx.config.public_url = "https://mergepatrol.example".into();
+    run.ctx.hosted_app = Some(AppCredentials {
+        id: 1,
+        slug: "mp".into(),
+        client_id: "c".into(),
+        client_secret: "s".into(),
+        webhook_secret: Some("hush".into()),
+        pem: String::new(),
+        owner: "o".into(),
+        html_url: "https://github.com/apps/mp".into(),
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_webhooks_a_fork_pr_waits_for_the_labeled_webhook() {
+    let mut run = Run::new(Fake::new(fork_pr));
+    with_webhooks(&mut run);
+    // Polled before the webhook came: the author may have pushed since the label.
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert!(run.lane().is_empty());
+    run.store
+        .label_heads
+        .lock()
+        .unwrap()
+        .insert(1, "pr-1-v0".into());
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_labeled_again_waits_afresh_for_its_webhook() {
+    let mut run = Run::new(Fake::new(fork_pr));
+    with_webhooks(&mut run);
+    run.tick().await;
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.clear());
+    run.tick().await;
+    tokio::time::advance(PIN_WAIT).await;
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.push(TRIGGER.into()));
+    // Polled before the new label's webhook.
+    run.tick().await;
+    assert!(run.kinds(1).is_empty());
+    assert_eq!(run.labels(1), [TRIGGER]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_webhooks_a_fork_pr_whose_webhook_never_comes_leaves() {
+    let mut run = Run::new(Fake::new(fork_pr));
+    with_webhooks(&mut run);
+    run.tick().await;
+    tokio::time::advance(PIN_WAIT).await;
+    run.tick().await;
+    assert_eq!(run.kinds(1), ["unpinned"]);
+    assert!(run.labels(1).is_empty());
+    assert!(last_comment(&run).contains("no webhook for its label"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_queues_at_the_head_its_label_went_on_at() {
+    let run = Run::new(Fake::new(fork_pr));
+    run.store
+        .label_heads
+        .lock()
+        .unwrap()
+        .insert(1, "pr-1-v0".into());
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_agent_fixes_a_fork_pr_whose_checks_fail() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.checks.insert("ci".into(), CheckState::Failed);
+    }));
+    run.drain().await;
+    assert!(run.rebase.fixed().is_empty());
+    assert_eq!(run.kinds(1).last().unwrap(), "ejected");
+    assert_eq!(run.labels(1), [FAILED]);
+    assert!(last_comment(&run).contains("required checks failed: ci"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_that_needs_a_rebase_waits_until_its_author_allows_edits() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.prs.get_mut(&1).unwrap().maintainer_can_modify = false;
+        s.behind.push("pr-1-v0".into());
+    }));
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    assert!(last_comment(&run).contains("only once its author allows edits by maintainers"));
+    run.tick().await;
+    assert_eq!(run.gh.with(|s| s.comments.len()), 1);
+
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().maintainer_can_modify = true);
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(&run.kinds(1)[2..4], ["released", "rebasing"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_on_the_trunk_needs_no_edits_by_maintainers() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.prs.get_mut(&1).unwrap().maintainer_can_modify = false;
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_behind_the_trunk_from_an_organization_is_ejected() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        let pr = s.prs.get_mut(&1).unwrap();
+        pr.maintainer_can_modify = false;
+        pr.head_repository.as_mut().unwrap().owner.kind = "Organization".into();
+        s.behind.push("pr-1-v0".into());
+    }));
+    run.drain().await;
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = last_comment(&run);
+    assert!(
+        comment.contains("a fork that an organization owns"),
+        "{comment}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_behind_the_trunk_that_changes_workflows_is_ejected() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.behind.push("pr-1-v0".into());
+        s.change_workflows.push(1);
+    }));
+    run.drain().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
+    assert!(last_comment(&run).contains("changes workflow files"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_whose_ci_waits_for_approval_is_held_until_a_maintainer_approves() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        // GitHub holds the runs on the head the queue publishes, and shows them as failed.
+        s.awaiting_approval.push("pr-1-r1".into());
+        let failed = BTreeMap::from([("ci".to_owned(), CheckState::Failed)]);
+        s.checks_on.insert("pr-1-r1".into(), failed);
+    }));
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.lane(), [(1, format!("Held({AWAITING_APPROVAL:?})"))]);
+    assert!(last_comment(&run).contains(AWAITING_APPROVAL));
+    // It stays held, without a word more.
+    let comments = run.gh.with(|s| s.comments.len());
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.gh.with(|s| s.comments.len()), comments);
+
+    run.gh.with_mut(|s| {
+        s.awaiting_approval.clear();
+        s.checks_on.clear();
+    });
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_with_a_pr_from_a_fork_is_ejected() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[1]);
+        s.prs.get_mut(&2).unwrap().is_cross_repository = true;
+    }));
+    run.drain().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
 }

@@ -17,7 +17,9 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 ## What the queue does
 
-Mergepatrol rebases the PR onto the default branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The queue only serves PRs that target the default branch, from branches in this repo, and stacks of PRs (from `gh stack`) that merge into it.
+Mergepatrol rebases the PR onto the default branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The queue only serves PRs that target the default branch, and stacks of PRs (from `gh stack`) that merge into it.
+
+A PR from a fork merges only as it was when the label went on: a push to it after that takes it out of the queue, until a maintainer adds `<label>` again. It never joins a batch, gets no agent, and is ejected on a conflict or a failed check. Mergepatrol can push its rebase only while the author allows edits by maintainers.
 
 A stack is one item of the queue. The label on any of its PRs queues the whole stack, and the stack waits until every PR in it is ready. Mergepatrol rebases every layer when the stack is behind, and merges the stack all at once: every PR, or none. When it ejects a stack, every PR in it gets `<label>:failed`.
 
