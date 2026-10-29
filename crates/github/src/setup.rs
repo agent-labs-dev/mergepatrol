@@ -73,6 +73,14 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
     })
 }
 
+/// The hosted App: the same App, public, so any account can install it.
+pub fn hosted_manifest(public_url: &str) -> Value {
+    let mut m = manifest(public_url, "");
+    m["name"] = json!("Mergepatrol");
+    m["public"] = json!(true);
+    m
+}
+
 /// Where the browser posts the manifest form.
 pub fn manifest_form_url(owner: &str, organization: bool, state: &str) -> Result<String> {
     let base = if organization {
@@ -277,6 +285,16 @@ mod tests {
         assert_eq!(m["redirect_url"], "http://localhost:8080/setup/callback");
         assert_eq!(m["callback_urls"][0], "http://localhost:8080/auth/callback");
         assert!(m["name"].as_str().unwrap().len() <= 34);
+    }
+
+    #[test]
+    fn the_hosted_app_is_public() {
+        let m = hosted_manifest("https://mergepatrol.ai");
+        assert_eq!(m["public"], true);
+        assert_eq!(
+            m["hook_attributes"]["url"],
+            "https://mergepatrol.ai/webhooks/github"
+        );
     }
 
     #[test]

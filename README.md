@@ -111,6 +111,8 @@ The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for
 
 `deploy/gcp/bootstrap.sh` sets up one environment in a GCP project with billing linked, and deploys it with `deploy/gcp/cloudbuild.yaml`. The orchestrator runs as the Cloud Run service `mergepatrol`, as one instance that is always on, with Cloud SQL Postgres. Each job runs as an execution of the Cloud Run Job `mergepatrol-job`, which Cloud Run sandboxes with gVisor. The job's service account has no roles, and the job has no way into the orchestrator but its link: `<MERGEPATROL_PUBLIC_URL>/jobs/<token>`. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done. The token is in the execution's arguments, so anyone who can read the project's Cloud Run executions can see it.
 
+This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public App `Mergepatrol`, which any account can install; each workspace brings its own Anthropic API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
+
 | Variable | What it is |
 | --- | --- |
 | `MERGEPATROL_CLOUD_RUN_JOB` | `projects/<p>/locations/<r>/jobs/<name>`, with `MERGEPATROL_EXECUTOR=cloud-run` |
