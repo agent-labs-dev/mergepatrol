@@ -74,6 +74,8 @@ struct State {
     stacks: BTreeMap<PrNumber, Vec<PrNumber>>,
     /// How many PR reads fail next, as in a GitHub outage.
     outage: u32,
+    /// How many label removals fail next.
+    failing_label_removals: u32,
     /// Whether the next merge never answers, as when a restart cuts the wait short. `Merged`:
     /// GitHub merges it meanwhile; `Pending`: not yet.
     merge_hangs: Option<MergeHang>,
@@ -504,6 +506,10 @@ impl GitHub for Fake {
 
     async fn remove_label(&self, _: &RepoName, number: PrNumber, label: &str) -> Result<()> {
         let mut s = self.state.lock().unwrap();
+        if s.failing_label_removals > 0 {
+            s.failing_label_removals -= 1;
+            bail!("DELETE /issues/{number}/labels/{label}: 502 Bad Gateway");
+        }
         s.prs
             .get_mut(&number)
             .unwrap()
@@ -681,6 +687,21 @@ impl Store for Mem {
         let exit = (pr, outcome.into(), summary.title.clone());
         self.exits.lock().unwrap().push(exit);
         Ok(None)
+    }
+    async fn has_left(&self, _: &LaneKey, pr: PrNumber) -> Result<bool> {
+        let events = self.events.lock().unwrap();
+        let joined = events
+            .iter()
+            .filter(|(n, kind, _)| *n == pr && kind == "enqueued")
+            .count();
+        let left = self
+            .exits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, ..)| *n == pr)
+            .count();
+        Ok(joined > 0 && left >= joined)
     }
     async fn exits(&self, _: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
         unreachable!()
@@ -1287,6 +1308,22 @@ async fn a_merged_pr_leaves_no_refs_in_the_cache() {
         git(&["for-each-ref", "--format=%(refname)", "refs/mergepatrol"]),
         "refs/mergepatrol/pr/2"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tick_cut_short_after_a_merge_records_it_once() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.failing_label_removals = 1;
+    }));
+    // The merge goes through, then a label removal fails, before the lane is saved.
+    assert!(run.try_tick().await.is_err());
+    assert_eq!(run.merged(), [1]);
+    // The next tick finds the PR closed: it leaves the lane, but its exit is already there.
+    run.tick().await;
+    assert_eq!(run.exits().len(), 1, "{:?}", run.exits());
+    assert_eq!(run.exits()[0].1, "merged");
+    assert!(run.lane().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

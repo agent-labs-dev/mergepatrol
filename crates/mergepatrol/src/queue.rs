@@ -1547,6 +1547,11 @@ async fn exit(
     detail: &str,
     reason: Option<&str>,
 ) -> Result<()> {
+    // A tick cut short after the exit, before it saved the lane, sees the PR leave again.
+    if ctx.store.has_left(key, number).await? {
+        tracing::info!(repo = %key.repo, pr = number, outcome, "already left the queue");
+        return Ok(());
+    }
     log(ctx, key, number, outcome, detail).await?;
     forget_refs(ctx, key, number).await;
     let summary = ctx.prs.get(key, number).unwrap_or_default();
