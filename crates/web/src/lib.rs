@@ -6,7 +6,6 @@ mod auth;
 mod ui;
 mod webhook;
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -49,8 +48,6 @@ struct AppState {
     public_url: Arc<str>,
     hosted_app: Option<Arc<AppCredentials>>,
     setup_token: Arc<Mutex<Option<String>>>,
-    /// OAuth and manifest flows in progress, by their `state` parameter.
-    pending: Arc<Mutex<HashMap<String, auth::Pending>>>,
     wake: Arc<dyn Wake>,
     repo_defaults: Arc<RepoSettings>,
     analytics: Analytics,
@@ -79,7 +76,6 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         public_url: config.public_url.trim_end_matches('/').into(),
         hosted_app: config.hosted_app.map(Arc::new),
         setup_token: Arc::new(Mutex::new(config.setup_token)),
-        pending: Arc::default(),
         wake: config.wake,
         repo_defaults: Arc::new(config.repo_defaults),
         analytics: config.analytics,
@@ -194,7 +190,12 @@ mod tests {
             .create_session(&auth::hash("tok"), &Session { kind, expires_at })
             .await
             .unwrap();
-        let config = WebConfig {
+        let config = web_config(hosted_app, wake);
+        (router(store, vault, config), "mp_session=tok".into())
+    }
+
+    fn web_config(hosted_app: Option<AppCredentials>, wake: Arc<Woken>) -> WebConfig {
+        WebConfig {
             hosted_app,
             public_url: "http://localhost:8080".into(),
             setup_token: None,
@@ -211,8 +212,118 @@ mod tests {
                 fix_ci: Default::default(),
             },
             analytics: Analytics::default(),
+        }
+    }
+
+    /// Another process on the same database: as after a restart, or on another instance.
+    async fn restarted(pool: PgPool, hosted_app: Option<AppCredentials>) -> Router {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool).await.unwrap());
+        let vault = Arc::new(Vault::new(store.clone(), KEY).unwrap());
+        router(store, vault, web_config(hosted_app, Arc::default()))
+    }
+
+    /// Where a redirect goes, and the cookies it sets.
+    fn redirect(res: &Response) -> (String, Vec<String>) {
+        let location = res.headers()["location"].to_str().unwrap().to_owned();
+        let cookies = res
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|c| c.to_str().unwrap().split(';').next().unwrap().to_owned())
+            .collect();
+        (location, cookies)
+    }
+
+    fn query_param(url: &str, name: &str) -> String {
+        url.split(['?', '&'])
+            .find_map(|p| p.strip_prefix(&format!("{name}=")))
+            .unwrap()
+            .to_owned()
+    }
+
+    async fn send(router: &Router, req: Request<Body>) -> Response {
+        router.clone().oneshot(req).await.unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_sign_in_survives_a_restart(pool: PgPool) {
+        let (before, _) = with_app(pool.clone(), Some(app(None)), Arc::default()).await;
+        let res = send(
+            &before,
+            Request::get("/auth/login").body(Body::empty()).unwrap(),
+        )
+        .await;
+        let (to_github, cookies) = redirect(&res);
+        let state = query_param(&to_github, "state");
+        let oauth = cookies.iter().find(|c| c.starts_with("mp_oauth=")).unwrap();
+
+        let after = restarted(pool, Some(app(None))).await;
+        let callback = |cookie: Option<&str>| {
+            let mut req = Request::get(format!("/auth/callback?code=c&state={state}"));
+            if let Some(c) = cookie {
+                req = req.header("cookie", c);
+            }
+            req.body(Body::empty()).unwrap()
         };
-        (router(store, vault, config), "mp_session=tok".into())
+        // Past the check of the state, up to GitHub's exchange of the code, which fails here.
+        let (back, _) = redirect(&send(&after, callback(Some(oauth))).await);
+        assert!(back.starts_with("/?error="), "{back}");
+        assert!(
+            !back.contains("expired") && !back.contains("another"),
+            "{back}"
+        );
+        // Without the browser's cookie, refused.
+        let (back, _) = redirect(&send(&after, callback(None)).await);
+        assert!(back.contains("another%20browser"), "{back}");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn creating_the_app_survives_a_restart(pool: PgPool) {
+        let (before, _) = with_app(pool.clone(), None, Arc::default()).await;
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let expires_at = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 600) as i64;
+        let setup = Session {
+            kind: SessionKind::Setup,
+            expires_at,
+        };
+        store
+            .create_session(&auth::hash("setup"), &setup)
+            .await
+            .unwrap();
+        let start = Request::post("/api/setup/manifest")
+            .header("cookie", "mp_session=setup")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"owner":"acme","organization":true}"#))
+            .unwrap();
+        let res = send(&before, start).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let manifest = res
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|c| c.to_str().unwrap().split(';').next().unwrap().to_owned())
+            .find(|c| c.starts_with("mp_manifest="))
+            .unwrap();
+        let state = manifest.strip_prefix("mp_manifest=").unwrap().to_owned();
+
+        let after = restarted(pool, None).await;
+        let callback = |cookie: Option<&str>| {
+            let mut req = Request::get(format!("/setup/callback?code=c&state={state}"));
+            if let Some(c) = cookie {
+                req = req.header("cookie", c);
+            }
+            req.body(Body::empty()).unwrap()
+        };
+        // Past the check of the state, up to GitHub's conversion of the code, which fails here.
+        let (back, _) = redirect(&send(&after, callback(Some(&manifest))).await);
+        assert!(back.starts_with("/?error="), "{back}");
+        assert!(!back.contains("expired"), "{back}");
+        let (back, _) = redirect(&send(&after, callback(None)).await);
+        assert!(back.contains("expired"), "{back}");
     }
 
     async fn get(router: &Router, path: &str, cookie: Option<&str>) -> StatusCode {
