@@ -225,7 +225,8 @@ pub trait Store: Send + Sync {
     /// Holds the session until `until` to read its installations again, unless another
     /// request holds it at `now`. Whether this one got it.
     async fn claim_session_check(&self, token_hash: &str, now: i64, until: i64) -> Result<bool>;
-    /// Saves a check's result, and lets go of the session.
+    /// Saves a check's result. The hold stays until it runs out: a check that saved has moved
+    /// `checked_at`, so no request is due another for an hour anyway.
     async fn update_session(&self, token_hash: &str, session: &Session) -> Result<()>;
     async fn create_login_code(&self, code_hash: &str, code: &LoginCode) -> Result<()>;
     /// Deletes the code and returns it, if it has not expired by `now`: a code works once.
@@ -1088,7 +1089,7 @@ impl Store for PgStore {
         };
         sqlx::query(
             "UPDATE sessions SET installations = $2, expires_at = $3, checked_at = $4,
-                github_nonce = $5, github_ciphertext = $6, checking_until = 0
+                github_nonce = $5, github_ciphertext = $6
              WHERE token_hash = $1",
         )
         .bind(token_hash)
@@ -1321,8 +1322,14 @@ mod tests {
         session.expires_at = now + 3600;
         store.update_session("a", &session).await.unwrap();
         assert_eq!(store.session("a").await.unwrap(), Some(session));
-        // Saving lets go too.
-        assert!(store.claim_session_check("a", now, now + 30).await.unwrap());
+        // Saving keeps the hold: a request that read the session before the save cannot check
+        // again with what it read.
+        assert!(
+            !store
+                .claim_session_check("a", now + 31, now + 61)
+                .await
+                .unwrap()
+        );
     }
 
     #[sqlx::test(migrations = false)]

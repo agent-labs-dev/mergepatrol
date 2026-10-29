@@ -624,6 +624,14 @@ async fn current_session(headers: &HeaderMap, state: &AppState) -> anyhow::Resul
     {
         return still_valid(session, now);
     }
+    // A check that finished since this request read the session spent its refresh token: start
+    // from what that check saved.
+    let Some(session) = state.store.session(&token_hash).await? else {
+        return Ok(None);
+    };
+    if !check_due(&session, now) {
+        return Ok(Some(session));
+    }
     match recheck(state, &token_hash, &session, now).await {
         Ok(checked) => Ok(Some(checked)),
         Err(e) if e.downcast_ref::<Revoked>().is_some() => {
@@ -691,6 +699,7 @@ async fn recheck(
             .ok_or_else(|| anyhow::anyhow!("no GitHub App yet"))?;
         token = setup::refresh_user_token(&creds, refresh).await?;
         // GitHub spent the old refresh token: keep the new one before anything else can fail.
+        // The hold stays, so no other request checks with the old one meanwhile.
         checked.github = Some(state.vault.seal(&name, &serde_json::to_string(&token)?)?);
         state.store.update_session(token_hash, &checked).await?;
     }
@@ -703,6 +712,8 @@ async fn recheck(
     };
     checked.checked_at = now;
     checked.expires_at = now + USER_SESSION.as_secs() as i64;
+    // Sealed again each time, so a key rotation reaches every session in use.
+    checked.github = Some(state.vault.seal(&name, &serde_json::to_string(&token)?)?);
     state.store.update_session(token_hash, &checked).await?;
     Ok(checked)
 }
