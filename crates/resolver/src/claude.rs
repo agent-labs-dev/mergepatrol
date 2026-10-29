@@ -1,14 +1,10 @@
-use std::process::Stdio;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
-use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use std::path::Path;
-
-use crate::{FixRequest, GIVE_UP, Resolution, ResolveRequest, Resolver, fix_prompt, prompt};
+use crate::{FixRequest, Resolution, ResolveRequest, Resolver, cli, fix_prompt, gave_up, prompt};
 
 /// Runs Claude Code headless (`claude -p`) in the job's worktree.
 pub struct ClaudeResolver {
@@ -46,7 +42,7 @@ impl ClaudeResolver {
             .clone()
             .context("no Anthropic API key: add one in the dashboard settings")?;
         let mut cmd = tokio::process::Command::new("claude");
-        cmd.current_dir(workdir).kill_on_drop(true);
+        cmd.current_dir(workdir);
         // `--bare` reads only ANTHROPIC_API_KEY, never a login on the machine.
         cmd.env("ANTHROPIC_API_KEY", key);
         if let Some(url) = &self.base_url {
@@ -65,10 +61,7 @@ impl ClaudeResolver {
             // Anything not in the allowlist is denied, never prompted.
             .args(["--permission-mode", "dontAsk"])
             .arg("--allowedTools")
-            .arg(Self::allowed_tools(verify))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .arg(Self::allowed_tools(verify));
         Ok(cmd)
     }
 
@@ -79,59 +72,25 @@ impl ClaudeResolver {
         verify: &[String],
         transcript_path: &Path,
     ) -> Result<Resolution> {
-        let mut child = self
-            .command(workdir, prompt, verify)?
-            .spawn()
-            .context("spawn claude")?;
-        let stdout = child.stdout.take().context("claude stdout")?;
-        // Drain stderr as it comes, so a full pipe never blocks the CLI.
-        let mut stderr = child.stderr.take().context("claude stderr")?;
-        let stderr = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut err = String::new();
-            let _ = stderr.read_to_string(&mut err).await;
-            err
-        });
-        if let Some(dir) = transcript_path.parent() {
-            tokio::fs::create_dir_all(dir).await?;
-        }
-        let mut transcript = tokio::fs::File::create(transcript_path).await?;
-
-        let read = async {
-            let mut lines = BufReader::new(stdout).lines();
-            let mut turns = 0;
-            let mut result = None;
-            while let Some(line) = lines.next_line().await? {
-                transcript.write_all(line.as_bytes()).await?;
-                transcript.write_all(b"\n").await?;
-                let Ok(event) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                match event["type"].as_str() {
-                    Some("assistant") => {
-                        turns += 1;
-                        if turns > self.max_turns {
-                            bail!("Claude went over {} turns", self.max_turns);
-                        }
+        let cmd = self.command(workdir, prompt, verify)?;
+        let mut turns = 0;
+        let mut result = None;
+        let (status, stderr) = cli::stream(cmd, "claude", self.timeout, transcript_path, |event| {
+            match event["type"].as_str() {
+                Some("assistant") => {
+                    turns += 1;
+                    if turns > self.max_turns {
+                        bail!("Claude went over {} turns", self.max_turns);
                     }
-                    Some("result") => result = Some(event),
-                    _ => {}
                 }
+                Some("result") => result = Some(event.clone()),
+                _ => {}
             }
-            anyhow::Ok((turns, result))
-        };
-
-        let (turns, result) = match tokio::time::timeout(self.timeout, read).await {
-            Ok(r) => r?,
-            Err(_) => bail!("Claude did not finish in {:?}", self.timeout),
-        };
-        let status = child.wait().await?;
-        let result = match result {
-            Some(r) => r,
-            None => bail!(
-                "claude exited ({status}) with no result: {}",
-                stderr.await?.trim()
-            ),
+            Ok(())
+        })
+        .await?;
+        let Some(result) = result else {
+            bail!("claude exited ({status}) with no result: {}", stderr.trim());
         };
 
         if result["is_error"].as_bool() == Some(true) {
@@ -144,8 +103,8 @@ impl ClaudeResolver {
             );
         }
         let text = result["result"].as_str().unwrap_or_default();
-        if let Some(reason) = text.lines().find_map(|l| l.trim().strip_prefix(GIVE_UP)) {
-            return Ok(Resolution::GaveUp(reason.trim().to_owned()));
+        if let Some(reason) = gave_up(text) {
+            return Ok(Resolution::GaveUp(reason));
         }
         Ok(Resolution::Resolved {
             turns,
@@ -178,37 +137,6 @@ impl Resolver for ClaudeResolver {
             req.transcript,
         )
         .await
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum KeyCheck {
-    Valid,
-    Invalid(String),
-}
-
-/// Asks the Anthropic API whether `key` works, with the cheapest call there is: list one model.
-pub async fn check_anthropic_key(key: &str) -> Result<KeyCheck> {
-    let res = reqwest::Client::new()
-        .get("https://api.anthropic.com/v1/models?limit=1")
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .context("could not reach the Anthropic API")?;
-    let status = res.status();
-    if status.is_success() {
-        return Ok(KeyCheck::Valid);
-    }
-    let body: Value = res.json().await.unwrap_or_default();
-    let message = body["error"]["message"]
-        .as_str()
-        .unwrap_or("rejected")
-        .to_owned();
-    match status.as_u16() {
-        401 | 403 => Ok(KeyCheck::Invalid(message)),
-        _ => bail!("the Anthropic API answered {status}: {message}"),
     }
 }
 

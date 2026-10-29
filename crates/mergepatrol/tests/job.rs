@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use mergepatrol_core::CheckFailure;
+use mergepatrol_core::{CheckFailure, Provider};
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
 use mergepatrol_executor::{Executor, LocalExecutor};
 
@@ -56,11 +56,12 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
         pr_body: String::new(),
         verify: Vec::new(),
         resolver: ResolverSpec {
+            provider: Default::default(),
             model: "claude-opus-5-5".into(),
             effort: "medium".into(),
             timeout_secs: 60,
             max_turns: 5,
-            anthropic: None,
+            api: None,
         },
         task: Default::default(),
     }
@@ -197,6 +198,33 @@ async fn fix_without_a_key_fails_with_the_reason() {
     assert!(!out.join(BUNDLE_FILE).exists());
 }
 
+#[tokio::test]
+async fn an_openai_fix_runs_codex_and_needs_its_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.provider = Provider::OpenAi;
+    spec.resolver.model = "gpt-6.1-sol".into();
+    spec.task = Task::FixChecks {
+        failures: vec![CheckFailure {
+            name: "ci".into(),
+            details: "it broke".into(),
+        }],
+    };
+    let out = tmp.path().join("out");
+    let result = executor().run("t4", &spec, &out).await.unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    // Codex says whose key is missing; the Claude CLI would ask for Anthropic's.
+    assert!(reason.contains("no OpenAI API key"), "{reason}");
+    assert_eq!(result.events[0].kind, "fixing");
+    assert!(!out.join(BUNDLE_FILE).exists());
+}
+
 /// The same clean rebase, in a container from the job image, through `DockerExecutor`.
 /// Needs Docker, `docker build --target job -t mergepatrol-job:latest .`, and `git daemon`.
 /// `cargo test -p mergepatrol --test job -- --ignored`
@@ -305,4 +333,92 @@ async fn a_cut_off_docker_job_leaves_no_container() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     panic!("the container is still there: {}", containers());
+}
+
+/// The whole OpenAI path: the job hits a conflict, and Codex resolves it through the
+/// orchestrator's proxy, which holds the key. Needs `codex` on PATH and OPENAI_API_KEY. For
+/// another Responses API as the upstream, set JOB_LIVE_OPENAI_UPSTREAM (without `/v1`),
+/// JOB_LIVE_OPENAI_KEY and JOB_LIVE_OPENAI_MODEL.
+/// `cargo test -p mergepatrol --test job -- --ignored an_openai_conflict`
+#[tokio::test]
+#[ignore = "needs codex and an API key"]
+async fn an_openai_conflict_is_resolved_through_the_proxy() {
+    use std::sync::Arc;
+
+    use mergepatrol_executor::protocol::ApiAccess;
+    use mergepatrol_executor::proxy::{Api, ApiProxy, Upstreams};
+
+    let env = |name: &str| std::env::var(name).ok();
+    let proxy = Arc::new(ApiProxy::new(Upstreams {
+        openai: env("JOB_LIVE_OPENAI_UPSTREAM").unwrap_or_else(|| "https://api.openai.com".into()),
+        ..Upstreams::default()
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, proxy.clone().router()).into_future());
+    let key = env("JOB_LIVE_OPENAI_KEY")
+        .or_else(|| env("OPENAI_API_KEY"))
+        .expect("an API key");
+    let granted = proxy.grant(Provider::OpenAi, key.into(), 100);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    commit(
+        &origin,
+        "greet.py",
+        "def greet(name):\n    return 'Hello ' + name\n",
+    );
+    git(&origin, &["checkout", "-q", "-b", "pr"]);
+    let head = commit(
+        &origin,
+        "greet.py",
+        "def greet(name):\n    return 'Hello, ' + name + '!'\n",
+    );
+    git(&origin, &["checkout", "-q", "main"]);
+    let trunk = commit(
+        &origin,
+        "greet.py",
+        "def greet(person):\n    return 'Hello ' + person\n",
+    );
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.pr_title = "Friendlier greeting".into();
+    spec.resolver.provider = Provider::OpenAi;
+    spec.resolver.model = env("JOB_LIVE_OPENAI_MODEL").unwrap_or_else(|| "gpt-6.1-sol".into());
+    spec.resolver.timeout_secs = 300;
+    spec.resolver.max_turns = 30;
+    spec.resolver.api = Some(ApiAccess {
+        base_url: Api::of(Provider::OpenAi, &spec.resolver.model).base_url(&proxy_url),
+        token: granted.token.clone(),
+    });
+    let out = tmp.path().join("out");
+    let executor = LocalExecutor {
+        program: env!("CARGO_BIN_EXE_mergepatrol").into(),
+        timeout: Duration::from_secs(360),
+    };
+    let result = executor.run("live", &spec, &out).await.unwrap();
+    println!("{:#?}", result.events);
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    assert!(result.events.iter().any(|e| e.kind == "resolved"));
+
+    // The resolution keeps both sides: the trunk's rename, and the PR's punctuation.
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "main"]);
+    let bundle = out.join(BUNDLE_FILE);
+    git(
+        &check,
+        &["fetch", "-q", bundle.to_str().unwrap(), "refs/heads/result"],
+    );
+    let resolved = git(&check, &["show", "FETCH_HEAD:greet.py"]);
+    println!("{resolved}");
+    assert!(
+        resolved.contains("person") && resolved.contains('!'),
+        "{resolved}"
+    );
+    let log = git(&check, &["log", "-1", "--format=%B", "FETCH_HEAD"]);
+    assert!(log.contains("Resolved-by: mergepatrol, codex ("), "{log}");
 }

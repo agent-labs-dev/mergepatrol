@@ -86,7 +86,7 @@ if ! secret mergepatrol-database-url; then
     "$DB_USER" "$PASSWORD" "$DB" "$PROJECT" "$REGION" "$SQL" \
     | g secrets create mergepatrol-database-url --data-file=-
 fi
-# Encrypts the GitHub App and the Anthropic keys in the database. Without it, set up again.
+# Encrypts the GitHub App and the model API keys in the database. Without it, set up again.
 secret mergepatrol-secret-key \
   || openssl rand -base64 32 | tr -d '\n' | g secrets create mergepatrol-secret-key --data-file=-
 

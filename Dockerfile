@@ -28,11 +28,11 @@ EXPOSE 8080
 ENTRYPOINT ["mergepatrol"]
 
 FROM node:24-bookworm-slim AS job
-# The default job image: git, the Claude CLI, and common toolchains for verify commands.
+# The default job image: git, the Claude and Codex CLIs, and common toolchains for verify commands.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates build-essential pkg-config python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @anthropic-ai/claude-code @openai/codex \
     && corepack enable
 COPY --from=golang:1-bookworm /usr/local/go /usr/local/go
 COPY --from=rust:1-slim-bookworm /usr/local/rustup /usr/local/rustup

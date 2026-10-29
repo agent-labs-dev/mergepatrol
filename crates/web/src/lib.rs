@@ -108,8 +108,8 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         )
         .route("/api/w/{id}/settings", get(api::settings))
         .route(
-            "/api/w/{id}/settings/anthropic-api-key",
-            put(api::set_anthropic_key).delete(api::delete_anthropic_key),
+            "/api/w/{id}/settings/api-keys/{provider}",
+            put(api::set_api_key).delete(api::delete_api_key),
         )
         .fallback(ui::serve)
         .with_state(state)
@@ -203,6 +203,7 @@ mod tests {
                 label: "mergepatrol".into(),
                 batch_size: 8,
                 resolver: mergepatrol_core::ResolverSettings {
+                    provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),
                 },

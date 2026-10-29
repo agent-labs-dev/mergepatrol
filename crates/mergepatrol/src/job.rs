@@ -11,11 +11,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::CheckFailure;
 use mergepatrol_executor::protocol::{
-    BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, Task,
+    BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, ResolverSpec, Task,
 };
+use mergepatrol_executor::proxy::Api;
 use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
-use mergepatrol_resolver::{ClaudeResolver, FixRequest, Resolution, ResolveRequest, Resolver};
+use mergepatrol_resolver::{
+    ClaudeResolver, CodexResolver, FixRequest, Resolution, ResolveRequest, Resolver,
+};
 use tokio::io::AsyncReadExt;
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -94,24 +97,17 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     }
     git.checkout_detached(dir, &spec.head_sha).await?;
 
-    let anthropic = spec.resolver.anthropic.as_ref();
-    let resolver = ClaudeResolver {
-        api_key: anthropic.map(|a| a.token.clone()),
-        base_url: anthropic.map(|a| a.base_url.clone()),
-        model: spec.resolver.model.clone(),
-        effort: spec.resolver.effort.clone(),
-        timeout: Duration::from_secs(spec.resolver.timeout_secs),
-        max_turns: spec.resolver.max_turns,
-    };
+    let resolver = resolver(&spec.resolver);
+    let resolver = resolver.as_ref();
 
     // The bundle holds the commits on top of what the orchestrator already has.
     let (exclude, done) = match &spec.task {
         Task::Rebase => {
-            rebase(spec, &git, &resolver, dir, out, events).await?;
+            rebase(spec, &git, resolver, dir, out, events).await?;
             (&spec.trunk_sha, "rebased")
         }
         Task::FixChecks { failures } => {
-            fix(spec, &git, &resolver, failures, dir, out, events).await?;
+            fix(spec, &git, resolver, failures, dir, out, events).await?;
             (&spec.head_sha, "fixed")
         }
     };
@@ -123,10 +119,40 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     Ok(())
 }
 
+/// The agent for the spec's model: the Claude CLI for the Messages API, Codex for the Responses
+/// API.
+fn resolver(spec: &ResolverSpec) -> Box<dyn Resolver> {
+    let token = spec.api.as_ref().map(|a| a.token.clone());
+    let timeout = Duration::from_secs(spec.timeout_secs);
+    match Api::of(spec.provider, &spec.model) {
+        Api::Messages => Box::new(ClaudeResolver {
+            api_key: token,
+            base_url: spec.api.as_ref().map(|a| a.base_url.clone()),
+            model: spec.model.clone(),
+            effort: spec.effort.clone(),
+            timeout,
+            max_turns: spec.max_turns,
+        }),
+        Api::Responses => Box::new(CodexResolver {
+            provider: spec.provider,
+            api_key: token,
+            base_url: spec
+                .api
+                .as_ref()
+                .map(|a| a.base_url.clone())
+                .unwrap_or_default(),
+            model: spec.model.clone(),
+            effort: spec.effort.clone(),
+            timeout,
+            max_turns: spec.max_turns,
+        }),
+    }
+}
+
 async fn rebase(
     spec: &JobSpec,
     git: &Git,
-    resolver: &ClaudeResolver,
+    resolver: &dyn Resolver,
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
@@ -137,10 +163,11 @@ async fn rebase(
         .await?;
     while let RebaseStep::Conflict { commit, files } = step {
         event(events, "conflict", files.join(", "));
-        if resolver.api_key.is_none() {
+        if spec.resolver.api.is_none() {
             bail!(
-                "it conflicts in {}, and the job has no Anthropic API key for an agent to resolve that",
-                files.join(", ")
+                "it conflicts in {}, and the job has no {} API key for an agent to resolve that",
+                files.join(", "),
+                spec.resolver.provider.name()
             );
         }
         let commit_message = git.commit_message(dir, &commit).await?;
@@ -200,7 +227,7 @@ async fn rebase(
 async fn fix(
     spec: &JobSpec,
     git: &Git,
-    resolver: &ClaudeResolver,
+    resolver: &dyn Resolver,
     failures: &[CheckFailure],
     dir: &Path,
     out: &Path,

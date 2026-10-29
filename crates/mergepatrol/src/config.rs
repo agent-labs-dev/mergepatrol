@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mergepatrol_core::{RepoSettings, ResolverSettings};
+use mergepatrol_core::{Provider, RepoSettings, ResolverSettings};
 
 /// Settings from the environment. Everything else is set up in the dashboard, or in each repo's
 /// config file.
@@ -65,18 +65,33 @@ pub struct HostedApp {
 impl Config {
     pub fn from_env() -> Result<Self> {
         let secret_key = secret_key()?;
+        let provider = match var("MERGEPATROL_PROVIDER") {
+            Some(p) => Provider::parse(&p).with_context(|| {
+                format!("MERGEPATROL_PROVIDER: {p:?} is not anthropic or openai")
+            })?,
+            None => Provider::Anthropic,
+        };
+        let model = match (provider, var("MERGEPATROL_MODEL")) {
+            (_, Some(model)) => model,
+            (Provider::Anthropic, None) => "claude-opus-5-5".into(),
+            (_, None) => bail!(
+                "MERGEPATROL_MODEL: set the {} model to use",
+                provider.name()
+            ),
+        };
         let repo_defaults = RepoSettings {
             label: opt("MERGEPATROL_LABEL", "mergepatrol"),
             batch_size: opt("MERGEPATROL_BATCH_SIZE", "8").parse()?,
             resolver: ResolverSettings {
-                model: opt("MERGEPATROL_MODEL", "claude-opus-5-5"),
+                provider,
+                model,
                 effort: opt("MERGEPATROL_EFFORT", "medium"),
             },
             verify: Vec::new(),
             fix_ci: Default::default(),
         };
         repo_defaults.check().map_err(|e| {
-            anyhow::anyhow!("MERGEPATROL_LABEL, _BATCH_SIZE, _MODEL or _EFFORT: {e}")
+            anyhow::anyhow!("MERGEPATROL_LABEL, _BATCH_SIZE, _PROVIDER, _MODEL or _EFFORT: {e}")
         })?;
         let public_url = opt("MERGEPATROL_PUBLIC_URL", "http://localhost:8080");
         Ok(Self {

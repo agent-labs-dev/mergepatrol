@@ -177,22 +177,22 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
   );
 }
 
-/** Across every page while the workspace has no Anthropic API key, until one is added. */
+/** Across every page while the workspace has no model API key, until one is added. */
 function NoKeyBanner({ workspace, account }: { workspace: number; account: string }) {
   const settings = useQuery({
     queryKey: ["settings", workspace],
     queryFn: () => fetchSettings(workspace),
   });
   const onSettings = useMatchRoute()({ to: "/$account/settings" });
-  if (!settings.data || settings.data.anthropic_api_key) return null;
+  if (!settings.data || settings.data.api_keys.some((k) => k.key)) return null;
   return (
     <div className="flex items-center gap-3 bg-amber-400 px-5 py-2 text-sm text-amber-950">
       <svg viewBox="0 0 16 16" className="size-4 shrink-0 fill-current" aria-hidden>
         <path d="M8.9 1.5a1 1 0 0 0-1.8 0L.6 13a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L8.9 1.5ZM7.25 6h1.5v4h-1.5V6Zm0 5.25h1.5v1.5h-1.5v-1.5Z" />
       </svg>
       <span>
-        <span className="font-semibold">No Anthropic API key.</span> Without it, Mergepatrol can't
-        resolve rebase conflicts or fix failed checks, so those PRs leave the queue.
+        <span className="font-semibold">No API key.</span> Without one, Mergepatrol can't resolve
+        rebase conflicts or fix failed checks, so those PRs leave the queue.
       </span>
       {!onSettings && (
         <Link

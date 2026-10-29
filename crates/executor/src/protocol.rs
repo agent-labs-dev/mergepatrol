@@ -1,7 +1,7 @@
 //! What crosses the sandbox boundary. The orchestrator writes a `JobSpec` to the job's stdin.
 //! The job writes `result.json`, and on success `result.bundle`, to its output directory.
 
-use mergepatrol_core::CheckFailure;
+use mergepatrol_core::{CheckFailure, Provider};
 use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
@@ -51,19 +51,24 @@ pub enum Task {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ResolverSpec {
+    #[serde(default)]
+    pub provider: Provider,
     pub model: String,
     pub effort: String,
     pub timeout_secs: u64,
     pub max_turns: u32,
-    /// The Anthropic API, through the orchestrator's proxy. `None` when the workspace has no
-    /// key: then a conflict fails the job.
-    pub anthropic: Option<AnthropicAccess>,
+    /// The provider's API, through the orchestrator's proxy. `None` when the workspace has no
+    /// key for it: then a conflict fails the job. The alias reads an orchestrator's spec from
+    /// before other providers, while a deploy rolls out the job image first.
+    #[serde(alias = "anthropic")]
+    pub api: Option<ApiAccess>,
 }
 
-/// The job calls the Anthropic API at `base_url` with `token`, which the proxy swaps for the
+/// The job calls the provider's API at `base_url` with `token`, which the proxy swaps for the
 /// workspace's key. The key itself never reaches the job.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct AnthropicAccess {
+pub struct ApiAccess {
+    /// Where the agent's CLI sends its requests, as it expects its base URL.
     pub base_url: String,
     /// Good until the job ends.
     pub token: String,

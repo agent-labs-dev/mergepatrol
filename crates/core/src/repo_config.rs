@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Provider;
+
 pub const REPO_CONFIG_PATH: &str = ".mergepatrol/mergepatrol.yml";
 
 /// The resolver's `--effort` values.
@@ -23,6 +25,9 @@ pub struct RepoSettings {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolverSettings {
+    /// Whose model the agent runs, with the workspace's key for it.
+    #[serde(default)]
+    pub provider: Provider,
     pub model: String,
     pub effort: String,
 }
@@ -108,6 +113,7 @@ struct RepoConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResolverConfig {
+    provider: Option<Provider>,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -141,10 +147,22 @@ impl RepoSettings {
                 config.version
             ));
         }
+        // The default model is the default provider's: another provider needs its own.
+        let provider = config
+            .resolver
+            .provider
+            .unwrap_or(defaults.resolver.provider);
+        if provider != defaults.resolver.provider && config.resolver.model.is_none() {
+            return Err(format!(
+                "{REPO_CONFIG_PATH}: resolver.model: set the {} model to use",
+                provider.name()
+            ));
+        }
         let settings = Self {
             label: config.label.unwrap_or_else(|| defaults.label.clone()),
             batch_size: config.batch_size.unwrap_or(defaults.batch_size),
             resolver: ResolverSettings {
+                provider,
                 model: config
                     .resolver
                     .model
@@ -176,6 +194,12 @@ impl RepoSettings {
         }
         if self.batch_size == 0 {
             return Err("batch_size: 0 merges nothing; 1 is one PR at a time".into());
+        }
+        if !Provider::SUPPORTED.contains(&self.resolver.provider) {
+            return Err(format!(
+                "resolver.provider: {} is not supported yet",
+                self.resolver.provider.as_str()
+            ));
         }
         if self.resolver.model.trim().is_empty() {
             return Err("resolver.model is empty".into());
@@ -230,12 +254,40 @@ mod tests {
             label: "mergepatrol".into(),
             batch_size: 8,
             resolver: ResolverSettings {
+                provider: Provider::Anthropic,
                 model: "claude-opus-5-5".into(),
                 effort: "medium".into(),
             },
             verify: vec![],
             fix_ci: FixCiSettings::default(),
         }
+    }
+
+    #[test]
+    fn another_provider_names_its_model() {
+        let s = RepoSettings::from_file(
+            Some(
+                "version: 1
+resolver: { provider: openai, model: gpt-6.1-sol }
+",
+            ),
+            &defaults(),
+        )
+        .unwrap();
+        assert_eq!(s.resolver.provider, Provider::OpenAi);
+        assert_eq!(s.resolver.model, "gpt-6.1-sol");
+        assert_eq!(s.resolver.effort, "medium");
+
+        let err = RepoSettings::from_file(
+            Some(
+                "version: 1
+resolver: { provider: openai }
+",
+            ),
+            &defaults(),
+        )
+        .unwrap_err();
+        assert!(err.contains("set the OpenAI model"), "{err}");
     }
 
     #[test]
@@ -276,6 +328,8 @@ mod tests {
         s.label = "queue".into();
         s.verify = vec!["cargo check".into(), "pnpm test -- --run".into()];
         s.fix_ci.enabled = false;
+        s.resolver.provider = Provider::OpenAi;
+        s.resolver.model = "gpt-6.1-sol".into();
         assert_eq!(
             RepoSettings::from_file(Some(&s.to_yaml()), &defaults()),
             Ok(s)
@@ -289,6 +343,8 @@ mod tests {
             "version: 1\nbatchsize: 2\n",
             "version: 1\nbatch_size: 0\n",
             "version: 1\nresolver: { effort: extreme }\n",
+            "version: 1\nresolver: { provider: gemini, model: g }\n",
+            "version: 1\nresolver: { provider: openrouter, model: qwen/qwen3-coder }\n",
             "version: 1\nlabel: ''\n",
             "version: 1\nfix_ci: { attempts: 0 }\n",
             "version: 1\nfix_ci: { attempts: 6 }\n",

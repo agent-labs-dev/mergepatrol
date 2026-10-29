@@ -97,7 +97,7 @@ steps:
       - --min-instances=1
       - --max-instances=1
       - --no-cpu-throttling
-      # A job's Anthropic calls stream through the orchestrator, and one can outlast the
+      # A job's model API calls stream through the orchestrator, and one can outlast the
       # default 300s request timeout.
       - --timeout=3600
       - --cpu=2

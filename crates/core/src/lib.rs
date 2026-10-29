@@ -21,13 +21,43 @@ use serde::{Deserialize, Serialize};
 pub type PrNumber = u64;
 
 /// Who runs the agent's model, with the workspace's own key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
+    #[default]
     Anthropic,
     OpenAi,
     /// Any model OpenRouter serves, through its Anthropic or its OpenAI API.
     OpenRouter,
+}
+
+impl Provider {
+    /// The providers a repo can choose.
+    pub const SUPPORTED: [Provider; 2] = [Provider::Anthropic, Provider::OpenAi];
+
+    pub fn parse(s: &str) -> Option<Provider> {
+        [Provider::Anthropic, Provider::OpenAi, Provider::OpenRouter]
+            .into_iter()
+            .find(|p| p.as_str() == s)
+    }
+
+    /// As in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "anthropic",
+            Provider::OpenAi => "openai",
+            Provider::OpenRouter => "openrouter",
+        }
+    }
+
+    /// As people write it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "Anthropic",
+            Provider::OpenAi => "OpenAI",
+            Provider::OpenRouter => "OpenRouter",
+        }
+    }
 }
 
 /// A required check that failed, with what GitHub shows of why: the check's output, its
