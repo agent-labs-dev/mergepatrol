@@ -149,6 +149,7 @@ async fn orchestrator() -> Result<()> {
         jobs: Semaphore::new(config.max_jobs),
         wakers: Arc::default(),
         analytics: analytics.clone(),
+        authors: Default::default(),
         config,
     });
 

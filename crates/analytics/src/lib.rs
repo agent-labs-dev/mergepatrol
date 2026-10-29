@@ -1,8 +1,9 @@
 //! Product analytics for the hosted Mergepatrol, in PostHog. Off without a project key, so a
 //! self-hosted Mergepatrol sends nothing.
 //!
-//! A person is a GitHub login. A group of type `workspace` is an installation of the App, keyed
-//! by its installation ID: the organization or account that uses Mergepatrol.
+//! A person is a GitHub login: a signed-in user, or the author of a queued PR. A group of type
+//! `workspace` is an installation of the App, keyed by its installation ID: the organization or
+//! account that uses Mergepatrol.
 
 use std::sync::Arc;
 
@@ -68,21 +69,25 @@ impl Analytics {
         self.send(batch);
     }
 
-    /// A queue event, such as `merged` or `ejected`, as `pr <kind>`. It belongs to the
-    /// workspace, not to a person: the queue acts on its own.
-    pub fn queue_event(&self, installation_id: u64, repo: &str, trunk: &str, pr: u64, kind: &str) {
-        let workspace = installation_id.to_string();
-        self.send(vec![json!({
-            "event": format!("pr {kind}"),
-            "distinct_id": format!("workspace:{workspace}"),
-            "properties": {
-                "repo": repo,
-                "trunk": trunk,
-                "pr": pr,
-                "$groups": { WORKSPACE: workspace },
-                "$process_person_profile": false,
-            },
-        })]);
+    /// A queue event, such as `merged` or `ejected`, as `pr <kind>`. It counts for the PR's
+    /// author, by GitHub login, whether or not they ever signed in.
+    pub fn queue_event(
+        &self,
+        installation_id: u64,
+        repo: &str,
+        trunk: &str,
+        pr: u64,
+        kind: &str,
+        author: Option<&str>,
+    ) {
+        self.send(vec![queue_event(
+            installation_id,
+            repo,
+            trunk,
+            pr,
+            kind,
+            author,
+        )]);
     }
 
     /// Fire and forget: analytics never hold up or fail the caller.
@@ -104,6 +109,39 @@ impl Analytics {
     }
 }
 
+/// PostHog attaches `$groups` only to an event with a person, so an author-less one (a deleted
+/// account) counts for no workspace.
+fn queue_event(
+    installation_id: u64,
+    repo: &str,
+    trunk: &str,
+    pr: u64,
+    kind: &str,
+    author: Option<&str>,
+) -> Value {
+    let workspace = installation_id.to_string();
+    let mut properties = json!({
+        "repo": repo,
+        "trunk": trunk,
+        "pr": pr,
+        "$groups": { WORKSPACE: &workspace },
+        // The server's location, not the person's.
+        "$geoip_disable": true,
+    });
+    let distinct_id = match author {
+        Some(login) => {
+            // `$set_once`: a signed-in user's own profile wins.
+            properties["$set_once"] = json!({ "login": login, "name": login });
+            login.to_owned()
+        }
+        None => {
+            properties["$process_person_profile"] = json!(false);
+            format!("workspace:{workspace}")
+        }
+    };
+    json!({ "event": format!("pr {kind}"), "distinct_id": distinct_id, "properties": properties })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,7 +151,25 @@ mod tests {
         let analytics = Analytics::new(None, "https://us.i.posthog.com");
         assert!(analytics.browser().is_none());
         // Nothing to send to, and nothing spawned.
-        analytics.queue_event(1, "o/r", "main", 2, "merged");
+        analytics.queue_event(1, "o/r", "main", 2, "merged", Some("ann"));
+    }
+
+    #[test]
+    fn a_queue_event_counts_for_its_author_and_workspace() {
+        let event = queue_event(7, "o/r", "main", 2, "merged", Some("ann"));
+        assert_eq!(event["event"], "pr merged");
+        assert_eq!(event["distinct_id"], "ann");
+        let props = &event["properties"];
+        assert_eq!(props["$groups"]["workspace"], "7");
+        assert_eq!(props["$set_once"]["login"], "ann");
+        assert!(props.get("$process_person_profile").is_none());
+    }
+
+    #[test]
+    fn without_an_author_a_queue_event_has_no_person() {
+        let event = queue_event(7, "o/r", "main", 2, "merged", None);
+        assert_eq!(event["distinct_id"], "workspace:7");
+        assert_eq!(event["properties"]["$process_person_profile"], false);
     }
 
     #[test]
