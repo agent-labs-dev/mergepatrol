@@ -62,6 +62,8 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
         "public": false,
         "default_permissions": {
             "contents": "write",
+            // Classic branch protection: its required checks, and whether the trunk is strict.
+            "administration": "read",
             "pull_requests": "write",
             "issues": "write",
             "checks": "read",

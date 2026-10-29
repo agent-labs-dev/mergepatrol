@@ -4,6 +4,18 @@ Mergepatrol is a merge queue for GitHub. Add a label to a pull request, and Merg
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
+## Batches
+
+A queue that runs CI once per PR merges a few PRs an hour. So when several queued PRs have passed their own checks, Mergepatrol tests them together:
+
+1. It merges them, in queue order, onto a branch `mergepatrol/batch-<PRs>` at the base branch, and opens a draft PR from it, so the repo's `pull_request` CI runs on the combination. The draft's title is the first PR's title, plus a note, so a PR title check passes.
+2. When the required checks pass, it merges the PRs one by one, as they are: no rebase, and no second CI run. Each merge must leave the base branch at the tree that the batch tested, else it stops.
+3. It deletes the branch, which closes the draft PR.
+
+When a batch fails, Mergepatrol tests half of it next, and so on down to one PR, which runs alone: rebased, with its own checks. That PR is ejected; the rest merge.
+
+A PR runs alone when its own checks have not passed, when it conflicts with the PRs ahead of it, and on a base branch that requires PRs to be up to date before they merge. Mergepatrol reads that setting from the rulesets, and from classic branch protection with the App's `administration: read` permission. Without the permission, every base branch counts as requiring it. An App created before this permission existed must be given it on GitHub.
+
 Status: early. Not ready for use yet.
 
 ## Run it
@@ -59,6 +71,7 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
 | `MERGEPATROL_LABEL` | `mergepatrol` | The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
+| `MERGEPATROL_BATCH_SIZE` | `8` | The most PRs tested together. `1` merges one PR at a time |
 | `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
 | `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's model |

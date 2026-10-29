@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use mergepatrol_executor::LocalExecutor;
-use mergepatrol_github::Checks;
+use mergepatrol_github::{BranchMerge, Checks, RequiredChecks};
 use mergepatrol_store::{EventRecord, RepoSetting, SecretRecord, Session, Workspace};
 
 use super::*;
@@ -38,6 +38,7 @@ struct State {
     lag_reads: u32,
     stale: HashMap<PrNumber, (String, u32)>,
     required: Vec<String>,
+    strict: bool,
     /// The checks on every commit, unless `checks_on` has the commit.
     checks: BTreeMap<String, CheckState>,
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
@@ -45,6 +46,19 @@ struct State {
     merges: u32,
     /// Merged PRs stay, closed, as on GitHub.
     merged: Vec<PrNumber>,
+    /// Trees by commit, as the PRs merged into them in order: `t-1-2`. Unknown commits are `t`.
+    trees: HashMap<String, String>,
+    /// The PR whose change breaks CI: every commit that has it fails `ci`.
+    breaks: Option<PrNumber>,
+    /// PRs that conflict when merged into a batch.
+    conflicts: Vec<PrNumber>,
+    /// PRs whose merge GitHub rejects.
+    rejects: Vec<PrNumber>,
+    /// PRs whose squash merge comes out as another tree than the batch's.
+    diverges: Vec<PrNumber>,
+    /// The titles of the draft PRs opened, and the branches deleted.
+    drafts: Vec<String>,
+    deleted: Vec<String>,
 }
 
 impl State {
@@ -82,6 +96,18 @@ impl State {
 
     fn head(&self, number: PrNumber) -> String {
         self.branches[&self.prs[&number].head_ref_name].clone()
+    }
+
+    fn tree(&self, sha: &str) -> String {
+        self.trees.get(sha).cloned().unwrap_or_else(|| "t".into())
+    }
+
+    /// Whether `sha` has the breaking PR: merged into its tree, or rebased as its head.
+    fn broken(&self, sha: &str) -> bool {
+        self.breaks.is_some_and(|b| {
+            self.tree(sha).split('-').any(|n| n == b.to_string())
+                || sha.starts_with(&format!("pr-{b}-r"))
+        })
     }
 }
 
@@ -151,8 +177,12 @@ impl GitHub for Fake {
         })
     }
 
-    async fn required_checks(&self, _: &RepoName, _: &str) -> Result<Vec<String>> {
-        Ok(self.state.lock().unwrap().required.clone())
+    async fn required_checks(&self, _: &RepoName, _: &str) -> Result<RequiredChecks> {
+        let s = self.state.lock().unwrap();
+        Ok(RequiredChecks {
+            names: s.required.clone(),
+            strict: s.strict,
+        })
     }
 
     async fn checks(&self, _: &RepoName, sha: &str) -> Result<Checks> {
@@ -161,7 +191,10 @@ impl GitHub for Fake {
         if let Some(action) = action {
             action(&mut s);
         }
-        let by_name = s.checks_on.get(sha).unwrap_or(&s.checks).clone();
+        let mut by_name = s.checks_on.get(sha).unwrap_or(&s.checks).clone();
+        if s.broken(sha) {
+            by_name.insert("ci".into(), CheckState::Failed);
+        }
         Ok(Checks { by_name })
     }
 
@@ -176,12 +209,77 @@ impl GitHub for Fake {
         if s.head(number) != sha {
             return Ok(MergeOutcome::Rejected("head moved".into()));
         }
+        if s.rejects.contains(&number) {
+            return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
+        }
         s.merges += 1;
+        let mut tree = format!("{}-{number}", s.tree(&s.trunk.clone()));
+        if s.diverges.contains(&number) {
+            tree.push('x');
+        }
         s.trunk = format!("merge-{number}");
+        let trunk = s.trunk.clone();
+        s.trees.insert(trunk, tree);
         s.merged.push(number);
         Ok(MergeOutcome::Merged {
             sha: s.trunk.clone(),
         })
+    }
+
+    async fn create_branch(&self, _: &RepoName, branch: &str, sha: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        assert!(!s.branches.contains_key(branch), "{branch} exists");
+        s.branches.insert(branch.into(), sha.into());
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _: &RepoName, branch: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        if s.branches.remove(branch).is_some() {
+            s.deleted.push(branch.into());
+        }
+        Ok(())
+    }
+
+    async fn merge_into_branch(
+        &self,
+        _: &RepoName,
+        branch: &str,
+        head: &str,
+        _: &str,
+    ) -> Result<Option<BranchMerge>> {
+        let mut s = self.state.lock().unwrap();
+        let number = *s
+            .prs
+            .keys()
+            .find(|n| s.head(**n) == head)
+            .expect("a PR head");
+        if s.conflicts.contains(&number) {
+            return Ok(None);
+        }
+        let tree = format!("{}-{number}", s.tree(&s.branches[branch]));
+        let sha = format!("{branch}@{tree}");
+        s.trees.insert(sha.clone(), tree.clone());
+        s.branches.insert(branch.into(), sha.clone());
+        Ok(Some(BranchMerge { sha, tree }))
+    }
+
+    async fn open_draft_pr(
+        &self,
+        _: &RepoName,
+        head: &str,
+        base: &str,
+        title: &str,
+        _: &str,
+    ) -> Result<PrNumber> {
+        let mut s = self.state.lock().unwrap();
+        assert!(s.branches.contains_key(head) && base == "main");
+        s.drafts.push(title.into());
+        Ok(1000 + s.drafts.len() as PrNumber)
+    }
+
+    async fn commit_tree(&self, _: &RepoName, sha: &str) -> Result<String> {
+        Ok(self.state.lock().unwrap().tree(sha))
     }
 
     async fn add_label(&self, _: &RepoName, number: PrNumber, label: &str) -> Result<()> {
@@ -348,6 +446,8 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             model: String::new(),
             effort: String::new(),
             max_jobs: 1,
+            // One PR at a time, unless a test batches.
+            batch_size: 1,
             executor: ExecutorConfig::Local,
         },
         hosted_app: None,
@@ -378,6 +478,26 @@ impl Run {
             store,
             gh,
         }
+    }
+
+    fn batching(gh: Arc<Fake>) -> Self {
+        let mut run = Self::new(gh);
+        run.ctx.config.batch_size = 8;
+        run
+    }
+
+    /// Ticks until the lane is idle.
+    async fn drain(&self) {
+        for _ in 0..20 {
+            if matches!(self.tick().await, Ran::Idle) {
+                return;
+            }
+        }
+        panic!("the lane does not drain: {:?}", self.lane());
+    }
+
+    fn merged(&self) -> Vec<PrNumber> {
+        self.gh.with(|s| s.merged.clone())
     }
 
     async fn tick(&self) -> Ran {
@@ -587,4 +707,214 @@ async fn queued_prs_merge_one_after_the_other() {
     assert!(matches!(run.tick().await, Ran::Job));
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-2");
     assert!(matches!(run.tick().await, Ran::Idle));
+}
+
+fn prs(numbers: &[PrNumber]) -> impl FnOnce(&mut State) {
+    let numbers = numbers.to_vec();
+    move |s| {
+        s.required = vec!["ci".into()];
+        for n in numbers {
+            s.add_pr(n);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn green_prs_are_tested_together_and_merged_without_a_rebase() {
+    let run = Run::batching(Fake::new(prs(&[1, 2, 3])));
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.merged(), [1, 2, 3]);
+    assert_eq!(run.rebase.count(), 0);
+    assert_eq!(run.gh.with(|s| s.tree(&s.trunk)), "t-1-2-3");
+    assert_eq!(
+        run.gh.with(|s| s.drafts.clone()),
+        ["PR 1 (+2 in a Mergepatrol batch)"]
+    );
+    // The batch's branch is gone, which closes its draft PR.
+    assert_eq!(
+        run.gh.with(|s| s.deleted.clone()),
+        ["mergepatrol/batch-1-2-3"]
+    );
+    assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
+    assert!(run.lane().is_empty());
+    let lane = run
+        .store
+        .lanes
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(lane.batch_branch, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_batch_is_bisected_to_the_pr_that_broke_it() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2, 3, 4])(s);
+        s.breaks = Some(3);
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1, 2, 4]);
+    assert_eq!(run.labels(3), [FAILED]);
+    // 1-2-3-4 failed, 1-2 passed, 3-4 failed, 3 alone failed, then 4 alone.
+    assert_eq!(run.gh.with(|s| s.drafts.len()), 3);
+    assert_eq!(
+        run.kinds(3),
+        [
+            "enqueued",
+            "batch",
+            "batch-failed",
+            "batch",
+            "batch-failed",
+            "rebasing",
+            "published",
+            "ejected"
+        ]
+    );
+    let lane = run
+        .store
+        .lanes
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(lane.bisect, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_strict_trunk_merges_one_pr_at_a_time() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.strict = true;
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(run.rebase.count(), 2);
+    assert!(run.gh.with(|s| s.drafts.is_empty()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_whose_own_checks_have_not_passed_runs_alone() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2, 3])(s);
+        let head = s.head(1);
+        s.checks_on
+            .insert(head, [("ci".into(), CheckState::Failed)].into());
+    }));
+    run.tick().await;
+    // Rebased onto the trunk, where its checks run again.
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.rebase.count(), 1);
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2, 3]);
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_stops_at_the_first_conflict() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2, 3, 4])(s);
+        s.conflicts = vec![3];
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(
+        run.gh.with(|s| s.drafts.clone()),
+        ["PR 1 (+1 in a Mergepatrol batch)"]
+    );
+    // 3 conflicts even as the first of a batch, so it is rebased alone.
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2, 3]);
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_trunk_moving_while_a_batch_is_tested_builds_it_again() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    // The checks of both PRs are read, then the batch's.
+    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    run.gh.then(|_| {});
+    run.gh.then(|_| {});
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into());
+        s.trunk = "outside".into();
+    });
+    run.gh.then(|s| {
+        s.checks_on.remove(BATCH);
+    });
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.kinds(1), ["enqueued", "batch", "batch-stopped"]);
+    assert_eq!(run.lane().len(), 2);
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_that_leaves_another_tree_stops_the_batch() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2, 3])(s);
+        s.diverges = vec![1];
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.kinds(1).last().unwrap(), "diverged");
+    assert_eq!(
+        run.lane(),
+        [(2, "Waiting".to_owned()), (3, "Waiting".to_owned())]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rejected_merge_ejects_that_pr_and_stops_the_batch() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2, 3])(s);
+        s.rejects = vec![2];
+    }));
+    let start = Instant::now();
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.labels(2), [FAILED]);
+    assert!(start.elapsed() >= MERGE_RETRY_AFTER * MERGE_RETRIES);
+    assert_eq!(run.lane(), [(3, "Waiting".to_owned())]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_cut_short_by_a_restart_is_built_again() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let mut lane = Lane::default();
+    lane.sync(&[
+        Candidate {
+            number: 1,
+            priority: false,
+            hold: None,
+        },
+        Candidate {
+            number: 2,
+            priority: false,
+            hold: None,
+        },
+    ]);
+    lane.activate(1);
+    lane.activate(2);
+    lane.batch_branch = Some("mergepatrol/batch-1-2".into());
+    run.store.lanes.lock().unwrap().insert(key, lane);
+    run.gh
+        .state
+        .lock()
+        .unwrap()
+        .branches
+        .insert("mergepatrol/batch-1-2".into(), "stale".into());
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
 }

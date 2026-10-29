@@ -16,7 +16,8 @@ use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec};
 use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
-    App, AppCredentials, CheckState, Installation, MergeOutcome, PullRequest, RepoSnapshot,
+    App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
+    RepoSnapshot,
 };
 use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Scope, Store, Vault};
 use tokio::sync::{Notify, Semaphore};
@@ -35,6 +36,8 @@ const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const RESOLVER_MAX_TURNS: u32 = 50;
 const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
+const MERGE_RETRIES: u32 = 3;
+const MERGE_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 pub struct Ctx {
     pub config: Config,
@@ -208,20 +211,64 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
     }
     ctx.store.save_lane(&key, &lane).await?;
 
-    // Jobs run inside the tick, so an active entry here was cut short by a restart: run it again.
-    let Some(number) = lane.active().or_else(|| lane.next()) else {
+    // Jobs run inside the tick, so a job still active here was cut short by a restart. A single
+    // PR runs again; a batch is built again.
+    if let Some(branch) = lane.batch_branch.take() {
+        gh.delete_branch(repo, &branch).await?;
+        lane.stop();
+        ctx.store.save_lane(&key, &lane).await?;
+    }
+    let mut next = lane.active();
+    if next.is_empty() {
+        next = lane.next(ctx.config.batch_size);
+    }
+    let Some(&number) = next.first() else {
         return Ok(Ran::Idle);
     };
+    let required = gh.required_checks(repo, &key.trunk).await?;
+
+    // GitHub merges a PR behind the trunk, which a batch's PRs are, unless the trunk is strict.
+    if next.len() > 1 && !required.strict {
+        let prs = batchable(gh, repo, &snap, &required.names, &next).await?;
+        if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &prs).await? {
+            run_batch(ctx, gh, &key, &snap, &required.names, &mut lane, batch).await?;
+            return Ok(Ran::Job);
+        }
+    }
+
     lane.activate(number);
     ctx.store.save_lane(&key, &lane).await?;
 
     let _slot = ctx.jobs.acquire().await?;
-    let outcome = match run_job(ctx, gh, rebase, &key, &snap, number).await {
+    let outcome = match run_job(ctx, gh, rebase, &key, &snap, &required.names, number).await {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
     finish(ctx, gh, &key, &mut lane, number, outcome).await?;
     Ok(Ran::Job)
+}
+
+/// The PRs of `next` that can join a batch as they are, in order, up to the first that cannot:
+/// GitHub must merge each without a rebase, so its own required checks have passed.
+async fn batchable(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    snap: &RepoSnapshot,
+    required: &[String],
+    next: &[PrNumber],
+) -> Result<Vec<PullRequest>> {
+    let mut prs = Vec::new();
+    for number in next {
+        let Some(pr) = snap.labeled.iter().find(|p| p.number == *number) else {
+            break;
+        };
+        let checks = gh.checks(repo, &pr.head_ref_oid).await?;
+        if checks.verdict(required).0 != CheckState::Passed {
+            break;
+        }
+        prs.push(pr.clone());
+    }
+    Ok(prs)
 }
 
 async fn finish(
@@ -244,7 +291,7 @@ async fn finish(
             }
         }
         Outcome::Ejected(reason) => {
-            lane.remove(number);
+            lane.eject(number);
             eject(ctx, gh, key, number, &format!("Ejected: {reason}.")).await?;
         }
         Outcome::Held(reason) => {
@@ -263,6 +310,293 @@ async fn finish(
         }
     }
     ctx.store.save_lane(key, lane).await
+}
+
+/// PRs merged together on a branch of their own, which a draft PR puts through CI.
+struct Batch {
+    branch: String,
+    /// Each PR, with the merge commit it made on the branch.
+    steps: Vec<(PullRequest, BranchMerge)>,
+}
+
+/// Merges `prs` one after the other onto a new branch at the trunk, up to the first that
+/// conflicts. `None` when fewer than two merged: the first PR then runs alone.
+async fn build_batch(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    lane: &mut Lane,
+    prs: &[PullRequest],
+) -> Result<Option<Batch>> {
+    if prs.len() < 2 {
+        return Ok(None);
+    }
+    let repo = &key.repo;
+    let numbers: Vec<String> = prs.iter().map(|p| p.number.to_string()).collect();
+    let branch = format!("mergepatrol/batch-{}", numbers.join("-"));
+    lane.batch_branch = Some(branch.clone());
+    ctx.store.save_lane(key, lane).await?;
+
+    // A batch of the same PRs that stopped earlier left its branch.
+    gh.delete_branch(repo, &branch).await?;
+    gh.create_branch(repo, &branch, &snap.trunk_sha).await?;
+    let mut steps = Vec::new();
+    for pr in prs {
+        let message = format!("Merge #{} into the batch", pr.number);
+        match gh
+            .merge_into_branch(repo, &branch, &pr.head_ref_oid, &message)
+            .await?
+        {
+            Some(m) => steps.push((pr.clone(), m)),
+            None => break,
+        }
+    }
+    if steps.len() < 2 {
+        gh.delete_branch(repo, &branch).await?;
+        lane.batch_branch = None;
+        ctx.store.save_lane(key, lane).await?;
+        return Ok(None);
+    }
+    Ok(Some(Batch { branch, steps }))
+}
+
+/// How a batch's checks ended.
+enum Tested {
+    Passed,
+    Failed(Vec<String>),
+    /// Something changed under the batch, so what it tested is stale.
+    Stale(String),
+}
+
+/// Puts a batch through CI on a draft PR. When it passes, merges its PRs in order, each only
+/// while the trunk comes out as the tree the batch tested. The PRs it does not finish go back
+/// to their places.
+async fn run_batch(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    required: &[String],
+    lane: &mut Lane,
+    batch: Batch,
+) -> Result<()> {
+    let repo = &key.repo;
+    let members: Vec<PrNumber> = batch.steps.iter().map(|(pr, _)| pr.number).collect();
+    for n in &members {
+        lane.activate(*n);
+    }
+    ctx.store.save_lane(key, lane).await?;
+
+    let result = test_and_merge(ctx, gh, key, snap, required, lane, &batch, &members).await;
+    // Deleting the branch closes the draft PR.
+    gh.delete_branch(repo, &batch.branch).await?;
+    lane.batch_branch = None;
+    lane.stop();
+    ctx.store.save_lane(key, lane).await?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn test_and_merge(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    required: &[String],
+    lane: &mut Lane,
+    batch: &Batch,
+    members: &[PrNumber],
+) -> Result<()> {
+    let repo = &key.repo;
+    let (first, _) = &batch.steps[0];
+    let refs = |except: PrNumber| -> String {
+        members
+            .iter()
+            .filter(|n| **n != except)
+            .map(|n| format!("#{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    // `#n` in code spans: plain references would add a timeline event to every PR, on every batch.
+    let list: Vec<String> = batch
+        .steps
+        .iter()
+        .map(|(pr, _)| format!("- `#{}` {}", pr.number, pr.title))
+        .collect();
+    let title = format!(
+        "{} (+{} in a Mergepatrol batch)",
+        first.title,
+        members.len() - 1
+    );
+    let body = format!(
+        "Mergepatrol tests these PRs together, then merges them one by one. It closes this PR when it is done: do not merge it.\n\n{}",
+        list.join("\n")
+    );
+    let draft = gh
+        .open_draft_pr(repo, &batch.branch, &key.trunk, &title, &body)
+        .await?;
+    for n in members {
+        record(
+            ctx,
+            key,
+            *n,
+            "batch",
+            &format!("tested with {} in #{draft}", refs(*n)),
+        )
+        .await?;
+        gh.sticky_comment(
+            repo,
+            *n,
+            &format!("Testing together with {} in #{draft}.", refs(*n)),
+        )
+        .await?;
+    }
+
+    let head = &batch.steps.last().expect("a batch has PRs").1.sha;
+    let opened = Instant::now();
+    let tested = loop {
+        let now = gh.snapshot(repo, &ctx.config.labels.trigger).await?;
+        if let Some(why) = stale(&now, snap, batch) {
+            break Tested::Stale(why);
+        }
+        let checks = gh.checks(repo, head).await?;
+        match checks.verdict(required) {
+            (CheckState::Passed, _) if required.is_empty() && checks.by_name.is_empty() => {
+                if opened.elapsed() >= NO_CHECKS_GRACE {
+                    break Tested::Passed;
+                }
+            }
+            (CheckState::Passed, _) => break Tested::Passed,
+            (CheckState::Failed, names) => break Tested::Failed(names),
+            (CheckState::Pending, _) => {}
+        }
+        ctx.wakers
+            .wait(key.installation_id, repo, CHECKS_POLL)
+            .await;
+    };
+
+    match tested {
+        Tested::Stale(why) => {
+            for n in members {
+                record(ctx, key, *n, "batch-stopped", &why).await?;
+            }
+            Ok(())
+        }
+        Tested::Failed(names) => {
+            lane.batch_failed(members);
+            let why = format!("required checks failed: {}", names.join(", "));
+            for n in members {
+                record(ctx, key, *n, "batch-failed", &why).await?;
+                gh.sticky_comment(
+                    repo,
+                    *n,
+                    &format!("The batch with {} failed: {why}. Mergepatrol now tests these PRs in smaller batches, to find the one that broke it.", refs(*n)),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        Tested::Passed => merge_batch(ctx, gh, key, snap, lane, batch).await,
+    }
+}
+
+/// Why what the batch tested no longer stands: the trunk moved, or one of its PRs changed.
+fn stale(now: &RepoSnapshot, then: &RepoSnapshot, batch: &Batch) -> Option<String> {
+    if now.trunk_sha != then.trunk_sha {
+        return Some("the trunk moved outside the queue".into());
+    }
+    for (pr, _) in &batch.steps {
+        let Some(current) = now.labeled.iter().find(|p| p.number == pr.number) else {
+            return Some(format!("#{} left the queue", pr.number));
+        };
+        if current.head_ref_oid != pr.head_ref_oid {
+            return Some(format!("#{} was pushed to", pr.number));
+        }
+        if let Some(hold) = current.hold_reason() {
+            return Some(format!("#{} is on hold: {hold}", pr.number));
+        }
+    }
+    None
+}
+
+/// Merges the PRs of a batch that passed, in its order. Each merge must leave the trunk at the
+/// tree of the batch's commit for that PR; otherwise the rest would merge untested.
+async fn merge_batch(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    lane: &mut Lane,
+    batch: &Batch,
+) -> Result<()> {
+    let repo = &key.repo;
+    for (tested, step) in &batch.steps {
+        let n = tested.number;
+        let pr = gh.pull_request(repo, n).await?;
+        if !pr.has_label(&ctx.config.labels.trigger)
+            || gh.branch_sha(repo, &pr.head_ref_name).await? != tested.head_ref_oid
+        {
+            record(
+                ctx,
+                key,
+                n,
+                "batch-stopped",
+                "the PR changed before its merge",
+            )
+            .await?;
+            return Ok(());
+        }
+        if let Some(reason) = pr.hold_reason() {
+            return finish(ctx, gh, key, lane, n, Outcome::Held(reason)).await;
+        }
+        match merge_retrying(gh, repo, n, &tested.head_ref_oid, &snap.merge_method).await? {
+            MergeOutcome::Merged { sha } => {
+                let tree = gh.commit_tree(repo, &sha).await?;
+                finish(ctx, gh, key, lane, n, Outcome::Merged(sha.clone())).await?;
+                if tree != step.tree {
+                    record(
+                        ctx,
+                        key,
+                        n,
+                        "diverged",
+                        &format!(
+                            "the trunk came out as tree {tree}, not the batch's {}",
+                            step.tree
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+            MergeOutcome::Rejected(r) => {
+                let reason = EjectReason::MergeRejected(r);
+                return finish(ctx, gh, key, lane, n, Outcome::Ejected(reason)).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// GitHub rejects a merge right after the one before it, until it has worked out the PR's
+/// mergeability against the new trunk ("Base branch was modified"). It accepts it moments later.
+async fn merge_retrying(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    number: PrNumber,
+    head: &str,
+    method: &str,
+) -> Result<MergeOutcome> {
+    let mut tries = 0;
+    loop {
+        match gh.merge(repo, number, head, method).await? {
+            MergeOutcome::Rejected(_) if tries < MERGE_RETRIES => {
+                tries += 1;
+                tokio::time::sleep(MERGE_RETRY_AFTER).await;
+            }
+            outcome => return Ok(outcome),
+        }
+    }
 }
 
 /// A queue event: shown on the dashboard, and logged.
@@ -302,12 +636,12 @@ async fn run_job(
     rebase: &dyn Rebase,
     key: &LaneKey,
     snap: &RepoSnapshot,
+    required: &[String],
     number: PrNumber,
 ) -> Result<Outcome> {
     let repo = &key.repo;
     let mut job = Job::start(number);
     let mut published_at = Instant::now();
-    let required = gh.required_checks(repo, &key.trunk).await?;
 
     loop {
         let pr = gh.pull_request(repo, number).await?;
@@ -358,7 +692,7 @@ async fn run_job(
                     Event::BaseMoved
                 } else {
                     let checks = gh.checks(repo, head).await?;
-                    match checks.verdict(&required) {
+                    match checks.verdict(required) {
                         (CheckState::Passed, _)
                             if required.is_empty() && checks.by_name.is_empty() =>
                         {
