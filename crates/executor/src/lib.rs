@@ -66,6 +66,8 @@ impl Executor for DockerExecutor {
             .args(["rm", "-f", "-v", &name])
             .output()
             .await;
+        // From here on, the container may exist: a job cut off during `docker create` too.
+        let _container = Removed(name.clone());
         let mut create = Command::new("docker");
         // `/out` is a volume: under gVisor, writes to the container's own filesystem stay in
         // the sandbox's memory, where `docker cp` cannot see them.
@@ -94,7 +96,6 @@ impl Executor for DockerExecutor {
         let id = String::from_utf8(checked(create, "docker create").await?)?
             .trim()
             .to_owned();
-        let _container = Removed(id.clone());
 
         let mut start = Command::new("docker");
         start.args(["start", "-a", "-i", &id]);
@@ -106,7 +107,7 @@ impl Executor for DockerExecutor {
     }
 }
 
-/// Removes the job's container, and its `/out` volume, when dropped: after the job, after an
+/// Removes the job's container (by name), and its `/out` volume, when dropped: after the job, after an
 /// error, and when the job is cut off because its queue stopped.
 struct Removed(String);
 

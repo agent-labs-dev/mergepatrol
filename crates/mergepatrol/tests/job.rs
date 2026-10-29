@@ -204,13 +204,20 @@ async fn a_cut_off_docker_job_leaves_no_container() {
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     };
+    let running = || {
+        let out = Command::new("docker")
+            .args(["ps", "-q", "--filter", name, "--filter", "status=running"])
+            .output()
+            .unwrap();
+        !out.stdout.is_empty()
+    };
     for _ in 0..50 {
-        if !containers().is_empty() {
+        if running() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    assert!(!containers().is_empty(), "the job never started");
+    assert!(running(), "the job never started");
 
     job.abort();
     let _ = job.await;
