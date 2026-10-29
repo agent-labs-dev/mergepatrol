@@ -1365,6 +1365,13 @@ async fn run_batch(
     ctx.store.save_lane(key, lane).await?;
 
     let result = test_and_merge(ctx, settings, gh, key, snap, lane, &batch).await;
+    // Not the batch's fault, and likely to pass: it stays, so the next tick picks it up where it
+    // was, as after a restart, rather than building it and starting its CI again.
+    let first = batch.members()[0];
+    if result.is_err() && ctx.job_errors.failed(key, first) < JOB_ERRORS_FOR {
+        return result;
+    }
+    ctx.job_errors.clear(key, first);
     // Deleting the branch closes the draft PR.
     gh.delete_branch(repo, &batch.branch).await?;
     lane.stop();

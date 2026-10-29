@@ -79,6 +79,8 @@ struct State {
     outage: u32,
     /// How many label removals fail next.
     failing_label_removals: u32,
+    /// How many snapshots fail next, as when GraphQL is rate limited.
+    failing_snapshots: u32,
     /// Whether the next merge never answers, as when a restart cuts the wait short. `Merged`:
     /// GitHub merges it meanwhile; `Pending`: not yet.
     merge_hangs: Option<MergeHang>,
@@ -291,7 +293,11 @@ impl GitHub for Fake {
     }
 
     async fn snapshot(&self, _: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
+        if s.failing_snapshots > 0 {
+            s.failing_snapshots -= 1;
+            bail!("GraphQL: API rate limit already exceeded");
+        }
         let label = &labels.trigger;
         Ok(RepoSnapshot {
             id: "R".into(),
@@ -1766,6 +1772,53 @@ async fn a_batch_cut_short_by_a_restart_picks_up_where_it_was() {
     assert_eq!(
         run.kinds(1),
         ["enqueued", "batch", "batch-resumed", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_poll_fails_picks_up_where_it_was() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    run.gh.with_mut(|s| {
+        s.checks_on
+            .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
+    });
+    // The PRs' checks, then the batch's first poll: the next snapshot fails.
+    run.gh.then(|_| {});
+    run.gh.then(|_| {});
+    run.gh.then(|s| s.failing_snapshots = 1);
+    assert!(run.try_tick().await.is_err());
+    assert!(run.gh.with(|s| s.deleted.is_empty()), "the batch stays");
+    run.gh.with_mut(|s| s.checks_on.remove(BATCH));
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+    // The same branch and draft PR, which CI kept testing.
+    assert_eq!(run.gh.with(|s| s.drafts.len()), 1);
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "batch", "batch-resumed", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_poll_keeps_failing_stops() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    run.gh.with_mut(|s| {
+        s.checks_on
+            .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
+    });
+    run.gh.then(|_| {});
+    run.gh.then(|_| {});
+    run.gh.then(|s| s.failing_snapshots = 1);
+    assert!(run.try_tick().await.is_err());
+    tokio::time::advance(JOB_ERRORS_FOR).await;
+    // Resumed, its poll fails past the window: the batch stops, and its PRs go back.
+    run.gh.then(|s| s.failing_snapshots = 1);
+    assert!(run.try_tick().await.is_err());
+    assert_eq!(
+        run.gh.with(|s| s.deleted.clone()),
+        ["mergepatrol/batch-1-2"]
     );
 }
 
