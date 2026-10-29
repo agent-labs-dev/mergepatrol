@@ -315,18 +315,6 @@ impl Git {
             .to_owned())
     }
 
-    /// The content of `path` at `rev`, or `None` if it does not exist there.
-    pub async fn file_at(&self, wt: &Path, rev: &str, path: &str) -> Result<Option<String>> {
-        let out = self
-            .git(wt, &["show", &format!("{rev}:{path}")])
-            .output()
-            .await?;
-        Ok(out
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned()))
-    }
-
     pub async fn read_blob(&self, wt: &Path, sha: &str) -> Result<Vec<u8>> {
         self.output(wt, &["cat-file", "blob", sha]).await
     }

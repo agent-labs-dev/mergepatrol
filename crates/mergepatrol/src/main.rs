@@ -150,8 +150,10 @@ async fn orchestrator() -> Result<()> {
         public_url: ctx.config.public_url.clone(),
         setup_token,
         wake: ctx.wakers.clone(),
+        repo_defaults: ctx.config.repo_defaults.clone(),
     };
     tokio::spawn(queue::supervise(ctx.clone()));
+    tokio::spawn(queue::discover(ctx.clone()));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");

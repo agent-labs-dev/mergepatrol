@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{PrNumber, RepoName};
+use mergepatrol_core::{PrNumber, REPO_CONFIG_PATH, RepoName};
 use mergepatrol_github::{
     BranchMerge, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot, RequiredChecks,
 };
@@ -11,6 +11,8 @@ use mergepatrol_github::{
 #[async_trait]
 pub trait GitHub: Send + Sync {
     fn installation_id(&self) -> u64;
+    /// The repo's config file on its default branch.
+    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>>;
     async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot>;
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest>;
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String>;
@@ -50,6 +52,9 @@ pub trait GitHub: Send + Sync {
 impl GitHub for Installation {
     fn installation_id(&self) -> u64 {
         self.id
+    }
+    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>> {
+        Ok(self.default_branch_file(repo, REPO_CONFIG_PATH).await?.text)
     }
     async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot> {
         Installation::snapshot(self, repo, label).await

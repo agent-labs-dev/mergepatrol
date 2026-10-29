@@ -1,10 +1,13 @@
-//! The queue: lanes, entries, and the state machine of one job. Pure logic, no I/O.
+//! The queue: lanes, entries, the state machine of one job, and a repo's settings. Pure logic,
+//! no I/O.
 
 mod job;
 mod lane;
+mod repo_config;
 
 pub use job::{EjectReason, Event, Job, Phase, Transition};
 pub use lane::{Bisect, Candidate, Entry, EntryState, Lane, LaneChange, Person, PrSummary, Review};
+pub use repo_config::{EFFORTS, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings};
 
 use serde::{Deserialize, Serialize};
 

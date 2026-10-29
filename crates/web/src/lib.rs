@@ -13,6 +13,7 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use mergepatrol_core::RepoSettings;
 use mergepatrol_github::AppCredentials;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
 
@@ -32,6 +33,8 @@ pub struct WebConfig {
     pub setup_token: Option<String>,
     /// Webhooks wake the queue of the repo they name.
     pub wake: Arc<dyn Wake>,
+    /// The settings of a repo whose config file leaves them out.
+    pub repo_defaults: RepoSettings,
 }
 
 #[derive(Clone)]
@@ -44,6 +47,7 @@ struct AppState {
     /// OAuth and manifest flows in progress, by their `state` parameter.
     pending: Arc<Mutex<HashMap<String, auth::Pending>>>,
     wake: Arc<dyn Wake>,
+    repo_defaults: Arc<RepoSettings>,
 }
 
 impl AppState {
@@ -71,6 +75,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         setup_token: Arc::new(Mutex::new(config.setup_token)),
         pending: Arc::default(),
         wake: config.wake,
+        repo_defaults: Arc::new(config.repo_defaults),
     };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -88,6 +93,10 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/api/w/{id}/events", get(api::events))
         .route("/api/w/{id}/repos", get(api::repos))
         .route("/api/w/{id}/repos/{owner}/{name}", put(api::set_repo))
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/config",
+            get(api::repo_config).put(api::propose_repo_config),
+        )
         .route("/api/w/{id}/settings", get(api::settings))
         .route(
             "/api/w/{id}/settings/anthropic-api-key",
@@ -181,6 +190,15 @@ mod tests {
             public_url: "http://localhost:8080".into(),
             setup_token: None,
             wake,
+            repo_defaults: RepoSettings {
+                label: "mergepatrol".into(),
+                batch_size: 8,
+                resolver: mergepatrol_core::ResolverSettings {
+                    model: "m".into(),
+                    effort: "medium".into(),
+                },
+                verify: Vec::new(),
+            },
         };
         (router(store, vault, config), "mp_session=tok".into())
     }
@@ -223,6 +241,10 @@ mod tests {
         );
         assert_eq!(
             get(&router, "/api/w/2/repos", Some(&cookie)).await,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            get(&router, "/api/w/2/repos/o/r/config", Some(&cookie)).await,
             StatusCode::NOT_FOUND
         );
     }
@@ -276,6 +298,61 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_owned())]);
+    }
+
+    async fn deliver_push(router: &Router, body: &str) -> StatusCode {
+        let req = Request::post("/webhooks/github")
+            .header("x-github-event", "push")
+            .header(
+                "x-hub-signature-256",
+                webhook::sign("hush", body.as_bytes()),
+            )
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    fn push(r#ref: &str, commits: &str) -> String {
+        format!(
+            r#"{{"ref":"{}","installation":{{"id":7}},"repository":{{"full_name":"o/r","default_branch":"main"}},"commits":[{}]}}"#,
+            r#ref, commits
+        )
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_push_of_the_config_file_turns_its_repo_on(pool: PgPool) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;
+        let on = async || -> Vec<bool> {
+            store
+                .repos()
+                .await
+                .unwrap()
+                .iter()
+                .map(|s| s.on())
+                .collect()
+        };
+        let added = r#"{"added":[".mergepatrol/mergepatrol.yml"],"removed":[],"modified":[]}"#;
+        let removed = r#"{"added":[],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        let other = r#"{"added":["a.txt"],"removed":[],"modified":[]}"#;
+
+        // Another branch, or another file, changes nothing.
+        deliver_push(&router, &push("refs/heads/topic", added)).await;
+        deliver_push(&router, &push("refs/heads/main", other)).await;
+        assert!(on().await.is_empty());
+
+        deliver_push(
+            &router,
+            &push("refs/heads/main", &format!("{added},{other}")),
+        )
+        .await;
+        assert_eq!(on().await, [true]);
+        deliver_push(
+            &router,
+            &push("refs/heads/main", &format!("{added},{removed}")),
+        )
+        .await;
+        assert_eq!(on().await, [false]);
     }
 
     #[sqlx::test(migrations = false)]

@@ -16,8 +16,6 @@ use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{ClaudeResolver, Resolution, ResolveRequest, Resolver};
 use tokio::io::AsyncReadExt;
 
-use crate::config::{REPO_CONFIG_PATH, RepoConfig};
-
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub async fn main(out: PathBuf) -> Result<()> {
@@ -90,10 +88,6 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     }
     git.checkout_detached(dir, &spec.head_sha).await?;
 
-    let config = match git.file_at(dir, &spec.trunk_sha, REPO_CONFIG_PATH).await? {
-        Some(yaml) => RepoConfig::parse(&yaml)?,
-        None => RepoConfig::default(),
-    };
     let resolver = ClaudeResolver {
         api_key: spec.resolver.anthropic_api_key.clone(),
         model: spec.resolver.model.clone(),
@@ -118,7 +112,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
                 pr_body: &spec.pr_body,
                 commit_message: &commit_message,
                 trunk: &spec.trunk,
-                verify_commands: &config.verify,
+                verify_commands: &spec.verify,
                 transcript: &transcript,
             })
             .await;
@@ -155,7 +149,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     }
 
     if resolved_any {
-        for cmd in &config.verify {
+        for cmd in &spec.verify {
             event(events, "verify", cmd.as_str());
             let mut c = tokio::process::Command::new("sh");
             c.current_dir(dir).args(["-c", cmd]).kill_on_drop(true);

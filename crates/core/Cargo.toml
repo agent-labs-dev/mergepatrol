@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
+serde_yaml = "0.9.34"

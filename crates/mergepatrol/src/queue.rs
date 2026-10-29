@@ -10,7 +10,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use mergepatrol_core::{
-    Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, RepoName, Transition,
+    Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, REPO_CONFIG_PATH,
+    RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec};
@@ -33,6 +34,9 @@ const CHECKS_POLL: Duration = Duration::from_secs(15);
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
 /// How soon a repo turned on in the dashboard starts its queue.
 const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
+/// How often to look for the config file in every repo of every installation. A push webhook
+/// that adds or removes it is quicker.
+const DISCOVER_EVERY: Duration = Duration::from_secs(5 * 60);
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const RESOLVER_MAX_TURNS: u32 = 50;
 const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
@@ -74,8 +78,8 @@ impl mergepatrol_web::Wake for Wakers {
     }
 }
 
-/// Runs a queue for each repo that is on in the dashboard, and stops the queues of repos that
-/// are turned off. Waits until the GitHub App exists.
+/// Runs a queue for each repo that is on, and stops the queues of repos that are turned off.
+/// Waits until the GitHub App exists.
 pub async fn supervise(ctx: Arc<Ctx>) {
     let mut running = Running::new();
     loop {
@@ -84,6 +88,54 @@ pub async fn supervise(ctx: Arc<Ctx>) {
         }
         tokio::time::sleep(SUPERVISE_EVERY).await;
     }
+}
+
+/// Keeps track of which repos have the config file on their default branch, so that a repo
+/// queues once it has one.
+pub async fn discover(ctx: Arc<Ctx>) {
+    loop {
+        if let Err(e) = discover_once(&ctx).await {
+            tracing::error!(error = %format!("{e:#}"), "could not look for config files");
+        }
+        tokio::time::sleep(DISCOVER_EVERY).await;
+    }
+}
+
+async fn discover_once(ctx: &Ctx) -> Result<()> {
+    let Some(creds) = app_credentials(ctx).await? else {
+        return Ok(());
+    };
+    let app = App::from_credentials(&creds)?;
+    for inst in app.installations().await? {
+        let gh = app.installation(inst.id);
+        // One installation failing (suspended, say) does not stop the others.
+        let found = async {
+            let repos: Vec<RepoName> = gh
+                .repositories()
+                .await?
+                .into_iter()
+                .map(|r| r.repo)
+                .collect();
+            let has = gh.have_file(&repos, REPO_CONFIG_PATH).await?;
+            anyhow::Ok(
+                repos
+                    .into_iter()
+                    .zip(has)
+                    .filter_map(|(r, has)| has.then_some(r))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        match found.await {
+            Ok(with_config) => ctx.store.replace_has_config(inst.id, &with_config).await?,
+            Err(e) => tracing::warn!(
+                installation = inst.id,
+                account = %inst.account,
+                error = %format!("{e:#}"),
+                "could not look for config files"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// The GitHub App: the hosted one from the environment, or the self-hosted one from the vault.
@@ -106,10 +158,10 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
     };
     let wanted: Vec<(u64, RepoName)> = ctx
         .store
-        .repo_settings()
+        .repos()
         .await?
         .into_iter()
-        .filter(|s| s.enabled)
+        .filter(|s| s.on())
         .map(|s| (s.installation_id, s.repo))
         .collect();
 
@@ -162,10 +214,24 @@ enum Outcome {
 }
 
 async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) -> Result<Ran> {
-    let labels = &ctx.config.labels;
+    let installation = gh.installation_id();
+    let file = gh.config_file(repo).await?;
+    let settings = match RepoSettings::from_file(file.as_deref(), &ctx.config.repo_defaults) {
+        Ok(s) => s,
+        Err(e) => {
+            // Paused: the settings it would run with are a guess.
+            tracing::warn!(installation, %repo, error = %e, "the config file does not parse");
+            ctx.store
+                .set_config_error(installation, repo, Some(&e))
+                .await?;
+            return Ok(Ran::Idle);
+        }
+    };
+    ctx.store.set_config_error(installation, repo, None).await?;
+    let labels = settings.labels();
     let snap = gh.snapshot(repo, &labels.trigger).await?;
     let key = LaneKey {
-        installation_id: gh.installation_id(),
+        installation_id: installation,
         repo: repo.clone(),
         trunk: snap.default_branch.clone(),
     };
@@ -176,6 +242,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
         if pr.is_cross_repository {
             eject(
                 ctx,
+                &settings,
                 gh,
                 &key,
                 pr.number,
@@ -221,7 +288,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
     }
     let mut next = lane.active();
     if next.is_empty() {
-        next = lane.next(ctx.config.batch_size);
+        next = lane.next(settings.batch_size);
     }
     let Some(&number) = next.first() else {
         return Ok(Ran::Idle);
@@ -232,7 +299,17 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
     if next.len() > 1 && !required.strict {
         let prs = batchable(gh, repo, &snap, &required.names, &next).await?;
         if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &prs).await? {
-            run_batch(ctx, gh, &key, &snap, &required.names, &mut lane, batch).await?;
+            run_batch(
+                ctx,
+                &settings,
+                gh,
+                &key,
+                &snap,
+                &required.names,
+                &mut lane,
+                batch,
+            )
+            .await?;
             return Ok(Ran::Job);
         }
     }
@@ -241,11 +318,22 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
     ctx.store.save_lane(&key, &lane).await?;
 
     let _slot = ctx.jobs.acquire().await?;
-    let outcome = match run_job(ctx, gh, rebase, &key, &snap, &required.names, number).await {
+    let outcome = match run_job(
+        ctx,
+        &settings,
+        gh,
+        rebase,
+        &key,
+        &snap,
+        &required.names,
+        number,
+    )
+    .await
+    {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
-    finish(ctx, gh, &key, &mut lane, number, outcome).await?;
+    finish(ctx, &settings, gh, &key, &mut lane, number, outcome).await?;
     Ok(Ran::Job)
 }
 
@@ -274,6 +362,7 @@ async fn batchable(
 
 async fn finish(
     ctx: &Ctx,
+    settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
     lane: &mut Lane,
@@ -286,14 +375,22 @@ async fn finish(
             record(ctx, key, number, "merged", &sha).await?;
             gh.sticky_comment(&key.repo, number, &format!("Merged as {sha}."))
                 .await?;
-            let labels = &ctx.config.labels;
+            let labels = settings.labels();
             for label in [&labels.trigger, &labels.priority] {
                 gh.remove_label(&key.repo, number, label).await?;
             }
         }
         Outcome::Ejected(reason) => {
             lane.eject(number);
-            eject(ctx, gh, key, number, &format!("Ejected: {reason}.")).await?;
+            eject(
+                ctx,
+                settings,
+                gh,
+                key,
+                number,
+                &format!("Ejected: {reason}."),
+            )
+            .await?;
         }
         Outcome::Held(reason) => {
             lane.hold(number, reason.clone());
@@ -373,8 +470,10 @@ enum Tested {
 /// Puts a batch through CI on a draft PR. When it passes, merges its PRs in order, each only
 /// while the trunk comes out as the tree the batch tested. The PRs it does not finish go back
 /// to their places.
+#[allow(clippy::too_many_arguments)]
 async fn run_batch(
     ctx: &Ctx,
+    settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
     snap: &RepoSnapshot,
@@ -389,7 +488,10 @@ async fn run_batch(
     }
     ctx.store.save_lane(key, lane).await?;
 
-    let result = test_and_merge(ctx, gh, key, snap, required, lane, &batch, &members).await;
+    let result = test_and_merge(
+        ctx, settings, gh, key, snap, required, lane, &batch, &members,
+    )
+    .await;
     // Deleting the branch closes the draft PR.
     gh.delete_branch(repo, &batch.branch).await?;
     lane.batch_branch = None;
@@ -401,6 +503,7 @@ async fn run_batch(
 #[allow(clippy::too_many_arguments)]
 async fn test_and_merge(
     ctx: &Ctx,
+    settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
     snap: &RepoSnapshot,
@@ -457,7 +560,7 @@ async fn test_and_merge(
     let head = &batch.steps.last().expect("a batch has PRs").1.sha;
     let opened = Instant::now();
     let tested = loop {
-        let now = gh.snapshot(repo, &ctx.config.labels.trigger).await?;
+        let now = gh.snapshot(repo, &settings.label).await?;
         if let Some(why) = stale(&now, snap, batch) {
             break Tested::Stale(why);
         }
@@ -498,7 +601,7 @@ async fn test_and_merge(
             }
             Ok(())
         }
-        Tested::Passed => merge_batch(ctx, gh, key, snap, lane, batch).await,
+        Tested::Passed => merge_batch(ctx, settings, gh, key, snap, lane, batch).await,
     }
 }
 
@@ -525,6 +628,7 @@ fn stale(now: &RepoSnapshot, then: &RepoSnapshot, batch: &Batch) -> Option<Strin
 /// tree of the batch's commit for that PR; otherwise the rest would merge untested.
 async fn merge_batch(
     ctx: &Ctx,
+    settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
     snap: &RepoSnapshot,
@@ -535,7 +639,7 @@ async fn merge_batch(
     for (tested, step) in &batch.steps {
         let n = tested.number;
         let pr = gh.pull_request(repo, n).await?;
-        if !pr.has_label(&ctx.config.labels.trigger)
+        if !pr.has_label(&settings.label)
             || gh.branch_sha(repo, &pr.head_ref_name).await? != tested.head_ref_oid
         {
             record(
@@ -549,12 +653,21 @@ async fn merge_batch(
             return Ok(());
         }
         if let Some(reason) = pr.hold_reason() {
-            return finish(ctx, gh, key, lane, n, Outcome::Held(reason)).await;
+            return finish(ctx, settings, gh, key, lane, n, Outcome::Held(reason)).await;
         }
         match merge_retrying(gh, repo, n, &tested.head_ref_oid, &snap.merge_method).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
-                finish(ctx, gh, key, lane, n, Outcome::Merged(sha.clone())).await?;
+                finish(
+                    ctx,
+                    settings,
+                    gh,
+                    key,
+                    lane,
+                    n,
+                    Outcome::Merged(sha.clone()),
+                )
+                .await?;
                 if tree != step.tree {
                     record(
                         ctx,
@@ -572,7 +685,7 @@ async fn merge_batch(
             }
             MergeOutcome::Rejected(r) => {
                 let reason = EjectReason::MergeRejected(r);
-                return finish(ctx, gh, key, lane, n, Outcome::Ejected(reason)).await;
+                return finish(ctx, settings, gh, key, lane, n, Outcome::Ejected(reason)).await;
             }
         }
     }
@@ -614,12 +727,13 @@ async fn record(
 
 async fn eject(
     ctx: &Ctx,
+    settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
     number: PrNumber,
     why: &str,
 ) -> Result<()> {
-    let labels = &ctx.config.labels;
+    let labels = settings.labels();
     gh.remove_label(&key.repo, number, &labels.trigger).await?;
     gh.add_label(&key.repo, number, &labels.failed).await?;
     gh.sticky_comment(
@@ -631,8 +745,10 @@ async fn eject(
     record(ctx, key, number, "ejected", why).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_job(
     ctx: &Ctx,
+    settings: &RepoSettings,
     gh: &dyn GitHub,
     rebase: &dyn Rebase,
     key: &LaneKey,
@@ -646,7 +762,7 @@ async fn run_job(
 
     loop {
         let pr = gh.pull_request(repo, number).await?;
-        if !pr.has_label(&ctx.config.labels.trigger) {
+        if !pr.has_label(&settings.label) {
             return Ok(Outcome::Cancelled);
         }
 
@@ -655,7 +771,7 @@ async fn run_job(
                 record(ctx, key, number, "rebasing", &format!("onto {}", key.trunk)).await?;
                 gh.sticky_comment(repo, number, &format!("Rebasing onto `{}`.", key.trunk))
                     .await?;
-                let event = rebase.rebase(key, snap, &pr).await?;
+                let event = rebase.rebase(key, snap, &pr, settings).await?;
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
                     record(ctx, key, number, "published", head).await?;
@@ -741,7 +857,13 @@ async fn run_job(
 /// the new head, or why it could not.
 #[async_trait]
 trait Rebase: Send + Sync {
-    async fn rebase(&self, key: &LaneKey, snap: &RepoSnapshot, pr: &PullRequest) -> Result<Event>;
+    async fn rebase(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        pr: &PullRequest,
+        settings: &RepoSettings,
+    ) -> Result<Event>;
 }
 
 /// A plain `git rebase` here when the PR is already on the trunk, else a sandboxed job, whose
@@ -753,8 +875,14 @@ struct JobRebase<'a> {
 
 #[async_trait]
 impl Rebase for JobRebase<'_> {
-    async fn rebase(&self, key: &LaneKey, snap: &RepoSnapshot, pr: &PullRequest) -> Result<Event> {
-        rebase_and_publish(self.ctx, self.gh, key, snap, pr).await
+    async fn rebase(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        pr: &PullRequest,
+        settings: &RepoSettings,
+    ) -> Result<Event> {
+        rebase_and_publish(self.ctx, self.gh, key, snap, pr, settings).await
     }
 }
 
@@ -764,6 +892,7 @@ async fn rebase_and_publish(
     key: &LaneKey,
     snap: &RepoSnapshot,
     pr: &PullRequest,
+    settings: &RepoSettings,
 ) -> Result<Event> {
     let repo = &key.repo;
     let git = Git;
@@ -801,9 +930,10 @@ async fn rebase_and_publish(
         trunk_sha: trunk.clone(),
         pr_title: pr.title.clone(),
         pr_body: pr.body.clone(),
+        verify: settings.verify.clone(),
         resolver: ResolverSpec {
-            model: ctx.config.model.clone(),
-            effort: ctx.config.effort.clone(),
+            model: settings.resolver.model.clone(),
+            effort: settings.resolver.effort.clone(),
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
             anthropic_api_key: ctx

@@ -51,6 +51,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
         trunk_sha: trunk.into(),
         pr_title: "t".into(),
         pr_body: String::new(),
+        verify: Vec::new(),
         resolver: ResolverSpec {
             model: "claude-opus-5-5".into(),
             effort: "medium".into(),

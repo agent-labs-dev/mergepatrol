@@ -25,7 +25,7 @@ export function Queue({ workspace }: { workspace: number }) {
         <div>
           <p className="font-medium">No queues yet</p>
           <p className="mt-1 max-w-xs text-muted">
-            Turn on a repo in Repos, then add the{" "}
+            Set up a repo in Repos, then add the{" "}
             <code className="rounded bg-sunken px-1 text-xs">mergepatrol</code> label to a PR.
           </p>
         </div>

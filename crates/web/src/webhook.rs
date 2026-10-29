@@ -5,7 +5,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
-use mergepatrol_core::RepoName;
+use mergepatrol_core::{REPO_CONFIG_PATH, RepoName};
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -55,9 +55,37 @@ pub(crate) async fn receive(
             %repo,
             "webhook"
         );
+        if headers.get("x-github-event").and_then(|v| v.to_str().ok()) == Some("push")
+            && let Some(has) = config_after_push(&payload)
+        {
+            state.store.set_has_config(installation, &repo, has).await?;
+        }
         state.wake.wake(installation, repo);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether a push to the default branch leaves it with the config file, if the push touched the
+/// file. The periodic look at every repo catches what this misses.
+fn config_after_push(payload: &Value) -> Option<bool> {
+    let default = payload["repository"]["default_branch"].as_str()?;
+    if payload["ref"].as_str()? != format!("refs/heads/{default}") {
+        return None;
+    }
+    let has = |commit: &Value, list: &str| {
+        commit[list]
+            .as_array()
+            .is_some_and(|files| files.iter().any(|f| f == REPO_CONFIG_PATH))
+    };
+    payload["commits"].as_array()?.iter().rev().find_map(|c| {
+        if has(c, "removed") {
+            Some(false)
+        } else if has(c, "added") || has(c, "modified") {
+            Some(true)
+        } else {
+            None
+        }
+    })
 }
 
 /// `signature` is GitHub's `X-Hub-Signature-256`: `sha256=` and the hex HMAC of the body.
