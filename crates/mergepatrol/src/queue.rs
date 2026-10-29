@@ -3,11 +3,12 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use mergepatrol_core::{
     Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, RepoName, Transition,
 };
@@ -20,8 +21,10 @@ use mergepatrol_github::{
 use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Scope, Store, Vault};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::config::Config;
+use crate::github::GitHub;
 use crate::publish::{Publish, publish};
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
@@ -128,8 +131,9 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
 }
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
+    let rebase = JobRebase { ctx: &ctx, gh: &gh };
     loop {
-        match tick(&ctx, &gh, &repo).await {
+        match tick(&ctx, &gh, &rebase, &repo).await {
             // The lane may have a next PR: start it now, not a poll later.
             Ok(Ran::Job) => continue,
             Ok(Ran::Idle) => {}
@@ -154,11 +158,11 @@ enum Outcome {
     Cancelled,
 }
 
-async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<Ran> {
+async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) -> Result<Ran> {
     let labels = &ctx.config.labels;
     let snap = gh.snapshot(repo, &labels.trigger).await?;
     let key = LaneKey {
-        installation_id: gh.id,
+        installation_id: gh.installation_id(),
         repo: repo.clone(),
         trunk: snap.default_branch.clone(),
     };
@@ -212,7 +216,7 @@ async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<Ran> {
     ctx.store.save_lane(&key, &lane).await?;
 
     let _slot = ctx.jobs.acquire().await?;
-    let outcome = match run_job(ctx, gh, &key, &snap, number).await {
+    let outcome = match run_job(ctx, gh, rebase, &key, &snap, number).await {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
@@ -222,7 +226,7 @@ async fn tick(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<Ran> {
 
 async fn finish(
     ctx: &Ctx,
-    gh: &Installation,
+    gh: &dyn GitHub,
     key: &LaneKey,
     lane: &mut Lane,
     number: PrNumber,
@@ -271,7 +275,7 @@ async fn record(
 
 async fn eject(
     ctx: &Ctx,
-    gh: &Installation,
+    gh: &dyn GitHub,
     key: &LaneKey,
     number: PrNumber,
     why: &str,
@@ -290,7 +294,8 @@ async fn eject(
 
 async fn run_job(
     ctx: &Ctx,
-    gh: &Installation,
+    gh: &dyn GitHub,
+    rebase: &dyn Rebase,
     key: &LaneKey,
     snap: &RepoSnapshot,
     number: PrNumber,
@@ -311,7 +316,7 @@ async fn run_job(
                 record(ctx, key, number, "rebasing", &format!("onto {}", key.trunk)).await?;
                 gh.sticky_comment(repo, number, &format!("Rebasing onto `{}`.", key.trunk))
                     .await?;
-                let event = rebase_and_publish(ctx, gh, key, snap, &pr).await?;
+                let event = rebase.rebase(key, snap, &pr).await?;
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
                     record(ctx, key, number, "published", head).await?;
@@ -390,6 +395,27 @@ async fn run_job(
             Transition::Ejected(r) => return Ok(Outcome::Ejected(r)),
             Transition::Held(r) => return Ok(Outcome::Held(r)),
         };
+    }
+}
+
+/// Rebases a PR onto the trunk and publishes the result to its branch: `Event::Rebased` with
+/// the new head, or why it could not.
+#[async_trait]
+trait Rebase: Send + Sync {
+    async fn rebase(&self, key: &LaneKey, snap: &RepoSnapshot, pr: &PullRequest) -> Result<Event>;
+}
+
+/// A plain `git rebase` here when the PR is already on the trunk, else a sandboxed job, whose
+/// result is checked, then published through the Git Data API.
+struct JobRebase<'a> {
+    ctx: &'a Ctx,
+    gh: &'a Installation,
+}
+
+#[async_trait]
+impl Rebase for JobRebase<'_> {
+    async fn rebase(&self, key: &LaneKey, snap: &RepoSnapshot, pr: &PullRequest) -> Result<Event> {
+        rebase_and_publish(self.ctx, self.gh, key, snap, pr).await
     }
 }
 
@@ -535,6 +561,9 @@ async fn check_job_output(
     }
     Ok(local_head)
 }
+
+#[cfg(test)]
+mod loop_tests;
 
 #[cfg(test)]
 mod tests {
