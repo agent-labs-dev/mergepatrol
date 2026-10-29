@@ -79,6 +79,9 @@ pub struct PrDetails {
 struct Actor {
     login: String,
     avatar_url: String,
+    /// `User` or `Bot`. A requested reviewer comes without it, and is always a user.
+    #[serde(rename = "__typename", default)]
+    typename: String,
 }
 
 impl From<Actor> for Person {
@@ -86,6 +89,7 @@ impl From<Actor> for Person {
         Person {
             login: a.login,
             avatar_url: a.avatar_url,
+            bot: a.typename == "Bot",
         }
     }
 }
@@ -212,7 +216,7 @@ fn rejection(body: &Value) -> String {
 }
 
 const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } } stack { number baseRefName }
-  url createdAt additions deletions changedFiles author { login avatarUrl }
+  url createdAt additions deletions changedFiles author { __typename login avatarUrl }
   latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login avatarUrl } } } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
@@ -724,7 +728,7 @@ mod tests {
             "headRefName": "fix", "headRefOid": "abc", "labels": { "nodes": [{ "name": "mergepatrol" }] },
             "url": "https://github.com/o/r/pull/7", "createdAt": "2026-10-01T00:00:00Z",
             "additions": 3, "deletions": 1, "changedFiles": 2,
-            "author": null,
+            "author": { "__typename": "Bot", "login": "merge-patrol", "avatarUrl": "m" },
             "latestOpinionatedReviews": { "nodes": [
                 { "state": "APPROVED", "author": { "login": "ann", "avatarUrl": "a" } },
                 { "state": "CHANGES_REQUESTED", "author": null },
@@ -737,14 +741,15 @@ mod tests {
         }))
         .unwrap();
         let s = pr.summary();
-        assert_eq!(s.author, None);
+        assert!(s.author.unwrap().bot);
         assert_eq!(s.head_ref, "fix");
         assert_eq!(
             s.reviews,
             [Review {
                 reviewer: Person {
                     login: "ann".into(),
-                    avatar_url: "a".into()
+                    avatar_url: "a".into(),
+                    bot: false,
                 },
                 state: "APPROVED".into(),
             }]
@@ -753,7 +758,8 @@ mod tests {
             s.requested,
             [Person {
                 login: "bob".into(),
-                avatar_url: "b".into()
+                avatar_url: "b".into(),
+                bot: false,
             }]
         );
         assert_eq!(s.checks.as_deref(), Some("PENDING"));

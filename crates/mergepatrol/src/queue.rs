@@ -111,8 +111,10 @@ impl Prs {
             .cloned()
     }
 
+    /// The PR's author, unless an App opened it: an App is no person to count events for.
     fn author(&self, key: &LaneKey, number: PrNumber) -> Option<String> {
-        Some(self.get(key, number)?.author?.login)
+        let author = self.get(key, number)?.author?;
+        (!author.bot).then_some(author.login)
     }
 }
 

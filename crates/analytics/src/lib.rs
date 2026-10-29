@@ -184,7 +184,7 @@ impl Exit<'_> {
 }
 
 /// PostHog attaches `$groups` only to an event with a person, so an author-less one (a deleted
-/// account) counts for no workspace.
+/// account, or an App) counts for no workspace.
 fn queue_event(
     installation_id: u64,
     repo: &str,
