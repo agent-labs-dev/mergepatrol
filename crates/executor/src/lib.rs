@@ -65,10 +65,9 @@ impl Executor for DockerExecutor {
         tokio::fs::create_dir_all(out).await?;
         let name = format!("mergepatrol-job-{job_id}");
         // A container left over from a crash would block the name.
-        let _ = Command::new("docker")
-            .args(["rm", "-f", "-v", &name])
-            .output()
-            .await;
+        let mut rm = Command::new("docker");
+        rm.args(["rm", "-f", "-v", &name]);
+        let _ = checked(rm, "docker rm").await;
         // From here on, the container may exist: a job cut off during `docker create` too.
         let _container = Removed(name.clone());
         let mut create = Command::new("docker");
@@ -163,11 +162,19 @@ pub(crate) async fn read_result(out: &Path, logs: &str) -> Result<JobResult> {
     serde_json::from_slice(&json).context("the job wrote a bad result")
 }
 
-async fn checked(mut cmd: Command, what: &str) -> Result<Vec<u8>> {
-    let out = cmd
-        .stdin(Stdio::null())
-        .output()
+/// The longest a Docker command around the job may take: a hung daemon would hold its queue.
+const DOCKER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+async fn checked(cmd: Command, what: &str) -> Result<Vec<u8>> {
+    checked_within(cmd, what, DOCKER_TIMEOUT).await
+}
+
+async fn checked_within(mut cmd: Command, what: &str, timeout: Duration) -> Result<Vec<u8>> {
+    // Dropping the command kills it.
+    let output = cmd.stdin(Stdio::null()).kill_on_drop(true).output();
+    let out = tokio::time::timeout(timeout, output)
         .await
+        .with_context(|| format!("{what}: no result after {timeout:?}"))?
         .with_context(|| format!("{what}: spawn"))?;
     if !out.status.success() {
         bail!("{what}: {}", String::from_utf8_lossy(&out.stderr).trim());
@@ -182,4 +189,24 @@ fn tail(s: &str, lines: usize) -> String {
 
 fn path_str(p: &Path) -> Result<&str> {
     p.to_str().context("non-UTF-8 path")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_hung_docker_command_is_cut_short() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = std::time::Instant::now();
+        let err = checked_within(cmd, "docker cp", Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("docker cp: no result after"),
+            "{err}"
+        );
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
 }
