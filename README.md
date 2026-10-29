@@ -211,6 +211,19 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 | `analytics` | Product analytics in PostHog, for the hosted Mergepatrol |
 | `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
 
+## Compared to GitHub's merge queue
+
+GitHub's [merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) also tests PRs together before they merge. What Mergepatrol adds:
+
+| | Mergepatrol |
+| --- | --- |
+| A PR that conflicts with its base | An agent resolves the conflict, and the PR stays in the queue |
+| A required check that fails | An agent commits a fix on the PR, up to `fix_ci.attempts` times, before the PR is ejected |
+| A batch that fails | Half of it is tested next, and so on down to the one PR that fails. The rest merge |
+| Stacked PRs | A `gh stack` stack queues and merges as one item |
+| CI | Runs on the repo's `pull_request` workflows, on a draft PR per batch. No `merge_group` trigger to add |
+| Queueing a PR | A label, so people and coding agents queue the same way |
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
