@@ -955,6 +955,7 @@ async fn green_prs_are_tested_together_and_merged_without_a_rebase() {
         .cloned()
         .unwrap();
     assert_eq!(lane.batch_branch, None);
+    assert_eq!(lane.batch_pr, None);
 }
 
 #[tokio::test(start_paused = true)]
