@@ -70,7 +70,7 @@ function Form({
           replaces it.
         </p>
       )}
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <Field id={`${id}-label`} label="Trigger label" hint="Adds :priority and :failed">
           <input
             id={`${id}-label`}
@@ -124,7 +124,7 @@ function Form({
           </select>
         </Field>
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-3">
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <Field id={`${id}-fix`} label="Fix failed checks" hint="The agent commits a fix">
           <label className="flex h-9 items-center gap-2 text-fg-2">
             <input
@@ -166,7 +166,7 @@ function Form({
         </Field>
       </div>
       <ErrorText error={propose.error} />
-      <div className="mt-4 flex items-center justify-between gap-3">
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <span className="text-muted">
           {pr && (
             <>

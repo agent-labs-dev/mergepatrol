@@ -14,7 +14,8 @@ export const WINDOWS = [7, 30, 90] as const;
 export type Window = (typeof WINDOWS)[number];
 export const OUTCOMES = ["merged", "ejected", "removed"] as const;
 
-/** Two panes: the repos, and the selected repo's metrics and the PRs that left its queue. */
+/** Two panes: the repos, and the selected repo's metrics and the PRs that left its queue. A
+ * narrow screen lists the repos in a row above. */
 export function History({ workspace }: { workspace: number }) {
   const { repo, days = 30, outcome } = useSearch({ from: "/$account/history" });
   const navigate = useNavigate({ from: "/$account/history" });
@@ -42,9 +43,9 @@ export function History({ workspace }: { workspace: number }) {
   const rows = exits.data?.pages.flatMap((p) => p.exits) ?? [];
   const pick = (repo?: string) => navigate({ search: (s) => ({ ...s, repo }) });
   return (
-    <div className="grid h-full grid-cols-[220px_1fr]">
-      <div className="overflow-y-auto border-r border-line p-2">
-        <p className="px-2 py-2 text-xs font-medium text-muted">Repos</p>
+    <div className="flex h-full flex-col md:grid md:grid-cols-[220px_1fr]">
+      <div className="shrink-0 border-line p-2 max-md:flex max-md:gap-1 max-md:overflow-x-auto max-md:border-b md:overflow-y-auto md:border-r">
+        <p className="px-2 py-2 text-xs font-medium text-muted max-md:hidden">Repos</p>
         <RepoButton
           label="All repos"
           stats={current.at(-1)}
@@ -64,11 +65,11 @@ export function History({ workspace }: { workspace: number }) {
           />
         ))}
       </div>
-      <div className="overflow-y-auto bg-surface">
-        <div className="border-b border-line px-6 py-4">
-          <div className="flex items-center justify-between gap-4">
+      <div className="min-h-0 flex-1 overflow-y-auto bg-surface">
+        <div className="border-b border-line px-4 py-4 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <p className="font-medium">{repo ?? "All repos"}</p>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Segmented
                 name="outcome"
                 label="Outcome"
@@ -181,7 +182,7 @@ function RepoButton({
       type="button"
       onClick={onClick}
       title={title}
-      className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left ${
+      className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left max-md:w-auto max-md:shrink-0 ${
         selected ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
       }`}
     >
@@ -216,7 +217,7 @@ function Stats({
   const p50 = current?.p50_secs ?? null;
   const p95 = current?.p95_secs ?? null;
   return (
-    <dl className="mt-4 grid grid-cols-4 gap-3">
+    <dl className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
       <Tile label="Merged" value={String(current?.merged ?? 0)}>
         <Delta
           change={(current?.merged ?? 0) - (previous?.merged ?? 0)}
@@ -303,7 +304,7 @@ function TimeDelta({ now, before, vs }: { now: number | null; before: number | n
 const SPARK_W = 120;
 const SPARK_H = 24;
 
-/** Merges per UTC day, today last and marked. Hover for a day's count. */
+/** Merges per UTC day, today last and marked. Hover, tap, or drag for a day's count. */
 function Sparkline({ counts }: { counts: number[] }) {
   const [hover, setHover] = useState<number | null>(null);
   if (counts.length < 2) return null;
@@ -315,19 +316,22 @@ function Sparkline({ counts }: { counts: number[] }) {
   const last = counts.length - 1;
   const shown = hover ?? last;
   const ago = last - shown;
+  const pick = (el: Element, clientX: number) => {
+    const r = el.getBoundingClientRect();
+    const i = Math.round(((clientX - r.left) / r.width) * last);
+    setHover(Math.min(last, Math.max(0, i)));
+  };
   return (
     <dd className="mt-2 flex items-center gap-2">
       <svg
         viewBox={`-3 0 ${SPARK_W + 6} ${SPARK_H}`}
-        className="h-6 w-30 overflow-visible"
+        className="h-6 w-30 min-w-0 touch-pan-y overflow-visible"
         role="img"
         aria-label={`Merged per day: ${counts.join(", ")}`}
-        onMouseMove={(ev) => {
-          const r = ev.currentTarget.getBoundingClientRect();
-          const i = Math.round(((ev.clientX - r.left) / r.width) * last);
-          setHover(Math.min(last, Math.max(0, i)));
-        }}
-        onMouseLeave={() => setHover(null)}
+        onPointerDown={(ev) => pick(ev.currentTarget, ev.clientX)}
+        onPointerMove={(ev) => pick(ev.currentTarget, ev.clientX)}
+        // A tapped day stays until the next tap: a finger leaves as it lifts.
+        onPointerLeave={(ev) => ev.pointerType === "mouse" && setHover(null)}
       >
         <polyline
           points={points}
@@ -339,7 +343,7 @@ function Sparkline({ counts }: { counts: number[] }) {
         />
         <circle cx={x(shown)} cy={y(counts[shown])} r="2.5" className="fill-fg" />
       </svg>
-      <span className="text-xs text-faint tabular-nums">
+      <span className="shrink-0 text-xs text-faint tabular-nums">
         {counts[shown]} {ago === 0 ? "today" : ago === 1 ? "yesterday" : `${ago}d ago`}
       </span>
     </dd>
@@ -364,7 +368,7 @@ function Row({ exit: e, showRepo }: { exit: ExitView; showRepo: boolean }) {
   const queued =
     e.enqueued_at && (new Date(e.at).getTime() - new Date(e.enqueued_at).getTime()) / 1000;
   return (
-    <div className="flex gap-3 border-b border-line-soft px-6 py-3">
+    <div className="flex gap-3 border-b border-line-soft px-4 py-3 sm:px-6">
       <span className="min-w-0 flex-1">
         <span className="flex items-start justify-between gap-3">
           <a
@@ -381,7 +385,7 @@ function Row({ exit: e, showRepo }: { exit: ExitView; showRepo: boolean }) {
             {label}
           </span>
         </span>
-        <span className="mt-1 flex items-center gap-2 text-xs text-muted">
+        <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
           {showRepo && <span>{e.repo}</span>}
           <span className="tabular-nums">#{e.number}</span>
           {e.fork && <span title="From a fork">Fork</span>}
@@ -444,18 +448,18 @@ function Bar({
   if (total === 0) return null;
   return (
     // The gaps between steps are the surface showing through.
-    <div className={`flex gap-0.5 ${height}`} role="img" aria-label={label}>
+    <span className={`flex gap-0.5 ${height}`} role="img" aria-label={label}>
       {parts
         .filter((p) => p.secs > 0)
         .map((p) => (
-          <div
+          <span
             key={p.step}
             title={p.title}
             className="min-w-0.5 first:rounded-l last:rounded-r hover:opacity-80"
             style={{ flexGrow: p.secs, background: stepInfo[p.step][1] }}
           />
         ))}
-    </div>
+    </span>
   );
 }
 
@@ -467,7 +471,7 @@ function Steps({ steps }: { steps: StepStatsView[] }) {
   const label = steps.map((s) => `${stepInfo[s.step][0]} ${duration(s.mean_secs)}`).join(", ");
   return (
     <div className="mt-5">
-      <div className="mb-2 flex items-baseline justify-between">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3">
         <p className="text-xs font-medium text-muted">Where the time goes</p>
         <p className="text-xs text-faint">{duration(total)} on average from label to merge</p>
       </div>
@@ -516,23 +520,42 @@ function Steps({ steps }: { steps: StepStatsView[] }) {
   );
 }
 
-/** One PR's steps, end to end. */
+/** One PR's steps, end to end. Click or tap for each step's time, which a touch cannot hover
+ * for. */
 function StepBar({ steps }: { steps: StepTimeView[] }) {
-  const label = steps
-    .filter((s) => s.secs > 0)
-    .map((s) => `${stepInfo[s.step][0]} ${duration(s.secs)}`)
-    .join(", ");
+  const [open, setOpen] = useState(false);
+  const spent = steps.filter((s) => s.secs > 0);
+  if (spent.length === 0) return null;
+  const label = spent.map((s) => `${stepInfo[s.step][0]} ${duration(s.secs)}`).join(", ");
   return (
-    <div className="mt-2">
-      <Bar
-        height="h-1.5"
-        label={`Time in each step: ${label}`}
-        parts={steps.map((s) => ({
-          step: s.step,
-          secs: s.secs,
-          title: `${stepInfo[s.step][0]}: ${duration(s.secs)}`,
-        }))}
-      />
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-label="Time in each step"
+        className="block w-full cursor-pointer py-1"
+      >
+        <Bar
+          height="h-1.5"
+          label={`Time in each step: ${label}`}
+          parts={steps.map((s) => ({
+            step: s.step,
+            secs: s.secs,
+            title: `${stepInfo[s.step][0]}: ${duration(s.secs)}`,
+          }))}
+        />
+      </button>
+      {open && (
+        <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted tabular-nums">
+          {spent.map((s) => (
+            <li key={s.step} className="flex items-center gap-1.5">
+              <span className="size-2 rounded-sm" style={{ background: stepInfo[s.step][1] }} />
+              {stepInfo[s.step][0]} {duration(s.secs)}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

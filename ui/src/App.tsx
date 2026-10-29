@@ -36,9 +36,9 @@ export function App() {
   return (
     <>
       {error && (
-        <div className="flex justify-between border-b border-red-200 bg-red-50 px-5 py-2 text-sm text-red-800 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
+        <div className="flex justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 sm:px-5 text-sm text-red-800 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
           <span>{error}</span>
-          <button type="button" onClick={dismiss} className="font-medium hover:opacity-70">
+          <button type="button" onClick={dismiss} className="shrink-0 font-medium hover:opacity-70">
             Dismiss
           </button>
         </div>
@@ -105,13 +105,15 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
     );
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-dvh flex-col">
       <NoKeyBanner workspace={current.installation_id} account={current.account} />
       <header className="border-b border-line bg-surface">
-        <div className="flex h-12 items-center gap-3 px-5">
+        <div className="flex h-12 items-center gap-3 px-4 sm:px-5">
           <Mark />
-          <span className="text-faint">/</span>
-          <Avatar src={current.avatar_url} alt={current.account} />
+          <span className="text-faint max-sm:hidden">/</span>
+          <span className="max-sm:hidden">
+            <Avatar src={current.avatar_url} alt={current.account} />
+          </span>
           <select
             value={current.account}
             onChange={(e) => {
@@ -119,7 +121,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
               // The same page in the other workspace, without this one's selection.
               else navigate({ to: ".", params: { account: e.target.value }, search: {} });
             }}
-            className="field-sizing-content bg-transparent font-medium outline-none"
+            className="field-sizing-content min-w-0 bg-transparent font-medium outline-none"
           >
             {session.workspaces.map((w) => (
               <option key={w.installation_id} value={w.account}>
@@ -135,16 +137,28 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
               target="_blank"
               rel="noreferrer"
               title="Report a bug, request a feature, or tell us what you think"
+              aria-label="Feedback"
             >
-              Feedback
+              <span className="max-sm:hidden">Feedback</span>
+              <svg
+                viewBox="0 0 16 16"
+                className="size-4 fill-none stroke-current sm:hidden"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <path d="M2.5 3.5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H7l-3 2.5v-2.5h-.5a1 1 0 0 1-1-1Z" />
+              </svg>
             </a>
             <ThemeToggle theme={theme} onChange={setTheme} />
             {session.user && (
               <>
-                <Avatar src={session.user.avatar_url} alt={session.user.login} size="size-7" />
+                <span className="max-sm:hidden">
+                  <Avatar src={session.user.avatar_url} alt={session.user.login} size="size-7" />
+                </span>
                 <button
                   type="button"
-                  className="text-muted hover:text-fg"
+                  className="whitespace-nowrap text-muted hover:text-fg"
                   onClick={() => signOut.mutate()}
                 >
                   Sign out
@@ -153,7 +167,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
             )}
           </div>
         </div>
-        <nav className="flex gap-5 px-5">
+        <nav className="flex gap-5 px-4 sm:px-5">
           {tabs.map(([label, to]) => (
             <Link
               key={to}
@@ -186,11 +200,11 @@ function NoKeyBanner({ workspace, account }: { workspace: number; account: strin
   const onSettings = useMatchRoute()({ to: "/$account/settings" });
   if (!settings.data || settings.data.api_keys.some((k) => k.key)) return null;
   return (
-    <div className="flex items-center gap-3 bg-amber-400 px-5 py-2 text-sm text-amber-950">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 bg-amber-400 px-4 py-2 text-sm text-amber-950 sm:px-5">
       <svg viewBox="0 0 16 16" className="size-4 shrink-0 fill-current" aria-hidden>
         <path d="M8.9 1.5a1 1 0 0 0-1.8 0L.6 13a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L8.9 1.5ZM7.25 6h1.5v4h-1.5V6Zm0 5.25h1.5v1.5h-1.5v-1.5Z" />
       </svg>
-      <span>
+      <span className="min-w-0 flex-1">
         <span className="font-semibold">No API key.</span> Without one, Mergepatrol can't resolve
         rebase conflicts or fix failed checks, so those PRs leave the queue.
       </span>

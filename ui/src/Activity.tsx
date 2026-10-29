@@ -111,7 +111,8 @@ function Summary({ events, repo }: { events: EventView[]; repo: string }) {
   const head = events.filter((e) => e.kind === "published").at(-1)?.message;
   const since = events[0]?.at;
   return (
-    <dl className="grid grid-cols-4 divide-x divide-line overflow-hidden rounded-lg border border-line bg-surface">
+    // The gaps between tiles are the border showing through, in two rows or one.
+    <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-4">
       <Tile label="In queue">
         {since ? duration((Date.now() - new Date(since).getTime()) / 1000) : "–"}
       </Tile>
@@ -133,7 +134,7 @@ function Summary({ events, repo }: { events: EventView[]; repo: string }) {
 
 function Tile({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="px-4 py-3">
+    <div className="bg-surface px-4 py-3">
       <dt className="text-xs text-muted">{label}</dt>
       <dd className="mt-0.5 text-base font-semibold tabular-nums">{children}</dd>
     </div>
@@ -202,14 +203,14 @@ function Stages({ run }: { run: EventView[] }) {
       {STAGES.map((stage, i) => {
         const [icon, style] = stageStyle[stages[stage]];
         return (
-          <li key={stage} className="flex flex-1 items-center gap-1">
+          <li key={stage} className="flex min-w-0 flex-1 items-center gap-1">
             <span
-              className={`flex-1 rounded-md px-2 py-1.5 text-center font-medium ring-1 ring-inset ${style}`}
+              className={`flex-1 truncate rounded-md px-1 py-1.5 text-center font-medium ring-1 ring-inset max-sm:text-[11px] sm:px-2 ${style}`}
             >
-              {icon && <span className="mr-1">{icon}</span>}
+              {icon && <span className="mr-0.5 sm:mr-1">{icon}</span>}
               {stage}
             </span>
-            {i < STAGES.length - 1 && <span className="text-faint">›</span>}
+            {i < STAGES.length - 1 && <span className="text-faint max-sm:hidden">›</span>}
           </li>
         );
       })}

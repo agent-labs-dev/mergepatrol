@@ -61,7 +61,7 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
 
   return (
     <form onSubmit={submit} className="rounded-lg border border-line bg-surface">
-      <div className="p-5">
+      <div className="p-4 sm:p-5">
         <h2 className="font-semibold">{provider.name} API key</h2>
         <p className="mt-1 text-muted">
           The agent uses it when a rebase has conflicts, and to fix failed checks, in repos whose
@@ -93,7 +93,7 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
         />
         <ErrorText error={save.error ?? remove.error} />
       </div>
-      <div className="flex items-center justify-between rounded-b-lg border-t border-line bg-page px-5 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-lg border-t border-line bg-page px-4 py-3 sm:px-5">
         {key ? (
           <span className="text-muted" title={key.updated_at}>
             Ends in <span className="font-mono">{key.hint}</span>, updated {timeAgo(key.updated_at)}
@@ -101,7 +101,7 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
         ) : (
           <span className="text-muted">Not set.</span>
         )}
-        <span className="flex gap-2">
+        <span className="ml-auto flex gap-2">
           {key && (
             <button
               type="button"
