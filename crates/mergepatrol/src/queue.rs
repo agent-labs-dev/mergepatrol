@@ -287,6 +287,19 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
             LaneChange::Dequeued { number, .. } => {
                 record(ctx, &key, number, "dequeued", "left the queue").await?
             }
+            LaneChange::Held { number, reason } => {
+                record(ctx, &key, number, "held", &reason).await?;
+                gh.sticky_comment(repo, number, &on_hold(&reason)).await?;
+            }
+            LaneChange::Released(n) => {
+                record(ctx, &key, n, "released", "can merge again").await?;
+                gh.sticky_comment(
+                    repo,
+                    n,
+                    "No longer on hold. Waiting in its place in the queue.",
+                )
+                .await?;
+            }
         }
     }
     ctx.store.save_lane(&key, &lane).await?;
@@ -387,12 +400,8 @@ async fn finish(
         Outcome::Held(reason) => {
             lane.hold(number, reason.clone());
             record(ctx, key, number, "held", &reason).await?;
-            gh.sticky_comment(
-                &key.repo,
-                number,
-                &format!("On hold: {reason}. It stays in its place in the queue."),
-            )
-            .await?;
+            gh.sticky_comment(&key.repo, number, &on_hold(&reason))
+                .await?;
         }
         Outcome::Cancelled => {
             lane.remove(number);
@@ -400,6 +409,12 @@ async fn finish(
         }
     }
     ctx.store.save_lane(key, lane).await
+}
+
+fn on_hold(reason: &str) -> String {
+    format!(
+        "On hold: {reason}. It keeps its place in the queue, and goes on once GitHub would merge it."
+    )
 }
 
 /// PRs merged together on a branch of their own, which a draft PR puts through CI.
@@ -866,8 +881,8 @@ async fn run_job(
                 event
             }
             Phase::Merging { head } => {
-                if pr.hold_reason().is_some() {
-                    Event::NeedsApproval
+                if let Some(reason) = pr.hold_reason() {
+                    Event::OnHold(reason)
                 } else {
                     match gh.merge(repo, number, head, &snap.merge_method).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),

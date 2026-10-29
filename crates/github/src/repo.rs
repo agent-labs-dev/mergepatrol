@@ -96,8 +96,10 @@ impl PullRequest {
             return Some("the PR is a draft".into());
         }
         match self.review_decision.as_deref() {
-            Some("REVIEW_REQUIRED") => Some("waiting for an approval".into()),
-            Some("CHANGES_REQUESTED") => Some("a reviewer requested changes".into()),
+            Some("REVIEW_REQUIRED") => Some("waiting for a required review".into()),
+            Some("CHANGES_REQUESTED") => {
+                Some("a reviewer requested changes, and their approval is required".into())
+            }
             _ => None,
         }
     }

@@ -942,8 +942,35 @@ async fn a_dismissed_approval_holds_the_pr_in_its_place() {
     assert_eq!(run.kinds(2).last().unwrap(), "merged");
     assert_eq!(
         run.lane(),
-        [(1, "Held(\"waiting for an approval\")".to_owned())]
+        [(1, "Held(\"waiting for a required review\")".to_owned())]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_that_needs_a_review_is_held_and_says_so_until_approved() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().review_decision = Some("REVIEW_REQUIRED".into());
+    }));
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(comment.contains("On hold: waiting for a required review"));
+    // Each tick after says nothing new.
+    run.tick().await;
+    assert_eq!(run.gh.with(|s| s.comments.len()), 1);
+
+    run.gh
+        .state
+        .lock()
+        .unwrap()
+        .prs
+        .get_mut(&1)
+        .unwrap()
+        .review_decision = Some("APPROVED".into());
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(&run.kinds(1)[2..4], ["released", "rebasing"]);
+    assert_eq!(run.merged(), [1]);
 }
 
 #[tokio::test(start_paused = true)]
