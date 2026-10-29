@@ -394,6 +394,34 @@ impl Installation {
         Ok(pr)
     }
 
+    /// The open PRs into `base`, up to `limit`, updated last first. Their code owners are not
+    /// checked: `review_decision` leaves out a code owner's review it requires.
+    pub async fn open_pull_requests(
+        &self,
+        repo: &RepoName,
+        base: &str,
+        limit: u32,
+    ) -> Result<Vec<PullRequest>> {
+        let query = format!(
+            "query($owner: String!, $name: String!, $base: String!, $limit: Int!) {{
+              repository(owner: $owner, name: $name) {{
+                pullRequests(states: OPEN, baseRefName: $base, first: $limit, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
+                  nodes {{ {PR_FIELDS} }}
+                }}
+              }}
+            }}"
+        );
+        let data: Value = self
+            .graphql(
+                &query,
+                json!({ "owner": repo.owner, "name": repo.name, "base": base, "limit": limit }),
+            )
+            .await?;
+        Ok(serde_json::from_value(
+            data["repository"]["pullRequests"]["nodes"].clone(),
+        )?)
+    }
+
     /// The open PRs of the stack, bottom to top. Its merged layers are left out.
     pub async fn stack_layers(&self, repo: &RepoName, stack: PrNumber) -> Result<Vec<PrNumber>> {
         let r: Value = self

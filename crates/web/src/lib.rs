@@ -118,6 +118,14 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/api/w/{id}/repos", get(api::repos))
         .route("/api/w/{id}/repos/{owner}/{name}", put(api::set_repo))
         .route(
+            "/api/w/{id}/repos/{owner}/{name}/open",
+            get(api::open_pulls),
+        )
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/queue",
+            put(api::queue_pull).delete(api::dequeue_pull),
+        )
+        .route(
             "/api/w/{id}/repos/{owner}/{name}/config",
             get(api::repo_config).put(api::propose_repo_config),
         )
@@ -499,6 +507,52 @@ mod tests {
             get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
             StatusCode::OK
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_queue_changes_only_as_the_user(pool: PgPool) {
+        let (router, _) = signed_in(pool.clone()).await;
+        let (store, vault) = store_and_vault(pool).await;
+        let status = |method: &str, workspace: u64, cookie: &str| {
+            let req = Request::builder()
+                .method(method)
+                .uri(format!("/api/w/{workspace}/repos/acme/app/pulls/7/queue"))
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"priority":true}"#))
+                .unwrap();
+            let router = router.clone();
+            async move { send(&router, req).await.status() }
+        };
+        assert_eq!(
+            status("PUT", 2, "mp_session=tok").await,
+            StatusCode::NOT_FOUND
+        );
+        // Without the user's GitHub token, nothing can act as them: not the App in their stead.
+        for method in ["PUT", "DELETE"] {
+            assert_eq!(
+                status(method, 1, "mp_session=tok").await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        old_session(&*store, &vault, now() - 60, Some(expired_token())).await;
+        assert_eq!(
+            status("PUT", 1, "mp_session=old").await,
+            StatusCode::UNAUTHORIZED
+        );
+        // With a live token, the change goes on to GitHub: here, to the App there is none of yet.
+        store.delete_session(&auth::hash("old")).await.unwrap();
+        let live = UserToken {
+            expires_at: Some(now() + 3600),
+            ..expired_token()
+        };
+        old_session(&*store, &vault, now() - 60, Some(live)).await;
+        for method in ["PUT", "DELETE"] {
+            assert_eq!(
+                status(method, 1, "mp_session=old").await,
+                StatusCode::CONFLICT
+            );
+        }
     }
 
     #[sqlx::test(migrations = false)]
