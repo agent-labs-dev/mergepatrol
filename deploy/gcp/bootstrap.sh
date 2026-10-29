@@ -11,6 +11,8 @@ PROJECT=${PROJECT:-mergepatrol}
 # A region with Cloud Run domain mappings, near nebula's us-west2.
 REGION=${REGION:-us-west1}
 PUBLIC_URL=${PUBLIC_URL:-https://mergepatrol.ai}
+# Pushes to this repo's main deploy, through GitHub Actions.
+REPO=${REPO:-agent-labs-dev/mergepatrol}
 SQL=mergepatrol
 DB=mergepatrol
 DB_USER=mergepatrol
@@ -21,7 +23,8 @@ secret() { g secrets describe "$1" >/dev/null 2>&1; }
 grant() { for _ in 1 2 3 4 5 6; do g "$@" >/dev/null && return; sleep 10; done; return 1; }
 
 g services enable run.googleapis.com sqladmin.googleapis.com artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com secretmanager.googleapis.com iam.googleapis.com
+  cloudbuild.googleapis.com secretmanager.googleapis.com iam.googleapis.com \
+  iamcredentials.googleapis.com sts.googleapis.com
 
 g artifacts repositories describe mergepatrol --location="$REGION" >/dev/null 2>&1 \
   || g artifacts repositories create mergepatrol --location="$REGION" --repository-format=docker
@@ -29,7 +32,7 @@ g artifacts repositories describe mergepatrol --location="$REGION" >/dev/null 2>
 # The orchestrator holds the GitHub App key and starts jobs. A job runs untrusted repo code and
 # an agent with a shell, so its account has no roles at all: the token it can get from the
 # metadata server opens nothing.
-for sa in mergepatrol mergepatrol-job; do
+for sa in mergepatrol mergepatrol-job mergepatrol-deploy; do
   g iam service-accounts describe "$sa@$PROJECT.iam.gserviceaccount.com" >/dev/null 2>&1 \
     || g iam service-accounts create "$sa"
 done
@@ -47,6 +50,28 @@ for role in roles/run.admin roles/artifactregistry.writer roles/logging.logWrite
   roles/storage.objectViewer; do
   grant projects add-iam-policy-binding "$PROJECT" --member="$BUILD" --role="$role" --condition=None
 done
+
+# GitHub Actions on main signs in as mergepatrol-deploy with its OIDC token, so no key exists.
+# The condition pins the repo by id, which a rename or a new repo with the same name can't take.
+REPO_ID=$(gh api "repos/$REPO" --jq .id)
+DEPLOY=mergepatrol-deploy@$PROJECT.iam.gserviceaccount.com
+g iam workload-identity-pools describe github --location=global >/dev/null 2>&1 \
+  || g iam workload-identity-pools create github --location=global
+g iam workload-identity-pools providers describe github --location=global \
+  --workload-identity-pool=github >/dev/null 2>&1 \
+  || g iam workload-identity-pools providers create-oidc github --location=global \
+    --workload-identity-pool=github --issuer-uri=https://token.actions.githubusercontent.com \
+    --attribute-mapping=google.subject=assertion.sub,attribute.repository_id=assertion.repository_id \
+    --attribute-condition="assertion.repository_id=='$REPO_ID' && assertion.ref=='refs/heads/main'"
+grant iam service-accounts add-iam-policy-binding "$DEPLOY" --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/$NUMBER/locations/global/workloadIdentityPools/github/attribute.repository_id/$REPO_ID"
+# Submits the build and streams its log; the build itself deploys, as the account above.
+for role in roles/cloudbuild.builds.editor roles/serviceusage.serviceUsageConsumer roles/storage.admin \
+  roles/viewer; do
+  grant projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$DEPLOY" --role="$role" --condition=None
+done
+grant iam service-accounts add-iam-policy-binding "${BUILD#serviceAccount:}" \
+  --member="serviceAccount:$DEPLOY" --role=roles/iam.serviceAccountUser
 
 if ! g sql instances describe "$SQL" >/dev/null 2>&1; then
   g sql instances create "$SQL" --database-version=POSTGRES_17 --edition=enterprise \
@@ -79,6 +104,5 @@ Deployed. Left to do by hand:
   2. Read the setup token: gcloud logging read --project=$PROJECT \\
        'resource.labels.service_name="mergepatrol" AND jsonPayload.setup_token:*' --limit=1
      and open $PUBLIC_URL to create the GitHub App.
-  3. Deploy on every push to main: connect agent-labs-dev/mergepatrol to Cloud Build, and add a
-     trigger that runs deploy/gcp/cloudbuild.yaml with _REGION=$REGION and _PUBLIC_URL=$PUBLIC_URL.
+After this, every push to main of $REPO deploys (.github/workflows/deploy.yml).
 EOF
