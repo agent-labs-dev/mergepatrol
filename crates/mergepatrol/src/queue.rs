@@ -238,6 +238,10 @@ async fn finish(
             record(ctx, key, number, "merged", &sha).await?;
             gh.sticky_comment(&key.repo, number, &format!("Merged as {sha}."))
                 .await?;
+            let labels = &ctx.config.labels;
+            for label in [&labels.trigger, &labels.priority] {
+                gh.remove_label(&key.repo, number, label).await?;
+            }
         }
         Outcome::Ejected(reason) => {
             lane.remove(number);
