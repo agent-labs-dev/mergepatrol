@@ -59,6 +59,7 @@ function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
 
 const tabs = [
   ["Queue", "/$account/queue"],
+  ["History", "/$account/history"],
   ["Repos", "/$account/repos"],
   ["Settings", "/$account/settings"],
 ] as const;

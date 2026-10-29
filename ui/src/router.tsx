@@ -6,6 +6,8 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import { App } from "./App";
+import type { OutcomeView } from "./api/OutcomeView";
+import { History, OUTCOMES, WINDOWS, type Window } from "./History";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
@@ -18,6 +20,9 @@ import { useWorkspace } from "./workspace";
 
 const optional = <T,>(value: unknown, type: "string" | "number") =>
   typeof value === type ? (value as T) : undefined;
+
+const oneOf = <T,>(options: readonly T[], value: unknown) =>
+  options.includes(value as T) ? (value as T) : undefined;
 
 const root = createRootRoute({
   component: App,
@@ -50,6 +55,19 @@ const queue = createRoute({
   component: () => <Queue workspace={useWorkspace().workspace} />,
 });
 
+const history = createRoute({
+  getParentRoute: () => workspace,
+  path: "history",
+  /** The repo in view, the window in days, and the outcome listed. Every repo, 30 days, and
+   * every outcome by default. */
+  validateSearch: (search): { repo?: string; days?: Window; outcome?: OutcomeView } => ({
+    repo: optional(search.repo, "string"),
+    days: oneOf(WINDOWS, search.days),
+    outcome: oneOf(OUTCOMES, search.outcome),
+  }),
+  component: () => <History workspace={useWorkspace().workspace} />,
+});
+
 const repos = createRoute({
   getParentRoute: () => workspace,
   path: "repos",
@@ -67,7 +85,7 @@ const settings = createRoute({
 export const router = createRouter({
   routeTree: root.addChildren([
     home,
-    workspace.addChildren([workspaceHome, queue, repos, settings]),
+    workspace.addChildren([workspaceHome, queue, history, repos, settings]),
   ]),
 });
 

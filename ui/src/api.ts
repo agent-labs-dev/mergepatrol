@@ -1,7 +1,10 @@
 import type { EventView } from "./api/EventView";
+import type { ExitsPage } from "./api/ExitsPage";
+import type { HistoryStatsView } from "./api/HistoryStatsView";
 import type { LaneView } from "./api/LaneView";
 import type { ManifestForm } from "./api/ManifestForm";
 import type { ManifestRequest } from "./api/ManifestRequest";
+import type { OutcomeView } from "./api/OutcomeView";
 import type { PullRequestRef } from "./api/PullRequestRef";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
@@ -47,6 +50,21 @@ export const fetchLanes = (id: number) => get<LaneView[]>(w(id, "/lanes"));
 
 export const fetchEvents = (id: number, repo: string, pr?: number) =>
   get<EventView[]>(w(id, `/events?repo=${encodeURIComponent(repo)}${pr ? `&pr=${pr}` : ""}`));
+
+/** The query string of the defined values. */
+const query = (params: Record<string, string | number | undefined>) =>
+  new URLSearchParams(
+    Object.entries(params).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]])),
+  ).toString();
+
+/** Without `repo`, every repo's; without `outcome`, every outcome's. */
+export const fetchExits = (
+  id: number,
+  q: { repo?: string; days: number; outcome?: OutcomeView; before?: number },
+) => get<ExitsPage>(w(id, `/history?${query(q)}`));
+
+export const fetchHistoryStats = (id: number, q: { repo?: string; days: number }) =>
+  get<HistoryStatsView>(w(id, `/history/stats?${query(q)}`));
 
 export const fetchRepos = (id: number) => get<RepoView[]>(w(id, "/repos"));
 

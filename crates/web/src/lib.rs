@@ -97,6 +97,8 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         // A workspace is one installation of the App: `{id}` is its installation ID.
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
+        .route("/api/w/{id}/history", get(api::history))
+        .route("/api/w/{id}/history/stats", get(api::history_stats))
         .route("/api/w/{id}/repos", get(api::repos))
         .route("/api/w/{id}/repos/{owner}/{name}", put(api::set_repo))
         .route(

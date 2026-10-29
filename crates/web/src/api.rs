@@ -5,11 +5,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
     EFFORTS, Entry, EntryState, FixCiSettings, Person, PrSummary, REPO_CONFIG_PATH, RepoName,
-    RepoSettings, ResolverSettings,
+    RepoSettings, ResolverSettings, Step,
 };
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
-use mergepatrol_store::{ANTHROPIC_API_KEY, RepoState, Scope};
+use mergepatrol_store::{ANTHROPIC_API_KEY, ExitQuery, ExitRecord, ExitStats, RepoState, Scope};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -155,6 +155,113 @@ pub struct EventView {
     pub at: String,
     pub kind: String,
     pub message: String,
+}
+
+/// One page of the PRs that left the queue, the newest first.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ExitsPage {
+    pub exits: Vec<ExitView>,
+    /// `before` for the next page. `None` on the last.
+    #[ts(type = "number | null")]
+    pub next: Option<i64>,
+}
+
+/// The queue's metrics over a window, and over the window before it, for the trend.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct HistoryStatsView {
+    /// Each repo's, then every repo's together, with no `repo`.
+    pub current: Vec<StatsView>,
+    pub previous: Vec<StatsView>,
+    /// The PRs merged on each UTC day of the window, today last.
+    pub merged_by_day: Vec<u32>,
+    /// Where the merged PRs' time went, in the queue's order. Empty without a merge.
+    pub steps: Vec<StepStatsView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct StepStatsView {
+    pub step: StepView,
+    pub mean_secs: f64,
+    pub p50_secs: f64,
+    pub p95_secs: f64,
+}
+
+#[derive(Clone, Copy, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum StepView {
+    Waiting,
+    Held,
+    Rebasing,
+    Checks,
+    Fixing,
+}
+
+impl From<Step> for StepView {
+    fn from(s: Step) -> Self {
+        match s {
+            Step::Waiting => StepView::Waiting,
+            Step::Held => StepView::Held,
+            Step::Rebasing => StepView::Rebasing,
+            Step::Checks => StepView::Checks,
+            Step::Fixing => StepView::Fixing,
+        }
+    }
+}
+
+/// Seconds in one step.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct StepTimeView {
+    pub step: StepView,
+    pub secs: f64,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct StatsView {
+    pub repo: Option<String>,
+    pub merged: u32,
+    pub ejected: u32,
+    pub removed: u32,
+    /// Seconds from joining the queue to merging. `None` without a merge.
+    pub p50_secs: Option<f64>,
+    pub p95_secs: Option<f64>,
+}
+
+/// A time a PR left the queue, and the PR as it was then.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ExitView {
+    #[ts(type = "number")]
+    pub id: i64,
+    pub repo: String,
+    pub trunk: String,
+    pub number: u32,
+    pub outcome: OutcomeView,
+    /// The merge commit, or why.
+    pub detail: String,
+    pub title: String,
+    pub url: String,
+    pub author: Option<PersonView>,
+    /// `None` for a PR ejected before it joined, such as one from a fork.
+    pub enqueued_at: Option<String>,
+    /// Seconds in each step, in the queue's order. Empty with no `enqueued_at`.
+    pub steps: Vec<StepTimeView>,
+    pub at: String,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum OutcomeView {
+    Merged,
+    Ejected,
+    /// The label came off, or the PR closed.
+    Removed,
 }
 
 #[derive(Serialize, TS)]
@@ -348,6 +455,144 @@ pub(crate) async fn events(
             })
             .collect(),
     ))
+}
+
+const HISTORY_PAGE: u32 = 50;
+
+#[derive(Deserialize)]
+pub(crate) struct HistoryQuery {
+    /// Every repo without one.
+    repo: Option<String>,
+    /// The window, in days back from now.
+    days: u32,
+    /// Every outcome without one.
+    outcome: Option<OutcomeView>,
+    /// The `next` of the page before.
+    before: Option<i64>,
+}
+
+impl HistoryQuery {
+    fn repo(&self) -> Result<Option<RepoName>, ApiError> {
+        self.repo
+            .as_deref()
+            .map(|r| RepoName::parse(r).ok_or(ApiError::bad_request("repo must be owner/name")))
+            .transpose()
+    }
+
+    fn days(&self) -> Result<u32, ApiError> {
+        match self.days {
+            1..=365 => Ok(self.days),
+            _ => Err(ApiError::bad_request("days must be from 1 to 365")),
+        }
+    }
+}
+
+pub(crate) async fn history(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path(id): Path<u64>,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<ExitsPage>, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = q.repo()?;
+    let outcomes: &[&str] = match q.outcome {
+        None => &[],
+        Some(OutcomeView::Merged) => &["merged"],
+        Some(OutcomeView::Ejected) => &["ejected"],
+        Some(OutcomeView::Removed) => &["dequeued", "cancelled"],
+    };
+    let exits = app
+        .store
+        .exits(&ExitQuery {
+            installation_id: id,
+            repo: repo.as_ref(),
+            outcomes,
+            days: q.days()?,
+            before: q.before,
+            limit: HISTORY_PAGE,
+        })
+        .await?;
+    let next = (exits.len() == HISTORY_PAGE as usize)
+        .then(|| exits.last().map(|e| e.id))
+        .flatten();
+    Ok(Json(ExitsPage {
+        exits: exits.into_iter().map(ExitView::from).collect(),
+        next,
+    }))
+}
+
+pub(crate) async fn history_stats(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path(id): Path<u64>,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<HistoryStatsView>, ApiError> {
+    let id = user.workspace(id)?;
+    let (repo, days) = (q.repo()?, q.days()?);
+    let (current, previous, merged_by_day, steps) = tokio::try_join!(
+        app.store.exit_stats(id, days, 0),
+        app.store.exit_stats(id, 2 * days, days),
+        app.store.merged_by_day(id, repo.as_ref(), days),
+        app.store.step_stats(id, repo.as_ref(), days),
+    )?;
+    Ok(Json(HistoryStatsView {
+        current: current.into_iter().map(StatsView::from).collect(),
+        previous: previous.into_iter().map(StatsView::from).collect(),
+        merged_by_day: merged_by_day.into_iter().map(|n| n as u32).collect(),
+        steps: steps
+            .into_iter()
+            .map(|s| StepStatsView {
+                step: s.step.into(),
+                mean_secs: s.mean_secs,
+                p50_secs: s.p50_secs,
+                p95_secs: s.p95_secs,
+            })
+            .collect(),
+    }))
+}
+
+impl From<ExitStats> for StatsView {
+    fn from(s: ExitStats) -> Self {
+        StatsView {
+            repo: s.repo,
+            merged: s.merged as u32,
+            ejected: s.ejected as u32,
+            removed: s.removed as u32,
+            p50_secs: s.p50_secs,
+            p95_secs: s.p95_secs,
+        }
+    }
+}
+
+impl From<ExitRecord> for ExitView {
+    fn from(e: ExitRecord) -> Self {
+        ExitView {
+            id: e.id,
+            repo: e.repo,
+            trunk: e.trunk,
+            number: e.pr as u32,
+            outcome: match e.outcome.as_str() {
+                "merged" => OutcomeView::Merged,
+                "ejected" => OutcomeView::Ejected,
+                _ => OutcomeView::Removed,
+            },
+            detail: e.detail,
+            title: e.summary.title,
+            url: e.summary.url,
+            author: e.summary.author.map(Into::into),
+            enqueued_at: e.enqueued_at,
+            steps: e
+                .steps
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(step, secs)| StepTimeView {
+                    step: step.into(),
+                    secs,
+                })
+                .collect(),
+            at: e.at,
+        }
+    }
 }
 
 /// The repos this workspace's installation can access, and whether Mergepatrol runs on each.

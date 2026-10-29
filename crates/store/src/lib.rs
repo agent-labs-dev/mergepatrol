@@ -6,7 +6,7 @@ pub use vault::{ANTHROPIC_API_KEY, GITHUB_APP, SecretStatus, Vault};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use mergepatrol_core::{Lane, PrNumber, RepoName};
+use mergepatrol_core::{Lane, PrNumber, PrSummary, RepoName, Step, StepTimes, step_times};
 use serde::Serialize;
 use sqlx::PgPool;
 use sqlx::Row;
@@ -27,6 +27,64 @@ pub struct EventRecord {
     pub at: String,
     pub kind: String,
     pub message: String,
+}
+
+/// A time a PR left the queue: how, and the PR as it was then.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExitRecord {
+    /// Newer exits have higher IDs: the cursor for the next page.
+    pub id: i64,
+    pub repo: String,
+    pub trunk: String,
+    pub pr: PrNumber,
+    /// The event kind it left with: `merged`, `ejected`, `dequeued` or `cancelled`.
+    pub outcome: String,
+    /// The merge commit, or why.
+    pub detail: String,
+    pub summary: PrSummary,
+    /// `None` for a PR ejected before it joined, such as one from a fork.
+    pub enqueued_at: Option<String>,
+    /// `None` with `enqueued_at`.
+    pub steps: Option<StepTimes>,
+    pub at: String,
+}
+
+/// Seconds the merged PRs spent in one step, over a window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepStats {
+    pub step: Step,
+    pub mean_secs: f64,
+    pub p50_secs: f64,
+    pub p95_secs: f64,
+}
+
+/// Which exits to list, the newest first.
+#[derive(Clone, Debug)]
+pub struct ExitQuery<'a> {
+    pub installation_id: u64,
+    /// `None` for every repo of the workspace.
+    pub repo: Option<&'a RepoName>,
+    /// Outcomes to keep. Empty keeps all.
+    pub outcomes: &'a [&'a str],
+    /// Only exits from the last `days`.
+    pub days: u32,
+    /// Only exits older than this ID: the page after the one that ended with it.
+    pub before: Option<i64>,
+    pub limit: u32,
+}
+
+/// The exits of one repo, or of every repo in the workspace, over a stretch of time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExitStats {
+    /// `None` for every repo together.
+    pub repo: Option<String>,
+    pub merged: u64,
+    pub ejected: u64,
+    /// Dequeued or cancelled: the label came off, or the PR closed.
+    pub removed: u64,
+    /// Seconds from joining the queue to merging, of the merged PRs. `None` without any.
+    pub p50_secs: Option<f64>,
+    pub p95_secs: Option<f64>,
 }
 
 /// An encrypted secret, as stored. `Vault` encrypts and decrypts.
@@ -54,6 +112,37 @@ pub trait Store: Send + Sync {
         pr: Option<PrNumber>,
         limit: u32,
     ) -> Result<Vec<EventRecord>>;
+    /// A PR left the queue. Its time in the queue runs from its last `enqueued` event.
+    async fn record_exit(
+        &self,
+        key: &LaneKey,
+        pr: PrNumber,
+        outcome: &str,
+        detail: &str,
+        summary: &PrSummary,
+    ) -> Result<()>;
+    async fn exits(&self, query: &ExitQuery<'_>) -> Result<Vec<ExitRecord>>;
+    /// Each repo's, then every repo's together, from `from_days` ago to `to_days` ago.
+    async fn exit_stats(
+        &self,
+        installation_id: u64,
+        from_days: u32,
+        to_days: u32,
+    ) -> Result<Vec<ExitStats>>;
+    /// Of the PRs merged in the last `days`, in the order of `Step::ALL`. Empty without any.
+    async fn step_stats(
+        &self,
+        installation_id: u64,
+        repo: Option<&RepoName>,
+        days: u32,
+    ) -> Result<Vec<StepStats>>;
+    /// The PRs merged on each of the last `days` UTC days, today last. `None` for every repo.
+    async fn merged_by_day(
+        &self,
+        installation_id: u64,
+        repo: Option<&RepoName>,
+        days: u32,
+    ) -> Result<Vec<u64>>;
     async fn put_secret(&self, scope: Scope, name: &str, secret: SecretRecord) -> Result<()>;
     async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>>;
     async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()>;
@@ -276,6 +365,200 @@ impl Store for PgStore {
                 kind: row.get("kind"),
                 message: row.get("message"),
             })
+            .collect())
+    }
+
+    async fn record_exit(
+        &self,
+        key: &LaneKey,
+        pr: PrNumber,
+        outcome: &str,
+        detail: &str,
+        summary: &PrSummary,
+    ) -> Result<()> {
+        // From the time it last joined: none for a PR ejected before it joined.
+        let events = sqlx::query(
+            "SELECT extract(epoch FROM at)::FLOAT8 AS at, kind FROM events
+             WHERE installation_id = $1 AND repo = $2 AND pr = $3 AND id >= (
+                SELECT max(id) FROM events
+                WHERE installation_id = $1 AND repo = $2 AND pr = $3 AND kind = 'enqueued'
+             )
+             ORDER BY id",
+        )
+        .bind(key.installation_id as i64)
+        .bind(key.repo.to_string())
+        .bind(pr as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        let events: Vec<(f64, String)> = events
+            .into_iter()
+            .map(|row| (row.get("at"), row.get("kind")))
+            .collect();
+        let events: Vec<(f64, &str)> = events.iter().map(|(at, k)| (*at, k.as_str())).collect();
+        let enqueued_at = events.first().map(|(at, _)| *at);
+        let steps = enqueued_at
+            .map(|_| serde_json::to_value(step_times(&events)))
+            .transpose()?;
+        sqlx::query(
+            "INSERT INTO exits
+                (installation_id, repo, trunk, pr, outcome, detail, summary, enqueued_at, steps)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8), $9)",
+        )
+        .bind(key.installation_id as i64)
+        .bind(key.repo.to_string())
+        .bind(&key.trunk)
+        .bind(pr as i64)
+        .bind(outcome)
+        .bind(detail)
+        .bind(serde_json::to_value(summary)?)
+        .bind(enqueued_at)
+        .bind(steps)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn exits(&self, q: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
+        let rows = sqlx::query(
+            r#"SELECT id, repo, trunk, pr, outcome, detail, summary, steps,
+                to_char(enqueued_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS enqueued_at,
+                to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+             FROM exits
+             WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
+                AND (cardinality($3::TEXT[]) = 0 OR outcome = ANY($3))
+                AND at > now() - make_interval(days => $4)
+                AND ($5::BIGINT IS NULL OR id < $5)
+             ORDER BY id DESC LIMIT $6"#,
+        )
+        .bind(q.installation_id as i64)
+        .bind(q.repo.map(|r| r.to_string()))
+        .bind(q.outcomes)
+        .bind(q.days as i32)
+        .bind(q.before)
+        .bind(q.limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ExitRecord {
+                    id: row.get("id"),
+                    repo: row.get("repo"),
+                    trunk: row.get("trunk"),
+                    pr: row.get::<i64, _>("pr") as u64,
+                    outcome: row.get("outcome"),
+                    detail: row.get("detail"),
+                    summary: serde_json::from_value(row.get("summary"))?,
+                    steps: row
+                        .get::<Option<serde_json::Value>, _>("steps")
+                        .map(serde_json::from_value)
+                        .transpose()?,
+                    enqueued_at: row.get("enqueued_at"),
+                    at: row.get("at"),
+                })
+            })
+            .collect()
+    }
+
+    async fn exit_stats(
+        &self,
+        installation_id: u64,
+        from_days: u32,
+        to_days: u32,
+    ) -> Result<Vec<ExitStats>> {
+        let rows = sqlx::query(
+            "SELECT repo,
+                count(*) FILTER (WHERE outcome = 'merged') AS merged,
+                count(*) FILTER (WHERE outcome = 'ejected') AS ejected,
+                count(*) FILTER (WHERE outcome IN ('dequeued', 'cancelled')) AS removed,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM at - enqueued_at)::FLOAT8)
+                    FILTER (WHERE outcome = 'merged') AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM at - enqueued_at)::FLOAT8)
+                    FILTER (WHERE outcome = 'merged') AS p95
+             FROM exits
+             WHERE installation_id = $1
+                AND at > now() - make_interval(days => $2)
+                AND at <= now() - make_interval(days => $3)
+             GROUP BY GROUPING SETS ((repo), ())
+             ORDER BY repo NULLS LAST",
+        )
+        .bind(installation_id as i64)
+        .bind(from_days as i32)
+        .bind(to_days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| ExitStats {
+                repo: row.get("repo"),
+                merged: row.get::<i64, _>("merged") as u64,
+                ejected: row.get::<i64, _>("ejected") as u64,
+                removed: row.get::<i64, _>("removed") as u64,
+                p50_secs: row.get("p50"),
+                p95_secs: row.get("p95"),
+            })
+            .collect())
+    }
+
+    async fn step_stats(
+        &self,
+        installation_id: u64,
+        repo: Option<&RepoName>,
+        days: u32,
+    ) -> Result<Vec<StepStats>> {
+        let rows = sqlx::query(
+            "SELECT s.key AS step, avg(s.value::FLOAT8) AS mean,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY s.value::FLOAT8) AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY s.value::FLOAT8) AS p95
+             FROM exits, jsonb_each_text(steps) AS s
+             WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
+                AND outcome = 'merged' AND at > now() - make_interval(days => $3)
+             GROUP BY s.key",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.map(|r| r.to_string()))
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut stats: Vec<StepStats> = rows
+            .into_iter()
+            .filter_map(|row| {
+                Some(StepStats {
+                    step: Step::parse(row.get("step"))?,
+                    mean_secs: row.get("mean"),
+                    p50_secs: row.get("p50"),
+                    p95_secs: row.get("p95"),
+                })
+            })
+            .collect();
+        stats.sort_by_key(|s| s.step);
+        Ok(stats)
+    }
+
+    async fn merged_by_day(
+        &self,
+        installation_id: u64,
+        repo: Option<&RepoName>,
+        days: u32,
+    ) -> Result<Vec<u64>> {
+        let rows = sqlx::query(
+            "SELECT count(e.id) AS merged
+             FROM generate_series(0, $3 - 1) AS ago
+             LEFT JOIN exits e ON e.installation_id = $1 AND ($2::TEXT IS NULL OR e.repo = $2)
+                AND e.outcome = 'merged'
+                AND e.at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                    - make_interval(days => ago)
+                AND e.at < date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                    - make_interval(days => ago - 1)
+             GROUP BY ago ORDER BY ago DESC",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.map(|r| r.to_string()))
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.get::<i64, _>("merged") as u64)
             .collect())
     }
 
@@ -628,6 +911,128 @@ mod tests {
         assert!(events[0].at.ends_with('Z'), "{}", events[0].at);
         assert_eq!(store.events(1, &key.repo, None, 10).await.unwrap().len(), 2);
         assert_eq!(store.events(2, &key.repo, None, 10).await.unwrap().len(), 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn exits_keep_the_pr_and_its_time_in_the_queue(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let key = |repo: &str| LaneKey {
+            installation_id: 1,
+            repo: RepoName::parse(repo).unwrap(),
+            trunk: "main".into(),
+        };
+        let (a, b) = (key("o/a"), key("o/b"));
+        let summary = PrSummary {
+            title: "Fix it".into(),
+            ..Default::default()
+        };
+        store.record(&a, 1, "enqueued", "").await.unwrap();
+        store.record(&a, 1, "rebasing", "").await.unwrap();
+        store.record(&a, 1, "published", "").await.unwrap();
+        // An hour in the queue, all of it waiting.
+        sqlx::query("UPDATE events SET at = now() - interval '1 hour' WHERE kind = 'enqueued'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        store
+            .record_exit(&a, 1, "merged", "abc", &summary)
+            .await
+            .unwrap();
+        store.record(&b, 2, "enqueued", "").await.unwrap();
+        store
+            .record_exit(&b, 2, "ejected", "no", &summary)
+            .await
+            .unwrap();
+        // Ejected before it joined.
+        store
+            .record_exit(&b, 3, "ejected", "fork", &summary)
+            .await
+            .unwrap();
+        store
+            .record_exit(&b, 4, "dequeued", "", &summary)
+            .await
+            .unwrap();
+
+        let query = ExitQuery {
+            installation_id: 1,
+            repo: None,
+            outcomes: &[],
+            days: 30,
+            before: None,
+            limit: 10,
+        };
+        async fn prs(store: &PgStore, q: ExitQuery<'_>) -> Vec<PrNumber> {
+            let exits = store.exits(&q).await.unwrap();
+            exits.iter().map(|e| e.pr).collect()
+        }
+        let exits = store.exits(&query).await.unwrap();
+        assert_eq!(exits.iter().map(|e| e.pr).collect::<Vec<_>>(), [4, 3, 2, 1]);
+        assert_eq!(exits[3].summary, summary);
+        assert_eq!(exits[3].detail, "abc");
+        assert!(exits[3].enqueued_at.is_some());
+        assert_eq!(exits[1].enqueued_at, None);
+        assert_eq!(exits[1].steps, None);
+        let waited = exits[3].steps.as_ref().unwrap()[&Step::Waiting];
+        assert!((3599.0..3700.0).contains(&waited), "{waited}");
+
+        let steps = store.step_stats(1, None, 30).await.unwrap();
+        assert_eq!(steps.iter().map(|s| s.step).collect::<Vec<_>>(), Step::ALL);
+        assert_eq!(steps[0].p50_secs, waited);
+        assert!(
+            store
+                .step_stats(1, Some(&b.repo), 30)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let repo_a = ExitQuery {
+            repo: Some(&a.repo),
+            ..query.clone()
+        };
+        assert_eq!(prs(&store, repo_a).await, [1]);
+        let ejected = ExitQuery {
+            outcomes: &["ejected"],
+            ..query.clone()
+        };
+        assert_eq!(prs(&store, ejected).await, [3, 2]);
+        let next_page = ExitQuery {
+            before: Some(exits[1].id),
+            limit: 1,
+            ..query.clone()
+        };
+        assert_eq!(prs(&store, next_page).await, [2]);
+        let other = ExitQuery {
+            installation_id: 2,
+            ..query.clone()
+        };
+        assert_eq!(prs(&store, other).await, Vec::<PrNumber>::new());
+
+        let stats = store.exit_stats(1, 30, 0).await.unwrap();
+        let counts: Vec<_> = stats
+            .iter()
+            .map(|s| (s.repo.as_deref(), s.merged, s.ejected, s.removed))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                (Some("o/a"), 1, 0, 0),
+                (Some("o/b"), 0, 2, 1),
+                (None, 1, 2, 1)
+            ]
+        );
+        let p50 = stats[0].p50_secs.unwrap();
+        assert!((3599.0..3700.0).contains(&p50), "{p50}");
+        assert_eq!(stats[1].p50_secs, None);
+        // Nothing the 30 days before: only the row for every repo, empty.
+        let before = store.exit_stats(1, 60, 30).await.unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!((before[0].repo.as_deref(), before[0].merged), (None, 0));
+
+        assert_eq!(store.merged_by_day(1, None, 3).await.unwrap(), [0, 0, 1]);
+        assert_eq!(
+            store.merged_by_day(1, Some(&b.repo), 2).await.unwrap(),
+            [0, 0]
+        );
     }
 
     #[sqlx::test(migrations = false)]
