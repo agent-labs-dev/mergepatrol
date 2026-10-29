@@ -2,6 +2,22 @@
 
 Mergepatrol is a merge queue for GitHub. Add a label to a pull request, and Mergepatrol rebases it onto its base branch, waits for the required checks, and merges it.
 
+Status: early. Expect rough edges, and [tell us](https://github.com/agent-labs-dev/mergepatrol/issues/new/choose) what breaks.
+
+## Try it
+
+The hosted Mergepatrol at https://mergepatrol.ai runs the public GitHub App `Mergepatrol`. You bring your own model API key.
+
+1. Sign in with GitHub at https://mergepatrol.ai.
+2. Install the App on your organization or account, and choose its repos. GitHub sends you back to the dashboard.
+3. In **Repos**, **Set up** a repo. Mergepatrol opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
+4. In **Settings**, add an Anthropic or OpenAI API key. Create one for Mergepatrol alone, with a spend limit.
+5. Add the `mergepatrol` label to a PR.
+
+To run your own, see [Run it](#run-it).
+
+## How it works
+
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
 When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
@@ -10,7 +26,7 @@ Required checks that have not finished 3 hours after a rebase or a fix also ejec
 
 An error outside the PR's job does not eject it. That covers GitHub being down, or slow to answer, as well as a rate limit. The PR keeps its place at the head of the queue, and its job runs again. Only after 30 minutes of such errors is it ejected.
 
-## Batches
+### Batches
 
 A queue that runs CI once per PR merges a few PRs an hour. So when several queued PRs have passed their own checks, Mergepatrol tests them together:
 
@@ -22,7 +38,7 @@ When a batch fails, Mergepatrol tests half of it next, and so on down to one PR,
 
 A PR runs alone when its own checks have not passed, when it conflicts with the PRs ahead of it, and on a base branch that requires PRs to be up to date before they merge. Mergepatrol reads that setting from the rulesets, and from classic branch protection with the App's `administration: read` permission. Without the permission, every base branch counts as requiring it. An App created before this permission existed must be given it on GitHub.
 
-## Stacks
+### Stacks
 
 A stack of PRs, made with `gh stack`, is one item of the queue: the label on any of its PRs queues the whole stack, and Mergepatrol merges it all at once, with GitHub's asynchronous merge. Either every PR of the stack merges, or none does. GitHub merges a stack only when the required checks of each of its PRs passed.
 
@@ -33,7 +49,7 @@ A stack of PRs, made with `gh stack`, is one item of the queue: the label on any
 
 Every merge goes through the asynchronous merge API, stacked or not. A merge still pending when Mergepatrol restarts is waited for, not requested again.
 
-## PRs from forks
+### PRs from forks
 
 A maintainer queues a PR from a fork with the label, as any other. Its author is not trusted as the repo's own are, so the queue treats it differently:
 
@@ -44,8 +60,6 @@ A maintainer queues a PR from a fork with the label, as any other. Its author is
 - While GitHub waits for a maintainer to approve the fork's workflow runs, the PR waits on hold.
 
 A stack with a PR from a fork is not supported yet.
-
-Status: early. Not ready for use yet.
 
 ## Run it
 
