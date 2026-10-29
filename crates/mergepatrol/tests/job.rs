@@ -170,3 +170,62 @@ async fn docker_executor_runs_a_job_in_a_container() {
     assert_eq!(result.outcome, JobOutcome::Rebased, "{result:?}");
     assert!(out.join(BUNDLE_FILE).exists());
 }
+
+/// A job that is cut off (its queue stopped) leaves no container or volume behind.
+/// Needs Docker and the job image. `cargo test -p mergepatrol --test job -- --ignored`
+#[tokio::test]
+#[ignore]
+async fn a_cut_off_docker_job_leaves_no_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut spec = spec(tmp.path(), "0", "0");
+    // An address that never answers: the job hangs in its first fetch.
+    spec.clone_url = "git://10.255.255.1/never".into();
+    let docker = mergepatrol_executor::DockerExecutor {
+        image: "mergepatrol-job:latest".into(),
+        runtime: None,
+        network: None,
+        resolv_conf: None,
+        memory: "1g".into(),
+        cpus: "1".into(),
+        timeout: Duration::from_secs(120),
+    };
+    let out = tmp.path().join("out");
+    let name = "name=^mergepatrol-job-cut-off$";
+    // From an earlier failed run of this test.
+    Command::new("docker")
+        .args(["rm", "-f", "-v", "mergepatrol-job-cut-off"])
+        .output()
+        .unwrap();
+    let job = tokio::spawn(async move { docker.run("cut-off", &spec, &out).await });
+    let containers = || {
+        let out = Command::new("docker")
+            .args(["ps", "-aq", "--filter", name])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let running = || {
+        let out = Command::new("docker")
+            .args(["ps", "-q", "--filter", name, "--filter", "status=running"])
+            .output()
+            .unwrap();
+        !out.stdout.is_empty()
+    };
+    for _ in 0..50 {
+        if running() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(running(), "the job never started");
+
+    job.abort();
+    let _ = job.await;
+    for _ in 0..50 {
+        if containers().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    panic!("the container is still there: {}", containers());
+}

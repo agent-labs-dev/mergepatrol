@@ -66,6 +66,8 @@ impl Executor for DockerExecutor {
             .args(["rm", "-f", "-v", &name])
             .output()
             .await;
+        // From here on, the container may exist: a job cut off during `docker create` too.
+        let _container = Removed(name.clone());
         let mut create = Command::new("docker");
         // `/out` is a volume: under gVisor, writes to the container's own filesystem stay in
         // the sandbox's memory, where `docker cp` cannot see them.
@@ -95,29 +97,32 @@ impl Executor for DockerExecutor {
             .trim()
             .to_owned();
 
-        let result = async {
-            let mut start = Command::new("docker");
-            start.args(["start", "-a", "-i", &id]);
-            let logs = run_with_spec(start, spec, self.timeout).await;
-            if logs.is_err() {
-                let _ = Command::new("docker").args(["kill", &id]).output().await;
-            }
-            let logs = logs?;
-            let mut cp = Command::new("docker");
-            cp.args(["cp", &format!("{id}:/out/."), path_str(out)?]);
-            checked(cp, "docker cp").await?;
-            read_result(out, &logs).await
-        }
-        .await;
+        let mut start = Command::new("docker");
+        start.args(["start", "-a", "-i", &id]);
+        let logs = run_with_spec(start, spec, self.timeout).await?;
+        let mut cp = Command::new("docker");
+        cp.args(["cp", &format!("{id}:/out/."), path_str(out)?]);
+        checked(cp, "docker cp").await?;
+        read_result(out, &logs).await
+    }
+}
 
-        if let Err(e) = Command::new("docker")
-            .args(["rm", "-f", "-v", &id])
-            .output()
-            .await
-        {
-            tracing::warn!(error = %e, container = %id, "could not remove the job container");
+/// Removes the job's container (by name), and its `/out` volume, when dropped: after the job, after an
+/// error, and when the job is cut off because its queue stopped.
+struct Removed(String);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        // Drop cannot wait, so `docker rm` finishes on its own; tokio reaps it.
+        let removing = Command::new("docker")
+            .args(["rm", "-f", "-v", &self.0])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Err(e) = removing {
+            tracing::warn!(error = %e, container = %self.0, "could not remove the job container");
         }
-        result
     }
 }
 
