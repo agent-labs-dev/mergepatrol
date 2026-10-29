@@ -663,10 +663,18 @@ pub(crate) async fn set_repo(
     Json(body): Json<SetRepo>,
 ) -> Result<StatusCode, ApiError> {
     let id = user.workspace(id)?;
-    let repo = RepoName { owner, name };
+    let repo = repo_name(owner, name)?;
     app.store.set_repo_enabled(id, &repo, body.enabled).await?;
     tracing::info!(installation = id, %repo, enabled = ?body.enabled, "repo setting changed");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The repo of a URL's `{owner}/{name}`. Each is one path segment, but `%2F` decodes to a
+/// slash: a repo stored with one would break every read of the repos.
+fn repo_name(owner: String, name: String) -> Result<RepoName, ApiError> {
+    RepoName::parse(&format!("{owner}/{name}"))
+        .filter(|r| !r.owner.contains('/'))
+        .ok_or_else(|| ApiError::bad_request("not a repo"))
 }
 
 /// Mergepatrol's branch for the PR that changes a repo's config file.
@@ -684,7 +692,7 @@ pub(crate) async fn repo_config(
     Path((id, owner, name)): Path<(u64, String, String)>,
 ) -> Result<Json<RepoConfigView>, ApiError> {
     let id = user.workspace(id)?;
-    let repo = RepoName { owner, name };
+    let repo = repo_name(owner, name)?;
     let gh = installation(&app, id).await?;
     let file = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
     let defaults: &RepoSettings = &app.repo_defaults;
@@ -720,7 +728,7 @@ pub(crate) async fn propose_repo_config(
     Json(body): Json<RepoSettingsView>,
 ) -> Result<Json<PullRequestRef>, ApiError> {
     let id = user.workspace(id)?;
-    let repo = RepoName { owner, name };
+    let repo = repo_name(owner, name)?;
     let settings = RepoSettings::from(body);
     settings
         .check()
