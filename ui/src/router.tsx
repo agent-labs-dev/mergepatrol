@@ -8,6 +8,7 @@ import {
 import { App } from "./App";
 import type { OutcomeView } from "./api/OutcomeView";
 import { History, OUTCOMES, WINDOWS, type Window } from "./History";
+import { HistoryPrototype } from "./HistoryPrototype";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
@@ -58,17 +59,37 @@ const queue = createRoute({
   component: () => <Queue workspace={useWorkspace().workspace} />,
 });
 
+// PROTOTYPE: the developer-stats variants in development.
+const HistoryPage = import.meta.env.DEV ? HistoryPrototype : History;
+
 const history = createRoute({
   getParentRoute: () => workspace,
   path: "history",
   /** The repo in view, the window in days, and the outcome listed. Every repo, 30 days, and
    * every outcome by default. */
-  validateSearch: (search): { repo?: string; days?: Window; outcome?: OutcomeView } => ({
+  validateSearch: (
+    search,
+  ): {
+    repo?: string;
+    days?: Window;
+    outcome?: OutcomeView;
+    // PROTOTYPE: developer stats.
+    variant?: string;
+    author?: string;
+    view?: string;
+    by?: string;
+    sort?: string;
+  } => ({
     repo: optional(search.repo, "string"),
     days: oneOf(WINDOWS, search.days),
     outcome: oneOf(OUTCOMES, search.outcome),
+    variant: optional(search.variant, "string"),
+    author: optional(search.author, "string"),
+    view: optional(search.view, "string"),
+    by: optional(search.by, "string"),
+    sort: optional(search.sort, "string"),
   }),
-  component: () => <History workspace={useWorkspace().workspace} />,
+  component: () => <HistoryPage workspace={useWorkspace().workspace} />,
 });
 
 const repos = createRoute({

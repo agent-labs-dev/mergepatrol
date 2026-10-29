@@ -128,7 +128,7 @@ export function History({ workspace }: { workspace: number }) {
   );
 }
 
-function Segmented<T extends string | number | undefined>({
+export function Segmented<T extends string | number | undefined>({
   name,
   label,
   options,
@@ -203,7 +203,7 @@ function ejectRate(s?: StatsView) {
   return tried ? (s?.ejected ?? 0) / tried : null;
 }
 
-function Stats({
+export function Stats({
   current,
   previous,
   mergedByDay,
@@ -250,7 +250,7 @@ function Stats({
   );
 }
 
-function Tile({
+export function Tile({
   label,
   value,
   children,
@@ -269,7 +269,7 @@ function Tile({
 }
 
 /** A change from the window before: green when it went the way that is good, red otherwise. */
-function Delta({
+export function Delta({
   change,
   text,
   good,
@@ -292,7 +292,15 @@ function Delta({
   );
 }
 
-function TimeDelta({ now, before, vs }: { now: number | null; before: number | null; vs: string }) {
+export function TimeDelta({
+  now,
+  before,
+  vs,
+}: {
+  now: number | null;
+  before: number | null;
+  vs: string;
+}) {
   if (now === null || before === null || before === 0) return null;
   return (
     <Delta
@@ -308,7 +316,7 @@ const SPARK_W = 120;
 const SPARK_H = 24;
 
 /** Merges per UTC day, today last and marked. Hover, tap, or drag for a day's count. */
-function Sparkline({ counts }: { counts: number[] }) {
+export function Sparkline({ counts }: { counts: number[] }) {
   const [hover, setHover] = useState<number | null>(null);
   if (counts.length < 2) return null;
   const max = Math.max(1, ...counts);
@@ -354,7 +362,7 @@ function Sparkline({ counts }: { counts: number[] }) {
   );
 }
 
-const outcomeBadge: Record<OutcomeView, [string, string]> = {
+export const outcomeBadge: Record<OutcomeView, [string, string]> = {
   merged: [
     "Merged",
     "bg-green-50 text-green-800 ring-green-600/20 dark:bg-green-400/10 dark:text-green-300 dark:ring-green-400/30",
@@ -366,7 +374,7 @@ const outcomeBadge: Record<OutcomeView, [string, string]> = {
   removed: ["Removed", "bg-sunken text-fg-2 ring-neutral-500/20"],
 };
 
-function Row({ exit: e, showRepo }: { exit: ExitView; showRepo: boolean }) {
+export function Row({ exit: e, showRepo }: { exit: ExitView; showRepo: boolean }) {
   const [label, style] = outcomeBadge[e.outcome];
   const url = e.url || `https://github.com/${e.repo}/pull/${e.number}`;
   const queued =
@@ -430,7 +438,7 @@ function Detail({ exit: e }: { exit: ExitView }) {
   return null;
 }
 
-const stepInfo: Record<StepView, [string, string]> = {
+export const stepInfo: Record<StepView, [string, string]> = {
   waiting: ["Waiting", "var(--step-1)"],
   held: ["Held", "var(--step-2)"],
   rebasing: ["Rebasing", "var(--step-3)"],
@@ -439,7 +447,7 @@ const stepInfo: Record<StepView, [string, string]> = {
 };
 
 /** The steps laid end to end, each as wide as its share. Hover one for its name and time. */
-function Bar({
+export function Bar({
   parts,
   height,
   label,
@@ -469,7 +477,7 @@ function Bar({
 
 /** Where the merged PRs' time went: the average of each step end to end, then each step's
  * numbers, which double as the legend. */
-function Steps({ steps }: { steps: StepStatsView[] }) {
+export function Steps({ steps }: { steps: StepStatsView[] }) {
   if (steps.length === 0) return null;
   const total = steps.reduce((sum, s) => sum + s.mean_secs, 0);
   const label = steps.map((s) => `${stepInfo[s.step][0]} ${duration(s.mean_secs)}`).join(", ");
@@ -526,7 +534,7 @@ function Steps({ steps }: { steps: StepStatsView[] }) {
 
 /** What the agents cost over the window, by model and effort, split into resolving rebase
  * conflicts and fixing failed checks. */
-function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
+export function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
   if (llms.length === 0) return null;
   const sum = (runs: (l: LlmStatsView) => LlmRunsView): LlmRunsView => ({
     runs: llms.reduce((t, l) => t + runs(l).runs, 0),
@@ -577,7 +585,7 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
   );
 }
 
-const both = (a: LlmRunsView, b: LlmRunsView): LlmRunsView => ({
+export const both = (a: LlmRunsView, b: LlmRunsView): LlmRunsView => ({
   runs: a.runs + b.runs,
   failed: a.failed + b.failed,
   turns: a.turns + b.turns,
@@ -586,7 +594,7 @@ const both = (a: LlmRunsView, b: LlmRunsView): LlmRunsView => ({
 });
 
 /** The known cost: "–" when no run told it, "$1.20+" when only some did, such as Codex's. */
-const cost = (r: LlmRunsView) =>
+export const cost = (r: LlmRunsView) =>
   r.unpriced === r.runs ? "–" : `${usd(r.cost_usd)}${r.unpriced > 0 ? "+" : ""}`;
 
 function LlmRuns({ runs }: { runs: LlmRunsView }) {
