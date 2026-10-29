@@ -35,6 +35,13 @@ async fn main() -> Result<()> {
             _ => anyhow::bail!("usage: mergepatrol job --out <dir> | --remote <link>"),
         };
     }
+    if let [_, cmd, url] = args.as_slice()
+        && cmd == "hosted-manifest"
+    {
+        // For deploy/gcp/hosted-app.sh, which creates the hosted App once.
+        println!("{}", mergepatrol_github::setup::hosted_manifest(url));
+        return Ok(());
+    }
     orchestrator().await
 }
 

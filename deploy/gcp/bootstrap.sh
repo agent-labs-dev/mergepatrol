@@ -90,6 +90,10 @@ fi
 secret mergepatrol-secret-key \
   || openssl rand -base64 32 | tr -d '\n' | g secrets create mergepatrol-secret-key --data-file=-
 
+# The hosted GitHub App: made once, in the browser.
+secret mergepatrol-github-app-id || ORG="${REPO%%/*}" PROJECT="$PROJECT" PUBLIC_URL="$PUBLIC_URL" \
+  deploy/gcp/hosted-app.sh
+
 g builds submit --region="$REGION" --config=deploy/gcp/cloudbuild.yaml \
   --substitutions="_REGION=$REGION,_PUBLIC_URL=$PUBLIC_URL" .
 
@@ -101,8 +105,6 @@ Deployed. Left to do by hand:
      The domain must be verified for your Google account first (Search Console). Then add the
      records it prints (A/AAAA for an apex, a CNAME for a subdomain), DNS only: a Cloudflare
      proxy blocks Google's certificate.
-  2. Read the setup token: gcloud logging read --project=$PROJECT \\
-       'resource.labels.service_name="mergepatrol" AND jsonPayload.setup_token:*' --limit=1
-     and open $PUBLIC_URL to create the GitHub App.
+  2. Open $PUBLIC_URL, install the App, and sign in.
 After this, every push to main of $REPO deploys (.github/workflows/deploy.yml).
 EOF
