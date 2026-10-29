@@ -60,6 +60,8 @@ const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
 const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflow runs";
 /// How long to wait for a fork PR's pull ref to follow a push to the fork.
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
+/// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
+const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
 
 pub struct Ctx {
     pub config: Config,
@@ -76,6 +78,26 @@ pub struct Ctx {
     pub analytics: Analytics,
     pub prs: Prs,
     pub job_errors: JobErrors,
+    /// When the queue first saw each fork PR it has no pin for yet.
+    pub unpinned: Unpinned,
+}
+
+/// Fork PRs waiting for their pin: the `labeled` webhook, or for their pull ref to show it.
+#[derive(Default)]
+pub struct Unpinned(std::sync::Mutex<HashMap<(u64, RepoName, PrNumber), Instant>>);
+
+impl Unpinned {
+    /// How long ago the queue first saw the PR without its pin.
+    fn waited(&self, key: &LaneKey, number: PrNumber) -> Duration {
+        let mut map = self.0.lock().unwrap();
+        let k = (key.installation_id, key.repo.clone(), number);
+        map.entry(k).or_insert_with(Instant::now).elapsed()
+    }
+
+    fn forget(&self, key: &LaneKey, number: PrNumber) {
+        let k = (key.installation_id, key.repo.clone(), number);
+        self.0.lock().unwrap().remove(&k);
+    }
 }
 
 /// Since when each PR's job has failed on every try, on errors outside the job.
@@ -419,11 +441,16 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
             continue;
         }
         let mut pin = None;
+        // A fork PR's head from its pull ref, which the PR's GraphQL lags behind.
+        let mut top = unit.top().clone();
         if unit.fork() {
-            match fork_pin(ctx, &key, &mut lane, unit.top(), &labels.trigger).await? {
-                Ok(p) => pin = p,
-                Err(why) => {
-                    drop_pushed(ctx, &settings, gh, &key, unit.number, &why).await?;
+            top.head_ref_oid = gh.pull_head(repo, top.number).await?;
+            match fork_pin(ctx, &key, &mut lane, &top, &labels.trigger).await? {
+                Pin::Keep => {}
+                Pin::Join(head) => pin = Some(head),
+                Pin::Wait => continue,
+                Pin::Drop { kind, why } => {
+                    drop_fork(ctx, &settings, gh, &key, unit.number, kind, &why).await?;
                     continue;
                 }
             }
@@ -436,7 +463,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         } else if let Some(reason) = unit.hold_reason() {
             Some(reason)
         } else if unit.fork() {
-            match fork_block(gh, &key, &snap.trunk_sha, unit.top()).await? {
+            match fork_block(gh, &key, &snap.trunk_sha, &top).await? {
                 Some(Block::Hold(reason)) => Some(reason),
                 Some(Block::Eject(why)) => {
                     let why = format!("Ejected: {why}.");
@@ -635,56 +662,97 @@ async fn pr_head(gh: &dyn GitHub, repo: &RepoName, pr: &PullRequest) -> Result<S
     }
 }
 
+/// What the queue does with a fork PR's head, as the PR's pull ref shows it.
+enum Pin {
+    /// In the lane, at a head it may merge.
+    Keep,
+    /// Joins the lane at this head, the one its label went on at.
+    Join(String),
+    /// Not yet in the lane: its pin has not come, or the pull ref does not show it yet.
+    Wait,
+    /// Leaves the queue.
+    Drop { kind: &'static str, why: String },
+}
+
 /// What a fork PR's author pushed after a maintainer queued it, nobody queued: the queue merges
-/// only the head it was labeled at, from the `labeled` webhook, or at first sight without one,
-/// and the heads it published itself. `Ok` with the pin for a PR that joins the lane now, and
-/// `Err` with why it may not stay.
+/// only the head the label went on at, and the heads it published itself. The pin comes from
+/// the `labeled` webhook; only without webhooks is it the head at first sight.
 async fn fork_pin(
     ctx: &Ctx,
     key: &LaneKey,
     lane: &mut Lane,
     pr: &PullRequest,
     label: &str,
-) -> Result<std::result::Result<Option<String>, String>> {
+) -> Result<Pin> {
     let head = &pr.head_ref_oid;
-    let pushed = Err("new commits were pushed to it after it was queued".to_owned());
-    let Some(entry) = lane.entries.iter().find(|e| e.number == pr.number) else {
-        let labeled = ctx
-            .store
-            .label_head(key.installation_id, &key.repo, pr.number, label)
-            .await?;
-        return Ok(match labeled {
-            Some(pin) if pin != *head => pushed,
-            _ => Ok(Some(head.clone())),
+    if let Some(entry) = lane.entries.iter().find(|e| e.number == pr.number) {
+        return Ok(match entry.heads.contains(head) {
+            true => Pin::Keep,
+            // Queued before the queue pinned fork PRs.
+            false if entry.heads.is_empty() => {
+                lane.accept(pr.number, head);
+                Pin::Keep
+            }
+            false => Pin::Drop {
+                kind: "pushed",
+                why: "new commits were pushed to it after it was queued".into(),
+            },
         });
+    }
+    let labeled = ctx
+        .store
+        .label_head(key.installation_id, &key.repo, pr.number, label)
+        .await?;
+    let pin = match labeled {
+        Some(pin) => Some(pin),
+        None if !webhooks(ctx).await? => Some(head.clone()),
+        None => None,
     };
-    Ok(match entry.heads.contains(head) {
-        true => Ok(None),
-        // Queued before the queue pinned fork PRs.
-        false if entry.heads.is_empty() => {
-            lane.accept(pr.number, head);
-            Ok(None)
-        }
-        false => pushed,
+    if pin.as_ref() == Some(head) {
+        ctx.unpinned.forget(key, pr.number);
+        return Ok(Pin::Join(head.clone()));
+    }
+    // The webhook may come after the poll, and the pull ref may lag behind the label.
+    if ctx.unpinned.waited(key, pr.number) < PIN_WAIT {
+        return Ok(Pin::Wait);
+    }
+    ctx.unpinned.forget(key, pr.number);
+    Ok(match pin {
+        Some(_) => Pin::Drop {
+            kind: "pushed",
+            why: "new commits were pushed to it after its label went on".into(),
+        },
+        None => Pin::Drop {
+            kind: "unpinned",
+            why: "GitHub sent no webhook for its label, so Mergepatrol cannot tell which commits were queued".into(),
+        },
     })
 }
 
-/// Takes a fork PR out of the queue, pushed to since it was queued, for a maintainer to look at
-/// the new commits.
-async fn drop_pushed(
+/// Whether GitHub delivers webhooks to this Mergepatrol: it does only with a secret, and to https.
+async fn webhooks(ctx: &Ctx) -> Result<bool> {
+    let secret = app_credentials(ctx)
+        .await?
+        .is_some_and(|app| app.webhook_secret.is_some());
+    Ok(secret && ctx.config.public_url.starts_with("https://"))
+}
+
+/// Takes a fork PR out of the queue, for a maintainer to queue it as it is now.
+async fn drop_fork(
     ctx: &Ctx,
     settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
     number: PrNumber,
+    kind: &str,
     why: &str,
 ) -> Result<()> {
     let labels = settings.labels();
-    record(ctx, key, number, "pushed", why).await?;
+    record(ctx, key, number, kind, why).await?;
     gh.remove_label(&key.repo, number, &labels.trigger).await?;
     gh.remove_label(&key.repo, number, &labels.priority).await?;
     let comment = format!(
-        "Dequeued: {why}. Mergepatrol merges a PR from a fork only as it was when it was queued. Add `{}` again to queue the new commits.",
+        "Dequeued: {why}. Mergepatrol merges a PR from a fork only as it was when its label went on. Add `{}` again to queue it as it is now.",
         labels.trigger
     );
     gh.sticky_comment(&key.repo, number, &comment).await
@@ -886,7 +954,7 @@ async fn finish(
         }
         Outcome::Pushed(why) => {
             lane.remove(unit.number);
-            drop_pushed(ctx, settings, gh, key, unit.number, &why).await?;
+            drop_fork(ctx, settings, gh, key, unit.number, "pushed", &why).await?;
             exit(ctx, key, unit.number, "dequeued", &why, None).await?;
         }
     }
@@ -1484,7 +1552,7 @@ async fn run_job(
     let mut failing = 0;
 
     loop {
-        let now = unit.refreshed(gh, repo).await?;
+        let mut now = unit.refreshed(gh, repo).await?;
         if !now.has_label(&settings.label) {
             return Ok(Outcome::Cancelled);
         }
@@ -1498,6 +1566,8 @@ async fn run_job(
                 let why = "new commits were pushed to it after it was queued";
                 return Ok(Outcome::Pushed(why.into()));
             }
+            // The head the job may work on: `Sandbox::rebase` refuses any other.
+            now.layers[0].head_ref_oid = head;
         }
 
         let event = match &job.phase {
@@ -1541,6 +1611,9 @@ async fn run_job(
                     let why = "the trunk moved outside the queue";
                     record_all(ctx, key, &prs, "base-moved", why).await?;
                     Event::BaseMoved
+                } else if now.fork() && gh.awaiting_approval(repo, &heads[0]).await? {
+                    // Runs waiting for approval can show as failed checks.
+                    Event::OnHold(AWAITING_APPROVAL.into())
                 } else {
                     // GitHub merges a stack only when every layer's required checks passed.
                     let mut verdict = (CheckState::Passed, Vec::new());
@@ -1565,10 +1638,6 @@ async fn run_job(
                             if published_at.elapsed() >= CHECKS_TIMEOUT =>
                         {
                             Event::ChecksTimedOut(names)
-                        (CheckState::Pending, _)
-                            if now.fork() && gh.awaiting_approval(repo, &heads[0]).await? =>
-                        {
-                            Event::OnHold(AWAITING_APPROVAL.into())
                         }
                         (CheckState::Pending, _) => {
                             ctx.wakers
@@ -1951,6 +2020,10 @@ async fn rebase_and_publish(
 ) -> Result<Event> {
     let git = Git;
     let (cache, heads, trunk) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+    // A fork's author may have pushed since the queue checked the head against its pin.
+    if unit.fork() && heads[0] != unit.top().head_ref_oid {
+        return Ok(Event::HeadMoved);
+    }
     let mut rebased: Vec<String> = heads[..from].to_vec();
     let mut moved: Vec<usize> = Vec::new();
     let result = rebase_layers(

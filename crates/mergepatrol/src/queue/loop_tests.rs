@@ -695,8 +695,9 @@ impl Store for Mem {
     async fn put_secret(&self, _: Scope, _: &str, _: SecretRecord) -> Result<()> {
         unreachable!()
     }
+    /// None: no self-hosted App, so no webhooks unless a test sets the hosted one.
     async fn secret(&self, _: Scope, _: &str) -> Result<Option<SecretRecord>> {
-        unreachable!()
+        Ok(None)
     }
     async fn delete_secret(&self, _: Scope, _: &str) -> Result<()> {
         unreachable!()
@@ -795,6 +796,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         analytics: Analytics::default(),
         prs: Default::default(),
         job_errors: Default::default(),
+        unpinned: Default::default(),
     }
 }
 
@@ -1963,10 +1965,73 @@ async fn a_fork_pr_pushed_to_since_its_label_went_on_is_not_queued() {
         .lock()
         .unwrap()
         .insert(1, "what-the-maintainer-saw".into());
+    // The pull ref may only lag behind the label: it waits a while first.
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert!(run.kinds(1).is_empty());
+    tokio::time::advance(PIN_WAIT).await;
     assert!(matches!(run.tick().await, Ran::Idle));
     assert_eq!(run.kinds(1), ["pushed"]);
     assert!(run.labels(1).is_empty());
     assert!(run.merged().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_goes_by_its_pull_ref_which_the_pr_lags_behind() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        // Pushed just before the label went on: GraphQL still shows the head before.
+        s.branches.insert("pr-1".into(), "pr-1-v1".into());
+    }));
+    run.store
+        .label_heads
+        .lock()
+        .unwrap()
+        .insert(1, "pr-1-v1".into());
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+/// A Mergepatrol that GitHub delivers webhooks to.
+fn with_webhooks(run: &mut Run) {
+    run.ctx.config.public_url = "https://mergepatrol.example".into();
+    run.ctx.hosted_app = Some(AppCredentials {
+        id: 1,
+        slug: "mp".into(),
+        client_id: "c".into(),
+        client_secret: "s".into(),
+        webhook_secret: Some("hush".into()),
+        pem: String::new(),
+        owner: "o".into(),
+        html_url: "https://github.com/apps/mp".into(),
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_webhooks_a_fork_pr_waits_for_the_labeled_webhook() {
+    let mut run = Run::new(Fake::new(fork_pr));
+    with_webhooks(&mut run);
+    // Polled before the webhook came: the author may have pushed since the label.
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert!(run.lane().is_empty());
+    run.store
+        .label_heads
+        .lock()
+        .unwrap()
+        .insert(1, "pr-1-v0".into());
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_webhooks_a_fork_pr_whose_webhook_never_comes_leaves() {
+    let mut run = Run::new(Fake::new(fork_pr));
+    with_webhooks(&mut run);
+    run.tick().await;
+    tokio::time::advance(PIN_WAIT).await;
+    run.tick().await;
+    assert_eq!(run.kinds(1), ["unpinned"]);
+    assert!(run.labels(1).is_empty());
+    assert!(last_comment(&run).contains("no webhook for its label"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -2059,9 +2124,10 @@ async fn a_fork_pr_behind_the_trunk_that_changes_workflows_is_ejected() {
 async fn a_fork_pr_whose_ci_waits_for_approval_is_held_until_a_maintainer_approves() {
     let run = Run::new(Fake::new(|s| {
         fork_pr(s);
-        s.checks.insert("ci".into(), CheckState::Pending);
-        // GitHub holds the runs on the head the queue publishes.
+        // GitHub holds the runs on the head the queue publishes, and shows them as failed.
         s.awaiting_approval.push("pr-1-r1".into());
+        let failed = BTreeMap::from([("ci".to_owned(), CheckState::Failed)]);
+        s.checks_on.insert("pr-1-r1".into(), failed);
     }));
     assert!(matches!(run.tick().await, Ran::Job));
     assert_eq!(run.lane(), [(1, format!("Held({AWAITING_APPROVAL:?})"))]);
@@ -2073,7 +2139,7 @@ async fn a_fork_pr_whose_ci_waits_for_approval_is_held_until_a_maintainer_approv
 
     run.gh.with_mut(|s| {
         s.awaiting_approval.clear();
-        s.checks.insert("ci".into(), CheckState::Passed);
+        s.checks_on.clear();
     });
     run.drain().await;
     assert_eq!(run.merged(), [1]);
