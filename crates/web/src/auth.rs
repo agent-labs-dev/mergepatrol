@@ -6,7 +6,7 @@
 //! Self-hosted, before the GitHub App exists: the server logs a setup token, and whoever has it
 //! creates the App (the manifest flow). The hosted App comes from the environment instead.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::{FromRequestParts, Query, State};
@@ -23,25 +23,16 @@ use ts_rs::TS;
 use crate::{ApiError, AppState};
 
 const SESSION_COOKIE: &str = "mp_session";
+/// A sign-in in progress, in the browser that started it: `<state>.<PKCE verifier>`.
 const OAUTH_COOKIE: &str = "mp_oauth";
+/// The App's creation in progress: its `state`.
+const MANIFEST_COOKIE: &str = "mp_manifest";
 /// As long as GitHub's user tokens. Signing in again picks up new installations.
 const USER_SESSION: Duration = Duration::from_secs(8 * 3600);
 const SETUP_SESSION: Duration = Duration::from_secs(3600);
 /// GitHub gives the manifest flow one hour.
-const PENDING: Duration = Duration::from_secs(3600);
-
-pub(crate) enum Pending {
-    Manifest { expires: Instant },
-    Login { verifier: String, expires: Instant },
-}
-
-impl Pending {
-    fn expired(&self) -> bool {
-        match self {
-            Self::Manifest { expires } | Self::Login { expires, .. } => *expires < Instant::now(),
-        }
-    }
-}
+const MANIFEST_FLOW: Duration = Duration::from_secs(3600);
+const LOGIN_FLOW: Duration = Duration::from_secs(600);
 
 #[derive(Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -253,7 +244,7 @@ pub(crate) async fn start_manifest(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ManifestRequest>,
-) -> Result<Json<ManifestForm>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     if !matches!(
         current_session(&headers, &state).await?,
         Some(Session {
@@ -278,18 +269,17 @@ pub(crate) async fn start_manifest(
             "the owner must be a GitHub account name",
         ));
     }
+    // In the browser's cookie, not in this process: a restart, or another instance, takes the
+    // callback too.
     let token = random_token(24);
-    remember(
-        &state,
-        token.clone(),
-        Pending::Manifest {
-            expires: Instant::now() + PENDING,
-        },
-    );
-    Ok(Json(ManifestForm {
-        action: setup::manifest_form_url(owner, body.organization, &token)?,
-        manifest: setup::manifest(&state.public_url, owner).to_string(),
-    }))
+    let cookie = cookie(&state, MANIFEST_COOKIE, &token, MANIFEST_FLOW);
+    Ok((
+        AppendHeaders([(header::SET_COOKIE, cookie)]),
+        Json(ManifestForm {
+            action: setup::manifest_form_url(owner, body.organization, &token)?,
+            manifest: setup::manifest(&state.public_url, owner).to_string(),
+        }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -302,17 +292,34 @@ pub(crate) struct CodeQuery {
 /// GitHub created the App. Store its credentials, then send the user to install it.
 pub(crate) async fn manifest_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<CodeQuery>,
 ) -> Response {
     let result = async {
         let (Some(code), Some(token)) = (q.code, q.state) else {
             anyhow::bail!("GitHub did not create the App");
         };
-        if !matches!(take(&state, &token), Some(Pending::Manifest { .. })) {
-            anyhow::bail!("this setup link expired: start again");
+        // The cookie only ties the callback to the browser: whoever calls can set it. The setup
+        // session, which the setup token unlocked, is what lets the App be created.
+        let setup = current_session(&headers, &state).await?;
+        if !matches!(
+            setup,
+            Some(Session {
+                kind: SessionKind::Setup,
+                ..
+            })
+        ) {
+            anyhow::bail!("enter the setup token first");
+        }
+        let started = read_cookie(&headers, MANIFEST_COOKIE);
+        if !started.is_some_and(|s| constant_time_eq(s.as_bytes(), token.as_bytes())) {
+            anyhow::bail!("this setup link expired, or started in another browser: start again");
         }
         if state.hosted_app.is_some() {
             anyhow::bail!("this Mergepatrol uses the hosted GitHub App");
+        }
+        if state.app_credentials().await?.is_some() {
+            anyhow::bail!("the GitHub App already exists");
         }
         let creds = setup::convert_manifest(&code).await?;
         state
@@ -325,7 +332,14 @@ pub(crate) async fn manifest_callback(
     }
     .await;
     match result {
-        Ok(install) => Redirect::to(&install).into_response(),
+        Ok(install) => (
+            AppendHeaders([(
+                header::SET_COOKIE,
+                cookie(&state, MANIFEST_COOKIE, "", Duration::ZERO),
+            )]),
+            Redirect::to(&install),
+        )
+            .into_response(),
         Err(e) => error_redirect(&format!("{e:#}")),
     }
 }
@@ -348,16 +362,11 @@ pub(crate) async fn login(State(state): State<AppState>) -> Response {
         Ok(u) => u,
         Err(e) => return error_redirect(&format!("{e:#}")),
     };
-    remember(
-        &state,
-        token.clone(),
-        Pending::Login {
-            verifier: pkce.verifier,
-            expires: Instant::now() + PENDING,
-        },
-    );
-    // The cookie ties the callback to this browser, so nobody can sign you in as them.
-    let cookie = cookie(&state, OAUTH_COOKIE, &token, Duration::from_secs(600));
+    // The cookie ties the callback to this browser, so nobody can sign you in as them. It holds
+    // the verifier too, so the sign-in does not depend on this process: a restart, or another
+    // instance, takes the callback.
+    let value = format!("{token}.{}", pkce.verifier);
+    let cookie = cookie(&state, OAUTH_COOKIE, &value, LOGIN_FLOW);
     (
         AppendHeaders([(header::SET_COOKIE, cookie)]),
         Redirect::to(&url),
@@ -377,18 +386,19 @@ pub(crate) async fn login_callback(
         let (Some(code), Some(token)) = (q.code, q.state) else {
             anyhow::bail!("GitHub sign-in failed");
         };
-        if read_cookie(&headers, OAUTH_COOKIE).as_deref() != Some(token.as_str()) {
+        let started = read_cookie(&headers, OAUTH_COOKIE);
+        let Some((started, verifier)) = started.as_deref().and_then(|v| v.split_once('.')) else {
+            anyhow::bail!("this sign-in link expired, or started in another browser: try again");
+        };
+        if !constant_time_eq(started.as_bytes(), token.as_bytes()) {
             anyhow::bail!("this sign-in started in another browser: try again");
         }
-        let Some(Pending::Login { verifier, .. }) = take(&state, &token) else {
-            anyhow::bail!("this sign-in link expired: try again");
-        };
         let creds = state
             .app_credentials()
             .await?
             .ok_or_else(|| anyhow::anyhow!("no GitHub App yet"))?;
         let user_token =
-            setup::exchange_code(&creds, &code, &callback_url(&state), &verifier).await?;
+            setup::exchange_code(&creds, &code, &callback_url(&state), verifier).await?;
         let user = setup::user(&user_token).await?;
         let installations = setup::user_installations(&user_token).await?;
         state
@@ -518,21 +528,6 @@ pub(crate) fn hash(token: &str) -> String {
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-fn remember(state: &AppState, token: String, pending: Pending) {
-    let mut map = state.pending.lock().unwrap();
-    map.retain(|_, p| !p.expired());
-    map.insert(token, pending);
-}
-
-fn take(state: &AppState, token: &str) -> Option<Pending> {
-    state
-        .pending
-        .lock()
-        .unwrap()
-        .remove(token)
-        .filter(|p| !p.expired())
 }
 
 fn callback_url(state: &AppState) -> String {
