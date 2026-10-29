@@ -977,6 +977,58 @@ async fn a_failed_required_check_ejects() {
     assert!(comment.contains("required checks failed: ci"), "{comment}");
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_required_check_that_never_reports_ejects_without_a_fix() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into(), "e2e".into()];
+    }));
+    let start = tokio::time::Instant::now();
+    run.tick().await;
+    assert!(start.elapsed() >= CHECKS_TIMEOUT);
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "ejected"]
+    );
+    assert!(run.rebase.fixed().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(
+        comment.contains("required checks did not finish within 3 hours: e2e"),
+        "{comment}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_checks_never_finish_counts_as_failed() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.required = vec!["ci".into(), "e2e".into()];
+        // Each PR passed both on its own; the batch never gets `e2e`.
+        let both = BTreeMap::from([
+            ("ci".to_owned(), CheckState::Passed),
+            ("e2e".to_owned(), CheckState::Passed),
+        ]);
+        for n in [1, 2] {
+            s.checks_on.insert(format!("pr-{n}-v0"), both.clone());
+        }
+    }));
+    run.tick().await;
+    let failed: Vec<String> = run
+        .store
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, kind, _)| *n == 1 && kind == "batch-failed")
+        .map(|(.., message)| message.clone())
+        .collect();
+    assert_eq!(
+        failed,
+        ["required checks did not finish within 3 hours: e2e"]
+    );
+}
+
 fn failing_ci(s: &mut State) {
     s.add_pr(1);
     s.required = vec!["ci".into()];
