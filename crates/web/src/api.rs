@@ -7,7 +7,7 @@ use mergepatrol_core::{
     EFFORTS, Entry, EntryState, FixCiSettings, Labels, Person, PrSummary, Provider,
     REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
-use mergepatrol_github::{App, Installation, Proposal, PullRef, setup};
+use mergepatrol_github::{App, AsUser, Installation, Proposal, PullRef, setup};
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
     CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
@@ -970,6 +970,8 @@ pub(crate) async fn set_repo(
 const OPEN_PULLS: u32 = 50;
 
 /// The repo's open PRs into its default branch that are not in its queue, updated last first.
+/// Read as the user: each viewer's polling spends their own rate limit, not the queue's. A
+/// revoked token means signing in again.
 pub(crate) async fn open_pulls(
     State(app): State<AppState>,
     user: SignedIn,
@@ -989,7 +991,13 @@ pub(crate) async fn open_pulls(
         .flat_map(|(_, lane)| lane.entries)
         .flat_map(|e| std::iter::once(e.number).chain(e.layers))
         .collect();
-    let pulls = gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await?;
+    let token = user.github_token(&app)?;
+    let pulls = as_user(
+        AsUser::new(token)?
+            .open_pull_requests(&repo, &trunk, OPEN_PULLS)
+            .await,
+        &repo,
+    )?;
     Ok(Json(
         pulls
             .into_iter()
@@ -1088,8 +1096,8 @@ async fn layers(gh: &Installation, repo: &RepoName, number: u64) -> anyhow::Resu
     })
 }
 
-/// A change made as the user: GitHub's refusal is theirs to read.
-fn as_user(result: anyhow::Result<()>, repo: &RepoName) -> Result<(), ApiError> {
+/// A call made as the user: GitHub's refusal is theirs to read.
+fn as_user<T>(result: anyhow::Result<T>, repo: &RepoName) -> Result<T, ApiError> {
     result.map_err(|e| {
         if e.is::<setup::Refused>() {
             ApiError::Status(

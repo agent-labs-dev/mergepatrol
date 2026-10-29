@@ -167,7 +167,10 @@ impl ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        Self::Internal(e)
+        match e.downcast_ref::<mergepatrol_github::RateLimited>() {
+            Some(limited) => Self::Status(StatusCode::SERVICE_UNAVAILABLE, format!("{limited}.")),
+            None => Self::Internal(e),
+        }
     }
 }
 
