@@ -333,7 +333,38 @@ impl Installation {
                 .headers(api_headers())
                 .json(&body))
         };
-        graphql_data(name, Some(self.id), send(build, "POST /graphql").await?)
+        graphql_data(
+            name,
+            Some(self.id),
+            false,
+            send(build, "POST /graphql").await?,
+        )
+    }
+
+    /// A GraphQL query whose answer may lack what does not exist: GitHub reports a missing file
+    /// or repo as a `NOT_FOUND` error, beside the rest of the answer. Any other error fails it.
+    pub(crate) async fn graphql_missing_ok(
+        &self,
+        name: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value> {
+        let body = graphql_body(query, variables);
+        let build = || async {
+            Ok(self
+                .app
+                .http
+                .post(format!("{}/graphql", self.app.api))
+                .bearer_auth(self.token().await?)
+                .headers(api_headers())
+                .json(&body))
+        };
+        graphql_data(
+            name,
+            Some(self.id),
+            true,
+            send(build, "POST /graphql").await?,
+        )
     }
 }
 
@@ -373,7 +404,26 @@ impl AsUser {
                 .headers(api_headers())
                 .json(&body))
         };
-        graphql_data(name, None, send(build, "POST /graphql").await?)
+        graphql_data(name, None, false, send(build, "POST /graphql").await?)
+    }
+
+    /// As [`Installation::graphql_missing_ok`].
+    pub(crate) async fn graphql_missing_ok(
+        &self,
+        name: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value> {
+        let body = graphql_body(query, variables);
+        let build = || async {
+            Ok(self
+                .http
+                .post(format!("{}/graphql", self.api))
+                .bearer_auth(&self.token)
+                .headers(api_headers())
+                .json(&body))
+        };
+        graphql_data(name, None, true, send(build, "POST /graphql").await?)
     }
 }
 
@@ -392,9 +442,11 @@ fn graphql_body(query: &str, variables: Value) -> Value {
 }
 
 /// The `data` of a GraphQL response, with its cost logged. `installation` is `None` for a user.
+/// `missing_ok` lets `NOT_FOUND` errors through, beside the data.
 fn graphql_data<T: DeserializeOwned>(
     name: &str,
     installation: Option<u64>,
+    missing_ok: bool,
     (status, body): (StatusCode, String),
 ) -> Result<T> {
     if installation.is_none() && status == StatusCode::UNAUTHORIZED {
@@ -404,7 +456,18 @@ fn graphql_data<T: DeserializeOwned>(
         bail!("GraphQL {name}: {status} {body}");
     }
     let mut res: Value = serde_json::from_str(&body)?;
-    if let Some(errors) = res.get("errors") {
+    let missing = |errors: &Value| {
+        !res["data"].is_null()
+            && errors
+                .as_array()
+                .is_some_and(|e| e.iter().all(|e| e["type"] == "NOT_FOUND"))
+    };
+    if missing_ok && res["data"].is_null() {
+        bail!("GraphQL: {}", res["errors"]);
+    }
+    if let Some(errors) = res.get("errors")
+        && !(missing_ok && missing(errors))
+    {
         bail!("GraphQL: {errors}");
     }
     let mut data = res["data"].take();
@@ -781,6 +844,33 @@ mod tests {
         );
         let m = graphql_body("mutation { updateRefs { id } }", json!({}));
         assert_eq!(m["query"], "mutation { updateRefs { id } }");
+    }
+
+    #[tokio::test]
+    async fn a_missing_ok_query_lets_only_not_found_through() {
+        let (gh, _) = fake::serve(vec![
+            (
+                200,
+                "",
+                r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND"}]}"#,
+            ),
+            (
+                200,
+                "",
+                r#"{"data":{"repository":null},"errors":[{"type":"FORBIDDEN"}]}"#,
+            ),
+        ])
+        .await;
+        let v = gh
+            .graphql_missing_ok("q", "{ ok }", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(v, json!({ "repository": null }));
+        assert!(
+            gh.graphql_missing_ok("q", "{ ok }", json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
