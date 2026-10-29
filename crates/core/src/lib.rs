@@ -6,7 +6,10 @@ mod lane;
 mod repo_config;
 
 pub use job::{EjectReason, Event, Job, Phase, Transition};
-pub use lane::{Bisect, Candidate, Entry, EntryState, Lane, LaneChange, Person, PrSummary, Review};
+pub use lane::{
+    BatchStep, Bisect, BuiltBatch, Candidate, Entry, EntryState, Lane, LaneChange, Person,
+    PrSummary, Review,
+};
 pub use repo_config::{
     EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
 };
