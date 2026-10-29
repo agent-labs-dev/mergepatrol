@@ -61,6 +61,8 @@ impl AppModel {
         if matches!(self.auth, Auth::SigningIn) {
             return;
         }
+        // An offline retry would sign in with the old token over this one.
+        self.poll = None;
         self.auth = Auth::SigningIn;
         cx.notify();
         let server = self.server.clone();

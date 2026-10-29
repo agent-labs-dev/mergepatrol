@@ -10,7 +10,7 @@ use gpui::{
     relative,
 };
 
-use crate::dropdown::{self, Dismiss, WIDTH};
+use crate::dropdown::{self, Dismiss, MAX_HEIGHT, WIDTH};
 use crate::feed::{self, Feed, NowCard, Stage};
 use crate::model::{AppModel, Auth};
 use crate::theme::Theme;
@@ -412,10 +412,11 @@ impl Render for Panel {
                     .relative()
                     .flex_none()
                     .w(px(WIDTH as f32))
+                    .max_h(px(MAX_HEIGHT as f32))
                     .flex()
                     .flex_col()
-                    .child(body)
-                    .child(self.footer(t, cx))
+                    .child(div().id("body").min_h_0().overflow_y_scroll().child(body))
+                    .child(self.footer(t, cx).flex_none())
                     .child(measure),
             )
     }

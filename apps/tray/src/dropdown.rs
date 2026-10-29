@@ -18,7 +18,7 @@ use crate::panel::Panel;
 
 pub const WIDTH: f64 = 360.0;
 const MIN_HEIGHT: f64 = 120.0;
-const MAX_HEIGHT: f64 = 680.0;
+pub const MAX_HEIGHT: f64 = 680.0;
 const INITIAL_HEIGHT: f64 = 400.0;
 const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(200);
 
