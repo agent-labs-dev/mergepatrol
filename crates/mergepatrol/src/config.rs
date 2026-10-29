@@ -33,7 +33,7 @@ pub enum ExecutorConfig {
         image: String,
         runtime: Option<String>,
         network: Option<String>,
-        dns: Vec<String>,
+        resolv_conf: Option<String>,
         memory: String,
         cpus: String,
     },
@@ -81,12 +81,7 @@ impl Config {
                     image: opt("MERGEPATROL_JOB_IMAGE", "mergepatrol-job:latest"),
                     runtime: var("MERGEPATROL_JOB_RUNTIME"),
                     network: var("MERGEPATROL_JOB_NETWORK"),
-                    dns: opt("MERGEPATROL_JOB_DNS", "")
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
+                    resolv_conf: var("MERGEPATROL_JOB_RESOLV_CONF"),
                     memory: opt("MERGEPATROL_JOB_MEMORY", "4g"),
                     cpus: opt("MERGEPATROL_JOB_CPUS", "2"),
                 },

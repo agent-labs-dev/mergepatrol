@@ -14,10 +14,10 @@ services:
       MERGEPATROL_EXECUTOR: docker
       MERGEPATROL_JOB_IMAGE: mergepatrol-job:latest
       # On Linux with gVisor installed (see deploy/sandbox-host.sh): runsc, mergepatrol-jobs,
-      # and public DNS servers such as 1.1.1.1,8.8.8.8.
+      # and /etc/mergepatrol/job-resolv.conf.
       MERGEPATROL_JOB_RUNTIME: ${MERGEPATROL_JOB_RUNTIME:-}
       MERGEPATROL_JOB_NETWORK: ${MERGEPATROL_JOB_NETWORK:-}
-      MERGEPATROL_JOB_DNS: ${MERGEPATROL_JOB_DNS:-}
+      MERGEPATROL_JOB_RESOLV_CONF: ${MERGEPATROL_JOB_RESOLV_CONF:-}
     depends_on:
       postgres: { condition: service_healthy }
       job-image: { condition: service_started }
