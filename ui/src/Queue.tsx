@@ -203,7 +203,7 @@ const asItem = (p: OpenPullView): Item => ({
 });
 
 /** A click the queue has not caught up with: GitHub has the labels, the lane not yet. */
-type Pending = { kind: "queueing" | "removing"; item: Item };
+type Pending = { kind: "queueing" | "removing"; item: Item; repo: string };
 
 /** The queue looks at a repo within seconds of a label change. Past this, stop waiting. */
 const PENDING_MS = 60_000;
@@ -212,56 +212,68 @@ const PENDING_MS = 60_000;
 const entryOf = (lane: LaneView, n: number) =>
   lane.entries.find((e) => e.number === n || e.layers.includes(n));
 
+const pendingKey = (repo: string, n: number) => `${repo}#${n}`;
+
 function useActions(workspace: number, lane: LaneView | undefined) {
   const client = useQueryClient();
-  const [pending, setPending] = useState(new Map<number, Pending & { at: number }>());
+  const [pending, setPending] = useState(new Map<string, Pending & { at: number }>());
   const [error, setError] = useState<string | null>(null);
-  const repo = lane?.repo ?? "";
-  const drop = (n: number) =>
+  const drop = (key: string) =>
     setPending((p) => {
       const next = new Map(p);
-      next.delete(n);
+      next.delete(key);
       return next;
     });
-  // Each poll of the lane may show what a click did. Then the open PRs change too.
+  // Each poll of the lane may show what a click did, and then the open PRs change too. A poll
+  // that changes nothing keeps the same lane, so the expiry needs its own timer.
   useEffect(() => {
-    if (!lane) return;
-    setPending((p) => {
-      const next = new Map(
-        [...p].filter(([n, { kind, item, at }]) => {
-          const e = entryOf(lane, n);
-          const done = kind === "removing" ? !e : e?.priority === item.priority;
-          return !done && Date.now() - at < PENDING_MS;
-        }),
-      );
-      if (next.size === p.size) return p;
-      client.invalidateQueries({ queryKey: ["open"] });
-      return next;
-    });
+    const prune = () =>
+      setPending((p) => {
+        const next = new Map(
+          [...p].filter(([, { kind, item, repo, at }]) => {
+            const e = lane?.repo === repo ? entryOf(lane, item.number) : undefined;
+            const done =
+              lane?.repo === repo && (kind === "removing" ? !e : e?.priority === item.priority);
+            return !done && Date.now() - at < PENDING_MS;
+          }),
+        );
+        if (next.size === p.size) return p;
+        client.invalidateQueries({ queryKey: ["open"] });
+        return next;
+      });
+    prune();
+    const timer = setInterval(prune, 5_000);
+    return () => clearInterval(timer);
   }, [lane, client]);
   const mutation = useMutation({
-    mutationFn: ({ kind, item }: Pending) =>
+    mutationFn: ({ kind, item, repo }: Pending) =>
       kind === "removing"
         ? dequeuePull(workspace, repo, prOf(item))
         : queuePull(workspace, repo, prOf(item), item.priority),
-    onMutate: ({ kind, item }) => {
+    onMutate: (p) => {
       setError(null);
-      setPending((p) => new Map(p).set(item.number, { kind, item, at: Date.now() }));
+      setPending((m) =>
+        new Map(m).set(pendingKey(p.repo, p.item.number), { ...p, at: Date.now() }),
+      );
     },
-    onError: (e, { item }) => {
+    onError: (e, p) => {
       setError(e.message);
-      drop(item.number);
+      drop(pendingKey(p.repo, p.item.number));
     },
     // The open PRs stay as they are, the clicked one in its place, until the lane has it.
     onSuccess: () => client.invalidateQueries({ queryKey: ["lanes"] }),
   });
+  const repo = lane?.repo ?? "";
   return {
-    pending: pending as ReadonlyMap<number, Pending>,
+    /** The lane's clicks still to show, by PR. */
+    pending: new Map(
+      [...pending.values()].filter((p) => p.repo === repo).map((p) => [p.item.number, p]),
+    ) as ReadonlyMap<number, Pending>,
     error,
     dismiss: () => setError(null),
     queue: (item: Item, priority: boolean) =>
-      mutation.mutate({ kind: "queueing", item: { ...item, priority } }),
-    remove: (item: Item) => mutation.mutate({ kind: "removing", item }),
+      mutation.mutate({ kind: "queueing", item: { ...item, priority }, repo }),
+    remove: (item: Item) => mutation.mutate({ kind: "removing", item, repo }),
   };
 }
 type Actions = ReturnType<typeof useActions>;
