@@ -76,6 +76,8 @@ pub struct SessionView {
     pub workspaces: Vec<WorkspaceView>,
     /// Product analytics in PostHog. `None` when off, as when self-hosted.
     pub analytics: Option<AnalyticsView>,
+    /// The hosted plan. `None` without billing, as when self-hosted.
+    pub pricing: Option<crate::PricingView>,
 }
 
 #[derive(Serialize, TS)]
@@ -228,6 +230,7 @@ pub(crate) async fn session(
             html_url: c.html_url,
         }),
         workspaces,
+        pricing: state.billing.is_some().then(crate::PricingView::new),
         analytics: state.analytics.browser().map(|(key, host)| AnalyticsView {
             key: key.to_owned(),
             host: host.to_owned(),

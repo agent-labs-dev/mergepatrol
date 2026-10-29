@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { PricingView } from "./api/PricingView";
 import type { ThemeProps } from "./theme";
 import { Mark, primary, repoUrl, StarButton, secondary, ThemeToggle } from "./ui";
 
@@ -54,14 +55,90 @@ function SignInButton({ className = "" }: { className?: string }) {
   );
 }
 
+function Plan({
+  name,
+  price,
+  per,
+  points,
+}: {
+  name: string;
+  price: string;
+  per: string;
+  points: ReactNode[];
+}) {
+  return (
+    <div className="flex flex-col rounded-xl border border-line bg-surface p-6 shadow-xs">
+      <h3 className="font-medium">{name}</h3>
+      <p className="mt-3">
+        <span className="text-3xl font-semibold tracking-tight">{price}</span>{" "}
+        <span className="text-fg-2">{per}</span>
+      </p>
+      <ul className="mt-5 flex flex-col gap-2 leading-relaxed text-fg-2">
+        {points.map((point, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: a fixed list
+          <li key={i} className="flex gap-2">
+            <span className="text-muted">–</span>
+            <span>{point}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** The hosted plan. Self-hosted, the server sends none, and the page shows none. */
+function Pricing({ pricing }: { pricing: PricingView }) {
+  return (
+    <section id="pricing" className="border-t border-line py-16">
+      <h2 className="text-xl font-semibold tracking-tight">Pricing</h2>
+      <p className="mt-2 text-fg-2">
+        Every plan runs the agent on your own model API key, so LLM costs are yours, at cost.
+      </p>
+      <div className="mt-8 grid gap-4 sm:grid-cols-2">
+        <Plan
+          name="Public repos"
+          price="Free"
+          per="for open source"
+          points={[
+            "Every feature: batches, stacks, agents on conflicts and failed checks",
+            `Fair use: up to ${pricing.fair_use_prs} queued PRs and ${pricing.fair_use_jobs} jobs an hour per account`,
+          ]}
+        />
+        <Plan
+          name="Private repos"
+          price={`$${pricing.price_usd}`}
+          per="per seat, a month"
+          points={[
+            `A free trial of ${pricing.trial_days} days, no card needed`,
+            "A seat is a developer who queues PRs, taken with their first one",
+            "Remove a seat in Settings any time",
+          ]}
+        />
+      </div>
+      <p className="mt-6 text-sm text-muted">
+        Or self-host it: Mergepatrol is Apache-2.0, with no limits.
+      </p>
+    </section>
+  );
+}
+
 /** What a signed-out visitor sees: what Mergepatrol does, and the way in. */
-export function Landing({ theme, setTheme }: ThemeProps) {
+export function Landing({
+  theme,
+  setTheme,
+  pricing,
+}: ThemeProps & { pricing: PricingView | null }) {
   return (
     <div className="min-h-screen">
       <header className="mx-auto flex h-14 max-w-5xl items-center gap-2 px-6 font-semibold">
         <Mark /> Mergepatrol
         <div className="ml-auto flex items-center gap-2 font-normal sm:gap-3">
           <ThemeToggle theme={theme} onChange={setTheme} />
+          {pricing && (
+            <a className="hidden text-fg-2 hover:text-fg sm:inline" href="#pricing">
+              Pricing
+            </a>
+          )}
           <StarButton />
           <a className={`${secondary} whitespace-nowrap`} href="/auth/login">
             Sign in
@@ -109,10 +186,12 @@ export function Landing({ theme, setTheme }: ThemeProps) {
           </div>
         </section>
 
+        {pricing && <Pricing pricing={pricing} />}
+
         <section className="border-t border-line py-16 text-center">
           <h2 className="text-xl font-semibold tracking-tight">Start queueing</h2>
           <p className="mt-2 text-fg-2">
-            Sign in, install the App on your repos, and bring your own Anthropic API key.
+            Sign in, install the App on your repos, and bring your own Anthropic or OpenAI API key.
           </p>
           <SignInButton className="mt-6" />
         </section>

@@ -14,7 +14,7 @@ The hosted Mergepatrol at https://mergepatrol.ai runs the public GitHub App `Mer
 4. In **Settings**, add an Anthropic or OpenAI API key. Create one for Mergepatrol alone, with a spend limit.
 5. Add the `mergepatrol` label to a PR.
 
-To run your own, see [Run it](#run-it).
+Public repos are free. Private repos cost $15 a seat a month, after a free trial: see [Pricing](#pricing). To run your own, see [Run it](#run-it).
 
 ## How it works
 
@@ -60,6 +60,16 @@ A maintainer queues a PR from a fork with the label, as any other. Its author is
 - While GitHub waits for a maintainer to approve the fork's workflow runs, the PR waits on hold.
 
 A stack with a PR from a fork is not supported yet.
+
+## Pricing
+
+The hosted Mergepatrol is free on public repos. Private repos cost $15 a month per seat, after a free trial of 14 days that needs no card. Either way, the agent runs on your own model API key.
+
+- **Public repos** have a fair-use limit across a workspace: 100 PRs joining a queue, and 50 jobs (rebases and fixes), an hour. Over it, waiting PRs go on hold, keep their place, and go on once the last hour is under the limit. A PR already running finishes.
+- **Private repos** need a subscription, started from the dashboard's Settings. Without one, their waiting PRs go on hold, with a comment that links there.
+- **A seat** is a developer whose PR joined a private repo's queue. They take it with their first such PR, and keep it until removed in Settings. A seat added mid-month is charged for the rest of it; a removed one drops off the next bill. A PR authored by an App, such as Dependabot, takes no seat.
+
+A self-hosted Mergepatrol has no limits, and bills no one.
 
 ## Run it
 
@@ -113,24 +123,6 @@ The hosted Mergepatrol uses one public GitHub App, which we create by hand on Gi
 | `MERGEPATROL_GITHUB_WEBHOOK_SECRET` | The webhook secret. Optional: without it, Mergepatrol only polls |
 
 The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file.
-
-If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
-| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64. To rotate it, see below |
-| `MERGEPATROL_SECRET_KEY_FILE` | | A file that holds the secret key, instead of `MERGEPATROL_SECRET_KEY`. Compose uses one |
-| `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
-| `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
-| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
-| `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
-| `MERGEPATROL_MAX_JOBS` | `4` | The most rebase and fix jobs that run at once, across every queue |
-| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
-| `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
-| `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
-| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
-| `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
 
 ### Rotate the secret key
 
@@ -212,6 +204,41 @@ This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public A
 | `MERGEPATROL_CLOUD_RUN_JOB` | `projects/<p>/locations/<r>/jobs/<name>`, with `MERGEPATROL_EXECUTOR=cloud-run` |
 | `MERGEPATROL_POSTHOG_KEY` | The PostHog project key. Turns on product analytics (below) |
 | `MERGEPATROL_POSTHOG_HOST` | The PostHog host. `https://us.i.posthog.com` by default |
+
+### Billing
+
+Billing runs through Stripe, and is off unless the three `MERGEPATROL_STRIPE_*` variables below are set. In Stripe, create:
+
+1. A product, with a recurring price of $15 a month per unit: `MERGEPATROL_STRIPE_PRICE`. Mergepatrol keeps each subscription's quantity at the workspace's seats.
+2. A webhook endpoint at `<public URL>/webhooks/stripe`, for `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`: its signing secret is `MERGEPATROL_STRIPE_WEBHOOK_SECRET`.
+3. The customer portal's settings, where a customer adds a card, sees invoices, or cancels.
+
+A workspace's first subscription starts with Stripe's trial, without a card. One that has no card when the trial ends is cancelled.
+
+| Variable | What it is |
+| --- | --- |
+| `MERGEPATROL_STRIPE_SECRET_KEY` | A secret or restricted key: Checkout sessions, customer portal sessions, and subscriptions (write) |
+| `MERGEPATROL_STRIPE_WEBHOOK_SECRET` | The webhook endpoint's signing secret, `whsec_…` |
+| `MERGEPATROL_STRIPE_PRICE` | The price, `price_…` |
+
+If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
+| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64. To rotate it, see below |
+| `MERGEPATROL_SECRET_KEY_FILE` | | A file that holds the secret key, instead of `MERGEPATROL_SECRET_KEY`. Compose uses one |
+| `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
+| `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
+| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
+| `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
+| `MERGEPATROL_MAX_JOBS` | `4` | The most rebase and fix jobs that run at once, across every queue |
+| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
+| `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
+| `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
+| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
+| `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
+
 
 ### Analytics
 

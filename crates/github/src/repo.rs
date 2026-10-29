@@ -20,6 +20,8 @@ pub struct RepoSnapshot {
     pub id: String,
     pub default_branch: String,
     pub trunk_sha: String,
+    /// Private, or internal: not open to everyone.
+    pub private: bool,
     /// `squash`, `merge` or `rebase`: the repo's default for this App.
     pub merge_method: String,
     /// Open PRs with the trigger label, oldest first.
@@ -290,6 +292,7 @@ impl Installation {
             "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!, $after: String) {{
               repository(owner: $owner, name: $name) {{
                 id
+                isPrivate
                 trigger: label(name: $label) {{ name }}
                 priority: label(name: $priority) {{ name }}
                 failed: label(name: $failed) {{ name }}
@@ -359,6 +362,7 @@ impl Installation {
                 .as_str()
                 .context("trunk sha")?
                 .to_owned(),
+            private: r["isPrivate"].as_bool().unwrap_or(true),
             merge_method: r["viewerDefaultMergeMethod"]
                 .as_str()
                 .unwrap_or("MERGE")

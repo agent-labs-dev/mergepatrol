@@ -11,6 +11,7 @@ base64 = "0.23.1"
 getrandom = "0.4.3"
 hmac = "0.13"
 mergepatrol-analytics = { version = "0.1.0", path = "../analytics" }
+mergepatrol-billing = { version = "0.1.0", path = "../billing" }
 mergepatrol-core = { version = "0.1.0", path = "../core" }
 mergepatrol-github = { version = "0.1.0", path = "../github" }
 mergepatrol-resolver = { version = "0.1.0", path = "../resolver" }

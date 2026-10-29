@@ -58,7 +58,7 @@ function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
   if (session.status === "needs_setup") {
     return session.setup_unlocked ? <CreateApp /> : <UnlockSetup />;
   }
-  if (session.status === "signed_out") return <Landing {...theme} />;
+  if (session.status === "signed_out") return <Landing {...theme} pricing={session.pricing} />;
   if (session.status === "signed_in" && session.app) {
     return session.workspaces.length === 0 ? (
       <Install app={session.app} />

@@ -6,6 +6,8 @@ substitutions:
   _PUBLIC_URL: https://mergepatrol.ai
   # The PostHog project `mergepatrol`, in the agent-labs organization. Public: browsers send it.
   _POSTHOG_KEY: phc_kw3KfV5JfjGbGjoZ4CHDNEyE4NePf8g5c5xJsJJNDtqT
+  # The live Stripe price per seat, in the product `Mergepatrol`. Not secret.
+  _STRIPE_PRICE: price_1UVzi1PwOsXo1dyk78nfPqCb
   _REPO: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/mergepatrol
 options:
   dynamicSubstitutions: true
@@ -106,5 +108,5 @@ steps:
       - --add-cloudsql-instances=${PROJECT_ID}:${_REGION}:mergepatrol
       # The hosted GitHub App, from deploy/gcp/hosted-app.sh.
       - >-
-        --set-secrets=MERGEPATROL_DATABASE_URL=mergepatrol-database-url:latest,MERGEPATROL_SECRET_KEY=mergepatrol-secret-key:latest,MERGEPATROL_GITHUB_APP_ID=mergepatrol-github-app-id:latest,MERGEPATROL_GITHUB_APP_PRIVATE_KEY=mergepatrol-github-app-private-key:latest,MERGEPATROL_GITHUB_CLIENT_ID=mergepatrol-github-client-id:latest,MERGEPATROL_GITHUB_CLIENT_SECRET=mergepatrol-github-client-secret:latest,MERGEPATROL_GITHUB_WEBHOOK_SECRET=mergepatrol-github-webhook-secret:latest
-      - --set-env-vars=MERGEPATROL_PUBLIC_URL=${_PUBLIC_URL},MERGEPATROL_EXECUTOR=cloud-run,MERGEPATROL_CLOUD_RUN_JOB=projects/${PROJECT_ID}/locations/${_REGION}/jobs/mergepatrol-job,MERGEPATROL_POSTHOG_KEY=${_POSTHOG_KEY}
+        --set-secrets=MERGEPATROL_DATABASE_URL=mergepatrol-database-url:latest,MERGEPATROL_SECRET_KEY=mergepatrol-secret-key:latest,MERGEPATROL_GITHUB_APP_ID=mergepatrol-github-app-id:latest,MERGEPATROL_GITHUB_APP_PRIVATE_KEY=mergepatrol-github-app-private-key:latest,MERGEPATROL_GITHUB_CLIENT_ID=mergepatrol-github-client-id:latest,MERGEPATROL_GITHUB_CLIENT_SECRET=mergepatrol-github-client-secret:latest,MERGEPATROL_GITHUB_WEBHOOK_SECRET=mergepatrol-github-webhook-secret:latest,MERGEPATROL_STRIPE_SECRET_KEY=mergepatrol-stripe-secret-key:latest,MERGEPATROL_STRIPE_WEBHOOK_SECRET=mergepatrol-stripe-webhook-secret:latest
+      - --set-env-vars=MERGEPATROL_PUBLIC_URL=${_PUBLIC_URL},MERGEPATROL_EXECUTOR=cloud-run,MERGEPATROL_CLOUD_RUN_JOB=projects/${PROJECT_ID}/locations/${_REGION}/jobs/mergepatrol-job,MERGEPATROL_POSTHOG_KEY=${_POSTHOG_KEY},MERGEPATROL_STRIPE_PRICE=${_STRIPE_PRICE}

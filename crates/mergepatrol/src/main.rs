@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mergepatrol_analytics::Analytics;
+use mergepatrol_billing::Billing;
 use mergepatrol_executor::proxy::{ApiProxy, Upstreams};
 use mergepatrol_executor::remote::{CloudRunLaunch, Mailbox, RemoteExecutor};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
@@ -57,7 +58,7 @@ async fn orchestrator() -> Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
     tokio::fs::create_dir_all(&config.data_dir).await?;
 
     let pg = Arc::new(PgStore::connect(&config.database_url).await?);
@@ -151,6 +152,10 @@ async fn orchestrator() -> Result<()> {
         }
     };
 
+    let billing = config.stripe.take().map(|stripe| {
+        tracing::info!("billing is on");
+        Arc::new(Billing::new(pg.clone(), stripe, &config.public_url))
+    });
     let bind = config.bind;
     let analytics = Analytics::new(config.posthog_key.clone(), &config.posthog_host);
     let ctx = Arc::new(Ctx {
@@ -165,6 +170,7 @@ async fn orchestrator() -> Result<()> {
         prs: Default::default(),
         job_errors: Default::default(),
         unpinned: Default::default(),
+        billing: billing.clone(),
         config,
     });
 
@@ -175,6 +181,7 @@ async fn orchestrator() -> Result<()> {
         wake: ctx.wakers.clone(),
         repo_defaults: ctx.config.repo_defaults.clone(),
         analytics,
+        billing,
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let queues = tokio::spawn(queue::lead(ctx.clone(), pg, stopped));

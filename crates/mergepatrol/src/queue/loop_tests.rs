@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Spend, Step, StepTimes};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -12,8 +13,8 @@ use mergepatrol_github::{
     BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
 };
 use mergepatrol_store::{
-    EventRecord, ExitQuery, ExitRecord, ExitStats, LoginCode, RepoState, SecretRecord, Session,
-    StepStats, Workspace,
+    BillingStore, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse, LoginCode, RepoState,
+    SecretRecord, Session, StepStats, Subscription, Unsynced, Workspace,
 };
 
 use super::*;
@@ -40,6 +41,7 @@ type Action = Box<dyn FnOnce(&mut State) + Send>;
 struct State {
     /// `.mergepatrol/mergepatrol.yml` on the trunk.
     config: Option<String>,
+    private: bool,
     trunk: String,
     branches: HashMap<String, String>,
     prs: BTreeMap<PrNumber, PullRequest>,
@@ -294,6 +296,7 @@ impl GitHub for Fake {
             id: "R".into(),
             default_branch: "main".into(),
             trunk_sha: s.trunk.clone(),
+            private: s.private,
             merge_method: "merge".into(),
             labeled: s
                 .prs
@@ -837,6 +840,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             job_proxy_bind: None,
             posthog_key: None,
             posthog_host: String::new(),
+            stripe: None,
         },
         hosted_app: None,
         vault: Arc::new(Vault::new(store.clone(), &format!("{}=", "A".repeat(43))).unwrap()),
@@ -852,6 +856,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         prs: Default::default(),
         job_errors: Default::default(),
         unpinned: Default::default(),
+        billing: None,
     }
 }
 
@@ -2308,4 +2313,147 @@ async fn a_stack_with_a_pr_from_a_fork_is_ejected() {
     run.drain().await;
     assert!(run.merged().is_empty());
     assert_eq!(run.labels(1), [FAILED]);
+}
+
+/// Billing in memory, as far as the queue uses it.
+#[derive(Default)]
+struct Plans {
+    subscription: Mutex<Option<Subscription>>,
+    fair_use: Mutex<Vec<(FairUse, i64)>>,
+    seats: Mutex<Vec<String>>,
+}
+
+impl Plans {
+    fn subscribe(&self) {
+        *self.subscription.lock().unwrap() = Some(Subscription {
+            customer: "cus".into(),
+            id: "sub".into(),
+            item: "si".into(),
+            status: "active".into(),
+            quantity: 1,
+            trial_end: None,
+        });
+    }
+}
+
+#[async_trait]
+impl BillingStore for Plans {
+    async fn subscription(&self, _: u64) -> Result<Option<Subscription>> {
+        Ok(self.subscription.lock().unwrap().clone())
+    }
+    async fn set_subscription(&self, _: u64, _: &Subscription) -> Result<()> {
+        unreachable!()
+    }
+    async fn set_quantity(&self, _: u64, _: u32) -> Result<()> {
+        unreachable!()
+    }
+    async fn add_seat(&self, _: u64, login: &str, _: i64) -> Result<bool> {
+        let mut seats = self.seats.lock().unwrap();
+        let new = !seats.iter().any(|s| s == login);
+        if new {
+            seats.push(login.into());
+        }
+        Ok(new)
+    }
+    async fn remove_seat(&self, _: u64, _: &str) -> Result<bool> {
+        unreachable!()
+    }
+    async fn seats(&self, _: u64) -> Result<Vec<String>> {
+        unreachable!()
+    }
+    async fn unsynced(&self) -> Result<Vec<Unsynced>> {
+        unreachable!()
+    }
+    async fn record_fair_use(&self, _: u64, kind: FairUse, at: i64) -> Result<()> {
+        self.fair_use.lock().unwrap().push((kind, at));
+        Ok(())
+    }
+    async fn fair_use_since(&self, _: u64, kind: FairUse, since: i64) -> Result<u64> {
+        let rows = self.fair_use.lock().unwrap();
+        Ok(rows
+            .iter()
+            .filter(|(k, at)| *k == kind && *at >= since)
+            .count() as u64)
+    }
+    async fn prune_fair_use(&self, _: i64) -> Result<u64> {
+        unreachable!()
+    }
+}
+
+fn billed(run: &mut Run, plans: &Arc<Plans>) {
+    let stripe = StripeConfig {
+        secret_key: String::new(),
+        webhook_secret: String::new(),
+        price: String::new(),
+    };
+    let billing = Billing::new(plans.clone(), stripe, "https://mergepatrol.test");
+    run.ctx.billing = Some(Arc::new(billing));
+}
+
+fn by(login: &str) -> mergepatrol_github::PrDetails {
+    serde_json::from_value(serde_json::json!({
+        "url": "", "createdAt": "", "additions": 0, "deletions": 0, "changedFiles": 0,
+        "author": { "login": login, "avatarUrl": "", "__typename": "User" },
+        "latestOpinionatedReviews": { "nodes": [] }, "reviewRequests": { "nodes": [] },
+        "commits": null,
+    }))
+    .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_private_repo_waits_on_hold_until_subscribed() {
+    let mut run = Run::new(Fake::new(|s| {
+        s.private = true;
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().details = by("ada");
+    }));
+    let plans = Arc::new(Plans::default());
+    billed(&mut run, &plans);
+
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(comment.contains("Start a free trial of 14 days"));
+    assert!(comment.contains("https://mergepatrol.test/o/settings"));
+    // Its author takes a seat already, so the subscription starts with it.
+    assert_eq!(*plans.seats.lock().unwrap(), ["ada"]);
+
+    plans.subscribe();
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(*plans.seats.lock().unwrap(), ["ada"]);
+    assert!(plans.fair_use.lock().unwrap().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_public_repo_over_its_fair_use_waits_for_the_hour() {
+    let mut run = Run::new(Fake::new(|s| s.add_pr(1)));
+    let plans = Arc::new(Plans::default());
+    billed(&mut run, &plans);
+    let old = unix_now() - 30 * 60;
+    plans
+        .fair_use
+        .lock()
+        .unwrap()
+        .extend((0..FAIR_USE_PRS).map(|_| (FairUse::Pr, old)));
+
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(comment.contains("fair-use limit"));
+
+    // The hour passes.
+    plans.fair_use.lock().unwrap().retain(|(_, at)| *at != old);
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    // It counted when it joined, and took no seat.
+    let kinds: Vec<FairUse> = plans
+        .fair_use
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(k, _)| *k)
+        .collect();
+    assert_eq!(kinds, [FairUse::Pr]);
+    assert!(plans.seats.lock().unwrap().is_empty());
 }
