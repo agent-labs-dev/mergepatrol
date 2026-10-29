@@ -84,6 +84,13 @@ pub struct TreeEntry {
     pub sha: Option<String>,
 }
 
+/// A merge commit that GitHub made on a branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchMerge {
+    pub sha: String,
+    pub tree: String,
+}
+
 #[derive(Debug)]
 pub enum MergeOutcome {
     Merged { sha: String },
@@ -222,6 +229,94 @@ impl Installation {
             .graphql(query, json!({ "repo": repo_id, "updates": updates }))
             .await?;
         Ok(())
+    }
+
+    pub async fn create_branch(&self, repo: &RepoName, branch: &str, sha: &str) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/git/refs"),
+                Some(json!({ "ref": format!("refs/heads/{branch}"), "sha": sha })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes `branch`, if it is there. GitHub closes the PRs it heads.
+    pub async fn delete_branch(&self, repo: &RepoName, branch: &str) -> Result<()> {
+        let res = self
+            .request(
+                Method::DELETE,
+                &format!("/repos/{repo}/git/refs/heads/{branch}"),
+                None,
+            )
+            .await?;
+        // 422: the ref does not exist.
+        if !res.status.is_success()
+            && res.status != StatusCode::NOT_FOUND
+            && res.status != StatusCode::UNPROCESSABLE_ENTITY
+        {
+            anyhow::bail!("delete branch {branch}: {} {}", res.status, res.body);
+        }
+        Ok(())
+    }
+
+    /// Merges `head` into `branch` on GitHub, with a merge commit. `None` when they conflict,
+    /// or when `branch` already has `head`.
+    pub async fn merge_into_branch(
+        &self,
+        repo: &RepoName,
+        branch: &str,
+        head: &str,
+        message: &str,
+    ) -> Result<Option<BranchMerge>> {
+        let res = self
+            .request(
+                Method::POST,
+                &format!("/repos/{repo}/merges"),
+                Some(json!({ "base": branch, "head": head, "commit_message": message })),
+            )
+            .await?;
+        match res.status {
+            StatusCode::CREATED => Ok(Some(BranchMerge {
+                sha: res.body["sha"].as_str().context("merge sha")?.to_owned(),
+                tree: res.body["commit"]["tree"]["sha"]
+                    .as_str()
+                    .context("merge tree")?
+                    .to_owned(),
+            })),
+            StatusCode::CONFLICT | StatusCode::NO_CONTENT => Ok(None),
+            s => anyhow::bail!("merge {head} into {branch}: {s} {}", res.body),
+        }
+    }
+
+    pub async fn open_draft_pr(
+        &self,
+        repo: &RepoName,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PrNumber> {
+        let r: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/pulls"),
+                Some(json!({ "head": head, "base": base, "title": title, "body": body, "draft": true })),
+            )
+            .await?;
+        r["number"].as_u64().context("PR number")
+    }
+
+    pub async fn commit_tree(&self, repo: &RepoName, sha: &str) -> Result<String> {
+        let r: Value = self
+            .rest(
+                Method::GET,
+                &format!("/repos/{repo}/git/commits/{sha}"),
+                None,
+            )
+            .await?;
+        Ok(r["tree"]["sha"].as_str().context("commit tree")?.to_owned())
     }
 
     pub async fn merge(

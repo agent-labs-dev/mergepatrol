@@ -4,7 +4,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use mergepatrol_core::{PrNumber, RepoName};
-use mergepatrol_github::{Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot};
+use mergepatrol_github::{
+    BranchMerge, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot, RequiredChecks,
+};
 
 #[async_trait]
 pub trait GitHub: Send + Sync {
@@ -12,7 +14,7 @@ pub trait GitHub: Send + Sync {
     async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot>;
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest>;
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String>;
-    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<Vec<String>>;
+    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks>;
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks>;
     async fn merge(
         &self,
@@ -21,6 +23,24 @@ pub trait GitHub: Send + Sync {
         sha: &str,
         method: &str,
     ) -> Result<MergeOutcome>;
+    async fn create_branch(&self, repo: &RepoName, branch: &str, sha: &str) -> Result<()>;
+    async fn delete_branch(&self, repo: &RepoName, branch: &str) -> Result<()>;
+    async fn merge_into_branch(
+        &self,
+        repo: &RepoName,
+        branch: &str,
+        head: &str,
+        message: &str,
+    ) -> Result<Option<BranchMerge>>;
+    async fn open_draft_pr(
+        &self,
+        repo: &RepoName,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PrNumber>;
+    async fn commit_tree(&self, repo: &RepoName, sha: &str) -> Result<String>;
     async fn add_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()>;
     async fn remove_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()>;
     async fn sticky_comment(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()>;
@@ -40,7 +60,7 @@ impl GitHub for Installation {
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String> {
         Installation::branch_sha(self, repo, branch).await
     }
-    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<Vec<String>> {
+    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks> {
         Installation::required_checks(self, repo, branch).await
     }
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
@@ -54,6 +74,34 @@ impl GitHub for Installation {
         method: &str,
     ) -> Result<MergeOutcome> {
         Installation::merge(self, repo, number, sha, method).await
+    }
+    async fn create_branch(&self, repo: &RepoName, branch: &str, sha: &str) -> Result<()> {
+        Installation::create_branch(self, repo, branch, sha).await
+    }
+    async fn delete_branch(&self, repo: &RepoName, branch: &str) -> Result<()> {
+        Installation::delete_branch(self, repo, branch).await
+    }
+    async fn merge_into_branch(
+        &self,
+        repo: &RepoName,
+        branch: &str,
+        head: &str,
+        message: &str,
+    ) -> Result<Option<BranchMerge>> {
+        Installation::merge_into_branch(self, repo, branch, head, message).await
+    }
+    async fn open_draft_pr(
+        &self,
+        repo: &RepoName,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PrNumber> {
+        Installation::open_draft_pr(self, repo, head, base, title, body).await
+    }
+    async fn commit_tree(&self, repo: &RepoName, sha: &str) -> Result<String> {
+        Installation::commit_tree(self, repo, sha).await
     }
     async fn add_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()> {
         Installation::add_label(self, repo, number, label).await

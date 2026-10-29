@@ -21,6 +21,8 @@ pub struct Config {
     pub model: String,
     pub effort: String,
     pub max_jobs: usize,
+    /// The most PRs tested together. 1 tests and merges one PR at a time.
+    pub batch_size: usize,
     pub executor: ExecutorConfig,
 }
 
@@ -75,6 +77,10 @@ impl Config {
             model: opt("MERGEPATROL_MODEL", "claude-opus-5-5"),
             effort: opt("MERGEPATROL_EFFORT", "medium"),
             max_jobs: opt("MERGEPATROL_MAX_JOBS", "4").parse()?,
+            batch_size: match opt("MERGEPATROL_BATCH_SIZE", "8").parse()? {
+                0 => bail!("MERGEPATROL_BATCH_SIZE: 0 merges nothing; 1 is one PR at a time"),
+                n => n,
+            },
             executor: match opt("MERGEPATROL_EXECUTOR", "local").as_str() {
                 "local" => ExecutorConfig::Local,
                 "docker" => ExecutorConfig::Docker {

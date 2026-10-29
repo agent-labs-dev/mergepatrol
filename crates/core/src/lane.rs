@@ -35,10 +35,26 @@ pub enum LaneChange {
     },
 }
 
-/// The queue of one (repo, trunk). Serial: at most one entry is active.
+/// The queue of one (repo, trunk). One job at a time: a single PR, or a batch of PRs tested
+/// together, whose entries are all active.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lane {
     pub entries: Vec<Entry>,
+    /// Set after a batch failed: the PR that broke it is among `suspects`.
+    #[serde(default)]
+    pub bisect: Option<Bisect>,
+    /// The branch of the batch being tested. Still set at startup means a restart cut the batch
+    /// short: delete the branch, which closes its PR.
+    #[serde(default)]
+    pub batch_branch: Option<String>,
+}
+
+/// The search for the PR that broke a batch: the next batches take only suspects, and at most
+/// half as many as the batch that failed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bisect {
+    pub suspects: Vec<PrNumber>,
+    pub limit: usize,
 }
 
 impl Lane {
@@ -56,6 +72,11 @@ impl Lane {
             }
             keep
         });
+        for change in &changes {
+            if let LaneChange::Dequeued { number, .. } = change {
+                self.clear_suspect(*number);
+            }
+        }
 
         for c in candidates {
             match self.entries.iter_mut().find(|e| e.number == c.number) {
@@ -85,28 +106,53 @@ impl Lane {
         changes
     }
 
-    pub fn active(&self) -> Option<PrNumber> {
+    pub fn active(&self) -> Vec<PrNumber> {
         self.entries
             .iter()
-            .find(|e| e.state == EntryState::Active)
+            .filter(|e| e.state == EntryState::Active)
             .map(|e| e.number)
+            .collect()
     }
 
-    /// The next PR to start: the first waiting priority PR, else the first waiting PR.
-    /// `None` while a PR is active.
-    pub fn next(&self) -> Option<PrNumber> {
-        if self.active().is_some() {
-            return None;
+    /// The next PRs to start, at most `max`, in the order to merge them: waiting priority PRs,
+    /// then waiting PRs, each by place. While bisecting, only suspects, at most the bisect's
+    /// limit. Empty while a job is active.
+    pub fn next(&self, max: usize) -> Vec<PrNumber> {
+        if !self.active().is_empty() {
+            return Vec::new();
         }
         let waiting = || {
             self.entries
                 .iter()
                 .filter(|e| e.state == EntryState::Waiting)
         };
-        waiting()
-            .find(|e| e.priority)
-            .or_else(|| waiting().next())
+        let order: Vec<PrNumber> = waiting()
+            .filter(|e| e.priority)
+            .chain(waiting().filter(|e| !e.priority))
             .map(|e| e.number)
+            .collect();
+        if let Some(b) = &self.bisect {
+            let suspects: Vec<PrNumber> = order
+                .iter()
+                .copied()
+                .filter(|n| b.suspects.contains(n))
+                .take(b.limit)
+                .collect();
+            // Suspects that are all on hold must not stall the PRs behind them.
+            if !suspects.is_empty() {
+                return suspects;
+            }
+        }
+        order.into_iter().take(max).collect()
+    }
+
+    /// A batch failed its checks: one of its PRs, or a mix of them, broke it. Test half of
+    /// them next; a single PR runs alone, where a failure is its own.
+    pub fn batch_failed(&mut self, members: &[PrNumber]) {
+        self.bisect = Some(Bisect {
+            suspects: members.to_vec(),
+            limit: (members.len() / 2).max(1),
+        });
     }
 
     pub fn activate(&mut self, number: PrNumber) {
@@ -122,8 +168,39 @@ impl Lane {
         }
     }
 
+    /// Ends the active job, and puts its PRs that are still active back in their places.
+    pub fn stop(&mut self) {
+        for e in &mut self.entries {
+            if e.state == EntryState::Active {
+                e.state = EntryState::Waiting;
+            }
+        }
+    }
+
     pub fn remove(&mut self, number: PrNumber) {
         self.entries.retain(|e| e.number != number);
+        self.clear_suspect(number);
+    }
+
+    /// The PR was ejected. A suspect ejected is the one that broke the batch: the search is over.
+    pub fn eject(&mut self, number: PrNumber) {
+        self.entries.retain(|e| e.number != number);
+        if self
+            .bisect
+            .as_ref()
+            .is_some_and(|b| b.suspects.contains(&number))
+        {
+            self.bisect = None;
+        }
+    }
+
+    fn clear_suspect(&mut self, number: PrNumber) {
+        if let Some(b) = &mut self.bisect {
+            b.suspects.retain(|n| *n != number);
+            if b.suspects.is_empty() {
+                self.bisect = None;
+            }
+        }
     }
 }
 
@@ -158,7 +235,7 @@ mod tests {
                 ..c(2)
             },
         ]);
-        assert_eq!(lane.next(), Some(2));
+        assert_eq!(lane.next(1), [2]);
     }
 
     #[test]
@@ -166,7 +243,7 @@ mod tests {
         let mut lane = Lane::default();
         lane.sync(&[c(1), c(2)]);
         lane.activate(1);
-        assert_eq!(lane.next(), None);
+        assert!(lane.next(8).is_empty());
     }
 
     #[test]
@@ -179,9 +256,9 @@ mod tests {
             },
             c(2),
         ]);
-        assert_eq!(lane.next(), Some(2));
+        assert_eq!(lane.next(1), [2]);
         lane.sync(&[c(1), c(2)]);
-        assert_eq!(lane.next(), Some(1));
+        assert_eq!(lane.next(1), [1]);
     }
 
     #[test]
@@ -197,7 +274,7 @@ mod tests {
                 was_active: true
             }]
         );
-        assert_eq!(lane.next(), Some(2));
+        assert_eq!(lane.next(1), [2]);
     }
 
     #[test]
@@ -209,6 +286,93 @@ mod tests {
             hold: Some("needs approval".into()),
             ..c(1)
         }]);
-        assert_eq!(lane.active(), Some(1));
+        assert_eq!(lane.active(), [1]);
+    }
+
+    fn lane(numbers: &[PrNumber]) -> Lane {
+        let mut lane = Lane::default();
+        lane.sync(&numbers.iter().map(|n| c(*n)).collect::<Vec<_>>());
+        lane
+    }
+
+    #[test]
+    fn a_batch_takes_priority_prs_first_then_by_place() {
+        let mut lane = lane(&[1, 2, 3]);
+        lane.sync(&[
+            c(1),
+            c(2),
+            c(3),
+            Candidate {
+                priority: true,
+                ..c(4)
+            },
+        ]);
+        assert_eq!(lane.next(3), [4, 1, 2]);
+    }
+
+    #[test]
+    fn a_failed_batch_bisects_down_to_one_pr() {
+        let mut lane = lane(&[1, 2, 3, 4, 5, 6]);
+        lane.batch_failed(&[1, 2, 3, 4]);
+        assert_eq!(lane.next(8), [1, 2]);
+
+        // The first half passed and merged: the rest of the suspects, still two at a time.
+        lane.remove(1);
+        lane.remove(2);
+        assert_eq!(lane.next(8), [3, 4]);
+
+        lane.batch_failed(&[3, 4]);
+        assert_eq!(lane.next(8), [3]);
+        lane.remove(3);
+        assert_eq!(lane.next(8), [4]);
+
+        // 4 alone failed: it broke the batch, and full batches resume.
+        lane.eject(4);
+        assert_eq!(lane.bisect, None);
+        assert_eq!(lane.next(8), [5, 6]);
+    }
+
+    #[test]
+    fn the_search_ends_when_the_culprit_is_ejected() {
+        let mut lane = lane(&[1, 2, 3]);
+        lane.batch_failed(&[1, 2]);
+        lane.batch_failed(&[1]);
+        lane.eject(1);
+        assert_eq!(lane.next(8), [2, 3]);
+    }
+
+    #[test]
+    fn suspects_on_hold_do_not_stall_the_lane() {
+        let mut lane = lane(&[1, 2, 3]);
+        lane.batch_failed(&[1, 2]);
+        lane.sync(&[
+            Candidate {
+                hold: Some("draft".into()),
+                ..c(1)
+            },
+            Candidate {
+                hold: Some("draft".into()),
+                ..c(2)
+            },
+            c(3),
+        ]);
+        assert_eq!(lane.next(8), [3]);
+    }
+
+    #[test]
+    fn suspects_that_leave_the_queue_end_the_search() {
+        let mut lane = lane(&[1, 2, 3]);
+        lane.batch_failed(&[1, 2]);
+        lane.sync(&[c(3)]);
+        assert_eq!(lane.bisect, None);
+    }
+
+    #[test]
+    fn stopping_a_batch_puts_its_prs_back_in_place() {
+        let mut lane = lane(&[1, 2, 3]);
+        lane.activate(1);
+        lane.activate(2);
+        lane.stop();
+        assert_eq!(lane.next(8), [1, 2, 3]);
     }
 }

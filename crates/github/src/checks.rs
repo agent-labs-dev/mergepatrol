@@ -52,10 +52,20 @@ impl Checks {
     }
 }
 
+/// The status checks that a branch requires before a merge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RequiredChecks {
+    pub names: Vec<String>,
+    /// The PR must also be up to date with the branch: GitHub merges only a PR that has every
+    /// commit of the branch.
+    pub strict: bool,
+}
+
 impl Installation {
     /// The status checks that the branch's rulesets and classic protection require.
-    pub async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<Vec<String>> {
+    pub async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks> {
         let mut names = Vec::new();
+        let mut strict = false;
         let rules: Vec<Value> = self
             .rest(
                 Method::GET,
@@ -67,6 +77,7 @@ impl Installation {
             .iter()
             .filter(|r| r["type"] == "required_status_checks")
         {
+            strict |= rule["parameters"]["strict_required_status_checks_policy"] == true;
             for check in rule["parameters"]["required_status_checks"]
                 .as_array()
                 .into_iter()
@@ -86,6 +97,7 @@ impl Installation {
             )
             .await?;
         if res.status.is_success() {
+            strict |= res.body["strict"] == true;
             for c in res.body["contexts"].as_array().into_iter().flatten() {
                 if let Some(c) = c.as_str() {
                     names.push(c.to_owned());
@@ -94,7 +106,7 @@ impl Installation {
         }
         names.sort();
         names.dedup();
-        Ok(names)
+        Ok(RequiredChecks { names, strict })
     }
 
     pub async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
