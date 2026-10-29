@@ -565,7 +565,7 @@ impl Installation {
     }
 
     /// The merge commit of the PR, if it merged at `head`.
-    async fn merged_as(
+    pub async fn merged_as(
         &self,
         repo: &RepoName,
         number: PrNumber,

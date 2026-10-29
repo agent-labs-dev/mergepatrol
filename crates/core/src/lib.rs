@@ -9,7 +9,7 @@ mod steps;
 pub use job::{EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
     BatchStep, Bisect, BuiltBatch, Candidate, Entry, EntryState, Lane, LaneChange, LayerHead,
-    Person, PrSummary, Review,
+    PendingMerge, Person, PrSummary, Review,
 };
 pub use repo_config::{
     EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,

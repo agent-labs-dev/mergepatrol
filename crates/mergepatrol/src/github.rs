@@ -34,6 +34,13 @@ pub trait GitHub: Send + Sync {
         sha: &str,
         method: &str,
     ) -> Result<MergeOutcome>;
+    /// The merge commit of the PR, if it merged at `head`.
+    async fn merged_as(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        head: &str,
+    ) -> Result<Option<String>>;
     async fn create_branch(&self, repo: &RepoName, branch: &str, sha: &str) -> Result<()>;
     async fn delete_branch(&self, repo: &RepoName, branch: &str) -> Result<()>;
     async fn merge_into_branch(
@@ -100,6 +107,14 @@ impl GitHub for Installation {
         method: &str,
     ) -> Result<MergeOutcome> {
         Installation::merge(self, repo, number, sha, method).await
+    }
+    async fn merged_as(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        head: &str,
+    ) -> Result<Option<String>> {
+        Installation::merged_as(self, repo, number, head).await
     }
     async fn create_branch(&self, repo: &RepoName, branch: &str, sha: &str) -> Result<()> {
         Installation::create_branch(self, repo, branch, sha).await
