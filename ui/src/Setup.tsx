@@ -2,23 +2,38 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { startManifest, unlock } from "./api";
 import type { AppView } from "./api/AppView";
+import { ErrorText, field, Mark, primary } from "./ui";
 
-function Card({ title, children }: { title: string; children: ReactNode }) {
+/** The first run's steps on a self-hosted Mergepatrol, which shows its progress. */
+const setupSteps = 2;
+
+function Card({ step, title, children }: { step?: number; title: string; children: ReactNode }) {
   return (
-    <section className="mx-auto mt-16 max-w-md rounded border border-neutral-800 p-6">
-      <h1 className="mb-1 text-xl font-semibold">Mergepatrol</h1>
-      <h2 className="mb-4 text-neutral-400">{title}</h2>
-      {children}
-    </section>
+    <div className="flex min-h-screen flex-col items-center justify-center px-4">
+      <div className="mb-6 flex items-center gap-2 font-semibold">
+        <Mark /> Mergepatrol
+      </div>
+      <section className="w-full max-w-md rounded-xl border border-line bg-surface p-8 shadow-sm">
+        {step && (
+          <ol className="mb-6 flex gap-1.5" aria-label={`Step ${step} of ${setupSteps}`}>
+            {Array.from({ length: setupSteps }, (_, i) => (
+              <li
+                // biome-ignore lint/suspicious/noArrayIndexKey: a fixed list of steps
+                key={i}
+                className={`h-1 flex-1 rounded-full ${i < step ? "bg-fg" : "bg-sunken"}`}
+              />
+            ))}
+          </ol>
+        )}
+        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+        {children}
+      </section>
+    </div>
   );
 }
 
-const input = "w-full rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-sm";
-const primary =
-  "rounded bg-sky-700 px-3 py-1.5 text-sm hover:bg-sky-600 disabled:opacity-50 inline-block";
-
-function ErrorText({ error }: { error: Error | null }) {
-  return error ? <p className="mt-2 text-sm text-red-400">{error.message}</p> : null;
+function Body({ children }: { children: ReactNode }) {
+  return <p className="mt-2 leading-relaxed text-fg-2">{children}</p>;
 }
 
 export function UnlockSetup() {
@@ -33,20 +48,27 @@ export function UnlockSetup() {
     mutation.mutate(token);
   };
   return (
-    <Card title="Set up">
-      <p className="mb-4 text-sm text-neutral-300">
+    <Card step={1} title="Set up Mergepatrol">
+      <Body>
         Enter the setup token. Mergepatrol prints it in its logs when it starts without a GitHub
-        App: <code className="text-xs">docker compose logs mergepatrol | grep setup_token</code>
-      </p>
-      <form onSubmit={submit} className="space-y-3">
+        App:
+      </Body>
+      <pre className="mt-3 overflow-x-auto rounded-md bg-sunken px-3 py-2 font-mono text-xs">
+        docker compose logs mergepatrol | grep setup_token
+      </pre>
+      <form onSubmit={submit} className="mt-5 space-y-3">
         <input
-          className={`${input} font-mono`}
+          className={`${field} w-full font-mono`}
           placeholder="Setup token"
           autoComplete="off"
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
-        <button type="submit" className={primary} disabled={!token.trim() || mutation.isPending}>
+        <button
+          type="submit"
+          className={`${primary} w-full`}
+          disabled={!token.trim() || mutation.isPending}
+        >
           Continue
         </button>
       </form>
@@ -65,11 +87,11 @@ export function CreateApp() {
       const form = document.createElement("form");
       form.method = "post";
       form.action = action;
-      const field = document.createElement("input");
-      field.type = "hidden";
-      field.name = "manifest";
-      field.value = manifest;
-      form.appendChild(field);
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "manifest";
+      input.value = manifest;
+      form.appendChild(input);
       document.body.appendChild(form);
       form.submit();
     },
@@ -78,30 +100,37 @@ export function CreateApp() {
     e.preventDefault();
     mutation.mutate({ owner: owner.trim(), organization });
   };
+  const choice = (on: boolean, label: string) => (
+    <button
+      type="button"
+      onClick={() => setOrganization(on)}
+      className={`h-8 flex-1 rounded ${organization === on ? "bg-surface shadow-xs ring-1 ring-line" : "text-muted hover:text-fg"}`}
+    >
+      {label}
+    </button>
+  );
   return (
-    <Card title="Create the GitHub App">
-      <p className="mb-4 text-sm text-neutral-300">
+    <Card step={2} title="Create the GitHub App">
+      <Body>
         Mergepatrol acts on GitHub as its own App. GitHub creates it for you, then asks where to
         install it.
-      </p>
-      <form onSubmit={submit} className="space-y-3">
-        <div className="flex gap-4 text-sm">
-          <label className="flex items-center gap-2">
-            <input type="radio" checked={organization} onChange={() => setOrganization(true)} />{" "}
-            Organization
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="radio" checked={!organization} onChange={() => setOrganization(false)} />{" "}
-            My personal account
-          </label>
+      </Body>
+      <form onSubmit={submit} className="mt-5 space-y-3">
+        <div className="flex gap-1 rounded-md bg-sunken p-1">
+          {choice(true, "Organization")}
+          {choice(false, "My personal account")}
         </div>
         <input
-          className={input}
+          className={`${field} w-full`}
           placeholder={organization ? "Organization name, e.g. acme" : "Your GitHub username"}
           value={owner}
           onChange={(e) => setOwner(e.target.value)}
         />
-        <button type="submit" className={primary} disabled={!owner.trim() || mutation.isPending}>
+        <button
+          type="submit"
+          className={`${primary} w-full`}
+          disabled={!owner.trim() || mutation.isPending}
+        >
           Create on GitHub
         </button>
       </form>
@@ -113,10 +142,11 @@ export function CreateApp() {
 export function SignIn() {
   return (
     <Card title="Sign in">
-      <p className="mb-4 text-sm text-neutral-300">
-        Mergepatrol rebases your pull requests and resolves conflicts with an agent.
-      </p>
-      <a className={primary} href="/auth/login">
+      <Body>
+        Mergepatrol rebases your pull requests, tests them together, and resolves conflicts with an
+        agent.
+      </Body>
+      <a className={`${primary} mt-5 w-full`} href="/auth/login">
         Sign in with GitHub
       </a>
     </Card>
@@ -126,12 +156,13 @@ export function SignIn() {
 /** Signed in, but the App is on no account the user can access. */
 export function Install({ app }: { app: AppView }) {
   return (
-    <Card title="Install Mergepatrol">
-      <p className="mb-4 text-sm text-neutral-300">
-        Install the <code>{app.slug}</code> App on an organization or on your account, and choose
-        its repos. Each installation is a workspace. GitHub sends you back here.
-      </p>
-      <a className={primary} href={app.install_url}>
+    <Card title="Install the App">
+      <Body>
+        Install <code className="rounded bg-sunken px-1 text-sm">{app.slug}</code> on an
+        organization or on your account, and choose its repos. Each installation is a workspace.
+        GitHub sends you back here.
+      </Body>
+      <a className={`${primary} mt-5 w-full`} href={app.install_url}>
         Install on GitHub
       </a>
     </Card>

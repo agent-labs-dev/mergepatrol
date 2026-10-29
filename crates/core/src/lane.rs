@@ -9,6 +9,43 @@ pub struct Candidate {
     pub priority: bool,
     /// `Some(reason)` when GitHub would not merge the PR yet: a draft, or missing approvals.
     pub hold: Option<String>,
+    pub summary: PrSummary,
+}
+
+/// What the dashboard shows of a PR, as of the last tick. The queue never reads it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrSummary {
+    pub title: String,
+    pub url: String,
+    /// `None` for a deleted account.
+    pub author: Option<Person>,
+    pub created_at: String,
+    pub head_ref: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
+    /// `APPROVED`, `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `None` when no review is required.
+    pub review_decision: Option<String>,
+    /// Each reviewer's latest approval or change request.
+    pub reviews: Vec<Review>,
+    /// Users asked to review who have not yet.
+    pub requested: Vec<Person>,
+    /// The head commit's combined checks: `SUCCESS`, `FAILURE`, `ERROR`, `PENDING` or
+    /// `EXPECTED`. `None` without checks.
+    pub checks: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Person {
+    pub login: String,
+    pub avatar_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Review {
+    pub reviewer: Person,
+    /// `APPROVED` or `CHANGES_REQUESTED`.
+    pub state: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +60,9 @@ pub struct Entry {
     pub number: PrNumber,
     pub priority: bool,
     pub state: EntryState,
+    /// Empty in a lane saved before the queue kept it, until the next tick.
+    #[serde(default)]
+    pub summary: PrSummary,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +122,7 @@ impl Lane {
             match self.entries.iter_mut().find(|e| e.number == c.number) {
                 Some(e) => {
                     e.priority = c.priority;
+                    e.summary = c.summary.clone();
                     if e.state != EntryState::Active {
                         e.state = match &c.hold {
                             Some(reason) => EntryState::Held(reason.clone()),
@@ -97,6 +138,7 @@ impl Lane {
                             Some(reason) => EntryState::Held(reason.clone()),
                             None => EntryState::Waiting,
                         },
+                        summary: c.summary.clone(),
                     });
                     changes.push(LaneChange::Enqueued(c.number));
                 }
@@ -213,6 +255,7 @@ mod tests {
             number,
             priority: false,
             hold: None,
+            summary: PrSummary::default(),
         }
     }
 

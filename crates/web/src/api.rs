@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use mergepatrol_core::{EntryState, RepoName};
+use mergepatrol_core::{Entry, EntryState, Person, PrSummary, RepoName};
 use mergepatrol_github::App;
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
 use mergepatrol_store::{ANTHROPIC_API_KEY, Scope};
@@ -29,6 +29,108 @@ pub struct EntryView {
     pub state: EntryStateView,
     /// Why the PR is held.
     pub detail: Option<String>,
+    pub title: String,
+    pub url: String,
+    /// `None` for a deleted account.
+    pub author: Option<PersonView>,
+    pub created_at: String,
+    pub head_ref: String,
+    pub additions: u32,
+    pub deletions: u32,
+    pub changed_files: u32,
+    pub review_decision: Option<ReviewDecisionView>,
+    /// Each reviewer's latest approval or change request.
+    pub reviews: Vec<ReviewView>,
+    /// Users asked to review who have not yet.
+    pub requested: Vec<PersonView>,
+    /// The head commit's combined checks. `None` without checks.
+    pub checks: Option<ChecksView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct PersonView {
+    pub login: String,
+    pub avatar_url: String,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ReviewView {
+    pub reviewer: PersonView,
+    pub approved: bool,
+}
+
+#[derive(Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ReviewDecisionView {
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+#[derive(Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum ChecksView {
+    Passed,
+    Failed,
+    Pending,
+}
+
+impl From<Person> for PersonView {
+    fn from(p: Person) -> Self {
+        PersonView {
+            login: p.login,
+            avatar_url: p.avatar_url,
+        }
+    }
+}
+
+impl EntryView {
+    fn new(number: u64, priority: bool, state: EntryState, pr: PrSummary) -> Self {
+        let (state, detail) = match state {
+            EntryState::Waiting => (EntryStateView::Waiting, None),
+            EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
+            EntryState::Active => (EntryStateView::Active, None),
+        };
+        EntryView {
+            number: number as u32,
+            priority,
+            state,
+            detail,
+            title: pr.title,
+            url: pr.url,
+            author: pr.author.map(PersonView::from),
+            created_at: pr.created_at,
+            head_ref: pr.head_ref,
+            additions: pr.additions as u32,
+            deletions: pr.deletions as u32,
+            changed_files: pr.changed_files as u32,
+            review_decision: match pr.review_decision.as_deref() {
+                Some("APPROVED") => Some(ReviewDecisionView::Approved),
+                Some("REVIEW_REQUIRED") => Some(ReviewDecisionView::ReviewRequired),
+                Some("CHANGES_REQUESTED") => Some(ReviewDecisionView::ChangesRequested),
+                _ => None,
+            },
+            reviews: pr
+                .reviews
+                .into_iter()
+                .map(|r| ReviewView {
+                    approved: r.state == "APPROVED",
+                    reviewer: r.reviewer.into(),
+                })
+                .collect(),
+            requested: pr.requested.into_iter().map(PersonView::from).collect(),
+            checks: match pr.checks.as_deref() {
+                Some("SUCCESS") => Some(ChecksView::Passed),
+                Some("FAILURE" | "ERROR") => Some(ChecksView::Failed),
+                Some(_) => Some(ChecksView::Pending),
+                None => None,
+            },
+        }
+    }
 }
 
 #[derive(Serialize, TS)]
@@ -104,26 +206,25 @@ pub(crate) async fn lanes(
             .map(|(key, lane)| LaneView {
                 repo: key.repo.to_string(),
                 trunk: key.trunk,
-                entries: lane
-                    .entries
+                entries: in_merge_order(lane.entries)
                     .into_iter()
-                    .map(|e| {
-                        let (state, detail) = match e.state {
-                            EntryState::Waiting => (EntryStateView::Waiting, None),
-                            EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
-                            EntryState::Active => (EntryStateView::Active, None),
-                        };
-                        EntryView {
-                            number: e.number as u32,
-                            priority: e.priority,
-                            state,
-                            detail,
-                        }
-                    })
+                    .map(|e| EntryView::new(e.number, e.priority, e.state, e.summary))
                     .collect(),
             })
             .collect(),
     ))
+}
+
+/// The order the queue takes them in, as `Lane::next` picks: the job, then waiting priority PRs,
+/// then waiting PRs, each by place. Held PRs last.
+fn in_merge_order(mut entries: Vec<Entry>) -> Vec<Entry> {
+    entries.sort_by_key(|e| match e.state {
+        EntryState::Active => 0,
+        EntryState::Waiting if e.priority => 1,
+        EntryState::Waiting => 2,
+        EntryState::Held(_) => 3,
+    });
+    entries
 }
 
 pub(crate) async fn events(
@@ -257,4 +358,31 @@ pub(crate) async fn delete_anthropic_key(
         .await?;
     tracing::info!(installation = id, "the Anthropic API key was removed");
     settings_view(&app, id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(number: u64, priority: bool, state: EntryState) -> Entry {
+        Entry {
+            number,
+            priority,
+            state,
+            summary: PrSummary::default(),
+        }
+    }
+
+    #[test]
+    fn lanes_list_prs_in_the_order_they_merge() {
+        let entries = vec![
+            entry(1, false, EntryState::Held("draft".into())),
+            entry(2, false, EntryState::Waiting),
+            entry(3, true, EntryState::Waiting),
+            entry(4, false, EntryState::Active),
+            entry(5, false, EntryState::Waiting),
+        ];
+        let order: Vec<u64> = in_merge_order(entries).iter().map(|e| e.number).collect();
+        assert_eq!(order, [4, 3, 2, 5, 1]);
+    }
 }

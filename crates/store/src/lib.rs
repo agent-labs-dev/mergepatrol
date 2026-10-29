@@ -502,6 +502,7 @@ mod tests {
             number: 4,
             priority: false,
             hold: None,
+            summary: Default::default(),
         }]);
         store.save_lane(&key, &lane).await.unwrap();
         assert_eq!(store.load_lane(&key).await.unwrap(), lane);

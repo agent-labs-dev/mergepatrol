@@ -4,7 +4,7 @@ mod job;
 mod lane;
 
 pub use job::{EjectReason, Event, Job, Phase, Transition};
-pub use lane::{Bisect, Candidate, Entry, EntryState, Lane, LaneChange};
+pub use lane::{Bisect, Candidate, Entry, EntryState, Lane, LaneChange, Person, PrSummary, Review};
 
 use serde::{Deserialize, Serialize};
 
