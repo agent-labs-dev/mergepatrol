@@ -87,6 +87,9 @@ pub struct Lane {
     /// short: delete the branch, which closes its PR.
     #[serde(default)]
     pub batch_branch: Option<String>,
+    /// The draft PR that tests the batch, once it is open.
+    #[serde(default)]
+    pub batch_pr: Option<PrNumber>,
 }
 
 /// The search for the PR that broke a batch: the next batches take only suspects, and at most
@@ -212,6 +215,7 @@ impl Lane {
 
     /// Ends the active job, and puts its PRs that are still active back in their places.
     pub fn stop(&mut self) {
+        self.batch_pr = None;
         for e in &mut self.entries {
             if e.state == EntryState::Active {
                 e.state = EntryState::Waiting;

@@ -552,6 +552,8 @@ async fn test_and_merge(
     let draft = gh
         .open_draft_pr(repo, &batch.branch, &key.trunk, &title, &body)
         .await?;
+    lane.batch_pr = Some(draft);
+    ctx.store.save_lane(key, lane).await?;
     try_join_all(members.iter().map(|n| async move {
         record(
             ctx,

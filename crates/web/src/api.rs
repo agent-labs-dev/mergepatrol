@@ -22,6 +22,8 @@ pub struct LaneView {
     pub repo: String,
     pub trunk: String,
     pub entries: Vec<EntryView>,
+    /// The draft PR that tests the active PRs together.
+    pub batch: Option<u32>,
 }
 
 #[derive(Serialize, TS)]
@@ -303,6 +305,7 @@ pub(crate) async fn lanes(
             .map(|(key, lane)| LaneView {
                 repo: key.repo.to_string(),
                 trunk: key.trunk,
+                batch: lane.batch_pr.map(|n| n as u32),
                 entries: in_merge_order(lane.entries)
                     .into_iter()
                     .map(|e| EntryView::new(e.number, e.priority, e.state, e.summary))

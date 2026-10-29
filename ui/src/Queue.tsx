@@ -35,6 +35,17 @@ export function Queue({ workspace }: { workspace: number }) {
 
   const lane = lanes.data.find((l) => laneKey(l) === laneId) ?? lanes.data[0];
   const entry = lane.entries.find((e) => e.number === pr) ?? lane.entries[0];
+  // The queue lists the active PRs first, so the batch is the head of the lane.
+  const batched = lane.batch === null ? [] : lane.entries.filter((e) => e.state === "active");
+  const rest = lane.entries.slice(batched.length);
+  const row = (e: EntryView) => (
+    <Row
+      entry={e}
+      place={e.state === "held" ? null : lane.entries.indexOf(e) + 1}
+      selected={e === entry}
+      onClick={() => setPr(e.number)}
+    />
+  );
   return (
     <div className="grid h-full grid-cols-[220px_minmax(360px,1fr)_minmax(400px,1.1fr)]">
       <div className="overflow-y-auto border-r border-line p-2">
@@ -71,20 +82,34 @@ export function Queue({ workspace }: { workspace: number }) {
         </div>
         {lane.entries.length === 0 && <p className="p-4 text-faint">Empty</p>}
         <ol>
-          {lane.entries.map((e, i) => (
-            <li key={e.number}>
-              <Row
-                entry={e}
-                place={e.state === "held" ? null : i + 1}
-                selected={e === entry}
-                onClick={() => setPr(e.number)}
-              />
+          {lane.batch !== null && (
+            <li className="border-b border-line-soft">
+              <p className="flex items-center gap-2 bg-sunken px-4 py-2 text-xs text-muted">
+                <span className="font-medium text-fg-2">Batch</span>
+                testing {batched.length} PRs together in
+                <a
+                  href={`https://github.com/${lane.repo}/pull/${lane.batch}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="tabular-nums text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg"
+                >
+                  #{lane.batch}
+                </a>
+              </p>
+              <ol className="shadow-[inset_2px_0_0_0_var(--color-blue-400)]">
+                {batched.map((e) => (
+                  <li key={e.number}>{row(e)}</li>
+                ))}
+              </ol>
             </li>
+          )}
+          {rest.map((e) => (
+            <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
       </div>
       <div className="overflow-y-auto">
-        {entry && <Detail workspace={workspace} lane={lane} entry={entry} />}
+        {entry && <Detail workspace={workspace} lane={lane} entry={entry} onSelect={setPr} />}
       </div>
     </div>
   );
@@ -191,10 +216,12 @@ function Detail({
   workspace,
   lane,
   entry: e,
+  onSelect,
 }: {
   workspace: number;
   lane: LaneView;
   entry: EntryView;
+  onSelect: (pr: number) => void;
 }) {
   const events = useQuery({
     queryKey: ["events", workspace, lane.repo, e.number],
@@ -267,7 +294,14 @@ function Detail({
           >
             <span className="w-20 shrink-0 font-medium capitalize">{ev.kind}</span>
             <span className="min-w-0 flex-1 font-mono text-xs break-words whitespace-pre-wrap text-muted">
-              {ev.message}
+              {ev.message.split(/(#\d+)/).map((part, i) =>
+                i % 2 ? (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the parts of a message never move.
+                  <PrLink key={i} lane={lane} number={Number(part.slice(1))} onSelect={onSelect} />
+                ) : (
+                  part
+                ),
+              )}
             </span>
             <time className="shrink-0 text-xs text-faint" title={ev.at}>
               {timeAgo(ev.at)}
@@ -276,6 +310,79 @@ function Detail({
         ))}
       </ol>
     </div>
+  );
+}
+
+/** A `#n` in an event: selects a queued PR, with its details on hover. Any other PR, such as a
+ * batch's draft or one already merged, opens on GitHub. */
+function PrLink({
+  lane,
+  number,
+  onSelect,
+}: {
+  lane: LaneView;
+  number: number;
+  onSelect: (pr: number) => void;
+}) {
+  const [at, setAt] = useState<{ top: number; left: number } | null>(null);
+  const entry = lane.entries.find((e) => e.number === number);
+  const link =
+    "text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg";
+  if (!entry)
+    return (
+      <a
+        href={`https://github.com/${lane.repo}/pull/${number}`}
+        target="_blank"
+        rel="noreferrer"
+        className={link}
+      >
+        #{number}
+      </a>
+    );
+  const show = (el: HTMLElement) => {
+    const r = el.getBoundingClientRect();
+    setAt({ top: r.bottom + 6, left: Math.min(r.left, window.innerWidth - 328) });
+  };
+  return (
+    <>
+      <button
+        type="button"
+        className={`${link} cursor-pointer`}
+        onClick={() => onSelect(number)}
+        onMouseEnter={(ev) => show(ev.currentTarget)}
+        onFocus={(ev) => show(ev.currentTarget)}
+        onMouseLeave={() => setAt(null)}
+        onBlur={() => setAt(null)}
+      >
+        #{number}
+      </button>
+      {/* Fixed, so the scrolling pane does not clip it. */}
+      {at && (
+        <span
+          role="tooltip"
+          style={at}
+          className="pointer-events-none fixed z-50 block w-80 rounded-lg border border-line bg-surface p-3 font-sans text-sm whitespace-normal text-fg shadow-lg"
+        >
+          <span className="flex items-start justify-between gap-3">
+            <span className="font-medium">{titleOf(entry)}</span>
+            <State entry={entry} />
+          </span>
+          <span className="mt-1.5 flex items-center gap-2 text-xs text-muted">
+            <span className="tabular-nums">#{entry.number}</span>
+            {entry.author && (
+              <span className="flex items-center gap-1">
+                <Avatar src={entry.author.avatar_url} alt={entry.author.login} size="size-4" />
+                {entry.author.login}
+              </span>
+            )}
+            <span className="ml-auto flex items-center gap-2">
+              <Checks checks={entry.checks} />
+              <Diff entry={entry} />
+            </span>
+          </span>
+        </span>
+      )}
+    </>
   );
 }
 
