@@ -78,7 +78,16 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
    docker compose logs mergepatrol | grep setup_token
    ```
 
-   Or without Docker: start the dev Postgres with `docker compose -f compose.dev.yml up -d`, then `(cd ui && pnpm install && pnpm build) && MERGEPATROL_DATABASE_URL=$DATABASE_URL cargo run -p mergepatrol`, where `DATABASE_URL` is the one in `.cargo/config.toml`.
+   Or without Docker for Mergepatrol itself, with Rust (`rust-toolchain.toml` picks the version) and Node 24 with pnpm:
+
+   ```bash
+   docker compose -f compose.dev.yml up -d   # or any Postgres 17
+   (cd ui && pnpm install && pnpm build)     # the dashboard, which the binary embeds
+   export MERGEPATROL_DATABASE_URL=postgres://mergepatrol:mergepatrol@127.0.0.1:54329/mergepatrol
+   cargo run -p mergepatrol                  # prints the setup token
+   ```
+
+   Jobs then run as local processes, without a sandbox. If port 8080 is taken, set `MERGEPATROL_BIND=127.0.0.1:<port>` and `MERGEPATROL_PUBLIC_URL=http://localhost:<port>`.
 
 3. Open http://localhost:8080 and do the setup in the dashboard:
    1. Enter the setup token from the logs.

@@ -4,7 +4,7 @@ Mergepatrol is early, and its design still moves. Before a large change, open an
 
 ## Develop
 
-You need Rust (stable), Node 24 with pnpm, and Docker.
+You need Rust (`rust-toolchain.toml` picks the version, and rustup installs it), Node 24 with pnpm, and Docker.
 
 ```bash
 docker compose -f compose.dev.yml up -d        # Postgres for the tests
