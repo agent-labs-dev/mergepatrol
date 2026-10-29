@@ -8,8 +8,11 @@ use mergepatrol_core::{
     RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
-use mergepatrol_resolver::{KeyCheck, check_api_key};
-use mergepatrol_store::{ExitQuery, ExitRecord, ExitStats, RepoState, Scope, api_key_secret};
+use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
+use mergepatrol_store::{
+    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, ExitQuery, ExitRecord, ExitStats, RepoState, Scope,
+    api_key_secret,
+};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -539,6 +542,27 @@ impl From<Provider> for ProviderView {
 pub struct SettingsView {
     /// One per provider a repo can choose.
     pub api_keys: Vec<ApiKeyView>,
+    pub chatgpt: ChatGptView,
+}
+
+/// The workspace's ChatGPT plan, which Codex uses instead of the OpenAI API key.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ChatGptView {
+    /// The login, with the account's email as the hint.
+    pub login: Option<SecretView>,
+    /// A sign-in the user has yet to finish.
+    pub sign_in: Option<ChatGptSignInView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ChatGptSignInView {
+    /// The user enters `user_code` at `verification_url`.
+    pub user_code: String,
+    pub verification_url: String,
+    /// How often to ask whether they have.
+    pub interval_secs: u32,
 }
 
 #[derive(Serialize, TS)]
@@ -1047,7 +1071,116 @@ async fn settings_view(app: &AppState, id: u64) -> Result<Json<SettingsView>, Ap
             }),
         });
     }
-    Ok(Json(SettingsView { api_keys }))
+    let scope = Scope::Installation(id);
+    let chatgpt = ChatGptView {
+        login: app
+            .vault
+            .status(scope, CHATGPT_LOGIN)
+            .await?
+            .map(|s| SecretView {
+                hint: s.hint,
+                updated_at: s.updated_at,
+            }),
+        sign_in: device_login(app, id).await?.map(|d| ChatGptSignInView {
+            user_code: d.user_code,
+            verification_url: d.verification_url,
+            interval_secs: d.interval_secs as u32,
+        }),
+    };
+    Ok(Json(SettingsView { api_keys, chatgpt }))
+}
+
+async fn device_login(app: &AppState, id: u64) -> anyhow::Result<Option<DeviceLogin>> {
+    let Some(json) = app
+        .vault
+        .get(Scope::Installation(id), CHATGPT_DEVICE_LOGIN)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_str(json.expose_secret())?))
+}
+
+/// Starts a sign-in to the workspace's ChatGPT plan, in place of any unfinished one. Kept in the
+/// vault, not in memory: the user's next poll can reach another instance.
+pub(crate) async fn start_chatgpt_login(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path(id): Path<u64>,
+) -> Result<Json<SettingsView>, ApiError> {
+    let id = user.workspace(id)?;
+    let device = app
+        .chatgpt
+        .start()
+        .await
+        .map_err(|e| ApiError::Status(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
+    let hint = device.user_code.clone();
+    set_json(
+        &app,
+        Scope::Installation(id),
+        CHATGPT_DEVICE_LOGIN,
+        &device,
+        hint,
+    )
+    .await?;
+    settings_view(&app, id).await
+}
+
+/// Asks OpenAI once whether the user has entered the code, and keeps the login once they have.
+pub(crate) async fn poll_chatgpt_login(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path(id): Path<u64>,
+) -> Result<Json<SettingsView>, ApiError> {
+    let id = user.workspace(id)?;
+    let scope = Scope::Installation(id);
+    let Some(device) = device_login(&app, id).await? else {
+        return Err(ApiError::Status(
+            StatusCode::CONFLICT,
+            "no ChatGPT sign-in to finish: start one".into(),
+        ));
+    };
+    match app.chatgpt.poll(&device).await {
+        Ok(None) => {}
+        Ok(Some(login)) => {
+            set_json(&app, scope, CHATGPT_LOGIN, &login, login.hint()).await?;
+            app.vault.delete(scope, CHATGPT_DEVICE_LOGIN).await?;
+            tracing::info!(installation = id, "a ChatGPT login was added");
+        }
+        Err(e) => {
+            app.vault.delete(scope, CHATGPT_DEVICE_LOGIN).await?;
+            return Err(ApiError::Status(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{e:#}"),
+            ));
+        }
+    }
+    settings_view(&app, id).await
+}
+
+async fn set_json(
+    app: &AppState,
+    scope: Scope,
+    name: &str,
+    value: &impl Serialize,
+    hint: String,
+) -> anyhow::Result<()> {
+    app.vault
+        .set_with_hint(scope, name, &serde_json::to_string(value)?, hint)
+        .await
+}
+
+pub(crate) async fn delete_chatgpt_login(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path(id): Path<u64>,
+) -> Result<Json<SettingsView>, ApiError> {
+    let id = user.workspace(id)?;
+    let scope = Scope::Installation(id);
+    app.vault.delete(scope, CHATGPT_LOGIN).await?;
+    app.vault.delete(scope, CHATGPT_DEVICE_LOGIN).await?;
+    tracing::info!(installation = id, "a ChatGPT login was removed");
+    settings_view(&app, id).await
 }
 
 fn provider(id: &str) -> Result<Provider, ApiError> {

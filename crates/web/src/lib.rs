@@ -18,6 +18,7 @@ use mergepatrol_analytics::Analytics;
 use mergepatrol_billing::Billing;
 use mergepatrol_core::RepoSettings;
 use mergepatrol_github::AppCredentials;
+use mergepatrol_resolver::ChatGptAuth;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
 use secrecy::ExposeSecret;
 
@@ -45,6 +46,8 @@ pub struct WebConfig {
     pub analytics: Analytics,
     /// Hosted billing: off self-hosted.
     pub billing: Option<Arc<Billing>>,
+    /// OpenAI's sign-in, for ChatGPT logins.
+    pub chatgpt: ChatGptAuth,
 }
 
 #[derive(Clone)]
@@ -58,6 +61,7 @@ struct AppState {
     repo_defaults: Arc<RepoSettings>,
     analytics: Analytics,
     billing: Option<Arc<Billing>>,
+    chatgpt: ChatGptAuth,
 }
 
 impl AppState {
@@ -87,6 +91,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         repo_defaults: Arc::new(config.repo_defaults),
         analytics: config.analytics,
         billing: config.billing,
+        chatgpt: config.chatgpt,
     };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -120,6 +125,14 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route(
             "/api/w/{id}/settings/api-keys/{provider}",
             put(api::set_api_key).delete(api::delete_api_key),
+        )
+        .route(
+            "/api/w/{id}/settings/chatgpt",
+            post(api::start_chatgpt_login).delete(api::delete_chatgpt_login),
+        )
+        .route(
+            "/api/w/{id}/settings/chatgpt/poll",
+            post(api::poll_chatgpt_login),
         )
         .route("/api/w/{id}/billing", get(billing::billing))
         .route("/api/w/{id}/billing/checkout", post(billing::checkout))
@@ -203,6 +216,10 @@ mod tests {
         hosted_app: Option<AppCredentials>,
         wake: Arc<Woken>,
     ) -> (Router, String) {
+        with_config(pool, web_config(hosted_app, wake)).await
+    }
+
+    async fn with_config(pool: PgPool, config: WebConfig) -> (Router, String) {
         let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool).await.unwrap());
         let vault = Arc::new(Vault::new(store.clone(), KEY).unwrap());
         let expires_at = (std::time::SystemTime::now()
@@ -225,7 +242,6 @@ mod tests {
             .create_session(&auth::hash("tok"), &session)
             .await
             .unwrap();
-        let config = web_config(hosted_app, wake);
         (router(store, vault, config), "mp_session=tok".into())
     }
 
@@ -248,6 +264,7 @@ mod tests {
             },
             analytics: Analytics::default(),
             billing: None,
+            chatgpt: ChatGptAuth::default(),
         }
     }
 
@@ -890,5 +907,46 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert!(woken.0.lock().unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_workspace_signs_in_to_chatgpt(pool: PgPool) {
+        let issuer = mergepatrol_resolver::testing::issuer().await;
+        let config = WebConfig {
+            chatgpt: ChatGptAuth::new(&issuer.url),
+            ..web_config(None, Arc::default())
+        };
+        let (router, cookie) = with_config(pool, config).await;
+        let call = |method: &str, path: &str| {
+            Request::builder()
+                .method(method)
+                .uri(format!("/api/w/1/settings/chatgpt{path}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let settings = |res: Response| async move {
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["chatgpt"].clone()
+        };
+
+        let started = settings(send(&router, call("POST", "")).await).await;
+        assert_eq!(started["sign_in"]["user_code"], "ABCD-1234");
+        assert!(started["login"].is_null());
+        // The user has yet to enter the code.
+        let waiting = settings(send(&router, call("POST", "/poll")).await).await;
+        assert_eq!(waiting["sign_in"]["user_code"], "ABCD-1234");
+
+        let done = settings(send(&router, call("POST", "/poll")).await).await;
+        assert!(done["sign_in"].is_null());
+        assert_eq!(done["login"]["hint"], "me@example.com");
+        let res = send(&router, call("POST", "/poll")).await;
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+
+        let removed = settings(send(&router, call("DELETE", "")).await).await;
+        assert!(removed["login"].is_null());
     }
 }

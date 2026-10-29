@@ -107,3 +107,15 @@ export const openPortal = (id: number) => send<RedirectView>("POST", w(id, "/bil
 /** Frees a developer's seat: they take one again with their next PR on a private repo. */
 export const freeSeat = (id: number, login: string) =>
   send<BillingView>("DELETE", w(id, `/billing/seats/${encodeURIComponent(login)}`));
+
+/** Starts a sign-in to the workspace's ChatGPT plan: the user enters the code it returns. */
+export const startChatGptLogin = (id: number) =>
+  send<SettingsView>("POST", w(id, "/settings/chatgpt"));
+
+/** Asks whether the user has entered the code yet. */
+export const pollChatGptLogin = (id: number) =>
+  send<SettingsView>("POST", w(id, "/settings/chatgpt/poll"));
+
+/** Signs out, or cancels a sign-in. */
+export const deleteChatGptLogin = (id: number) =>
+  send<SettingsView>("DELETE", w(id, "/settings/chatgpt"));

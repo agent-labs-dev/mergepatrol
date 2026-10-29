@@ -1,4 +1,5 @@
 mod config;
+mod credentials;
 mod github;
 mod job;
 mod publish;
@@ -164,6 +165,7 @@ async fn orchestrator() -> Result<()> {
         store: store.clone(),
         executor,
         proxy: proxy.clone(),
+        chatgpt: Default::default(),
         jobs: Semaphore::new(config.max_jobs),
         wakers: Arc::default(),
         analytics: analytics.clone(),
@@ -182,6 +184,7 @@ async fn orchestrator() -> Result<()> {
         repo_defaults: ctx.config.repo_defaults.clone(),
         analytics,
         billing,
+        chatgpt: Default::default(),
     };
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let queues = tokio::spawn(queue::lead(ctx.clone(), pg, stopped));

@@ -27,13 +27,14 @@ use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
     RepoSnapshot,
 };
-use mergepatrol_store::{GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault, api_key_secret};
+use mergepatrol_store::{GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
 use secrecy::ExposeSecret;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::config::Config;
+use crate::credentials::ChatGpt;
 use crate::github::GitHub;
 use crate::publish::{Publish, create_commits, publish};
 
@@ -77,8 +78,9 @@ pub struct Ctx {
     pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
     pub executor: Arc<dyn Executor>,
-    /// Holds the workspaces' model API keys for the jobs, which get tokens.
+    /// Holds the workspaces' model credentials for the jobs, which get tokens.
     pub proxy: Arc<ApiProxy>,
+    pub chatgpt: ChatGpt,
     /// Sandboxed jobs running at once, across repos. A PR waiting for its checks holds none.
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
@@ -2002,7 +2004,7 @@ struct Below<'a> {
     upstream: &'a str,
 }
 
-/// The spec of a job on the PR at `head`, which sits on, or goes onto, `onto`. Its Anthropic
+/// The spec of a job on the PR at `head`, which sits on, or goes onto, `onto`. Its model API
 /// token works until the `Granted` is dropped: keep it for as long as the job runs.
 #[allow(clippy::too_many_arguments)]
 async fn job_spec(
@@ -2021,13 +2023,14 @@ async fn job_spec(
     let granted = match pr.is_cross_repository {
         true => None,
         false => ctx
-            .vault
-            .get(
+            .chatgpt
+            .credential(
+                &ctx.vault,
                 Scope::Installation(key.installation_id),
-                api_key_secret(resolver.provider),
+                resolver.provider,
             )
             .await?
-            .map(|k| ctx.proxy.grant(resolver.provider, k, REQUESTS_PER_JOB)),
+            .map(|c| ctx.proxy.grant(resolver.provider, c, REQUESTS_PER_JOB)),
     };
     let spec = JobSpec {
         repo: key.repo.to_string(),

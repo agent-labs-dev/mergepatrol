@@ -1,5 +1,5 @@
-//! The model APIs as a job sees them. The workspace's keys stay in the orchestrator: each job
-//! gets a token instead, which this proxy swaps for the key while the job runs.
+//! The model APIs as a job sees them. The workspace's credentials stay in the orchestrator: each
+//! job gets a token instead, which this proxy swaps for the credential while the job runs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,13 +18,16 @@ use serde_json::json;
 pub const REQUESTS_PER_JOB: u32 = 1000;
 /// The Messages API's own limit on a request.
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
-/// The request headers that go upstream. The key replaces the job's token.
-const FORWARDED: [&str; 5] = [
+/// The request headers that go upstream. The credential replaces the job's token.
+const FORWARDED: [&str; 7] = [
     "content-type",
     "accept",
     "anthropic-version",
     "anthropic-beta",
     "openai-beta",
+    // Codex's, which the ChatGPT backend reads.
+    "originator",
+    "session_id",
 ];
 
 /// The APIs the agents speak: the Claude CLI the Messages API, Codex the Responses API.
@@ -67,6 +70,18 @@ impl Api {
     }
 }
 
+/// What the proxy calls the model API with, for a job's token.
+#[derive(Clone)]
+pub enum Credential {
+    ApiKey(SecretString),
+    /// A ChatGPT plan's login, which only Codex's own backend takes: OpenAI's models, through
+    /// the Responses API.
+    ChatGpt {
+        access_token: SecretString,
+        account_id: String,
+    },
+}
+
 /// Where each provider's APIs are. Others in tests.
 #[derive(Clone)]
 pub struct Upstreams {
@@ -74,6 +89,8 @@ pub struct Upstreams {
     pub openai: String,
     /// Both of OpenRouter's APIs: `/v1/messages` and `/v1/responses`.
     pub openrouter: String,
+    /// The Responses API on a ChatGPT plan, without `/v1`.
+    pub chatgpt: String,
 }
 
 impl Default for Upstreams {
@@ -82,20 +99,32 @@ impl Default for Upstreams {
             anthropic: "https://api.anthropic.com".into(),
             openai: "https://api.openai.com".into(),
             openrouter: "https://openrouter.ai/api".into(),
+            chatgpt: "https://chatgpt.com/backend-api/codex".into(),
         }
     }
 }
 
 impl Upstreams {
-    /// The base URL of `provider`'s `api`, and whether the key goes as a bearer token rather
-    /// than `x-api-key`. `None` when the provider does not serve the API.
-    fn of(&self, provider: Provider, api: Api) -> Option<(&str, bool)> {
-        match (provider, api) {
-            (Provider::Anthropic, Api::Messages) => Some((&self.anthropic, false)),
-            (Provider::OpenAi, Api::Responses) => Some((&self.openai, true)),
-            (Provider::OpenRouter, _) => Some((&self.openrouter, true)),
-            _ => None,
-        }
+    /// The URL of `path` in `api`, for `credential` from `provider`. `None` when they do not
+    /// serve the API.
+    fn url(
+        &self,
+        provider: Provider,
+        api: Api,
+        credential: &Credential,
+        path: &str,
+    ) -> Option<String> {
+        let base = match (credential, provider, api) {
+            (Credential::ChatGpt { .. }, Provider::OpenAi, Api::Responses) => {
+                return Some(format!("{}{}", self.chatgpt, path.strip_prefix("/v1")?));
+            }
+            (Credential::ChatGpt { .. }, _, _) => return None,
+            (_, Provider::Anthropic, Api::Messages) => &self.anthropic,
+            (_, Provider::OpenAi, Api::Responses) => &self.openai,
+            (_, Provider::OpenRouter, _) => &self.openrouter,
+            _ => return None,
+        };
+        Some(format!("{base}{path}"))
     }
 }
 
@@ -108,7 +137,7 @@ pub struct ApiProxy {
 
 struct Grant {
     provider: Provider,
-    key: SecretString,
+    credential: Credential,
     requests_left: u32,
 }
 
@@ -144,12 +173,12 @@ impl ApiProxy {
             .with_state(self)
     }
 
-    /// A token for `provider` with `key`, good for `requests` until the returned `Granted` is
-    /// dropped.
+    /// A token for `provider` with `credential`, good for `requests` until the returned
+    /// `Granted` is dropped.
     pub fn grant(
         self: &Arc<Self>,
         provider: Provider,
-        key: SecretString,
+        credential: Credential,
         requests: u32,
     ) -> Granted {
         let token = crate::remote::random_token();
@@ -157,7 +186,7 @@ impl ApiProxy {
             token.clone(),
             Grant {
                 provider,
-                key,
+                credential,
                 requests_left: requests,
             },
         );
@@ -167,15 +196,15 @@ impl ApiProxy {
         }
     }
 
-    /// The provider and key behind `token`, counting one request.
-    fn take(&self, token: &str) -> Option<(Provider, SecretString)> {
+    /// The provider and credential behind `token`, counting one request.
+    fn take(&self, token: &str) -> Option<(Provider, Credential)> {
         let mut grants = self.grants.lock().unwrap();
         let grant = grants.get_mut(token)?;
         if grant.requests_left == 0 {
             return None;
         }
         grant.requests_left -= 1;
-        Some((grant.provider, grant.key.clone()))
+        Some((grant.provider, grant.credential.clone()))
     }
 }
 
@@ -221,40 +250,55 @@ async fn forward(
     let token = header("x-api-key")
         .or_else(|| header("authorization").and_then(|v| v.strip_prefix("Bearer ")))
         .unwrap_or_default();
-    let Some((provider, key)) = proxy.take(token) else {
+    let Some((provider, credential)) = proxy.take(token) else {
         return error(
             api,
             StatusCode::UNAUTHORIZED,
             "unknown or expired job token, or the job is out of requests",
         );
     };
-    let Some((upstream, bearer)) = proxy.upstreams.of(provider, api) else {
+    let path = uri.path().strip_prefix(api.prefix()).unwrap_or(uri.path());
+    let Some(url) = proxy.upstreams.url(provider, api, &credential, path) else {
         return error(
             api,
             StatusCode::BAD_REQUEST,
-            &format!("{provider:?} does not serve this API"),
+            &format!("{provider:?} does not serve this API with this credential"),
         );
     };
-    let path = uri.path().strip_prefix(api.prefix()).unwrap_or(uri.path());
     let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
-    let mut req = proxy
-        .http
-        .post(format!("{upstream}{path}{query}"))
-        .body(body);
-    req = if bearer {
+    let mut req = proxy.http.post(format!("{url}{query}")).body(body);
+    req = match (&credential, api, provider) {
+        // The Claude CLI's own header, which only Anthropic takes.
+        (Credential::ApiKey(key), Api::Messages, Provider::Anthropic) => {
+            // Sensitive: redacted from debug output, and never indexed by HTTP/2 compression.
+            let Ok(mut value) = HeaderValue::from_str(key.expose_secret()) else {
+                return error(
+                    api,
+                    StatusCode::BAD_GATEWAY,
+                    "the stored key is not a valid header",
+                );
+            };
+            value.set_sensitive(true);
+            req.header("x-api-key", value)
+        }
         // Marked sensitive by reqwest.
-        req.bearer_auth(key.expose_secret())
-    } else {
-        // Sensitive: redacted from debug output, and never indexed by HTTP/2 compression.
-        let Ok(mut value) = HeaderValue::from_str(key.expose_secret()) else {
-            return error(
-                api,
-                StatusCode::BAD_GATEWAY,
-                "the stored key is not a valid header",
-            );
-        };
-        value.set_sensitive(true);
-        req.header("x-api-key", value)
+        (Credential::ApiKey(key), _, _) => req.bearer_auth(key.expose_secret()),
+        (
+            Credential::ChatGpt {
+                access_token,
+                account_id,
+            },
+            _,
+            _,
+        ) => {
+            let req = req
+                .bearer_auth(access_token.expose_secret())
+                .header("chatgpt-account-id", account_id);
+            match headers.contains_key("originator") {
+                true => req,
+                false => req.header("originator", "codex_exec"),
+            }
+        }
     };
     for name in FORWARDED {
         for value in headers.get_all(name) {
@@ -312,6 +356,8 @@ mod tests {
                     "key": header("x-api-key"),
                     "auth": header("authorization"),
                     "beta": header("anthropic-beta"),
+                    "account": header("chatgpt-account-id"),
+                    "originator": header("originator"),
                     "body": String::from_utf8_lossy(&body),
                 })
                 .to_string();
@@ -328,12 +374,24 @@ mod tests {
         url
     }
 
+    fn key(k: &str) -> Credential {
+        Credential::ApiKey(k.into())
+    }
+
+    fn chatgpt() -> Credential {
+        Credential::ChatGpt {
+            access_token: "chatgpt-access".into(),
+            account_id: "acct".into(),
+        }
+    }
+
     /// The proxy, and its URL.
     async fn proxy() -> (Arc<ApiProxy>, String) {
         let proxy = Arc::new(ApiProxy::new(Upstreams {
             anthropic: upstream("anthropic").await,
             openai: upstream("openai").await,
             openrouter: format!("{}/api", upstream("openrouter").await),
+            chatgpt: format!("{}/backend-api/codex", upstream("chatgpt").await),
         }));
         let url = serve(proxy.clone().router()).await;
         (proxy, url)
@@ -372,7 +430,7 @@ mod tests {
     #[tokio::test]
     async fn swaps_the_token_for_the_anthropic_key() {
         let (proxy, url) = proxy().await;
-        let granted = proxy.grant(Provider::Anthropic, SecretString::from("sk-ant-key"), 5);
+        let granted = proxy.grant(Provider::Anthropic, key("sk-ant-key"), 5);
         let seen = seen(messages(&url, &granted.token).await).await;
         assert_eq!(seen["upstream"], "anthropic");
         assert_eq!(seen["path"], "/v1/messages?beta=true");
@@ -385,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn a_key_that_is_not_a_header_fails_the_request() {
         let (proxy, url) = proxy().await;
-        let granted = proxy.grant(Provider::Anthropic, SecretString::from("sk-ant\nkey"), 5);
+        let granted = proxy.grant(Provider::Anthropic, key("sk-ant\nkey"), 5);
         let res = messages(&url, &granted.token).await;
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
     }
@@ -393,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn swaps_the_token_for_the_openai_key() {
         let (proxy, url) = proxy().await;
-        let granted = proxy.grant(Provider::OpenAi, SecretString::from("sk-openai"), 5);
+        let granted = proxy.grant(Provider::OpenAi, key("sk-openai"), 5);
         let seen = seen(responses(&url, &granted.token).await).await;
         assert_eq!(seen["upstream"], "openai");
         assert_eq!(seen["path"], "/v1/responses");
@@ -402,9 +460,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sends_codex_on_a_chatgpt_plan_to_its_backend() {
+        let (proxy, url) = proxy().await;
+        let granted = proxy.grant(Provider::OpenAi, chatgpt(), 5);
+        let seen = seen(responses(&url, &granted.token).await).await;
+        assert_eq!(seen["upstream"], "chatgpt");
+        assert_eq!(seen["path"], "/backend-api/codex/responses");
+        assert_eq!(seen["auth"], "Bearer chatgpt-access");
+        assert_eq!(seen["account"], "acct");
+        assert_eq!(seen["originator"], "codex_exec");
+        assert_eq!(seen["key"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_chatgpt_plan_serves_only_openai_models() {
+        let (proxy, url) = proxy().await;
+        let granted = proxy.grant(Provider::OpenAi, chatgpt(), 5);
+        let res = messages(&url, &granted.token).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let granted = proxy.grant(Provider::OpenRouter, chatgpt(), 5);
+        let res = responses(&url, &granted.token).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn openrouter_serves_both_apis() {
         let (proxy, url) = proxy().await;
-        let granted = proxy.grant(Provider::OpenRouter, SecretString::from("sk-or"), 5);
+        let granted = proxy.grant(Provider::OpenRouter, key("sk-or"), 5);
         for (seen, path) in [
             (
                 seen(messages(&url, &granted.token).await).await,
@@ -425,10 +507,10 @@ mod tests {
     #[tokio::test]
     async fn refuses_an_api_the_provider_does_not_serve() {
         let (proxy, url) = proxy().await;
-        let anthropic = proxy.grant(Provider::Anthropic, SecretString::from("sk-ant-key"), 5);
+        let anthropic = proxy.grant(Provider::Anthropic, key("sk-ant-key"), 5);
         let res = responses(&url, &anthropic.token).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        let openai = proxy.grant(Provider::OpenAi, SecretString::from("sk-openai"), 5);
+        let openai = proxy.grant(Provider::OpenAi, key("sk-openai"), 5);
         let res = messages(&url, &openai.token).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
@@ -436,7 +518,7 @@ mod tests {
     #[tokio::test]
     async fn refuses_an_unknown_token() {
         let (proxy, url) = proxy().await;
-        let _granted = proxy.grant(Provider::Anthropic, SecretString::from("sk-ant-key"), 5);
+        let _granted = proxy.grant(Provider::Anthropic, key("sk-ant-key"), 5);
         let res = messages(&url, "guess").await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         assert!(!res.text().await.unwrap().contains("sk-ant-key"));
@@ -450,7 +532,7 @@ mod tests {
     async fn a_token_ends_with_its_job() {
         let (proxy, url) = proxy().await;
         let token = proxy
-            .grant(Provider::Anthropic, SecretString::from("sk-ant-key"), 5)
+            .grant(Provider::Anthropic, key("sk-ant-key"), 5)
             .token
             .clone();
         assert_eq!(
@@ -462,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn a_token_runs_out_of_requests() {
         let (proxy, url) = proxy().await;
-        let granted = proxy.grant(Provider::Anthropic, SecretString::from("sk-ant-key"), 2);
+        let granted = proxy.grant(Provider::Anthropic, key("sk-ant-key"), 2);
         for _ in 0..2 {
             assert_eq!(
                 messages(&url, &granted.token).await.status(),
@@ -478,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_only_the_model_apis() {
         let (proxy, url) = proxy().await;
-        let granted = proxy.grant(Provider::OpenRouter, SecretString::from("sk-or"), 5);
+        let granted = proxy.grant(Provider::OpenRouter, key("sk-or"), 5);
         let http = reqwest::Client::new();
         for path in [
             "/anthropic/v1/models",

@@ -104,7 +104,7 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
    2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
    3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
    4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file (below). Merge it, and the repo queues.
-   5. In **Settings**, add your Anthropic or OpenAI API key. Mergepatrol checks it with the provider, then stores it encrypted. Create a key for Mergepatrol alone, with a spend limit (for Anthropic, in a workspace with one), so a leaked key costs at most the limit.
+   5. In **Settings**, add your Anthropic or OpenAI API key. Mergepatrol checks it with the provider, then stores it encrypted. Create a key for Mergepatrol alone, with a spend limit (for Anthropic, in a workspace with one), so a leaked key costs at most the limit. For OpenAI, you can **Sign in with ChatGPT** instead, and Codex runs on your ChatGPT plan. Mergepatrol signs in the way the Codex CLI does, which OpenAI does not support for other apps and could stop at any time: keep an API key to switch back to.
 
 4. Add the `mergepatrol` label to a PR to queue it. Mergepatrol creates the queue labels on each repo it queues.
 
@@ -154,7 +154,7 @@ fix_ci:
   attempts: 2      # 1 to 5 fixes, before the PR is ejected
 ```
 
-The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A file that sets another provider than the default must set its model too.
+The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too.
 
 The verify commands run after an agent resolution or fix, before the publish.
 
@@ -172,7 +172,7 @@ A rebase job runs the repo's code (the verify commands) and an agent with a shel
 
 - The **orchestrator** holds the GitHub App key and the queue. It never runs repo code.
 - Each **job** runs `mergepatrol job` in its own container, from the job image. It gets a GitHub token that can only read the one repo, and revokes it once it has fetched the repo. It returns a git bundle.
-- The workspace's model API keys stay in the orchestrator. A job calls its provider's API through the orchestrator's proxy, at `/anthropic` for Claude Code or `/openai` for Codex, with a token that works only while the job runs, and for a set number of requests.
+- The workspace's model API keys and ChatGPT login stay in the orchestrator, which renews the login. A job calls its provider's API through the orchestrator's proxy, at `/anthropic` for Claude Code or `/openai` for Codex, with a token that works only while the job runs, and for a set number of requests.
 - The orchestrator checks the bundle before it publishes: the result must sit on the base branch, and change no file that the PR did not change.
 
 In production the job containers use gVisor (`runsc`) on a network that cannot reach the cloud metadata server, private ranges, or the host. `deploy/sandbox-host.sh` sets that up on a Linux VM. Then set:

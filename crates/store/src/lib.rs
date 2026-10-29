@@ -4,7 +4,10 @@ mod billing;
 mod vault;
 
 pub use billing::{BillingStore, FairUse, Subscription, Unsynced};
-pub use vault::{ANTHROPIC_API_KEY, GITHUB_APP, SecretStatus, Vault, api_key_secret};
+pub use vault::{
+    ANTHROPIC_API_KEY, CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, GITHUB_APP, SecretStatus, Vault,
+    api_key_secret,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;

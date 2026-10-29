@@ -196,14 +196,15 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
   );
 }
 
-/** Across every page while the workspace has no model API key, until one is added. */
+/** Across every page while the workspace has no model API key or ChatGPT login, until it has one. */
 function NoKeyBanner({ workspace, account }: { workspace: number; account: string }) {
   const settings = useQuery({
     queryKey: ["settings", workspace],
     queryFn: () => fetchSettings(workspace),
   });
   const onSettings = useMatchRoute()({ to: "/$account/settings" });
-  if (!settings.data || settings.data.api_keys.some((k) => k.key)) return null;
+  if (!settings.data || settings.data.api_keys.some((k) => k.key) || settings.data.chatgpt.login)
+    return null;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-2 bg-amber-400 px-4 py-2 text-sm text-amber-950 sm:px-5">
       <svg viewBox="0 0 16 16" className="size-4 shrink-0 fill-current" aria-hidden>
