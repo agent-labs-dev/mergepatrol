@@ -145,6 +145,10 @@ This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public A
 | `web` | The HTTP server: JSON API and the dashboard |
 | `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.
+
 ## License
 
 Apache-2.0

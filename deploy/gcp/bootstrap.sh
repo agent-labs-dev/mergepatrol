@@ -8,7 +8,7 @@
 set -euo pipefail
 
 PROJECT=${PROJECT:-mergepatrol}
-# A region with Cloud Run domain mappings, near nebula's us-west2.
+# A region with Cloud Run domain mappings.
 REGION=${REGION:-us-west1}
 PUBLIC_URL=${PUBLIC_URL:-https://mergepatrol.ai}
 # Pushes to this repo's main deploy, through GitHub Actions.
