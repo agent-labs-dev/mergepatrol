@@ -3,11 +3,12 @@ import { useState } from "react";
 import { fetchSession, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
+import { Landing } from "./Landing";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
-import { CreateApp, Install, SignIn, UnlockSetup } from "./Setup";
-import { type Theme, useTheme } from "./theme";
+import { CreateApp, Install, UnlockSetup } from "./Setup";
+import { type ThemeProps, useTheme } from "./theme";
 import { Avatar, Mark, ThemeToggle } from "./ui";
 
 /** Setup and sign-in errors come back from the server as `?error=`. */
@@ -38,13 +39,11 @@ export function App() {
   );
 }
 
-type ThemeProps = { theme: Theme; setTheme: (t: Theme) => void };
-
 function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
   if (session.status === "needs_setup") {
     return session.setup_unlocked ? <CreateApp /> : <UnlockSetup />;
   }
-  if (session.status === "signed_out") return <SignIn />;
+  if (session.status === "signed_out") return <Landing {...theme} />;
   if (session.status === "signed_in" && session.app) {
     return session.workspaces.length === 0 ? (
       <Install app={session.app} />
