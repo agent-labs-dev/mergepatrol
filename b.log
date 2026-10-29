@@ -1,7 +1,0 @@
-{"timestamp":"2026-10-29T10:36:53.749624Z","level":"INFO","fields":{"message":"relation \"_sqlx_migrations\" already exists, skipping"},"target":"sqlx::postgres::notice"}
-{"timestamp":"2026-10-29T10:36:53.779454Z","level":"WARN","fields":{"message":"no GitHub App yet: open the dashboard and enter this setup token","setup_token":"t0C_WBijeah87MhEk-n7T2DP","url":"http://localhost:8080"},"target":"mergepatrol"}
-{"timestamp":"2026-10-29T10:36:53.779500Z","level":"WARN","fields":{"message":"jobs run as local processes, without a sandbox"},"target":"mergepatrol"}
-{"timestamp":"2026-10-29T10:36:53.779564Z","level":"INFO","fields":{"message":"dashboard","bind":"127.0.0.1:18082"},"target":"mergepatrol"}
-{"timestamp":"2026-10-29T10:36:53.807135Z","level":"INFO","fields":{"message":"another instance holds the queue lock: waiting for it"},"target":"mergepatrol::queue"}
-{"timestamp":"2026-10-29T10:36:58.839029Z","level":"INFO","fields":{"message":"holding the queue lock: running the queues"},"target":"mergepatrol::queue"}
-{"timestamp":"2026-10-29T10:37:03.758260Z","level":"INFO","fields":{"message":"stopping"},"target":"mergepatrol"}
