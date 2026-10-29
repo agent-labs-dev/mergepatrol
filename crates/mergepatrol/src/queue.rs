@@ -13,8 +13,7 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
-    LayerHead, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings,
-    Transition,
+    LayerHead, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
