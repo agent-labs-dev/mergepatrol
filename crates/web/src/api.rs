@@ -4,8 +4,8 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    EFFORTS, Entry, EntryState, FixCiSettings, Person, PrSummary, REPO_CONFIG_PATH, RepoName,
-    RepoSettings, ResolverSettings, Step,
+    EFFORTS, Entry, EntryState, FixCiSettings, Person, REPO_CONFIG_PATH, RepoName, RepoSettings,
+    ResolverSettings, Step,
 };
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
@@ -50,6 +50,8 @@ pub struct EntryView {
     pub requested: Vec<PersonView>,
     /// The head commit's combined checks. `None` without checks.
     pub checks: Option<ChecksView>,
+    /// A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
+    pub layers: Vec<u32>,
 }
 
 #[derive(Serialize, TS)]
@@ -94,7 +96,14 @@ impl From<Person> for PersonView {
 }
 
 impl EntryView {
-    fn new(number: u64, priority: bool, state: EntryState, pr: PrSummary) -> Self {
+    fn new(e: Entry) -> Self {
+        let Entry {
+            number,
+            priority,
+            state,
+            summary: pr,
+            layers,
+        } = e;
         let (state, detail) = match state {
             EntryState::Waiting => (EntryStateView::Waiting, None),
             EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
@@ -134,6 +143,7 @@ impl EntryView {
                 Some(_) => Some(ChecksView::Pending),
                 None => None,
             },
+            layers: layers.into_iter().map(|n| n as u32).collect(),
         }
     }
 }
@@ -415,7 +425,7 @@ pub(crate) async fn lanes(
                 batch: lane.batch_pr.map(|n| n as u32),
                 entries: in_merge_order(lane.entries)
                     .into_iter()
-                    .map(|e| EntryView::new(e.number, e.priority, e.state, e.summary))
+                    .map(EntryView::new)
                     .collect(),
             })
             .collect(),
@@ -871,6 +881,7 @@ pub(crate) async fn delete_anthropic_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mergepatrol_core::PrSummary;
 
     fn entry(number: u64, priority: bool, state: EntryState) -> Entry {
         Entry {
@@ -878,6 +889,7 @@ mod tests {
             priority,
             state,
             summary: PrSummary::default(),
+            layers: Vec::new(),
         }
     }
 

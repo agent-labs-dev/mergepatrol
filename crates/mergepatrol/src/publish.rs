@@ -20,10 +20,23 @@ pub struct Publish<'a> {
 /// Blob uploads in flight at once.
 const UPLOADS: usize = 8;
 
-/// Recreates the commits `base..local_head` on GitHub through the Git Data API, then moves
-/// the branch. GitHub signs commits it creates for the App, so the branch passes
-/// "require signed commits". Original authors stay as `Co-authored-by:` trailers.
+/// Recreates the commits `base..local_head` on GitHub, then moves the branch.
 pub async fn publish(gh: &Installation, git: &Git, wt: &Path, p: Publish<'_>) -> Result<String> {
+    let head = create_commits(gh, git, wt, &p).await?;
+    gh.force_update_branch(p.repo_id, p.branch, p.expected_head, &head)
+        .await?;
+    Ok(head)
+}
+
+/// Recreates the commits `base..local_head` on GitHub through the Git Data API, and returns the
+/// last. No branch moves. GitHub signs commits it creates for the App, so the branch passes
+/// "require signed commits". Original authors stay as `Co-authored-by:` trailers.
+pub async fn create_commits(
+    gh: &Installation,
+    git: &Git,
+    wt: &Path,
+    p: &Publish<'_>,
+) -> Result<String> {
     let commits = git.commits(wt, p.base, p.local_head).await?;
     if commits.is_empty() {
         bail!("the PR has no changes left after the rebase");
@@ -105,7 +118,5 @@ pub async fn publish(gh: &Installation, git: &Git, wt: &Path, p: Publish<'_>) ->
         parent_tree = tree;
     }
 
-    gh.force_update_branch(p.repo_id, p.branch, p.expected_head, &parent)
-        .await?;
     Ok(parent)
 }

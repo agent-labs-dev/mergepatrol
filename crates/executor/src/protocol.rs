@@ -18,7 +18,15 @@ pub struct JobSpec {
     pub head_ref: String,
     pub head_sha: String,
     pub trunk: String,
+    /// What the rebase goes onto: the trunk, or for a layer of a stack, the rebased layer below.
     pub trunk_sha: String,
+    /// A stack layer's branch below this one, which holds `trunk_sha`. `None` for the bottom.
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Where a stack layer's own commits start: the layer below, as it was. The rebase replays
+    /// `upstream..head_sha`. `None` replays what is not on the trunk.
+    #[serde(default)]
+    pub upstream: Option<String>,
     pub pr_title: String,
     pub pr_body: String,
     /// The repo's verify commands, from its config file.

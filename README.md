@@ -18,6 +18,17 @@ When a batch fails, Mergepatrol tests half of it next, and so on down to one PR,
 
 A PR runs alone when its own checks have not passed, when it conflicts with the PRs ahead of it, and on a base branch that requires PRs to be up to date before they merge. Mergepatrol reads that setting from the rulesets, and from classic branch protection with the App's `administration: read` permission. Without the permission, every base branch counts as requiring it. An App created before this permission existed must be given it on GitHub.
 
+## Stacks
+
+A stack of PRs, made with `gh stack`, is one item of the queue: the label on any of its PRs queues the whole stack, and Mergepatrol merges it all at once, with GitHub's asynchronous merge. Either every PR of the stack merges, or none does. GitHub merges a stack only when the required checks of each of its PRs passed.
+
+- The stack waits while any of its PRs is a draft or waits for a review.
+- In a batch, the stack is one step: its top PR holds every layer below it.
+- Alone, Mergepatrol rebases each layer onto the one below it, the bottom onto the base branch, and waits for each layer's checks. A failed check is fixed on the layer it failed on, and the layers above it are rebased onto the fix.
+- A failed stack is ejected whole.
+
+Every merge goes through the asynchronous merge API, stacked or not. A merge still pending when Mergepatrol restarts is waited for, not requested again.
+
 Status: early. Not ready for use yet.
 
 ## Run it

@@ -40,7 +40,7 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     commit(wt, "b.txt", "new\n", "pr adds b");
     let git = Git;
 
-    let RebaseStep::Conflict { files, .. } = git.rebase(wt, &trunk).await.unwrap() else {
+    let RebaseStep::Conflict { files, .. } = git.rebase(wt, &trunk, None).await.unwrap() else {
         panic!("expected a conflict");
     };
     assert_eq!(files, ["a.txt"]);

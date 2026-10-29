@@ -894,9 +894,7 @@ mod tests {
         let mut lane = Lane::default();
         lane.sync(&[Candidate {
             number: 4,
-            priority: false,
-            hold: None,
-            summary: Default::default(),
+            ..Default::default()
         }]);
         store.save_lane(&key, &lane).await.unwrap();
         assert_eq!(store.load_lane(&key).await.unwrap(), lane);

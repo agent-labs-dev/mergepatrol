@@ -40,8 +40,19 @@ pub struct PullRequest {
     pub head_ref_oid: String,
     #[serde(deserialize_with = "label_names")]
     pub labels: Vec<String>,
+    /// The stack the PR is a layer of. `None` outside a stack.
+    #[serde(default)]
+    pub stack: Option<StackRef>,
     #[serde(flatten)]
     pub details: PrDetails,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackRef {
+    pub number: PrNumber,
+    /// The branch the whole stack merges into. A layer's own base is the layer below it.
+    pub base_ref_name: String,
 }
 
 /// What the dashboard shows of a PR, as GraphQL returns it. The queue never reads it.
@@ -188,7 +199,19 @@ pub enum MergeOutcome {
     Rejected(String),
 }
 
-const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } }
+/// How often to ask for the result of an asynchronous merge. A stack of three took 10 seconds.
+const MERGE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// GitHub's reason for not merging, from an error body or a failed result.
+fn rejection(body: &Value) -> String {
+    body["details"]["message"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or("not mergeable")
+        .to_owned()
+}
+
+const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } } stack { number baseRefName }
   url createdAt additions deletions changedFiles author { login avatarUrl }
   latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login avatarUrl } } } }
@@ -269,6 +292,20 @@ impl Installation {
         )?)
     }
 
+    /// The open PRs of the stack, bottom to top. Its merged layers are left out.
+    pub async fn stack_layers(&self, repo: &RepoName, stack: PrNumber) -> Result<Vec<PrNumber>> {
+        let r: Value = self
+            .rest(Method::GET, &format!("/repos/{repo}/stacks/{stack}"), None)
+            .await?;
+        Ok(r["pull_requests"]
+            .as_array()
+            .context("stack pull_requests")?
+            .iter()
+            .filter(|p| p["state"] == "open")
+            .filter_map(|p| p["number"].as_u64())
+            .collect())
+    }
+
     pub async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String> {
         let r: Value = self
             .rest(
@@ -327,7 +364,6 @@ impl Installation {
     }
 
     /// Moves `branch` from `before` to `after`. It fails if the branch is not at `before`.
-    /// `updateRefs` is atomic, so a stack can later move all its branches in one call.
     pub async fn force_update_branch(
         &self,
         repo_id: &str,
@@ -335,10 +371,26 @@ impl Installation {
         before: &str,
         after: &str,
     ) -> Result<()> {
+        self.force_update_branches(repo_id, &[(branch, before, after)])
+            .await
+    }
+
+    /// Moves each `(branch, before, after)`, all or none: `updateRefs` is atomic. It fails if a
+    /// branch is not at its `before`, also one whose `after` is the same.
+    pub async fn force_update_branches(
+        &self,
+        repo_id: &str,
+        moves: &[(&str, &str, &str)],
+    ) -> Result<()> {
         let query = "mutation($repo: ID!, $updates: [RefUpdate!]!) {
             updateRefs(input: { repositoryId: $repo, refUpdates: $updates }) { clientMutationId }
         }";
-        let updates = json!([{ "name": format!("refs/heads/{branch}"), "beforeOid": before, "afterOid": after, "force": true }]);
+        let updates: Vec<Value> = moves
+            .iter()
+            .map(|(branch, before, after)| {
+                json!({ "name": format!("refs/heads/{branch}"), "beforeOid": before, "afterOid": after, "force": true })
+            })
+            .collect();
         let _: Value = self
             .graphql(query, json!({ "repo": repo_id, "updates": updates }))
             .await?;
@@ -433,6 +485,10 @@ impl Installation {
         Ok(r["tree"]["sha"].as_str().context("commit tree")?.to_owned())
     }
 
+    /// Merges the PR through the asynchronous merge API, the only one GitHub offers for a stacked
+    /// PR: for one, it merges every layer up to `number`, or none. Waits for the result. A merge
+    /// already pending for the PR, from before a restart, is waited for rather than requested
+    /// again.
     pub async fn merge(
         &self,
         repo: &RepoName,
@@ -443,24 +499,62 @@ impl Installation {
         let res = self
             .request(
                 Method::PUT,
-                &format!("/repos/{repo}/pulls/{number}/merge"),
-                Some(json!({ "sha": sha, "merge_method": method })),
+                &format!("/repos/{repo}/pulls/{number}/merge-async"),
+                Some(json!({ "sha": sha, "merge_method": method, "merge_action": "direct_merge" })),
             )
             .await?;
-        match res.status {
-            s if s.is_success() => Ok(MergeOutcome::Merged {
-                sha: res.body["sha"].as_str().unwrap_or_default().to_owned(),
-            }),
-            StatusCode::METHOD_NOT_ALLOWED
-            | StatusCode::CONFLICT
-            | StatusCode::UNPROCESSABLE_ENTITY => Ok(MergeOutcome::Rejected(
-                res.body["message"]
-                    .as_str()
-                    .unwrap_or("not mergeable")
-                    .to_owned(),
-            )),
+        let mut result = match res.status {
+            StatusCode::OK | StatusCode::ACCEPTED | StatusCode::CONFLICT => res.body,
+            StatusCode::BAD_REQUEST
+            | StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::UNPROCESSABLE_ENTITY => {
+                return Ok(MergeOutcome::Rejected(rejection(&res.body)));
+            }
             s => anyhow::bail!("merge #{number}: {s} {}", res.body),
+        };
+        loop {
+            match result["status"].as_str() {
+                Some("merged") => {
+                    let sha = match result["details"]["sha"].as_str() {
+                        Some(sha) => sha.to_owned(),
+                        // Merged before this request: the PR has its merge commit.
+                        None => self.merge_commit(repo, number).await?,
+                    };
+                    return Ok(MergeOutcome::Merged { sha });
+                }
+                Some("failed") => return Ok(MergeOutcome::Rejected(rejection(&result))),
+                // `direct_merge` never queues, so this is not a merge Mergepatrol asked for.
+                Some("enqueued") => {
+                    return Ok(MergeOutcome::Rejected(
+                        "the PR is in GitHub's merge queue".into(),
+                    ));
+                }
+                Some("pending") => {}
+                _ => anyhow::bail!("merge #{number}: unexpected result {result}"),
+            }
+            let uuid = result["details"]["uuid"]
+                .as_str()
+                .context("pending merge uuid")?
+                .to_owned();
+            tokio::time::sleep(MERGE_POLL).await;
+            result = self
+                .rest(
+                    Method::GET,
+                    &format!("/repos/{repo}/pulls/{number}/merge-async/{uuid}"),
+                    None,
+                )
+                .await?;
         }
+    }
+
+    async fn merge_commit(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
+        let pr: Value = self
+            .rest(Method::GET, &format!("/repos/{repo}/pulls/{number}"), None)
+            .await?;
+        Ok(pr["merge_commit_sha"]
+            .as_str()
+            .context("merge commit")?
+            .to_owned())
     }
 
     /// Creates the label, unless the repo already has it.

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step};
 use mergepatrol_executor::LocalExecutor;
-use mergepatrol_github::{BranchMerge, Checks, RequiredChecks};
+use mergepatrol_github::{BranchMerge, Checks, RequiredChecks, StackRef};
 use mergepatrol_store::{
     EventRecord, ExitQuery, ExitRecord, ExitStats, RepoState, SecretRecord, Session, StepStats,
     Workspace,
@@ -67,6 +67,8 @@ struct State {
     deleted: Vec<String>,
     /// The labels the repo has.
     repo_labels: Vec<String>,
+    /// Each stack's PRs, bottom to top.
+    stacks: BTreeMap<PrNumber, Vec<PrNumber>>,
 }
 
 impl State {
@@ -87,9 +89,41 @@ impl State {
                 head_ref_name: branch,
                 head_ref_oid: head,
                 labels: vec![TRIGGER.into()],
+                stack: None,
                 details: Default::default(),
             },
         );
+    }
+
+    /// Stacks the PRs `layers`, bottom to top, as stack `number`. Only `labeled` keep the label.
+    fn add_stack(&mut self, number: PrNumber, layers: &[PrNumber], labeled: &[PrNumber]) {
+        let mut base = "main".to_owned();
+        for n in layers {
+            self.add_pr(*n);
+            let pr = self.prs.get_mut(n).unwrap();
+            pr.base_ref_name = base;
+            pr.stack = Some(StackRef {
+                number,
+                base_ref_name: "main".into(),
+            });
+            if !labeled.contains(n) {
+                pr.labels.clear();
+            }
+            base = pr.head_ref_name.clone();
+        }
+        self.stacks.insert(number, layers.to_vec());
+    }
+
+    /// The layers of `number`'s stack up to it, or `number` alone.
+    fn up_to(&self, number: PrNumber) -> Vec<PrNumber> {
+        match &self.prs[&number].stack {
+            Some(stack) => {
+                let layers = &self.stacks[&stack.number];
+                let top = layers.iter().position(|n| *n == number).unwrap();
+                layers[..=top].to_vec()
+            }
+            None => vec![number],
+        }
     }
 
     /// Moves a PR's branch, as a push does. The PR API sees it `lag_reads` reads later.
@@ -199,6 +233,15 @@ impl GitHub for Fake {
         Ok(pr)
     }
 
+    async fn stack_layers(&self, _: &RepoName, stack: PrNumber) -> Result<Vec<PrNumber>> {
+        let s = self.state.lock().unwrap();
+        Ok(s.stacks[&stack]
+            .iter()
+            .copied()
+            .filter(|n| !s.merged.contains(n))
+            .collect())
+    }
+
     async fn branch_sha(&self, _: &RepoName, branch: &str) -> Result<String> {
         let s = self.state.lock().unwrap();
         Ok(if branch == "main" {
@@ -242,6 +285,7 @@ impl GitHub for Fake {
             .collect())
     }
 
+    /// As the asynchronous merge does: a stacked PR merges with every layer below it, or none.
     async fn merge(
         &self,
         _: &RepoName,
@@ -253,29 +297,39 @@ impl GitHub for Fake {
         if s.head(number) != sha {
             return Ok(MergeOutcome::Rejected("head moved".into()));
         }
-        // As a ruleset does: every required check must have passed on the commit.
-        let checks = s.checks_of(sha);
-        if let Some(missing) = s
-            .required
-            .iter()
-            .find(|r| checks.get(*r) != Some(&CheckState::Passed))
-        {
-            return Ok(MergeOutcome::Rejected(format!(
-                "Required status check \"{missing}\" is expected."
-            )));
-        }
-        if s.rejects.contains(&number) {
-            return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
+        let layers: Vec<PrNumber> = s
+            .up_to(number)
+            .into_iter()
+            .filter(|n| !s.merged.contains(n))
+            .collect();
+        // As a ruleset does: every required check must have passed on each layer's head.
+        for n in &layers {
+            let checks = s.checks_of(&s.head(*n));
+            if let Some(missing) = s
+                .required
+                .iter()
+                .find(|r| checks.get(*r) != Some(&CheckState::Passed))
+            {
+                return Ok(MergeOutcome::Rejected(format!(
+                    "Required status check \"{missing}\" is expected."
+                )));
+            }
+            if s.rejects.contains(n) {
+                return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
+            }
         }
         s.merges += 1;
-        let mut tree = format!("{}-{number}", s.tree(&s.trunk.clone()));
-        if s.diverges.contains(&number) {
-            tree.push('x');
+        let mut tree = s.tree(&s.trunk.clone());
+        for n in &layers {
+            tree = format!("{tree}-{n}");
+            if s.diverges.contains(n) {
+                tree.push('x');
+            }
         }
         s.trunk = format!("merge-{number}");
         let trunk = s.trunk.clone();
         s.trees.insert(trunk, tree);
-        s.merged.push(number);
+        s.merged.extend(layers);
         Ok(MergeOutcome::Merged {
             sha: s.trunk.clone(),
         })
@@ -309,10 +363,14 @@ impl GitHub for Fake {
             .keys()
             .find(|n| s.head(**n) == head)
             .expect("a PR head");
-        if s.conflicts.contains(&number) {
+        let layers = s.up_to(number);
+        if layers.iter().any(|n| s.conflicts.contains(n)) {
             return Ok(None);
         }
-        let tree = format!("{}-{number}", s.tree(&s.branches[branch]));
+        let mut tree = s.tree(&s.branches[branch]);
+        for n in layers {
+            tree = format!("{tree}-{n}");
+        }
         let sha = format!("{branch}@{tree}");
         s.trees.insert(sha.clone(), tree.clone());
         s.branches.insert(branch.into(), sha.clone());
@@ -409,7 +467,7 @@ impl Sandbox for Scripted {
         &self,
         _: &LaneKey,
         _: &RepoSnapshot,
-        pr: &PullRequest,
+        unit: &Unit,
         _: &RepoSettings,
     ) -> Result<Event> {
         let n = {
@@ -417,8 +475,8 @@ impl Sandbox for Scripted {
             *n += 1;
             assert!(
                 *n <= 5,
-                "rebased PR {} {n} times: the job is looping",
-                pr.number
+                "rebased {} {n} times: the job is looping",
+                unit.refs()
             );
             *n
         };
@@ -426,8 +484,11 @@ impl Sandbox for Scripted {
             return Ok(Event::RebaseFailed(reason.clone()));
         }
         let mut s = self.gh.state.lock().unwrap();
-        let head = format!("{}-r{n}", pr.head_ref_name);
-        s.push(pr.number, &head);
+        let mut head = String::new();
+        for pr in &unit.layers {
+            head = format!("{}-r{n}", pr.head_ref_name);
+            s.push(pr.number, &head);
+        }
         Ok(Event::Rebased {
             head,
             base: s.trunk.clone(),
@@ -438,7 +499,8 @@ impl Sandbox for Scripted {
         &self,
         _: &LaneKey,
         _: &RepoSnapshot,
-        pr: &PullRequest,
+        unit: &Unit,
+        layer: usize,
         _: &RepoSettings,
         head: &str,
         _: &str,
@@ -453,13 +515,18 @@ impl Sandbox for Scripted {
             return Ok(Event::FixFailed(reason.clone()));
         }
         let mut s = self.gh.state.lock().unwrap();
-        let fixed = format!("{head}-f{n}");
-        s.push(pr.number, &fixed);
+        let mut top = format!("{head}-f{n}");
+        s.push(unit.layers[layer].number, &top);
         if self.fix_works {
             let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
-            s.checks_on.insert(fixed.clone(), passing);
+            s.checks_on.insert(top.clone(), passing);
         }
-        Ok(Event::Fixed { head: fixed })
+        // The layers above go onto the fix.
+        for pr in &unit.layers[layer + 1..] {
+            top = format!("{}-s{n}", s.head(pr.number));
+            s.push(pr.number, &top);
+        }
+        Ok(Event::Fixed { head: top })
     }
 }
 
@@ -1277,15 +1344,11 @@ async fn a_batch_cut_short_by_a_restart_is_built_again() {
     lane.sync(&[
         Candidate {
             number: 1,
-            priority: false,
-            hold: None,
-            summary: Default::default(),
+            ..Default::default()
         },
         Candidate {
             number: 2,
-            priority: false,
-            hold: None,
-            summary: Default::default(),
+            ..Default::default()
         },
     ]);
     lane.activate(1);
@@ -1342,4 +1405,198 @@ async fn a_batch_whose_trunk_moved_during_a_restart_is_built_again() {
     assert_eq!(run.merged(), [1, 2]);
     assert_eq!(run.gh.with(|s| s.drafts.len()), 2);
     assert_eq!(run.kinds(1), ["enqueued", "batch", "batch", "merged"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn labeling_one_layer_queues_its_stack_which_merges_all_at_once() {
+    let run = Run::new(Fake::new(|s| s.add_stack(10, &[1, 2, 3], &[2])));
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.merged(), [1, 2, 3]);
+    assert_eq!(run.gh.with(|s| s.merges), 1);
+    assert_eq!(run.gh.with(|s| s.tree(&s.trunk)), "t-1-2-3");
+    for n in [1, 2, 3] {
+        assert_eq!(
+            run.kinds(n),
+            ["enqueued", "rebasing", "published", "merged"]
+        );
+        assert!(run.labels(n).is_empty());
+    }
+    assert!(run.lane().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_waits_while_any_layer_is_not_ready() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[1, 2]);
+        s.prs.get_mut(&1).unwrap().is_draft = true;
+    }));
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(
+        run.lane(),
+        [(
+            10,
+            "Held(\"#1 is not ready: the PR is a draft\")".to_owned()
+        )]
+    );
+    let held = run.gh.with(|s| {
+        s.comments
+            .iter()
+            .any(|(n, c)| *n == 2 && c.starts_with("On hold: #1 is not ready"))
+    });
+    assert!(held);
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().is_draft = false);
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_green_stack_is_tested_in_a_batch_and_merged_at_once() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1])(s);
+        s.add_stack(10, &[2, 3], &[3]);
+        s.add_pr(4);
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2, 3, 4]);
+    assert_eq!(run.rebase.count(), 0);
+    // 1, the stack, then 4.
+    assert_eq!(run.gh.with(|s| s.merges), 3);
+    assert_eq!(run.gh.with(|s| s.tree(&s.trunk)), "t-1-2-3-4");
+    assert_eq!(
+        run.gh.with(|s| s.drafts.clone()),
+        ["PR 1 (+3 in a Mergepatrol batch)"]
+    );
+    assert_eq!(
+        run.gh.with(|s| s.deleted.clone()),
+        ["mergepatrol/batch-1-10-4"]
+    );
+    assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
+    let comment = run.gh.with(|s| {
+        s.comments
+            .iter()
+            .any(|(n, c)| *n == 2 && c == "Testing together with #1, #4 in #1001.")
+    });
+    assert!(comment);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_that_breaks_a_batch_is_one_suspect_and_is_ejected_whole() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1])(s);
+        s.add_stack(10, &[2, 3], &[3]);
+        s.add_pr(4);
+        // Each layer passes on its own head; what has 3 merged in fails.
+        s.breaks = Some(3);
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1, 4]);
+    assert_eq!(run.labels(2), [FAILED]);
+    assert_eq!(run.labels(3), [FAILED]);
+    let lane = run
+        .store
+        .lanes
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .cloned()
+        .unwrap();
+    assert_eq!(lane.bisect, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_check_on_a_layer_is_fixed_there_and_the_layers_above_go_onto_the_fix() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.required = vec!["ci".into()];
+        s.checks_on
+            .insert("pr-1-r1".into(), [("ci".into(), CheckState::Failed)].into());
+    }));
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]]);
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(run.gh.with(|s| s.head(1)), "pr-1-r1-f1");
+    assert_eq!(run.gh.with(|s| s.head(2)), "pr-2-r1-s1");
+    let comment = run.gh.with(|s| {
+        s.comments
+            .iter()
+            .any(|(n, c)| *n == 2 && c.starts_with("Required checks failed on #1: ci."))
+    });
+    assert!(comment);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_push_to_a_lower_layer_while_checks_run_rebases_the_stack_again() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.required = vec!["ci".into()];
+        s.checks_on.insert(
+            "pr-2-r1".into(),
+            [("ci".into(), CheckState::Pending)].into(),
+        );
+    }));
+    // Layer 1's checks, then layer 2's, when its author pushes to layer 1.
+    run.gh.then(|_| {});
+    run.gh.then(|s| s.push(1, "pr-1-v1"));
+    run.tick().await;
+    assert_eq!(run.rebase.count(), 2);
+    assert_eq!(run.merged(), [1, 2]);
+    assert!(run.kinds(1).contains(&"head-moved".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_with_a_stack_picks_up_where_it_was_after_a_restart() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1])(s);
+        s.add_stack(10, &[2, 3], &[3]);
+    }));
+    const BATCH: &str = "mergepatrol/batch-1-10@t-1-2-3";
+    run.gh.with_mut(|s| {
+        s.checks_on
+            .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
+    });
+    let cut = tokio::time::timeout(CHECKS_POLL * 4, run.tick()).await;
+    assert!(cut.is_err(), "the batch is still testing");
+    run.gh.with_mut(|s| s.checks_on.remove(BATCH));
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2, 3]);
+    assert_eq!(run.gh.with(|s| s.drafts.len()), 1);
+    assert_eq!(
+        run.kinds(2),
+        ["enqueued", "batch", "batch-resumed", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_that_gains_a_pr_while_it_runs_runs_again_whole() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.required = vec!["ci".into()];
+        s.checks_on.insert(
+            "pr-2-r1".into(),
+            [("ci".into(), CheckState::Pending)].into(),
+        );
+    }));
+    // While the checks of layer 2 run, its author stacks 3 on top.
+    run.gh.then(|_| {});
+    run.gh.then(|s| {
+        s.add_pr(3);
+        let pr = s.prs.get_mut(&3).unwrap();
+        pr.labels.clear();
+        pr.base_ref_name = "pr-2".into();
+        pr.stack = Some(StackRef {
+            number: 10,
+            base_ref_name: "main".into(),
+        });
+        s.stacks.get_mut(&10).unwrap().push(3);
+        s.checks_on.remove("pr-2-r1");
+    });
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.kinds(1).last().unwrap(), "restarted");
+    assert_eq!(run.lane(), [(10, "Waiting".to_owned())]);
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2, 3]);
+    assert_eq!(run.gh.with(|s| s.merges), 1);
 }

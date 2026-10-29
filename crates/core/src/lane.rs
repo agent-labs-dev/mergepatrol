@@ -2,14 +2,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::PrNumber;
 
-/// A labeled pull request, as GitHub shows it now.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A labeled pull request, or a stack with a labeled layer, as GitHub shows it now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Candidate {
+    /// The PR's number, or the stack's: GitHub numbers stacks among PRs and issues.
     pub number: PrNumber,
     pub priority: bool,
     /// `Some(reason)` when GitHub would not merge the PR yet: a draft, or missing approvals.
     pub hold: Option<String>,
     pub summary: PrSummary,
+    /// A stack's PRs, bottom to top. Empty for a PR.
+    pub layers: Vec<PrNumber>,
 }
 
 /// What the dashboard shows of a PR, as of the last tick. The queue never reads it.
@@ -63,6 +66,20 @@ pub struct Entry {
     /// Empty in a lane saved before the queue kept it, until the next tick.
     #[serde(default)]
     pub summary: PrSummary,
+    /// A stack's PRs, bottom to top. Empty for a PR.
+    #[serde(default)]
+    pub layers: Vec<PrNumber>,
+}
+
+impl Entry {
+    /// The PRs this entry merges: a stack's layers, or the PR itself.
+    pub fn prs(&self) -> Vec<PrNumber> {
+        if self.layers.is_empty() {
+            vec![self.number]
+        } else {
+            self.layers.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,13 +126,23 @@ pub struct BuiltBatch {
     pub steps: Vec<BatchStep>,
 }
 
-/// One PR of a batch: the head it merged, and the merge commit it made on the branch.
+/// One PR or stack of a batch: the head it merged (a stack's top), and the merge commit it made
+/// on the branch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchStep {
     pub number: PrNumber,
     pub head_sha: String,
     pub sha: String,
     pub tree: String,
+    /// A stack's layers as tested, bottom to top. Empty for a PR.
+    #[serde(default)]
+    pub layers: Vec<LayerHead>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerHead {
+    pub number: PrNumber,
+    pub head_sha: String,
 }
 
 /// The search for the PR that broke a batch: the next batches take only suspects, and at most
@@ -152,6 +179,7 @@ impl Lane {
                 Some(e) => {
                     e.priority = c.priority;
                     e.summary = c.summary.clone();
+                    e.layers = c.layers.clone();
                     if e.state == EntryState::Active || e.state == hold_state(c) {
                         continue;
                     }
@@ -170,6 +198,7 @@ impl Lane {
                         priority: c.priority,
                         state: hold_state(c),
                         summary: c.summary.clone(),
+                        layers: c.layers.clone(),
                     });
                     changes.push(LaneChange::Enqueued(c.number));
                     if let Some(reason) = &c.hold {
@@ -304,6 +333,7 @@ mod tests {
             priority: false,
             hold: None,
             summary: PrSummary::default(),
+            layers: Vec::new(),
         }
     }
 

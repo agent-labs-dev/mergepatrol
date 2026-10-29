@@ -25,4 +25,8 @@ requested: Array<PersonView>,
 /**
  * The head commit's combined checks. `None` without checks.
  */
-checks: ChecksView | null, };
+checks: ChecksView | null, 
+/**
+ * A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
+ */
+layers: Array<number>, };

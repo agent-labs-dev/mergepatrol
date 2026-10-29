@@ -382,6 +382,8 @@ mod tests {
             head_sha: "1".into(),
             trunk: "main".into(),
             trunk_sha: "2".into(),
+            base_ref: None,
+            upstream: None,
             pr_title: String::new(),
             pr_body: String::new(),
             verify: Vec::new(),
