@@ -98,6 +98,16 @@ impl Unpinned {
         let k = (key.installation_id, key.repo.clone(), number);
         self.0.lock().unwrap().remove(&k);
     }
+
+    /// Forgets the repo's PRs that lost the label: a new labeling waits afresh.
+    fn keep_labeled(&self, key: &LaneKey, labeled: &[PullRequest]) {
+        let mut map = self.0.lock().unwrap();
+        map.retain(|(installation, repo, number), _| {
+            *installation != key.installation_id
+                || *repo != key.repo
+                || labeled.iter().any(|pr| pr.number == *number)
+        });
+    }
 }
 
 /// Since when each PR's job has failed on every try, on errors outside the job.
@@ -422,6 +432,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         trunk: snap.default_branch.clone(),
     };
     let mut lane = ctx.store.load_lane(&key).await?;
+    ctx.unpinned.keep_labeled(&key, &snap.labeled);
     let mut units = units(gh, repo, &snap.labeled).await?;
     let layers: Vec<PullRequest> = units.iter().flat_map(|u| u.layers.clone()).collect();
     ctx.prs.update(&key, &lane, &layers);

@@ -2023,6 +2023,23 @@ async fn with_webhooks_a_fork_pr_waits_for_the_labeled_webhook() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_fork_pr_labeled_again_waits_afresh_for_its_webhook() {
+    let mut run = Run::new(Fake::new(fork_pr));
+    with_webhooks(&mut run);
+    run.tick().await;
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.clear());
+    run.tick().await;
+    tokio::time::advance(PIN_WAIT).await;
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.push(TRIGGER.into()));
+    // Polled before the new label's webhook.
+    run.tick().await;
+    assert!(run.kinds(1).is_empty());
+    assert_eq!(run.labels(1), [TRIGGER]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn with_webhooks_a_fork_pr_whose_webhook_never_comes_leaves() {
     let mut run = Run::new(Fake::new(fork_pr));
     with_webhooks(&mut run);
