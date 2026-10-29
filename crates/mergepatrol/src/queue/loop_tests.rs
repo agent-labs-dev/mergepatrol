@@ -79,6 +79,7 @@ impl State {
                 head_ref_name: branch,
                 head_ref_oid: head,
                 labels: vec![TRIGGER.into()],
+                details: Default::default(),
             },
         );
     }
@@ -898,11 +899,13 @@ async fn a_batch_cut_short_by_a_restart_is_built_again() {
             number: 1,
             priority: false,
             hold: None,
+            summary: Default::default(),
         },
         Candidate {
             number: 2,
             priority: false,
             hold: None,
+            summary: Default::default(),
         },
     ]);
     lane.activate(1);

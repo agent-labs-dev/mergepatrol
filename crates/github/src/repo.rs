@@ -4,7 +4,7 @@ use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use mergepatrol_core::{PrNumber, RepoName};
+use mergepatrol_core::{Person, PrNumber, PrSummary, RepoName, Review};
 
 use crate::Installation;
 
@@ -38,6 +38,49 @@ pub struct PullRequest {
     pub head_ref_oid: String,
     #[serde(deserialize_with = "label_names")]
     pub labels: Vec<String>,
+    #[serde(flatten)]
+    pub details: PrDetails,
+}
+
+/// What the dashboard shows of a PR, as GraphQL returns it. The queue never reads it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDetails {
+    url: String,
+    created_at: String,
+    additions: u64,
+    deletions: u64,
+    changed_files: u64,
+    author: Option<Actor>,
+    #[serde(deserialize_with = "nodes")]
+    latest_opinionated_reviews: Vec<ReviewNode>,
+    /// A team asked to review comes back as `{}`: the App cannot read teams.
+    #[serde(deserialize_with = "nodes")]
+    review_requests: Vec<Value>,
+    /// The last commit's `statusCheckRollup`.
+    commits: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Actor {
+    login: String,
+    avatar_url: String,
+}
+
+impl From<Actor> for Person {
+    fn from(a: Actor) -> Self {
+        Person {
+            login: a.login,
+            avatar_url: a.avatar_url,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ReviewNode {
+    state: String,
+    author: Option<Actor>,
 }
 
 impl PullRequest {
@@ -56,6 +99,50 @@ impl PullRequest {
             _ => None,
         }
     }
+
+    pub fn summary(&self) -> PrSummary {
+        let d = self.details.clone();
+        PrSummary {
+            title: self.title.clone(),
+            url: d.url,
+            author: d.author.map(Person::from),
+            created_at: d.created_at,
+            head_ref: self.head_ref_name.clone(),
+            additions: d.additions,
+            deletions: d.deletions,
+            changed_files: d.changed_files,
+            review_decision: self.review_decision.clone(),
+            reviews: d
+                .latest_opinionated_reviews
+                .into_iter()
+                .filter_map(|r| {
+                    Some(Review {
+                        reviewer: r.author?.into(),
+                        state: r.state,
+                    })
+                })
+                .collect(),
+            requested: d
+                .review_requests
+                .into_iter()
+                .filter_map(|r| {
+                    serde_json::from_value::<Actor>(r["requestedReviewer"].clone()).ok()
+                })
+                .map(Person::from)
+                .collect(),
+            checks: d.commits["nodes"][0]["commit"]["statusCheckRollup"]["state"]
+                .as_str()
+                .map(str::to_owned),
+        }
+    }
+}
+
+fn nodes<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    #[derive(Deserialize)]
+    struct Conn<T> {
+        nodes: Vec<T>,
+    }
+    Ok(Conn::deserialize(d)?.nodes)
 }
 
 fn label_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
@@ -97,7 +184,11 @@ pub enum MergeOutcome {
     Rejected(String),
 }
 
-const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } }";
+const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } }
+  url createdAt additions deletions changedFiles author { login avatarUrl }
+  latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login avatarUrl } } } }
+  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 
 impl Installation {
     pub async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot> {
@@ -420,5 +511,53 @@ impl Installation {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_reads_graphql() {
+        let pr: PullRequest = serde_json::from_value(json!({
+            "number": 7, "title": "Fix it", "body": "", "isDraft": false,
+            "isCrossRepository": false, "reviewDecision": "APPROVED", "baseRefName": "main",
+            "headRefName": "fix", "headRefOid": "abc", "labels": { "nodes": [{ "name": "mergepatrol" }] },
+            "url": "https://github.com/o/r/pull/7", "createdAt": "2026-10-01T00:00:00Z",
+            "additions": 3, "deletions": 1, "changedFiles": 2,
+            "author": null,
+            "latestOpinionatedReviews": { "nodes": [
+                { "state": "APPROVED", "author": { "login": "ann", "avatarUrl": "a" } },
+                { "state": "CHANGES_REQUESTED", "author": null },
+            ] },
+            "reviewRequests": { "nodes": [
+                { "requestedReviewer": { "login": "bob", "avatarUrl": "b" } },
+                { "requestedReviewer": {} },
+            ] },
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "PENDING" } } }] },
+        }))
+        .unwrap();
+        let s = pr.summary();
+        assert_eq!(s.author, None);
+        assert_eq!(s.head_ref, "fix");
+        assert_eq!(
+            s.reviews,
+            [Review {
+                reviewer: Person {
+                    login: "ann".into(),
+                    avatar_url: "a".into()
+                },
+                state: "APPROVED".into(),
+            }]
+        );
+        assert_eq!(
+            s.requested,
+            [Person {
+                login: "bob".into(),
+                avatar_url: "b".into()
+            }]
+        );
+        assert_eq!(s.checks.as_deref(), Some("PENDING"));
     }
 }

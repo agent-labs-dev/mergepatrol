@@ -196,6 +196,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
             number: pr.number,
             priority: pr.has_label(&labels.priority),
             hold,
+            summary: pr.summary(),
         });
     }
 
