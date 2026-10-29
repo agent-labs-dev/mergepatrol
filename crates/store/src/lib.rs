@@ -6,7 +6,9 @@ pub use vault::{ANTHROPIC_API_KEY, GITHUB_APP, SecretStatus, Vault, api_key_secr
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use mergepatrol_core::{Lane, PrNumber, PrSummary, RepoName, Step, StepTimes, step_times};
+use mergepatrol_core::{
+    Lane, PrNumber, PrSummary, RepoName, Spend, SpendTask, Step, StepTimes, step_times,
+};
 use serde::Serialize;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
@@ -147,6 +149,13 @@ pub trait Store: Send + Sync {
         repo: Option<&RepoName>,
         days: u32,
     ) -> Result<Vec<u64>>;
+    /// The agent runs of the last `days`, whatever became of their PRs. `None` for every repo.
+    async fn spends(
+        &self,
+        installation_id: u64,
+        repo: Option<&RepoName>,
+        days: u32,
+    ) -> Result<Vec<Spend>>;
     async fn put_secret(&self, scope: Scope, name: &str, secret: SecretRecord) -> Result<()>;
     async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>>;
     async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()>;
@@ -622,6 +631,30 @@ impl Store for PgStore {
             .collect();
         stats.sort_by_key(|s| s.step);
         Ok(stats)
+    }
+
+    async fn spends(
+        &self,
+        installation_id: u64,
+        repo: Option<&RepoName>,
+        days: u32,
+    ) -> Result<Vec<Spend>> {
+        let rows = sqlx::query(
+            "SELECT kind, message FROM events
+             WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
+                AND kind = ANY($3) AND at > now() - make_interval(days => $4)
+             ORDER BY id",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.map(|r| r.to_string()))
+        .bind([SpendTask::Rebase, SpendTask::Fix].map(SpendTask::event_kind))
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Spend::parse(row.get("kind"), row.get("message")))
+            .collect())
     }
 
     async fn merged_by_day(
@@ -1191,6 +1224,43 @@ mod tests {
         assert!(events[0].at.ends_with('Z'), "{}", events[0].at);
         assert_eq!(store.events(1, &key.repo, None, 10).await.unwrap().len(), 2);
         assert_eq!(store.events(2, &key.repo, None, 10).await.unwrap().len(), 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn spends_are_the_agent_runs_of_the_window(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let key = |repo: &str| LaneKey {
+            installation_id: 1,
+            repo: RepoName::parse(repo).unwrap(),
+            trunk: "main".into(),
+        };
+        let (a, b) = (key("o/a"), key("o/b"));
+        let run = ", $0.50, by claude-opus-5-5 at high effort";
+        store
+            .record(&a, 1, "resolved", &format!("x.rs in 3 turns{run}"))
+            .await
+            .unwrap();
+        store
+            .record(&a, 1, "fix", &format!("2 turns{run}"))
+            .await
+            .unwrap();
+        store.record(&a, 1, "fixing", "ci").await.unwrap();
+        store.record(&b, 2, "fix", "4 turns").await.unwrap();
+        store.record(&a, 3, "fix", "9 turns").await.unwrap();
+        sqlx::query("UPDATE events SET at = now() - interval '40 days' WHERE pr = 3")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let all = store.spends(1, None, 30).await.unwrap();
+        assert_eq!(all.len(), 3);
+        let only_a = store.spends(1, Some(&a.repo), 30).await.unwrap();
+        assert_eq!(
+            only_a.iter().map(|s| s.task).collect::<Vec<_>>(),
+            [SpendTask::Rebase, SpendTask::Fix]
+        );
+        assert_eq!(only_a[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(store.spends(2, None, 30).await.unwrap(), []);
     }
 
     #[sqlx::test(migrations = false)]

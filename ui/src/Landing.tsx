@@ -27,7 +27,7 @@ const features: [string, ReactNode][] = [
   ],
   [
     "Agents resolve conflicts",
-    "A plain git rebase runs first. Only on a real conflict does Claude resolve it, then your verify commands run before anything is pushed.",
+    "A plain git rebase runs first. Only on a real conflict does an LLM resolve it, then your verify commands run before anything is pushed.",
   ],
   [
     "Isolated jobs",
@@ -77,7 +77,7 @@ export function Landing({ theme, setTheme }: ThemeProps) {
           </h1>
           <p className="mx-auto mt-5 max-w-xl text-base leading-relaxed text-fg-2 text-balance">
             Label a pull request. Mergepatrol rebases it, tests it with the PRs around it, and
-            merges it. When a rebase conflicts, Claude resolves it.
+            merges it. When a rebase conflicts, an LLM resolves it.
           </p>
           <SignInButton className="mt-8 h-10 px-5" />
         </section>

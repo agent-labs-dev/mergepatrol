@@ -102,6 +102,13 @@ export function duration(secs: number) {
   return `${(secs / 86400).toFixed(1)}d`;
 }
 
+/** "$0.46". */
+export const usd = (n: number) => `$${n.toFixed(2)}`;
+
+/** "claude-opus-5-5 · high", or "Unknown model" for runs from before events named it. */
+export const llmName = ({ model, effort }: { model: string | null; effort: string | null }) =>
+  model ? `${model}${effort ? ` · ${effort}` : ""}` : "Unknown model";
+
 export function timeAgo(iso: string) {
   const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
   if (s < 60) return "just now";

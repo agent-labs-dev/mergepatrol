@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mergepatrol_core::{CheckFailure, FIXED_BY};
+use mergepatrol_core::{CheckFailure, FIXED_BY, Spend, SpendTask};
 use mergepatrol_executor::protocol::{
     BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, ResolverSpec, Task,
 };
@@ -191,7 +191,13 @@ async fn rebase(
                 event(
                     events,
                     "resolved",
-                    format!("{} in {}", files.join(", "), spent(turns, cost_usd)),
+                    spent(
+                        &spec.resolver,
+                        SpendTask::Rebase,
+                        files.join(", "),
+                        turns,
+                        cost_usd,
+                    ),
                 );
             }
             Ok(Resolution::GaveUp(reason)) => bail!("the resolver gave up: {reason}"),
@@ -250,7 +256,13 @@ async fn fix(
         })
         .await;
     let spent = match outcome {
-        Ok(Resolution::Resolved { turns, cost_usd }) => spent(turns, cost_usd),
+        Ok(Resolution::Resolved { turns, cost_usd }) => spent(
+            &spec.resolver,
+            SpendTask::Fix,
+            String::new(),
+            turns,
+            cost_usd,
+        ),
         Ok(Resolution::GaveUp(reason)) => bail!("the agent gave up: {reason}"),
         Err(e) => bail!("the agent failed: {e:#}"),
     };
@@ -274,9 +286,22 @@ async fn fix(
     Ok(())
 }
 
-fn spent(turns: u32, cost_usd: Option<f64>) -> String {
-    let cost = cost_usd.map(|c| format!(", ${c:.2}")).unwrap_or_default();
-    format!("{turns} turns{cost}")
+fn spent(
+    resolver: &ResolverSpec,
+    task: SpendTask,
+    files: String,
+    turns: u32,
+    cost_usd: Option<f64>,
+) -> String {
+    Spend {
+        task,
+        files,
+        turns,
+        cost_usd,
+        model: Some(resolver.model.clone()),
+        effort: Some(resolver.effort.clone()),
+    }
+    .message()
 }
 
 /// Runs the repo's verify commands, which must pass after `what` the agent did.
