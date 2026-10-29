@@ -1,0 +1,33 @@
+name: Feedback, bug, or feature request
+description: Tell us what broke, what you need, or what you think of Mergepatrol.
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - Bug
+        - Feature request
+        - Feedback
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, or what do you want?
+      description: For a bug, what you expected and what happened instead. For a feature, the problem it solves.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: For a bug. Link the pull request, and the Mergepatrol comment on it, if there is one.
+      placeholder: |
+        1. Label a PR with `mergepatrol`
+        2. ...
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Hosted Mergepatrol, or self-hosted? If self-hosted, which version or commit?
