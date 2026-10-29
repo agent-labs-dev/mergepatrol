@@ -1,19 +1,20 @@
 //! `mergepatrol job`: the part that runs inside the sandbox. It reads a `JobSpec` from stdin (or
-//! from its link, with `--remote`),
-//! fetches the repo with a read-only token, rebases, resolves conflicts with the agent, runs the
-//! verify commands, and writes the result as a git bundle. It holds no credential that can
-//! write to GitHub: the orchestrator checks the bundle and publishes it.
+//! from its link, with `--remote`), and fetches the repo with a read-only token. Then it rebases
+//! and resolves conflicts with the agent, or has the agent fix the PR's failed checks. It runs
+//! the verify commands after the agent, and writes the result as a git bundle. It holds no
+//! credential that can write to GitHub: the orchestrator checks the bundle and publishes it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use mergepatrol_core::CheckFailure;
 use mergepatrol_executor::protocol::{
-    BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE,
+    BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, Task,
 };
 use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
-use mergepatrol_resolver::{ClaudeResolver, Resolution, ResolveRequest, Resolver};
+use mergepatrol_resolver::{ClaudeResolver, FixRequest, Resolution, ResolveRequest, Resolver};
 use tokio::io::AsyncReadExt;
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -41,7 +42,7 @@ async fn run_to(spec: &JobSpec, out: &Path) -> Result<()> {
     let repo_dir = std::env::temp_dir().join(format!("mergepatrol-job-{}", std::process::id()));
     let mut events = Vec::new();
     let outcome = match run(spec, &repo_dir, &out, &mut events).await {
-        Ok(()) => JobOutcome::Rebased,
+        Ok(()) => JobOutcome::Done,
         Err(e) => JobOutcome::Failed {
             reason: format!("{e:#}"),
         },
@@ -96,6 +97,33 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
         max_turns: spec.resolver.max_turns,
     };
 
+    // The bundle holds the commits on top of what the orchestrator already has.
+    let (exclude, done) = match &spec.task {
+        Task::Rebase => {
+            rebase(spec, &git, &resolver, dir, out, events).await?;
+            (&spec.trunk_sha, "rebased")
+        }
+        Task::FixChecks { failures } => {
+            fix(spec, &git, &resolver, failures, dir, out, events).await?;
+            (&spec.head_sha, "fixed")
+        }
+    };
+
+    let head = git.rev_parse(dir, "HEAD").await?;
+    git.create_bundle(dir, &out.join(BUNDLE_FILE), &head, exclude)
+        .await?;
+    event(events, done, head);
+    Ok(())
+}
+
+async fn rebase(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &ClaudeResolver,
+    dir: &Path,
+    out: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
     let mut resolved_any = false;
     let mut step = git.rebase(dir, &spec.trunk_sha).await?;
     while let RebaseStep::Conflict { commit, files } = step {
@@ -118,11 +146,10 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             .await;
         match outcome {
             Ok(Resolution::Resolved { turns, cost_usd }) => {
-                let cost = cost_usd.map(|c| format!(", ${c:.2}")).unwrap_or_default();
                 event(
                     events,
                     "resolved",
-                    format!("{} in {turns} turns{cost}", files.join(", ")),
+                    format!("{} in {}", files.join(", "), spent(turns, cost_usd)),
                 );
             }
             Ok(Resolution::GaveUp(reason)) => bail!("the resolver gave up: {reason}"),
@@ -149,26 +176,83 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     }
 
     if resolved_any {
-        for cmd in &spec.verify {
-            event(events, "verify", cmd.as_str());
-            let mut c = tokio::process::Command::new("sh");
-            c.current_dir(dir).args(["-c", cmd]).kill_on_drop(true);
-            let output = tokio::time::timeout(VERIFY_TIMEOUT, c.output())
-                .await
-                .with_context(|| format!("`{cmd}` timed out"))??;
-            if !output.status.success() {
-                let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-                text.push_str(&String::from_utf8_lossy(&output.stderr));
-                let lines: Vec<&str> = text.lines().collect();
-                let tail = lines[lines.len().saturating_sub(20)..].join("\n");
-                bail!("`{cmd}` failed after the resolution:\n```\n{tail}\n```");
-            }
+        verify(spec, dir, events, "the resolution").await?;
+    }
+    Ok(())
+}
+
+/// Has the agent fix the failed checks, and commits its fix on top of the PR head.
+async fn fix(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &ClaudeResolver,
+    failures: &[CheckFailure],
+    dir: &Path,
+    out: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let names: Vec<&str> = failures.iter().map(|f| f.name.as_str()).collect();
+    event(events, "fixing", names.join(", "));
+    let transcript = out
+        .join("transcripts")
+        .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
+    let outcome = resolver
+        .fix(FixRequest {
+            workdir: dir,
+            failures,
+            pr_title: &spec.pr_title,
+            pr_body: &spec.pr_body,
+            trunk: &spec.trunk,
+            verify_commands: &spec.verify,
+            transcript: &transcript,
+        })
+        .await;
+    let spent = match outcome {
+        Ok(Resolution::Resolved { turns, cost_usd }) => spent(turns, cost_usd),
+        Ok(Resolution::GaveUp(reason)) => bail!("the agent gave up: {reason}"),
+        Err(e) => bail!("the agent failed: {e:#}"),
+    };
+    if git.rev_parse(dir, "HEAD").await? != spec.head_sha {
+        bail!("the agent moved HEAD");
+    }
+    if !git.is_dirty(dir).await? {
+        bail!("the agent changed nothing");
+    }
+    verify(spec, dir, events, "the fix").await?;
+    git.commit_all(
+        dir,
+        &format!(
+            "Fix {}\n\nFixed-by: mergepatrol, {}",
+            names.join(", "),
+            resolver.name()
+        ),
+    )
+    .await?;
+    event(events, "fix", spent);
+    Ok(())
+}
+
+fn spent(turns: u32, cost_usd: Option<f64>) -> String {
+    let cost = cost_usd.map(|c| format!(", ${c:.2}")).unwrap_or_default();
+    format!("{turns} turns{cost}")
+}
+
+/// Runs the repo's verify commands, which must pass after `what` the agent did.
+async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &str) -> Result<()> {
+    for cmd in &spec.verify {
+        event(events, "verify", cmd.as_str());
+        let mut c = tokio::process::Command::new("sh");
+        c.current_dir(dir).args(["-c", cmd]).kill_on_drop(true);
+        let output = tokio::time::timeout(VERIFY_TIMEOUT, c.output())
+            .await
+            .with_context(|| format!("`{cmd}` timed out"))??;
+        if !output.status.success() {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            let lines: Vec<&str> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+            bail!("`{cmd}` failed after {what}:\n```\n{tail}\n```");
         }
     }
-
-    let head = git.rev_parse(dir, "HEAD").await?;
-    git.create_bundle(dir, &out.join(BUNDLE_FILE), &head, &spec.trunk_sha)
-        .await?;
-    event(events, "rebased", head);
     Ok(())
 }

@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{LabelSpec, Labels, PrNumber, REPO_CONFIG_PATH, RepoName};
+use mergepatrol_core::{CheckFailure, LabelSpec, Labels, PrNumber, REPO_CONFIG_PATH, RepoName};
 use mergepatrol_github::{
     BranchMerge, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot, RequiredChecks,
 };
@@ -18,6 +18,13 @@ pub trait GitHub: Send + Sync {
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String>;
     async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks>;
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks>;
+    /// What GitHub shows of why the checks `names` failed on `sha`.
+    async fn check_failures(
+        &self,
+        repo: &RepoName,
+        sha: &str,
+        names: &[String],
+    ) -> Result<Vec<CheckFailure>>;
     async fn merge(
         &self,
         repo: &RepoName,
@@ -71,6 +78,14 @@ impl GitHub for Installation {
     }
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         Installation::checks(self, repo, sha).await
+    }
+    async fn check_failures(
+        &self,
+        repo: &RepoName,
+        sha: &str,
+        names: &[String],
+    ) -> Result<Vec<CheckFailure>> {
+        Installation::check_failures(self, repo, sha, names).await
     }
     async fn merge(
         &self,

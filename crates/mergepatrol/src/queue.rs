@@ -1,5 +1,5 @@
 //! Drives one repo: polls GitHub, keeps the lane in sync, and runs the PR at the head of the lane
-//! through rebase, checks, and merge.
+//! through rebase, checks, fixes for failed checks, and merge.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -12,11 +12,11 @@ use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
-    Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, REPO_CONFIG_PATH,
-    RepoName, RepoSettings, Transition,
+    Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber,
+    REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
-use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec};
+use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
 use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
@@ -44,6 +44,8 @@ const RESOLVER_MAX_TURNS: u32 = 50;
 const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 const MERGE_RETRIES: u32 = 15;
 const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
+/// A fix may change any file but these: CI's own config, and the queue's.
+const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
 
 pub struct Ctx {
     pub config: Config,
@@ -189,9 +191,9 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
 }
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
-    let rebase = JobRebase { ctx: &ctx, gh: &gh };
+    let sandbox = JobSandbox { ctx: &ctx, gh: &gh };
     loop {
-        match tick(&ctx, &gh, &rebase, &repo).await {
+        match tick(&ctx, &gh, &sandbox, &repo).await {
             // The lane may have a next PR: start it now, not a poll later.
             Ok(Ran::Job) => continue,
             Ok(Ran::Idle) => {}
@@ -216,7 +218,7 @@ enum Outcome {
     Cancelled,
 }
 
-async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) -> Result<Ran> {
+async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName) -> Result<Ran> {
     let installation = gh.installation_id();
     let file = gh.config_file(repo).await?;
     let settings = match RepoSettings::from_file(file.as_deref(), &ctx.config.repo_defaults) {
@@ -331,7 +333,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
         ctx,
         &settings,
         gh,
-        rebase,
+        sandbox,
         &key,
         &snap,
         &required.names,
@@ -769,14 +771,14 @@ async fn run_job(
     ctx: &Ctx,
     settings: &RepoSettings,
     gh: &dyn GitHub,
-    rebase: &dyn Rebase,
+    sandbox: &dyn Sandbox,
     key: &LaneKey,
     snap: &RepoSnapshot,
     required: &[String],
     number: PrNumber,
 ) -> Result<Outcome> {
     let repo = &key.repo;
-    let mut job = Job::start(number);
+    let mut job = Job::start(number, settings.fix_ci.allowed());
     let mut published_at = Instant::now();
 
     loop {
@@ -790,7 +792,7 @@ async fn run_job(
                 record(ctx, key, number, "rebasing", &format!("onto {}", key.trunk)).await?;
                 gh.sticky_comment(repo, number, &format!("Rebasing onto `{}`.", key.trunk))
                     .await?;
-                let event = rebase.rebase(key, snap, &pr, settings).await?;
+                let event = sandbox.rebase(key, snap, &pr, settings).await?;
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
                     record(ctx, key, number, "published", head).await?;
@@ -851,6 +853,41 @@ async fn run_job(
                     }
                 }
             }
+            Phase::Fixing { head, base, failed } => {
+                let attempt = format!("attempt {} of {}", job.fixes, job.fix_attempts);
+                record(
+                    ctx,
+                    key,
+                    number,
+                    "fixing",
+                    &format!("{}, {attempt}", failed.join(", ")),
+                )
+                .await?;
+                gh.sticky_comment(
+                    repo,
+                    number,
+                    &format!(
+                        "Required checks failed: {}. Fixing them, {attempt}.",
+                        failed.join(", ")
+                    ),
+                )
+                .await?;
+                let failures = gh.check_failures(repo, head, failed).await?;
+                let event = sandbox
+                    .fix(key, snap, &pr, settings, head, base, &failures)
+                    .await?;
+                published_at = Instant::now();
+                if let Event::Fixed { head } = &event {
+                    record(ctx, key, number, "published", head).await?;
+                    gh.sticky_comment(
+                        repo,
+                        number,
+                        &format!("Pushed a fix as {head}. Waiting for checks."),
+                    )
+                    .await?;
+                }
+                event
+            }
             Phase::Merging { head } => {
                 if pr.hold_reason().is_some() {
                     Event::NeedsApproval
@@ -872,10 +909,10 @@ async fn run_job(
     }
 }
 
-/// Rebases a PR onto the trunk and publishes the result to its branch: `Event::Rebased` with
-/// the new head, or why it could not.
+/// The jobs that change a PR's branch, and publish the result to it.
 #[async_trait]
-trait Rebase: Send + Sync {
+trait Sandbox: Send + Sync {
+    /// Rebases the PR onto the trunk: `Event::Rebased` with the new head, or why it could not.
     async fn rebase(
         &self,
         key: &LaneKey,
@@ -883,17 +920,31 @@ trait Rebase: Send + Sync {
         pr: &PullRequest,
         settings: &RepoSettings,
     ) -> Result<Event>;
+
+    /// Commits a fix for `failures` on top of `head`, which sits on `base`: `Event::Fixed` with
+    /// the new head, or why it could not.
+    #[allow(clippy::too_many_arguments)]
+    async fn fix(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        pr: &PullRequest,
+        settings: &RepoSettings,
+        head: &str,
+        base: &str,
+        failures: &[CheckFailure],
+    ) -> Result<Event>;
 }
 
-/// A plain `git rebase` here when the PR is already on the trunk, else a sandboxed job, whose
-/// result is checked, then published through the Git Data API.
-struct JobRebase<'a> {
+/// A sandboxed job, whose result is checked, then published through the Git Data API. A rebase
+/// of a PR already on the trunk needs no job.
+struct JobSandbox<'a> {
     ctx: &'a Ctx,
     gh: &'a Installation,
 }
 
 #[async_trait]
-impl Rebase for JobRebase<'_> {
+impl Sandbox for JobSandbox<'_> {
     async fn rebase(
         &self,
         key: &LaneKey,
@@ -903,22 +954,35 @@ impl Rebase for JobRebase<'_> {
     ) -> Result<Event> {
         rebase_and_publish(self.ctx, self.gh, key, snap, pr, settings).await
     }
+
+    async fn fix(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        pr: &PullRequest,
+        settings: &RepoSettings,
+        head: &str,
+        base: &str,
+        failures: &[CheckFailure],
+    ) -> Result<Event> {
+        fix_and_publish(
+            self.ctx, self.gh, key, snap, pr, settings, head, base, failures,
+        )
+        .await
+    }
 }
 
-async fn rebase_and_publish(
+/// The repo's object cache, with the trunk and the PR branch fetched: their heads.
+async fn fetch_pr(
     ctx: &Ctx,
     gh: &Installation,
+    git: &Git,
     key: &LaneKey,
-    snap: &RepoSnapshot,
     pr: &PullRequest,
-    settings: &RepoSettings,
-) -> Result<Event> {
+) -> Result<(std::path::PathBuf, String, String)> {
     let repo = &key.repo;
-    let git = Git;
     let cache = cache_path(&ctx.config.data_dir, &repo.owner, &repo.name);
-    let clone_url = format!("https://github.com/{repo}.git");
-    git.ensure_cache(&cache, &clone_url).await?;
-
+    git.ensure_cache(&cache, &clone_url(repo)).await?;
     let pr_ref = format!("refs/mergepatrol/pr/{}", pr.number);
     let trunk_ref = format!("refs/remotes/origin/{}", key.trunk);
     git.fetch(
@@ -932,21 +996,33 @@ async fn rebase_and_publish(
     .await?;
     let head = git.rev_parse(&cache, &pr_ref).await?;
     let trunk = git.rev_parse(&cache, &trunk_ref).await?;
-    if git.is_ancestor(&cache, &trunk, &head).await? {
-        return Ok(Event::Rebased { head, base: trunk });
-    }
+    Ok((cache, head, trunk))
+}
 
-    let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
-    let out = ctx.config.data_dir.join("jobs").join(&job_id);
-    let _ = tokio::fs::remove_dir_all(&out).await;
-    let spec = JobSpec {
-        repo: repo.to_string(),
-        clone_url,
-        token: gh.read_token(repo).await?,
+fn clone_url(repo: &RepoName) -> String {
+    format!("https://github.com/{repo}.git")
+}
+
+/// The spec of a job on the PR at `head`, which sits on, or goes onto, `trunk`.
+#[allow(clippy::too_many_arguments)]
+async fn job_spec(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+    head: &str,
+    trunk: &str,
+    task: Task,
+) -> Result<JobSpec> {
+    Ok(JobSpec {
+        repo: key.repo.to_string(),
+        clone_url: clone_url(&key.repo),
+        token: gh.read_token(&key.repo).await?,
         head_ref: pr.head_ref_name.clone(),
-        head_sha: head.clone(),
+        head_sha: head.to_owned(),
         trunk: key.trunk.clone(),
-        trunk_sha: trunk.clone(),
+        trunk_sha: trunk.to_owned(),
         pr_title: pr.title.clone(),
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
@@ -960,48 +1036,145 @@ async fn rebase_and_publish(
                 .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
                 .await?,
         },
-    };
-    record(ctx, key, pr.number, "job", &job_id).await?;
-    let result = match ctx.executor.run(&job_id, &spec, &out).await {
-        Ok(r) => r,
-        Err(e) => return Ok(Event::RebaseFailed(format!("the rebase job failed: {e:#}"))),
-    };
+        task,
+    })
+}
+
+/// Runs a job in the sandbox, with its output in `out`. `Err` says why it failed.
+async fn run_sandboxed(
+    ctx: &Ctx,
+    key: &LaneKey,
+    number: PrNumber,
+    job_id: &str,
+    spec: &JobSpec,
+    out: &Path,
+) -> Result<()> {
+    let _ = tokio::fs::remove_dir_all(out).await;
+    record(ctx, key, number, "job", job_id).await?;
+    let result = ctx
+        .executor
+        .run(job_id, spec, out)
+        .await
+        .context("the job failed")?;
     for e in &result.events {
-        record(ctx, key, pr.number, &e.kind, &e.message).await?;
+        record(ctx, key, number, &e.kind, &e.message).await?;
     }
     if let JobOutcome::Failed { reason } = result.outcome {
-        return Ok(Event::RebaseFailed(reason));
+        bail!("{reason}");
     }
+    Ok(())
+}
 
-    let local_head = match check_job_output(&git, &cache, &out, pr.number, &trunk, &head).await {
-        Ok(h) => h,
-        Err(e) => return Ok(Event::RebaseFailed(format!("{e:#}"))),
-    };
+/// Publishes the commits `base..local_head` to the PR branch, if it is still at `head`.
+#[allow(clippy::too_many_arguments)]
+async fn publish_to_pr(
+    gh: &Installation,
+    git: &Git,
+    cache: &Path,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    pr: &PullRequest,
+    head: &str,
+    base: &str,
+    local_head: &str,
+) -> Result<std::result::Result<String, Event>> {
     let published = publish(
         gh,
-        &git,
-        &cache,
+        git,
+        cache,
         Publish {
             repo: &key.repo,
             repo_id: &snap.id,
             branch: &pr.head_ref_name,
-            expected_head: &head,
-            base: &trunk,
-            local_head: &local_head,
+            expected_head: head,
+            base,
+            local_head,
         },
     )
     .await;
     match published {
-        Ok(sha) => Ok(Event::Rebased {
+        Ok(sha) => Ok(Ok(sha)),
+        // `updateRefs` refuses when the branch moved: the author pushed while the job ran.
+        Err(_) if gh.branch_sha(&key.repo, &pr.head_ref_name).await? != head => {
+            Ok(Err(Event::HeadMoved))
+        }
+        Err(e) => bail!("publishing failed: {e:#}"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fix_and_publish(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+    head: &str,
+    base: &str,
+    failures: &[CheckFailure],
+) -> Result<Event> {
+    let repo = &key.repo;
+    let git = Git;
+    let (cache, fetched, _) = fetch_pr(ctx, gh, &git, key, pr).await?;
+    if fetched != head {
+        return Ok(Event::HeadMoved);
+    }
+    let job_id = format!(
+        "{}-{}-{}-fix-{}",
+        repo.owner,
+        repo.name,
+        pr.number,
+        &head[..8]
+    );
+    let out = ctx.config.data_dir.join("jobs").join(&job_id);
+    let task = Task::FixChecks {
+        failures: failures.to_vec(),
+    };
+    let spec = job_spec(ctx, gh, key, pr, settings, head, base, task).await?;
+    let fixed = async {
+        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
+        let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
+        publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await
+    };
+    Ok(match fixed.await {
+        Ok(Ok(sha)) => Event::Fixed { head: sha },
+        Ok(Err(event)) => event,
+        Err(e) => Event::FixFailed(format!("{e:#}")),
+    })
+}
+
+async fn rebase_and_publish(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+) -> Result<Event> {
+    let repo = &key.repo;
+    let git = Git;
+    let (cache, head, trunk) = fetch_pr(ctx, gh, &git, key, pr).await?;
+    if git.is_ancestor(&cache, &trunk, &head).await? {
+        return Ok(Event::Rebased { head, base: trunk });
+    }
+
+    let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
+    let out = ctx.config.data_dir.join("jobs").join(&job_id);
+    let spec = job_spec(ctx, gh, key, pr, settings, &head, &trunk, Task::Rebase).await?;
+    let rebased = async {
+        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
+        let local_head = check_job_output(&git, &cache, &out, pr.number, &trunk, &head).await?;
+        publish_to_pr(gh, &git, &cache, key, snap, pr, &head, &trunk, &local_head).await
+    };
+    Ok(match rebased.await {
+        Ok(Ok(sha)) => Event::Rebased {
             head: sha,
             base: trunk,
-        }),
-        // `updateRefs` refuses when the branch moved: the author pushed while we rebased.
-        Err(_) if gh.branch_sha(&key.repo, &pr.head_ref_name).await? != head => {
-            Ok(Event::HeadMoved)
-        }
-        Err(e) => Ok(Event::RebaseFailed(format!("publishing failed: {e:#}"))),
-    }
+        },
+        Ok(Err(event)) => event,
+        Err(e) => Event::RebaseFailed(format!("{e:#}")),
+    })
 }
 
 /// The job is untrusted, so its output is checked here, not believed. A rebase only replays
@@ -1015,18 +1188,7 @@ async fn check_job_output(
     trunk: &str,
     head: &str,
 ) -> Result<String> {
-    let bundle = out.join(BUNDLE_FILE);
-    let size = tokio::fs::metadata(&bundle)
-        .await
-        .context("the job wrote no bundle")?
-        .len();
-    if size > MAX_BUNDLE_BYTES {
-        bail!("the job's result is {size} bytes, over the {MAX_BUNDLE_BYTES} limit");
-    }
-    let local_head = git
-        .import_bundle(cache, &bundle, &format!("refs/mergepatrol/result/{number}"))
-        .await?;
-    let _ = tokio::fs::remove_file(&bundle).await;
+    let local_head = import_job_output(git, cache, out, number).await?;
     if !git.is_ancestor(cache, trunk, &local_head).await? {
         bail!("the job's result does not sit on the base branch");
     }
@@ -1047,6 +1209,52 @@ async fn check_job_output(
             outside.join(", ")
         );
     }
+    Ok(local_head)
+}
+
+/// A fix may change any file but CI's and the queue's config, and only on top of the PR head.
+async fn check_fix_output(
+    git: &Git,
+    cache: &Path,
+    out: &Path,
+    number: PrNumber,
+    head: &str,
+) -> Result<String> {
+    let local_head = import_job_output(git, cache, out, number).await?;
+    if !git.is_ancestor(cache, head, &local_head).await? || local_head == head {
+        bail!("the fix is not a commit on top of the PR");
+    }
+    let protected: Vec<String> = git
+        .changed_files(cache, head, &local_head)
+        .await?
+        .into_iter()
+        .filter(|f| FIX_PROTECTED.iter().any(|p| f.starts_with(p)))
+        .collect();
+    if !protected.is_empty() {
+        bail!("the fix changed files it may not: {}", protected.join(", "));
+    }
+    Ok(local_head)
+}
+
+/// Imports the job's bundle, once its size is checked: the commit it holds.
+async fn import_job_output(
+    git: &Git,
+    cache: &Path,
+    out: &Path,
+    number: PrNumber,
+) -> Result<String> {
+    let bundle = out.join(BUNDLE_FILE);
+    let size = tokio::fs::metadata(&bundle)
+        .await
+        .context("the job wrote no bundle")?
+        .len();
+    if size > MAX_BUNDLE_BYTES {
+        bail!("the job's result is {size} bytes, over the {MAX_BUNDLE_BYTES} limit");
+    }
+    let local_head = git
+        .import_bundle(cache, &bundle, &format!("refs/mergepatrol/result/{number}"))
+        .await?;
+    let _ = tokio::fs::remove_file(&bundle).await;
     Ok(local_head)
 }
 
@@ -1114,6 +1322,49 @@ mod tests {
             .await
             .unwrap();
         check_job_output(&Git, &cache, &out, 1, &trunk, &head).await
+    }
+
+    /// A fix job result that changes `files` on top of the PR head.
+    async fn check_fix(files: &[(&str, &str)]) -> Result<String> {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(work.join(".github")).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        commit(&work, &[("a.txt", "1\n")]);
+        let head = commit(&work, &[("a.txt", "pr\n")]);
+        let result = commit(&work, files);
+
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        git(&cache, &["init", "-q", "--bare"]);
+        git(
+            &cache,
+            &[
+                "fetch",
+                "-q",
+                work.to_str().unwrap(),
+                &format!("{head}:refs/pr"),
+            ],
+        );
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        Git.create_bundle(&work, &out.join(BUNDLE_FILE), &result, &head)
+            .await
+            .unwrap();
+        check_fix_output(&Git, &cache, &out, 1, &head).await
+    }
+
+    #[tokio::test]
+    async fn a_fix_may_change_files_outside_the_pr() {
+        check_fix(&[("b.txt", "a test it needed\n")]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_fix_may_not_change_ci_config() {
+        let err = check_fix(&[("b.txt", "ok\n"), (".github/ci.yml", "skip: true\n")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("may not: .github/ci.yml"), "{err}");
     }
 
     #[tokio::test(start_paused = true)]

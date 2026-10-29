@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::{GIVE_UP, Resolution, ResolveRequest, Resolver, prompt};
+use std::path::Path;
 
-/// Runs Claude Code headless (`claude -p`) in the rebase worktree.
+use crate::{FixRequest, GIVE_UP, Resolution, ResolveRequest, Resolver, fix_prompt, prompt};
+
+/// Runs Claude Code headless (`claude -p`) in the job's worktree.
 pub struct ClaudeResolver {
     /// The workspace's Anthropic API key.
     pub api_key: Option<String>,
@@ -30,25 +32,24 @@ impl ClaudeResolver {
         tools.extend(verify.iter().map(|c| format!("Bash({c})")));
         tools.join(",")
     }
-}
 
-#[async_trait]
-impl Resolver for ClaudeResolver {
-    fn name(&self) -> String {
-        format!("claude ({})", self.model)
-    }
-
-    async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution> {
+    async fn run(
+        &self,
+        workdir: &Path,
+        prompt: String,
+        verify: &[String],
+        transcript_path: &Path,
+    ) -> Result<Resolution> {
         let key = self
             .api_key
             .clone()
             .context("no Anthropic API key: add one in the dashboard settings")?;
         let mut cmd = tokio::process::Command::new("claude");
-        cmd.current_dir(req.workdir).kill_on_drop(true);
+        cmd.current_dir(workdir).kill_on_drop(true);
         // `--bare` reads only ANTHROPIC_API_KEY, never a login on the machine.
         cmd.env("ANTHROPIC_API_KEY", key);
         cmd.arg("-p")
-            .arg(prompt(&req))
+            .arg(prompt)
             .args([
                 "--bare",
                 "--output-format",
@@ -60,7 +61,7 @@ impl Resolver for ClaudeResolver {
             // Anything not in the allowlist is denied, never prompted.
             .args(["--permission-mode", "dontAsk"])
             .arg("--allowedTools")
-            .arg(Self::allowed_tools(req.verify_commands))
+            .arg(Self::allowed_tools(verify))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -75,10 +76,10 @@ impl Resolver for ClaudeResolver {
             let _ = stderr.read_to_string(&mut err).await;
             err
         });
-        if let Some(dir) = req.transcript.parent() {
+        if let Some(dir) = transcript_path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
-        let mut transcript = tokio::fs::File::create(req.transcript).await?;
+        let mut transcript = tokio::fs::File::create(transcript_path).await?;
 
         let read = async {
             let mut lines = BufReader::new(stdout).lines();
@@ -134,6 +135,33 @@ impl Resolver for ClaudeResolver {
             turns,
             cost_usd: result["total_cost_usd"].as_f64(),
         })
+    }
+}
+
+#[async_trait]
+impl Resolver for ClaudeResolver {
+    fn name(&self) -> String {
+        format!("claude ({})", self.model)
+    }
+
+    async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution> {
+        self.run(
+            req.workdir,
+            prompt(&req),
+            req.verify_commands,
+            req.transcript,
+        )
+        .await
+    }
+
+    async fn fix(&self, req: FixRequest<'_>) -> Result<Resolution> {
+        self.run(
+            req.workdir,
+            fix_prompt(&req),
+            req.verify_commands,
+            req.transcript,
+        )
+        .await
     }
 }
 

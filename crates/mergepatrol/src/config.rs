@@ -68,6 +68,7 @@ impl Config {
                 effort: opt("MERGEPATROL_EFFORT", "medium"),
             },
             verify: Vec::new(),
+            fix_ci: Default::default(),
         };
         repo_defaults.check().map_err(|e| {
             anyhow::anyhow!("MERGEPATROL_LABEL, _BATCH_SIZE, _MODEL or _EFFORT: {e}")

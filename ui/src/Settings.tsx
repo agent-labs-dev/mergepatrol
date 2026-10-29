@@ -38,8 +38,8 @@ export function Settings({ workspace }: { workspace: number }) {
         <div className="p-5">
           <h2 className="font-semibold">Anthropic API key</h2>
           <p className="mt-1 text-muted">
-            The resolver uses it when a rebase has conflicts. It is stored encrypted, and never
-            shown again.
+            The agent uses it when a rebase has conflicts, and to fix failed checks. It is stored
+            encrypted, and never shown again.
           </p>
           <input
             type="password"

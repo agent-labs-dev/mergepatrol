@@ -68,6 +68,8 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
             "issues": "write",
             "checks": "read",
             "statuses": "read",
+            // The logs of failed GitHub Actions jobs, for the agent that fixes them.
+            "actions": "read",
             "metadata": "read",
         },
     })

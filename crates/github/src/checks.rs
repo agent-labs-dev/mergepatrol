@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
 
-use mergepatrol_core::RepoName;
+use mergepatrol_core::{CheckFailure, RepoName};
 
 use crate::Installation;
 
@@ -159,6 +159,162 @@ impl Installation {
     }
 }
 
+/// How much of a failed job's log the fix agent gets: its end, where the error is.
+const LOG_TAIL_BYTES: usize = 32 * 1024;
+const ANNOTATIONS: usize = 50;
+
+impl Installation {
+    /// What GitHub shows of why the checks `names` failed on `sha`.
+    pub async fn check_failures(
+        &self,
+        repo: &RepoName,
+        sha: &str,
+        names: &[String],
+    ) -> Result<Vec<CheckFailure>> {
+        let mut found: BTreeMap<String, String> = BTreeMap::new();
+        let runs: Value = self
+            .rest(
+                Method::GET,
+                &format!("/repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest"),
+                None,
+            )
+            .await?;
+        for run in runs["check_runs"].as_array().into_iter().flatten() {
+            let Some(name) = run["name"]
+                .as_str()
+                .filter(|n| names.iter().any(|m| m == n))
+            else {
+                continue;
+            };
+            found.insert(name.to_owned(), self.check_run_details(repo, run).await?);
+        }
+        let status: Value = self
+            .rest(
+                Method::GET,
+                &format!("/repos/{repo}/commits/{sha}/status"),
+                None,
+            )
+            .await?;
+        for s in status["statuses"].as_array().into_iter().flatten() {
+            let Some(name) = s["context"]
+                .as_str()
+                .filter(|n| names.iter().any(|m| m == n))
+            else {
+                continue;
+            };
+            let mut details = format!("Commit status: {}", s["state"].as_str().unwrap_or("?"));
+            for (label, field) in [("Description", "description"), ("Details", "target_url")] {
+                if let Some(v) = s[field].as_str().filter(|v| !v.is_empty()) {
+                    details.push_str(&format!("\n{label}: {v}"));
+                }
+            }
+            found.entry(name.to_owned()).or_insert(details);
+        }
+        Ok(names
+            .iter()
+            .map(|name| CheckFailure {
+                name: name.clone(),
+                details: found
+                    .remove(name)
+                    .unwrap_or_else(|| "GitHub shows nothing about this check.".into()),
+            })
+            .collect())
+    }
+
+    /// A check run's conclusion, output and annotations, and for a GitHub Actions job, the
+    /// end of its log.
+    async fn check_run_details(&self, repo: &RepoName, run: &Value) -> Result<String> {
+        let mut details = format!(
+            "Check run: {}",
+            run["conclusion"].as_str().unwrap_or("failed")
+        );
+        let output = &run["output"];
+        for field in ["title", "summary", "text"] {
+            if let Some(v) = output[field].as_str().filter(|v| !v.trim().is_empty()) {
+                details.push_str(&format!("\n\n{}", v.trim()));
+            }
+        }
+        let id = run["id"].as_u64().unwrap_or_default();
+        if output["annotations_count"].as_u64().unwrap_or(0) > 0 {
+            let annotations: Value = self
+                .rest(
+                    Method::GET,
+                    &format!("/repos/{repo}/check-runs/{id}/annotations?per_page={ANNOTATIONS}"),
+                    None,
+                )
+                .await?;
+            let lines: Vec<String> = annotations
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|a| {
+                    format!(
+                        "- {}:{} [{}] {}",
+                        a["path"].as_str().unwrap_or("?"),
+                        a["start_line"].as_u64().unwrap_or(0),
+                        a["annotation_level"].as_str().unwrap_or("?"),
+                        a["message"].as_str().unwrap_or("").trim()
+                    )
+                })
+                .collect();
+            if !lines.is_empty() {
+                details.push_str(&format!("\n\nAnnotations:\n{}", lines.join("\n")));
+            }
+        }
+        // A GitHub Actions check run is a workflow job, with the same ID. Its log needs the
+        // App's `actions: read` permission, which an App created before it lacks.
+        if run["app"]["slug"] == "github-actions" {
+            let res = self
+                .request(
+                    Method::GET,
+                    &format!("/repos/{repo}/actions/jobs/{id}/logs"),
+                    None,
+                )
+                .await?;
+            match (res.status, res.body) {
+                (s, Value::String(log)) if s.is_success() => {
+                    details.push_str(&format!(
+                        "\n\nThe end of the log:\n```\n{}\n```",
+                        log_tail(&log)
+                    ));
+                }
+                (StatusCode::FORBIDDEN, _) => details
+                    .push_str("\n\n(No log: the GitHub App lacks the `actions: read` permission.)"),
+                _ => {}
+            }
+        }
+        if let Some(url) = run["details_url"].as_str() {
+            details.push_str(&format!("\n\nDetails: {url}"));
+        }
+        Ok(details)
+    }
+}
+
+/// The last `LOG_TAIL_BYTES` of a job log, from a line start, without the timestamp that
+/// GitHub Actions puts before each line.
+fn log_tail(log: &str) -> String {
+    let mut start = log.len().saturating_sub(LOG_TAIL_BYTES);
+    while !log.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &log[start..];
+    let tail = match (start, tail.find('\n')) {
+        (0, _) | (_, None) => tail,
+        (_, Some(i)) => &tail[i + 1..],
+    };
+    tail.lines()
+        .map(|l| match l.split_once(' ') {
+            Some((stamp, rest))
+                if stamp.len() >= 20 && stamp.ends_with('Z') && stamp.as_bytes()[4] == b'-' =>
+            {
+                rest
+            }
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +338,18 @@ mod tests {
             ("flaky-optional", CheckState::Failed),
         ]);
         assert_eq!(c.verdict(&["test".into()]).0, CheckState::Passed);
+    }
+
+    #[test]
+    fn a_log_tail_starts_at_a_line_and_drops_the_timestamps() {
+        let log = format!(
+            "{}\n2026-10-29T10:00:00.1234567Z error[E0425]: cannot find value `x`\nplain line",
+            "x".repeat(LOG_TAIL_BYTES)
+        );
+        assert_eq!(
+            log_tail(&log),
+            "error[E0425]: cannot find value `x`\nplain line"
+        );
     }
 
     #[test]

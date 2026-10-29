@@ -3,4 +3,12 @@
 /**
  * A repo's settings, as its config file sets them.
  */
-export type RepoSettingsView = { label: string, batch_size: number, model: string, effort: string, verify: Array<string>, };
+export type RepoSettingsView = { label: string, batch_size: number, model: string, effort: string, verify: Array<string>, 
+/**
+ * The agent fixes failed required checks.
+ */
+fix_ci: boolean, 
+/**
+ * The most fixes a PR gets, before it is ejected.
+ */
+fix_ci_attempts: number, };

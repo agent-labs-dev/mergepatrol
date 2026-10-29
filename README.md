@@ -4,6 +4,8 @@ Mergepatrol is a merge queue for GitHub. Add a label to a pull request, and Merg
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
+When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
+
 ## Batches
 
 A queue that runs CI once per PR merges a few PRs an hour. So when several queued PRs have passed their own checks, Mergepatrol tests them together:
@@ -90,9 +92,14 @@ resolver:
   effort: medium   # low, medium, high, xhigh or max
 verify:
   - cargo check
+fix_ci:
+  enabled: true    # an agent fixes failed required checks
+  attempts: 2      # 1 to 5 fixes, before the PR is ejected
 ```
 
-The verify commands run after an agent resolution, before the publish.
+The verify commands run after an agent resolution or fix, before the publish.
+
+A fix runs in the sandbox, like a rebase, while the PR keeps its place at the head of the queue. It may change any file except those under `.github/` and `.mergepatrol/`. The agent gets each failed check's output and annotations, and for a GitHub Actions job, the end of its log. The log needs the App's `actions: read` permission: an App created before this permission existed must be given it on GitHub, or the agent works from the output alone.
 
 A repo queues once its default branch has the file. Mergepatrol looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Repos** override the file, until you choose **Follow the config file**.
 

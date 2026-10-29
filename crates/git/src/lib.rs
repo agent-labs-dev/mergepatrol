@@ -245,6 +245,24 @@ impl Git {
         Ok(())
     }
 
+    /// Whether the worktree has changes to commit, untracked files included.
+    pub async fn is_dirty(&self, wt: &Path) -> Result<bool> {
+        Ok(!self
+            .run(wt, &["status", "--porcelain"])
+            .await?
+            .trim()
+            .is_empty())
+    }
+
+    /// Commits every change in the worktree, untracked files included, as Mergepatrol.
+    pub async fn commit_all(&self, wt: &Path, message: &str) -> Result<()> {
+        self.run(wt, &["add", "-A"]).await?;
+        let author = format!("{} <{}>", COMMITTER.0, COMMITTER.1);
+        let mut cmd = self.git(wt, &["commit", "-q", "--author", &author, "-F", "-"]);
+        input(cmd.stdin(Stdio::piped()), message.as_bytes(), "git commit").await?;
+        Ok(())
+    }
+
     pub async fn add_trailer(&self, wt: &Path, message: &str, trailer: &str) -> Result<String> {
         // Without the newline, older git (2.39 in our bookworm images) puts the trailer right under the subject.
         let message = format!("{}\n", message.trim_end());
