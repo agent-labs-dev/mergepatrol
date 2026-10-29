@@ -1,4 +1,5 @@
 mod config;
+mod github;
 mod job;
 mod publish;
 mod queue;

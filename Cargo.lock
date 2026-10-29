@@ -1220,6 +1220,7 @@ name = "mergepatrol"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "mergepatrol-core",
  "mergepatrol-executor",
