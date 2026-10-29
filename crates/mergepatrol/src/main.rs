@@ -135,7 +135,9 @@ async fn orchestrator() -> Result<()> {
                 launch: Box::new(CloudRunLaunch {
                     job: job.clone(),
                     timeout: JOB_TIMEOUT,
-                    http: reqwest::Client::new(),
+                    http: reqwest::Client::builder()
+                        .timeout(mergepatrol_executor::remote::CLOUD_RUN_REQUEST_TIMEOUT)
+                        .build()?,
                 }),
                 timeout: JOB_TIMEOUT,
             })

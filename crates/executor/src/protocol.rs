@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
 pub const BUNDLE_FILE: &str = "result.bundle";
+/// The largest bundle a job may return.
+pub const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 
 /// No `Debug`: it holds a GitHub token and a token for the Anthropic proxy.
 #[derive(Clone, Serialize, Deserialize)]

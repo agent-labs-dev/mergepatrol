@@ -19,21 +19,36 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 use crate::Executor;
-use crate::protocol::{BUNDLE_FILE, JobResult, JobSpec, RESULT_FILE};
+use crate::protocol::{BUNDLE_FILE, JobResult, JobSpec, MAX_BUNDLE_BYTES, RESULT_FILE};
 
 /// Under Cloud Run's 32 MiB limit on an HTTP/1 request, which the bundle can exceed.
 pub const CHUNK_BYTES: usize = 16 * 1024 * 1024;
+/// The most a job may upload: its bundle, and room for its result. The job is untrusted, so
+/// more is refused as it comes, not after it filled the disk.
+const MAX_UPLOAD_BYTES: u64 = MAX_BUNDLE_BYTES + CHUNK_BYTES as u64;
 
 /// The jobs waiting for their spec, or uploading their output, by token.
-#[derive(Default)]
 pub struct Mailbox {
     slots: Mutex<HashMap<String, Slot>>,
+    /// The most each job may upload.
+    limit: u64,
+}
+
+impl Default for Mailbox {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::default(),
+            limit: MAX_UPLOAD_BYTES,
+        }
+    }
 }
 
 struct Slot {
     /// Taken by the first fetch.
     spec: Option<Vec<u8>>,
     out: PathBuf,
+    /// The bytes uploaded so far.
+    received: u64,
     done: Option<oneshot::Sender<()>>,
 }
 
@@ -61,6 +76,7 @@ impl Mailbox {
             Slot {
                 spec: Some(serde_json::to_vec(spec)?),
                 out: out.to_owned(),
+                received: 0,
                 done: Some(tx),
             },
         );
@@ -73,8 +89,17 @@ impl Mailbox {
         ))
     }
 
-    fn out(&self, token: &str) -> Option<PathBuf> {
-        self.slots.lock().unwrap().get(token).map(|s| s.out.clone())
+    /// Where the job's next `bytes` go, if they fit under the limit: they count as received from
+    /// here on.
+    fn receive(&self, token: &str, bytes: usize) -> Result<PathBuf, StatusCode> {
+        let mut slots = self.slots.lock().unwrap();
+        let slot = slots.get_mut(token).ok_or(StatusCode::NOT_FOUND)?;
+        let received = slot.received + bytes as u64;
+        if received > self.limit {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        slot.received = received;
+        Ok(slot.out.clone())
     }
 }
 
@@ -109,8 +134,9 @@ async fn append(
     if name != RESULT_FILE && name != BUNDLE_FILE {
         return StatusCode::NOT_FOUND;
     }
-    let Some(out) = mb.out(&token) else {
-        return StatusCode::NOT_FOUND;
+    let out = match mb.receive(&token, body.len()) {
+        Ok(out) => out,
+        Err(status) => return status,
     };
     let written = async {
         let mut f = tokio::fs::OpenOptions::new()
@@ -263,6 +289,10 @@ pub struct CloudRunLaunch {
 
 const RUN_API: &str = "https://run.googleapis.com/v2";
 const EXECUTION_POLL: Duration = Duration::from_secs(10);
+/// Failed polls in a row before the execution counts as lost: a minute.
+const MAX_FAILED_POLLS: u32 = 6;
+/// Every call to Cloud Run and the metadata server: a hung one would hold the job's queue.
+pub const CLOUD_RUN_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn gcp_token(http: &reqwest::Client) -> Result<String> {
     let r: Value = http
@@ -318,32 +348,60 @@ struct CloudRunExecution {
     http: reqwest::Client,
 }
 
+impl CloudRunExecution {
+    /// `None` while the execution runs; then whether it succeeded.
+    async fn poll(&self) -> Result<Option<Result<()>>> {
+        let e: Value = self
+            .http
+            .get(format!("{RUN_API}/{}", self.name))
+            .bearer_auth(gcp_token(&self.http).await?)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if e.get("completionTime").is_none() {
+            return Ok(None);
+        }
+        if e["succeededCount"].as_u64().unwrap_or(0) > 0 {
+            return Ok(Some(Ok(())));
+        }
+        Ok(Some(Err(anyhow::anyhow!(
+            "the Cloud Run execution failed: {}. Logs: {}",
+            e["conditions"],
+            e["logUri"].as_str().unwrap_or("none")
+        ))))
+    }
+}
+
+/// Polls a job until it ends. One failed poll says nothing of the job, which runs on; after
+/// `MAX_FAILED_POLLS` in a row it counts as lost, and is cancelled, since it may still run.
+async fn watch<F>(mut poll: impl FnMut() -> F, cancel: impl Fn()) -> Result<()>
+where
+    F: Future<Output = Result<Option<Result<()>>>>,
+{
+    let mut failed = 0;
+    loop {
+        tokio::time::sleep(EXECUTION_POLL).await;
+        match poll().await {
+            Ok(None) => failed = 0,
+            Ok(Some(ended)) => return ended,
+            Err(e) if failed < MAX_FAILED_POLLS => {
+                failed += 1;
+                tracing::warn!(error = %format!("{e:#}"), "could not read the job's execution");
+            }
+            Err(e) => {
+                cancel();
+                return Err(e.context("read the job's execution"));
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Launched for CloudRunExecution {
     async fn ended(&self) -> Result<()> {
-        loop {
-            tokio::time::sleep(EXECUTION_POLL).await;
-            let e: Value = self
-                .http
-                .get(format!("{RUN_API}/{}", self.name))
-                .bearer_auth(gcp_token(&self.http).await?)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if e.get("completionTime").is_none() {
-                continue;
-            }
-            if e["succeededCount"].as_u64().unwrap_or(0) > 0 {
-                return Ok(());
-            }
-            bail!(
-                "the Cloud Run execution failed: {}. Logs: {}",
-                e["conditions"],
-                e["logUri"].as_str().unwrap_or("none")
-            );
-        }
+        watch(|| self.poll(), || self.cancel()).await
     }
 
     fn cancel(&self) {
@@ -500,6 +558,49 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let err = ex.run("j", &spec(), out.path()).await.unwrap_err();
         assert!(err.to_string().contains("without reporting"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_upload_past_the_limit_is_refused_as_it_comes() {
+        let mailbox = Arc::new(Mailbox {
+            slots: Mutex::default(),
+            limit: 12,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(axum::serve(listener, mailbox.clone().router()).into_future());
+        let out = tempfile::tempdir().unwrap();
+        let (closed, _done) = mailbox.open(&spec(), out.path()).unwrap();
+        let url = format!("{base}/jobs/{}/files/{BUNDLE_FILE}", closed.token);
+        let post = |body: &'static [u8]| reqwest::Client::new().post(&url).body(body).send();
+        assert_eq!(post(b"0123456789").await.unwrap().status(), 204);
+        assert_eq!(post(b"abcde").await.unwrap().status(), 413);
+        assert_eq!(
+            std::fs::read(out.path().join(BUNDLE_FILE)).unwrap(),
+            b"0123456789"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_polls_are_retried_until_the_job_counts_as_lost() {
+        // Fails `failures` polls, then says the job succeeded.
+        async fn watched(failures: u32) -> (Result<()>, bool) {
+            let polls = std::sync::atomic::AtomicU32::new(0);
+            let cancelled = std::sync::atomic::AtomicBool::new(false);
+            let poll = || async {
+                match polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < failures {
+                    true => bail!("503 Service Unavailable"),
+                    false => Ok(Some(Ok(()))),
+                }
+            };
+            let cancel = || cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+            let ended = watch(poll, cancel).await;
+            (ended, cancelled.into_inner())
+        }
+        let (ended, cancelled) = watched(MAX_FAILED_POLLS).await;
+        assert!(ended.is_ok() && !cancelled, "{ended:?}");
+        let (ended, cancelled) = watched(MAX_FAILED_POLLS + 1).await;
+        assert!(ended.is_err() && cancelled, "{ended:?}");
     }
 
     #[tokio::test]
