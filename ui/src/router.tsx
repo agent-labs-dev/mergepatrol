@@ -7,7 +7,7 @@ import {
 } from "@tanstack/react-router";
 import { App } from "./App";
 import type { OutcomeView } from "./api/OutcomeView";
-import { History, OUTCOMES, WINDOWS, type Window } from "./History";
+import { History, LISTS, type List, OUTCOMES, WINDOWS, type Window } from "./History";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
@@ -61,10 +61,20 @@ const queue = createRoute({
 const history = createRoute({
   getParentRoute: () => workspace,
   path: "history",
-  /** The repo in view, the window in days, and the outcome listed. Every repo, 30 days, and
-   * every outcome by default. */
-  validateSearch: (search): { repo?: string; days?: Window; outcome?: OutcomeView } => ({
+  /** What the side lists, the repo and the developer in view, the window in days, and the
+   * outcome listed. Repos, every repo and developer, 30 days, and every outcome by default. */
+  validateSearch: (
+    search,
+  ): {
+    list?: List;
+    repo?: string;
+    author?: string;
+    days?: Window;
+    outcome?: OutcomeView;
+  } => ({
+    list: oneOf(LISTS, search.list),
     repo: optional(search.repo, "string"),
+    author: optional(search.author, "string"),
     days: oneOf(WINDOWS, search.days),
     outcome: oneOf(OUTCOMES, search.outcome),
   }),

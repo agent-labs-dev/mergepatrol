@@ -10,8 +10,8 @@ use mergepatrol_core::{
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
-    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, ExitQuery, ExitRecord, ExitStats, RepoState, Scope,
-    api_key_secret,
+    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
+    RepoState, Scope, Slice, api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -239,14 +239,19 @@ pub struct ExitsPage {
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct HistoryStatsView {
-    /// Each repo's, then every repo's together, with no `repo`.
+    /// Each repo's, then every repo's together, with no `repo`. Of the author's PRs with one,
+    /// whatever the repo: it picks a row.
     pub current: Vec<StatsView>,
     pub previous: Vec<StatsView>,
+    /// Each author's, by login, of the repo's PRs with one, whatever the author. Not the PRs
+    /// of deleted accounts.
+    pub developers: Vec<DeveloperStatsView>,
     /// The PRs merged on each UTC day of the window, today last.
     pub merged_by_day: Vec<u32>,
     /// Where the merged PRs' time went, in the queue's order. Empty without a merge.
     pub steps: Vec<StepStatsView>,
-    /// The agent runs of the window, of every PR, by model and effort: the costliest first.
+    /// The agent runs of the window on the repo's and author's PRs, by model and effort: the
+    /// costliest first.
     pub llms: Vec<LlmStatsView>,
 }
 
@@ -370,6 +375,35 @@ pub struct StatsView {
     /// Seconds from joining the queue to merging. `None` without a merge.
     pub p50_secs: Option<f64>,
     pub p95_secs: Option<f64>,
+}
+
+/// One author's PRs over the window.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct DeveloperStatsView {
+    pub author: PersonView,
+    /// A GitHub App, such as Dependabot, rather than a user.
+    pub bot: bool,
+    pub merged: u32,
+    pub ejected: u32,
+    pub removed: u32,
+    /// Seconds from joining the queue to merging. `None` without a merge.
+    pub p50_secs: Option<f64>,
+    pub p95_secs: Option<f64>,
+}
+
+impl From<DeveloperStats> for DeveloperStatsView {
+    fn from(s: DeveloperStats) -> Self {
+        DeveloperStatsView {
+            bot: s.author.bot,
+            author: s.author.into(),
+            merged: s.merged as u32,
+            ejected: s.ejected as u32,
+            removed: s.removed as u32,
+            p50_secs: s.p50_secs,
+            p95_secs: s.p95_secs,
+        }
+    }
 }
 
 /// A time a PR left the queue, and the PR as it was then.
@@ -692,6 +726,8 @@ const HISTORY_PAGE: u32 = 50;
 pub(crate) struct HistoryQuery {
     /// Every repo without one.
     repo: Option<String>,
+    /// A GitHub login. Every author without one.
+    author: Option<String>,
     /// The window, in days back from now.
     days: u32,
     /// Every outcome without one.
@@ -706,6 +742,13 @@ impl HistoryQuery {
             .as_deref()
             .map(|r| RepoName::parse(r).ok_or(ApiError::bad_request("repo must be owner/name")))
             .transpose()
+    }
+
+    fn slice<'a>(&'a self, repo: Option<&'a RepoName>) -> Slice<'a> {
+        Slice {
+            repo,
+            author: self.author.as_deref(),
+        }
     }
 
     fn days(&self) -> Result<u32, ApiError> {
@@ -734,7 +777,7 @@ pub(crate) async fn history(
         .store
         .exits(&ExitQuery {
             installation_id: id,
-            repo: repo.as_ref(),
+            slice: q.slice(repo.as_ref()),
             outcomes,
             days: q.days()?,
             before: q.before,
@@ -758,16 +801,29 @@ pub(crate) async fn history_stats(
 ) -> Result<Json<HistoryStatsView>, ApiError> {
     let id = user.workspace(id)?;
     let (repo, days) = (q.repo()?, q.days()?);
-    let (current, previous, merged_by_day, steps, spends) = tokio::try_join!(
-        app.store.exit_stats(id, days, 0),
-        app.store.exit_stats(id, 2 * days, days),
-        app.store.merged_by_day(id, repo.as_ref(), days),
-        app.store.step_stats(id, repo.as_ref(), days),
-        app.store.spends(id, repo.as_ref(), days),
+    let slice = q.slice(repo.as_ref());
+    // Each repo's of the author's, and each author's of the repo's, so either can break down
+    // the other.
+    let by_repo = Slice {
+        repo: None,
+        ..slice
+    };
+    let by_author = Slice {
+        author: None,
+        ..slice
+    };
+    let (current, previous, developers, merged_by_day, steps, spends) = tokio::try_join!(
+        app.store.exit_stats(id, by_repo, days, 0),
+        app.store.exit_stats(id, by_repo, 2 * days, days),
+        app.store.developer_stats(id, by_author, days),
+        app.store.merged_by_day(id, slice, days),
+        app.store.step_stats(id, slice, days),
+        app.store.spends(id, slice, days),
     )?;
     Ok(Json(HistoryStatsView {
         current: current.into_iter().map(StatsView::from).collect(),
         previous: previous.into_iter().map(StatsView::from).collect(),
+        developers: developers.into_iter().map(Into::into).collect(),
         merged_by_day: merged_by_day.into_iter().map(|n| n as u32).collect(),
         steps: steps
             .into_iter()

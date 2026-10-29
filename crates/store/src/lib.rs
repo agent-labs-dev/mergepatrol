@@ -12,7 +12,7 @@ pub use vault::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{
-    Lane, PrNumber, PrSummary, RepoName, Spend, SpendTask, Step, StepTimes, step_times,
+    Lane, Person, PrNumber, PrSummary, RepoName, Spend, SpendTask, Step, StepTimes, step_times,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -65,12 +65,20 @@ pub struct StepStats {
     pub p95_secs: f64,
 }
 
+/// Which PRs a metric counts: one repo's or every repo's, one author's or everyone's.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Slice<'a> {
+    /// `None` for every repo of the workspace.
+    pub repo: Option<&'a RepoName>,
+    /// A GitHub login. `None` for every author.
+    pub author: Option<&'a str>,
+}
+
 /// Which exits to list, the newest first.
 #[derive(Clone, Debug)]
 pub struct ExitQuery<'a> {
     pub installation_id: u64,
-    /// `None` for every repo of the workspace.
-    pub repo: Option<&'a RepoName>,
+    pub slice: Slice<'a>,
     /// Outcomes to keep. Empty keeps all.
     pub outcomes: &'a [&'a str],
     /// Only exits from the last `days`.
@@ -90,6 +98,18 @@ pub struct ExitStats {
     /// Dequeued or cancelled: the label came off, or the PR closed.
     pub removed: u64,
     /// Seconds from joining the queue to merging, of the merged PRs. `None` without any.
+    pub p50_secs: Option<f64>,
+    pub p95_secs: Option<f64>,
+}
+
+/// The exits of one author's PRs over a stretch of time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeveloperStats {
+    /// As of their latest exit in the stretch.
+    pub author: Person,
+    pub merged: u64,
+    pub ejected: u64,
+    pub removed: u64,
     pub p50_secs: Option<f64>,
     pub p95_secs: Option<f64>,
 }
@@ -133,34 +153,41 @@ pub trait Store: Send + Sync {
     /// PR that never joined.
     async fn has_left(&self, key: &LaneKey, pr: PrNumber) -> Result<bool>;
     async fn exits(&self, query: &ExitQuery<'_>) -> Result<Vec<ExitRecord>>;
-    /// Each repo's, then every repo's together, from `from_days` ago to `to_days` ago.
+    /// Each repo's of the slice, then the slice's together, from `from_days` ago to `to_days`
+    /// ago.
     async fn exit_stats(
         &self,
         installation_id: u64,
+        slice: Slice<'_>,
         from_days: u32,
         to_days: u32,
     ) -> Result<Vec<ExitStats>>;
+    /// Each author's of the slice in the last `days`, by login. PRs whose author's account was
+    /// deleted count for none.
+    async fn developer_stats(
+        &self,
+        installation_id: u64,
+        slice: Slice<'_>,
+        days: u32,
+    ) -> Result<Vec<DeveloperStats>>;
     /// Of the PRs merged in the last `days`, in the order of `Step::ALL`. Empty without any.
     async fn step_stats(
         &self,
         installation_id: u64,
-        repo: Option<&RepoName>,
+        slice: Slice<'_>,
         days: u32,
     ) -> Result<Vec<StepStats>>;
-    /// The PRs merged on each of the last `days` UTC days, today last. `None` for every repo.
+    /// The PRs merged on each of the last `days` UTC days, today last.
     async fn merged_by_day(
         &self,
         installation_id: u64,
-        repo: Option<&RepoName>,
+        slice: Slice<'_>,
         days: u32,
     ) -> Result<Vec<u64>>;
-    /// The agent runs of the last `days`, whatever became of their PRs. `None` for every repo.
-    async fn spends(
-        &self,
-        installation_id: u64,
-        repo: Option<&RepoName>,
-        days: u32,
-    ) -> Result<Vec<Spend>>;
+    /// The agent runs of the last `days`, whatever became of their PRs. With an author, only
+    /// the runs on PRs that have left the queue: a PR's author is known from its exit.
+    async fn spends(&self, installation_id: u64, slice: Slice<'_>, days: u32)
+    -> Result<Vec<Spend>>;
     async fn put_secret(&self, scope: Scope, name: &str, secret: SecretRecord) -> Result<()>;
     async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>>;
     async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()>;
@@ -562,17 +589,19 @@ impl Store for PgStore {
                 to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
              FROM exits
              WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
+                AND ($7::TEXT IS NULL OR summary->'author'->>'login' = $7)
                 AND (cardinality($3::TEXT[]) = 0 OR outcome = ANY($3))
                 AND at > now() - make_interval(days => $4)
                 AND ($5::BIGINT IS NULL OR id < $5)
              ORDER BY id DESC LIMIT $6"#,
         )
         .bind(q.installation_id as i64)
-        .bind(q.repo.map(|r| r.to_string()))
+        .bind(q.slice.repo.map(|r| r.to_string()))
         .bind(q.outcomes)
         .bind(q.days as i32)
         .bind(q.before)
         .bind(q.limit as i64)
+        .bind(q.slice.author)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
@@ -599,6 +628,7 @@ impl Store for PgStore {
     async fn exit_stats(
         &self,
         installation_id: u64,
+        slice: Slice<'_>,
         from_days: u32,
         to_days: u32,
     ) -> Result<Vec<ExitStats>> {
@@ -613,6 +643,8 @@ impl Store for PgStore {
                     FILTER (WHERE outcome = 'merged') AS p95
              FROM exits
              WHERE installation_id = $1
+                AND ($4::TEXT IS NULL OR repo = $4)
+                AND ($5::TEXT IS NULL OR summary->'author'->>'login' = $5)
                 AND at > now() - make_interval(days => $2)
                 AND at <= now() - make_interval(days => $3)
              GROUP BY GROUPING SETS ((repo), ())
@@ -621,6 +653,8 @@ impl Store for PgStore {
         .bind(installation_id as i64)
         .bind(from_days as i32)
         .bind(to_days as i32)
+        .bind(slice.repo.map(|r| r.to_string()))
+        .bind(slice.author)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -636,10 +670,54 @@ impl Store for PgStore {
             .collect())
     }
 
+    async fn developer_stats(
+        &self,
+        installation_id: u64,
+        slice: Slice<'_>,
+        days: u32,
+    ) -> Result<Vec<DeveloperStats>> {
+        let rows = sqlx::query(
+            "SELECT summary->'author'->>'login' AS login,
+                (array_agg(summary->'author' ORDER BY id DESC))[1] AS author,
+                count(*) FILTER (WHERE outcome = 'merged') AS merged,
+                count(*) FILTER (WHERE outcome = 'ejected') AS ejected,
+                count(*) FILTER (WHERE outcome IN ('dequeued', 'cancelled')) AS removed,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM at - enqueued_at)::FLOAT8)
+                    FILTER (WHERE outcome = 'merged') AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM at - enqueued_at)::FLOAT8)
+                    FILTER (WHERE outcome = 'merged') AS p95
+             FROM exits
+             WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
+                AND ($3::TEXT IS NULL OR summary->'author'->>'login' = $3)
+                AND summary->'author'->>'login' IS NOT NULL
+                AND at > now() - make_interval(days => $4)
+             GROUP BY login
+             ORDER BY login",
+        )
+        .bind(installation_id as i64)
+        .bind(slice.repo.map(|r| r.to_string()))
+        .bind(slice.author)
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(DeveloperStats {
+                    author: serde_json::from_value(row.get("author"))?,
+                    merged: row.get::<i64, _>("merged") as u64,
+                    ejected: row.get::<i64, _>("ejected") as u64,
+                    removed: row.get::<i64, _>("removed") as u64,
+                    p50_secs: row.get("p50"),
+                    p95_secs: row.get("p95"),
+                })
+            })
+            .collect()
+    }
+
     async fn step_stats(
         &self,
         installation_id: u64,
-        repo: Option<&RepoName>,
+        slice: Slice<'_>,
         days: u32,
     ) -> Result<Vec<StepStats>> {
         let rows = sqlx::query(
@@ -648,12 +726,14 @@ impl Store for PgStore {
                 percentile_cont(0.95) WITHIN GROUP (ORDER BY s.value::FLOAT8) AS p95
              FROM exits, jsonb_each_text(steps) AS s
              WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
+                AND ($4::TEXT IS NULL OR summary->'author'->>'login' = $4)
                 AND outcome = 'merged' AND at > now() - make_interval(days => $3)
              GROUP BY s.key",
         )
         .bind(installation_id as i64)
-        .bind(repo.map(|r| r.to_string()))
+        .bind(slice.repo.map(|r| r.to_string()))
         .bind(days as i32)
+        .bind(slice.author)
         .fetch_all(&self.pool)
         .await?;
         let mut stats: Vec<StepStats> = rows
@@ -674,19 +754,25 @@ impl Store for PgStore {
     async fn spends(
         &self,
         installation_id: u64,
-        repo: Option<&RepoName>,
+        slice: Slice<'_>,
         days: u32,
     ) -> Result<Vec<Spend>> {
         let rows = sqlx::query(
-            "SELECT kind, message FROM events
+            "SELECT kind, message FROM events e
              WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
                 AND kind = ANY($3) AND at > now() - make_interval(days => $4)
+                AND ($5::TEXT IS NULL OR EXISTS (
+                    SELECT 1 FROM exits x
+                    WHERE x.installation_id = e.installation_id AND x.repo = e.repo
+                        AND x.pr = e.pr AND x.summary->'author'->>'login' = $5
+                ))
              ORDER BY id",
         )
         .bind(installation_id as i64)
-        .bind(repo.map(|r| r.to_string()))
+        .bind(slice.repo.map(|r| r.to_string()))
         .bind(SpendTask::event_kinds())
         .bind(days as i32)
+        .bind(slice.author)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -698,13 +784,14 @@ impl Store for PgStore {
     async fn merged_by_day(
         &self,
         installation_id: u64,
-        repo: Option<&RepoName>,
+        slice: Slice<'_>,
         days: u32,
     ) -> Result<Vec<u64>> {
         let rows = sqlx::query(
             "SELECT count(e.id) AS merged
              FROM generate_series(0, $3 - 1) AS ago
              LEFT JOIN exits e ON e.installation_id = $1 AND ($2::TEXT IS NULL OR e.repo = $2)
+                AND ($4::TEXT IS NULL OR e.summary->'author'->>'login' = $4)
                 AND e.outcome = 'merged'
                 AND e.at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
                     - make_interval(days => ago)
@@ -713,8 +800,9 @@ impl Store for PgStore {
              GROUP BY ago ORDER BY ago DESC",
         )
         .bind(installation_id as i64)
-        .bind(repo.map(|r| r.to_string()))
+        .bind(slice.repo.map(|r| r.to_string()))
         .bind(days as i32)
+        .bind(slice.author)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1152,6 +1240,21 @@ mod tests {
     use super::*;
     use mergepatrol_core::Candidate;
 
+    /// One lane's repo, every author.
+    fn repo(key: &LaneKey) -> Slice<'_> {
+        Slice {
+            repo: Some(&key.repo),
+            author: None,
+        }
+    }
+
+    fn by(login: &str) -> Slice<'_> {
+        Slice {
+            repo: None,
+            author: Some(login),
+        }
+    }
+
     #[sqlx::test(migrations = false)]
     async fn one_instance_at_a_time_holds_the_queue_lock(pool: PgPool) {
         let store = PgStore::migrate(pool).await.unwrap();
@@ -1486,9 +1589,9 @@ mod tests {
             .await
             .unwrap();
 
-        let all = store.spends(1, None, 30).await.unwrap();
+        let all = store.spends(1, Slice::default(), 30).await.unwrap();
         assert_eq!(all.len(), 4);
-        let only_a = store.spends(1, Some(&a.repo), 30).await.unwrap();
+        let only_a = store.spends(1, repo(&a), 30).await.unwrap();
         assert_eq!(
             only_a.iter().map(|s| (s.task, s.done)).collect::<Vec<_>>(),
             [
@@ -1498,7 +1601,7 @@ mod tests {
             ]
         );
         assert_eq!(only_a[0].model.as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(store.spends(2, None, 30).await.unwrap(), []);
+        assert_eq!(store.spends(2, Slice::default(), 30).await.unwrap(), []);
     }
 
     #[sqlx::test(migrations = false)]
@@ -1545,7 +1648,7 @@ mod tests {
 
         let query = ExitQuery {
             installation_id: 1,
-            repo: None,
+            slice: Slice::default(),
             outcomes: &[],
             days: 30,
             before: None,
@@ -1565,18 +1668,12 @@ mod tests {
         let waited = exits[3].steps.as_ref().unwrap()[&Step::Waiting];
         assert!((3599.0..3700.0).contains(&waited), "{waited}");
 
-        let steps = store.step_stats(1, None, 30).await.unwrap();
+        let steps = store.step_stats(1, Slice::default(), 30).await.unwrap();
         assert_eq!(steps.iter().map(|s| s.step).collect::<Vec<_>>(), Step::ALL);
         assert_eq!(steps[0].p50_secs, waited);
-        assert!(
-            store
-                .step_stats(1, Some(&b.repo), 30)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store.step_stats(1, repo(&b), 30).await.unwrap().is_empty());
         let repo_a = ExitQuery {
-            repo: Some(&a.repo),
+            slice: repo(&a),
             ..query.clone()
         };
         assert_eq!(prs(&store, repo_a).await, [1]);
@@ -1597,7 +1694,7 @@ mod tests {
         };
         assert_eq!(prs(&store, other).await, Vec::<PrNumber>::new());
 
-        let stats = store.exit_stats(1, 30, 0).await.unwrap();
+        let stats = store.exit_stats(1, Slice::default(), 30, 0).await.unwrap();
         let counts: Vec<_> = stats
             .iter()
             .map(|s| (s.repo.as_deref(), s.merged, s.ejected, s.removed))
@@ -1614,15 +1711,124 @@ mod tests {
         assert!((3599.0..3700.0).contains(&p50), "{p50}");
         assert_eq!(stats[1].p50_secs, None);
         // Nothing the 30 days before: only the row for every repo, empty.
-        let before = store.exit_stats(1, 60, 30).await.unwrap();
+        let before = store.exit_stats(1, Slice::default(), 60, 30).await.unwrap();
         assert_eq!(before.len(), 1);
         assert_eq!((before[0].repo.as_deref(), before[0].merged), (None, 0));
 
-        assert_eq!(store.merged_by_day(1, None, 3).await.unwrap(), [0, 0, 1]);
         assert_eq!(
-            store.merged_by_day(1, Some(&b.repo), 2).await.unwrap(),
-            [0, 0]
+            store.merged_by_day(1, Slice::default(), 3).await.unwrap(),
+            [0, 0, 1]
         );
+        assert_eq!(store.merged_by_day(1, repo(&b), 2).await.unwrap(), [0, 0]);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn metrics_slice_by_author(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let key = |repo: &str| LaneKey {
+            installation_id: 1,
+            repo: RepoName::parse(repo).unwrap(),
+            trunk: "main".into(),
+        };
+        let (a, b) = (key("o/a"), key("o/b"));
+        let by_login = |login: &str, avatar: &str| PrSummary {
+            author: Some(Person {
+                login: login.into(),
+                avatar_url: avatar.into(),
+                bot: false,
+            }),
+            ..Default::default()
+        };
+        let run = ", $0.50, by claude-opus-5-5 at high effort";
+        store.record(&a, 1, "enqueued", "").await.unwrap();
+        store
+            .record(&a, 1, "fix", &format!("2 turns{run}"))
+            .await
+            .unwrap();
+        store
+            .record_exit(&a, 1, "merged", "abc", &by_login("ann", "old"))
+            .await
+            .unwrap();
+        store.record(&b, 2, "enqueued", "").await.unwrap();
+        store
+            .record_exit(&b, 2, "ejected", "no", &by_login("ann", "new"))
+            .await
+            .unwrap();
+        store.record(&b, 3, "enqueued", "").await.unwrap();
+        store
+            .record(&b, 3, "fix", &format!("4 turns{run}"))
+            .await
+            .unwrap();
+        store
+            .record_exit(&b, 3, "merged", "def", &by_login("bob", "b"))
+            .await
+            .unwrap();
+        // A deleted account counts in every repo's numbers, but for no developer.
+        store
+            .record_exit(&b, 4, "dequeued", "", &PrSummary::default())
+            .await
+            .unwrap();
+        // A run on a PR still in the queue has no author yet.
+        store
+            .record(&b, 5, "fix", &format!("1 turns{run}"))
+            .await
+            .unwrap();
+
+        let devs = store
+            .developer_stats(1, Slice::default(), 30)
+            .await
+            .unwrap();
+        let counts: Vec<_> = devs
+            .iter()
+            .map(|d| (d.author.login.as_str(), d.merged, d.ejected, d.removed))
+            .collect();
+        assert_eq!(counts, [("ann", 1, 1, 0), ("bob", 1, 0, 0)]);
+        assert_eq!(devs[0].author.avatar_url, "new", "as of the latest exit");
+        let in_b = store.developer_stats(1, repo(&b), 30).await.unwrap();
+        assert_eq!(
+            in_b.iter()
+                .map(|d| (d.author.login.as_str(), d.merged))
+                .collect::<Vec<_>>(),
+            [("ann", 0), ("bob", 1)]
+        );
+
+        let anns = store.exit_stats(1, by("ann"), 30, 0).await.unwrap();
+        let counts: Vec<_> = anns
+            .iter()
+            .map(|s| (s.repo.as_deref(), s.merged, s.ejected))
+            .collect();
+        assert_eq!(
+            counts,
+            [(Some("o/a"), 1, 0), (Some("o/b"), 0, 1), (None, 1, 1)]
+        );
+
+        let q = ExitQuery {
+            installation_id: 1,
+            slice: by("bob"),
+            outcomes: &[],
+            days: 30,
+            before: None,
+            limit: 10,
+        };
+        let exits = store.exits(&q).await.unwrap();
+        assert_eq!(exits.iter().map(|e| e.pr).collect::<Vec<_>>(), [3]);
+        assert_eq!(store.merged_by_day(1, by("bob"), 2).await.unwrap(), [0, 1]);
+        assert!(
+            store
+                .step_stats(1, by("nobody"), 30)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.step_stats(1, by("ann"), 30).await.unwrap().len(), 5);
+
+        assert_eq!(
+            store.spends(1, Slice::default(), 30).await.unwrap().len(),
+            3
+        );
+        let turns = |spends: Vec<Spend>| spends.iter().map(|s| s.turns).collect::<Vec<_>>();
+        assert_eq!(turns(store.spends(1, by("ann"), 30).await.unwrap()), [2]);
+        assert_eq!(turns(store.spends(1, by("bob"), 30).await.unwrap()), [4]);
     }
 
     #[sqlx::test(migrations = false)]

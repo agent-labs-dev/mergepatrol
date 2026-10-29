@@ -69,6 +69,32 @@ export function Avatar({ src, alt, size = "size-5" }: { src: string; alt: string
   );
 }
 
+/** A repo's stand-in for an avatar: its initials on a tile, tinted by its name so each repo
+ * keeps its color. "merge-patrol" and "mergePatrol" are "MP", "api" is "AP". */
+export function RepoIcon({ repo, size = "size-5" }: { repo: string; size?: string }) {
+  const name = repo.split("/").at(-1) ?? repo;
+  const words = name
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean);
+  const initials = (words.length > 1 ? words[0][0] + words[1][0] : name.slice(0, 2)).toUpperCase();
+  let hash = 0;
+  for (const c of repo) hash = (hash * 31 + c.charCodeAt(0)) | 0;
+  const hue = Math.abs(hash) % 360;
+  return (
+    <span
+      aria-hidden
+      className={`${size} grid shrink-0 place-items-center rounded font-mono text-[8px] leading-none font-bold`}
+      style={{
+        color: `oklch(0.6 0.15 ${hue})`,
+        background: `oklch(0.6 0.15 ${hue} / 0.15)`,
+      }}
+    >
+      {initials}
+    </span>
+  );
+}
+
 export function ErrorText({ error }: { error: Error | null }) {
   return error ? <p className="mt-2 text-sm text-bad">{error.message}</p> : null;
 }

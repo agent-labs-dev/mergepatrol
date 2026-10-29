@@ -2,6 +2,7 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { fetchExits, fetchHistoryStats } from "./api";
+import type { DeveloperStatsView } from "./api/DeveloperStatsView";
 import type { ExitView } from "./api/ExitView";
 import type { LlmRunsView } from "./api/LlmRunsView";
 import type { LlmStatsView } from "./api/LlmStatsView";
@@ -10,67 +11,140 @@ import type { StatsView } from "./api/StatsView";
 import type { StepStatsView } from "./api/StepStatsView";
 import type { StepTimeView } from "./api/StepTimeView";
 import type { StepView } from "./api/StepView";
-import { Avatar, duration, llmName, secondary, timeAgo, usd } from "./ui";
+import { Avatar, duration, llmName, RepoIcon, secondary, timeAgo, usd } from "./ui";
 
 export const WINDOWS = [7, 30, 90] as const;
 export type Window = (typeof WINDOWS)[number];
 export const OUTCOMES = ["merged", "ejected", "removed"] as const;
+/** What the side lists: picking one scopes the page to it. */
+export const LISTS = ["repos", "developers"] as const;
+export type List = (typeof LISTS)[number];
 
-/** Two panes: the repos, and the selected repo's metrics and the PRs that left its queue. A
- * narrow screen lists the repos in a row above. */
+/** Two panes: the repos or the developers, and the metrics and the PRs that left the queue of
+ * the one picked. A repo's developers, or a developer's repos, break down below the metrics:
+ * picking one there narrows to both. A narrow screen lists the side in a row above. */
 export function History({ workspace }: { workspace: number }) {
-  const { repo, days = 30, outcome } = useSearch({ from: "/$account/history" });
+  const {
+    list = "repos",
+    repo,
+    author,
+    days = 30,
+    outcome,
+  } = useSearch({
+    from: "/$account/history",
+  });
   const navigate = useNavigate({ from: "/$account/history" });
+  // The side lists every repo or developer, whatever the scope.
+  const side = useQuery({
+    queryKey: ["history-stats", workspace, undefined, undefined, days],
+    queryFn: () => fetchHistoryStats(workspace, { days }),
+    refetchInterval: 10_000,
+  });
   const stats = useQuery({
-    queryKey: ["history-stats", workspace, repo, days],
-    queryFn: () => fetchHistoryStats(workspace, { repo, days }),
+    queryKey: ["history-stats", workspace, repo, author, days],
+    queryFn: () => fetchHistoryStats(workspace, { repo, author, days }),
     refetchInterval: 10_000,
   });
   const exits = useInfiniteQuery({
-    queryKey: ["history", workspace, repo, days, outcome],
+    queryKey: ["history", workspace, repo, author, days, outcome],
     queryFn: ({ pageParam }) =>
-      fetchExits(workspace, { repo, days, outcome, before: pageParam ?? undefined }),
+      fetchExits(workspace, { repo, author, days, outcome, before: pageParam ?? undefined }),
     initialPageParam: null as number | null,
     getNextPageParam: (page) => page.next,
     refetchInterval: 10_000,
   });
 
-  if (stats.isError || exits.isError)
+  if (side.isError || stats.isError || exits.isError)
     return <p className="p-6 text-bad">Could not load the history.</p>;
-  if (!stats.data) return null;
+  if (!side.data || !stats.data) return null;
 
-  const { current, previous, merged_by_day, steps, llms } = stats.data;
-  const repos = current.filter((s) => s.repo !== null);
+  const { current, previous, developers, merged_by_day, steps, llms } = stats.data;
   const of = (all: StatsView[]) => all.find((s) => s.repo === (repo ?? null));
   const rows = exits.data?.pages.flatMap((p) => p.exits) ?? [];
-  const pick = (repo?: string) => navigate({ search: (s) => ({ ...s, repo }) });
+  const scope = (s: { repo?: string; author?: string }) =>
+    navigate({ search: (prev) => ({ ...prev, ...s }) });
+  const byRepo = list === "repos";
+  // The scope the side did not pick: one picked in the breakdown.
+  const narrowed = byRepo ? author : repo;
   return (
     <div className="flex h-full flex-col md:grid md:grid-cols-[220px_1fr]">
-      <div className="shrink-0 border-line p-2 max-md:flex max-md:gap-1 max-md:overflow-x-auto max-md:border-b md:overflow-y-auto md:border-r">
-        <p className="px-2 py-2 text-xs font-medium text-muted max-md:hidden">Repos</p>
-        <RepoButton
-          label="All repos"
-          stats={current.at(-1)}
-          days={days}
-          selected={!repo}
-          onClick={() => pick()}
-        />
-        {repos.map((s) => (
-          <RepoButton
-            key={s.repo}
-            label={s.repo?.split("/")[1] ?? ""}
-            title={s.repo ?? ""}
-            stats={s}
-            days={days}
-            selected={s.repo === repo}
-            onClick={() => pick(s.repo ?? undefined)}
+      <div className="shrink-0 border-line p-2 max-md:flex max-md:items-center max-md:gap-1 max-md:overflow-x-auto max-md:border-b md:overflow-y-auto md:border-r">
+        <div className="shrink-0 px-1 pb-1 md:pt-1">
+          <Segmented
+            name="list"
+            label="List"
+            options={LISTS}
+            value={list}
+            text={(l) => (l === "repos" ? "Repos" : "Developers")}
+            onChange={(list) =>
+              navigate({
+                search: (s) => ({ ...s, list, repo: undefined, author: undefined }),
+              })
+            }
           />
-        ))}
+        </div>
+        {byRepo ? (
+          <>
+            <SideButton
+              label={<All label="All repos" />}
+              count={side.data.current.at(-1)?.merged}
+              days={days}
+              selected={!repo}
+              onClick={() => scope({ repo: undefined })}
+            />
+            {side.data.current
+              .filter((s) => s.repo !== null)
+              .map((s) => (
+                <SideButton
+                  key={s.repo}
+                  label={<Repo repo={s.repo ?? ""} short />}
+                  title={s.repo ?? ""}
+                  count={s.merged}
+                  days={days}
+                  selected={s.repo === repo}
+                  onClick={() => scope({ repo: s.repo ?? undefined })}
+                />
+              ))}
+          </>
+        ) : (
+          <>
+            <SideButton
+              label={<All label="All developers" />}
+              count={side.data.current.at(-1)?.merged}
+              days={days}
+              selected={!author}
+              onClick={() => scope({ author: undefined })}
+            />
+            {byMerged(side.data.developers).map((d) => (
+              <SideButton
+                key={d.author.login}
+                label={<Developer stats={d} />}
+                title={d.author.login}
+                count={d.merged}
+                days={days}
+                selected={d.author.login === author}
+                onClick={() => scope({ author: d.author.login })}
+              />
+            ))}
+          </>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto bg-surface">
         <div className="border-b border-line px-4 py-4 sm:px-6">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-            <p className="font-medium">{repo ?? "All repos"}</p>
+            <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 font-medium">
+              {[author, repo].filter(Boolean).join(" in ") ||
+                (byRepo ? "All repos" : "All developers")}
+              {narrowed && (
+                <button
+                  type="button"
+                  className="text-xs font-normal text-muted hover:text-fg"
+                  onClick={() => scope(byRepo ? { author: undefined } : { repo: undefined })}
+                >
+                  Clear {narrowed}
+                </button>
+              )}
+            </p>
             <div className="flex flex-wrap items-center gap-3">
               <Segmented
                 name="outcome"
@@ -97,6 +171,29 @@ export function History({ workspace }: { workspace: number }) {
             days={days}
           />
           <Steps steps={steps} />
+          {byRepo ? (
+            <Breakdown
+              title={repo ? "Developers in this repo" : "Developers"}
+              rows={byMerged(developers).map((d) => ({
+                key: d.author.login,
+                name: <Developer stats={d} />,
+                stats: d,
+              }))}
+              selected={author}
+              onPick={(login) => scope({ author: login === author ? undefined : login })}
+            />
+          ) : (
+            <Breakdown
+              title={author ? `Where ${author} merges` : "Repos"}
+              rows={byMerged(current.filter((s) => s.repo !== null)).map((s) => ({
+                key: s.repo ?? "",
+                name: <Repo repo={s.repo ?? ""} />,
+                stats: s,
+              }))}
+              selected={repo}
+              onPick={(r) => scope({ repo: r === repo ? undefined : r })}
+            />
+          )}
           <Llms llms={llms} days={days} />
         </div>
         {exits.data && rows.length === 0 && (
@@ -125,6 +222,46 @@ export function History({ workspace }: { workspace: number }) {
         )}
       </div>
     </div>
+  );
+}
+
+const byMerged = <T extends { merged: number }>(all: T[]) =>
+  [...all].sort((a, b) => b.merged - a.merged);
+
+/** Lines up with the icons and avatars of the rows below it. */
+function All({ label }: { label: string }) {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span
+        aria-hidden
+        className="grid size-4 shrink-0 grid-cols-2 gap-px rounded bg-sunken p-[3px] ring-1 ring-line"
+      >
+        <span className="rounded-[1px] bg-faint" />
+        <span className="rounded-[1px] bg-faint" />
+        <span className="rounded-[1px] bg-faint" />
+        <span className="rounded-[1px] bg-faint" />
+      </span>
+      <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+function Repo({ repo, short }: { repo: string; short?: boolean }) {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <RepoIcon repo={repo} size="size-4" />
+      <span className="truncate">{short ? repo.split("/")[1] : repo}</span>
+    </span>
+  );
+}
+
+function Developer({ stats: d }: { stats: DeveloperStatsView }) {
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <Avatar src={d.author.avatar_url} alt={d.author.login} size="size-4" />
+      <span className="truncate">{d.author.login.replace(/\[bot\]$/, "")}</span>
+      {d.bot && <span className="text-[10px] text-faint uppercase">Bot</span>}
+    </span>
   );
 }
 
@@ -165,17 +302,17 @@ function Segmented<T extends string | number | undefined>({
   );
 }
 
-function RepoButton({
+function SideButton({
   label,
   title,
-  stats,
+  count,
   days,
   selected,
   onClick,
 }: {
-  label: string;
+  label: React.ReactNode;
   title?: string;
-  stats?: StatsView;
+  count?: number;
   days: number;
   selected: boolean;
   onClick: () => void;
@@ -189,16 +326,18 @@ function RepoButton({
         selected ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
       }`}
     >
-      <span className="truncate">{label}</span>
+      <span className="min-w-0 truncate">{label}</span>
       <span className="text-xs text-faint tabular-nums" title={`Merged in the last ${days} days`}>
-        {stats?.merged ?? 0}
+        {count ?? 0}
       </span>
     </button>
   );
 }
 
+type Counts = Pick<StatsView, "merged" | "ejected" | "p50_secs">;
+
 /** Ejected of the PRs the queue tried: `null` before it tried any. */
-function ejectRate(s?: StatsView) {
+function ejectRate(s?: Counts) {
   const tried = (s?.merged ?? 0) + (s?.ejected ?? 0);
   return tried ? (s?.ejected ?? 0) / tried : null;
 }
@@ -464,6 +603,63 @@ function Bar({
           />
         ))}
     </span>
+  );
+}
+
+/** The other side of the scope: merges as bars, then the eject rate and the median time in the
+ * queue. Picking a row narrows to it, and picking it again clears it. */
+function Breakdown({
+  title,
+  rows,
+  selected,
+  onPick,
+}: {
+  title: string;
+  rows: { key: string; name: React.ReactNode; stats: Counts }[];
+  selected?: string;
+  onPick: (key: string) => void;
+}) {
+  if (rows.length === 0) return null;
+  const max = Math.max(1, ...rows.map((r) => r.stats.merged));
+  return (
+    <div className="mt-5">
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <p className="text-xs font-medium text-muted">{title}</p>
+        <p className="text-xs text-faint max-sm:hidden">Merged · eject rate · median</p>
+      </div>
+      <ul className="text-xs">
+        {rows.map(({ key, name, stats: s }) => {
+          const rate = ejectRate(s);
+          return (
+            <li key={key}>
+              <button
+                type="button"
+                onClick={() => onPick(key)}
+                aria-pressed={key === selected}
+                className={`grid w-full grid-cols-[minmax(0,10rem)_1fr_3rem_3rem] items-center gap-3 rounded px-1 py-1 text-left ${
+                  key === selected ? "bg-sunken ring-1 ring-line" : "hover:bg-sunken"
+                }`}
+              >
+                <span className="min-w-0 truncate">{name}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <span
+                    className="h-2 rounded-sm bg-faint"
+                    style={{ width: `${(s.merged / max) * 100}%` }}
+                  />
+                  <span className="text-muted tabular-nums">{s.merged}</span>
+                </span>
+                <span className="text-right text-muted tabular-nums" title="Eject rate">
+                  {rate === null ? "–" : `${Math.round(rate * 100)}%`}
+                </span>
+                <span className="text-right text-muted tabular-nums" title="Median time in queue">
+                  {s.p50_secs === null ? "–" : duration(s.p50_secs)}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

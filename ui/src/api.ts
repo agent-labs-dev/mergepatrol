@@ -64,14 +64,17 @@ const query = (params: Record<string, string | number | undefined>) =>
     Object.entries(params).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]])),
   ).toString();
 
-/** Without `repo`, every repo's; without `outcome`, every outcome's. */
+/** Without `repo`, every repo's; without `author`, everyone's; without `outcome`, every
+ * outcome's. */
 export const fetchExits = (
   id: number,
-  q: { repo?: string; days: number; outcome?: OutcomeView; before?: number },
+  q: { repo?: string; author?: string; days: number; outcome?: OutcomeView; before?: number },
 ) => get<ExitsPage>(w(id, `/history?${query(q)}`));
 
-export const fetchHistoryStats = (id: number, q: { repo?: string; days: number }) =>
-  get<HistoryStatsView>(w(id, `/history/stats?${query(q)}`));
+export const fetchHistoryStats = (
+  id: number,
+  q: { repo?: string; author?: string; days: number },
+) => get<HistoryStatsView>(w(id, `/history/stats?${query(q)}`));
 
 export const fetchRepos = (id: number) => get<RepoView[]>(w(id, "/repos"));
 
