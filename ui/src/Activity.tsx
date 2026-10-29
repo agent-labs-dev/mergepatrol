@@ -265,7 +265,7 @@ function Fix({
     staleTime: Infinity,
     retry: false,
   });
-  const files = fix.data ? fileCount(fix.data.patch) + fix.data.omitted.length : 0;
+  const files = fix.data ? fileCount(fix.data.patch) : 0;
   return (
     <>
       {row(

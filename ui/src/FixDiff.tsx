@@ -25,9 +25,6 @@ export default function FixDiff({ fix }: { fix: FixView }) {
           }}
         />
       ))}
-      {fix.omitted.length > 0 && (
-        <p className="text-faint">No diff from GitHub for {fix.omitted.join(", ")}.</p>
-      )}
     </div>
   );
 }
