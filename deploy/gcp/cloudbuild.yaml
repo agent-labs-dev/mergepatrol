@@ -47,6 +47,7 @@ steps:
 
   # The job before the orchestrator: a new orchestrator may send a job what only a new job reads.
   # No retries: the orchestrator decides what a failed job means.
+  # Jobs always run in the gen2 execution environment, a microVM; there is no flag to set it.
   - id: deploy-job
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     waitFor: [push-job]

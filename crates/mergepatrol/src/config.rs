@@ -40,7 +40,7 @@ pub struct Config {
 pub enum ExecutorConfig {
     /// A subprocess on this machine. No isolation: for development.
     Local,
-    /// A container per job. Production uses the gVisor runtime (`runsc`).
+    /// A container per job. Self-hosted production uses the gVisor runtime (`runsc`).
     Docker {
         image: String,
         runtime: Option<String>,

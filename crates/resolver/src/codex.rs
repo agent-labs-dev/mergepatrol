@@ -41,7 +41,7 @@ impl CodexResolver {
         let mut cmd = tokio::process::Command::new("codex");
         cmd.current_dir(workdir).env(KEY_VAR, key);
         cmd.args(["exec", "--json", "--ephemeral", "--ignore-user-config"])
-            // The job's container is the sandbox, and Codex's own does not run inside gVisor.
+            // The job's gVisor container or Cloud Run microVM is the sandbox: Codex's can't nest.
             // Nothing asks for approval: there is nobody to answer.
             .arg("--dangerously-bypass-approvals-and-sandbox")
             .args(["--model", &self.model])

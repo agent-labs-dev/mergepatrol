@@ -1,7 +1,7 @@
 //! Runs rebase jobs. A job runs the repo's code and an agent with a shell, so it is untrusted:
-//! in production each job gets its own gVisor container (`DockerExecutor`). `LocalExecutor`
-//! runs the job as a subprocess, for development. `RemoteExecutor` runs each job on another
-//! machine: a Cloud Run Job execution.
+//! in production each job gets its own gVisor container (`DockerExecutor`) or Cloud Run microVM
+//! (`RemoteExecutor`, a Cloud Run Job execution). `LocalExecutor` runs the job as a subprocess,
+//! for development.
 
 pub mod protocol;
 pub mod proxy;
