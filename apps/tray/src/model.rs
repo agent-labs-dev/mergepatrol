@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AppContext, Context, Entity, Task};
 
-use crate::api::{ApiError, Client, WorkspaceView};
+use crate::api::{ApiError, Client};
 use crate::feed::{self, Feed, Snapshot};
 use crate::{keychain, sign_in};
 
@@ -18,15 +18,9 @@ const STATS_DAYS: u32 = 7;
 const EXITS_DAYS: u32 = 1;
 
 pub enum Auth {
-    SignedOut {
-        error: Option<String>,
-    },
+    SignedOut { error: Option<String> },
     SigningIn,
-    SignedIn {
-        client: Client,
-        login: String,
-        workspaces: Vec<WorkspaceView>,
-    },
+    SignedIn { client: Client, login: String },
 }
 
 pub struct AppModel {
@@ -111,7 +105,7 @@ impl AppModel {
         cx.notify();
     }
 
-    /// Checks the token and finds the user's workspaces, then polls.
+    /// Checks the token, then polls.
     fn start_session(&mut self, token: String, cx: &mut Context<Self>) {
         let client = Client::new(&self.server, &token);
         self.poll = None;
@@ -129,7 +123,6 @@ impl AppModel {
                         m.auth = Auth::SignedIn {
                             client,
                             login: user.login,
-                            workspaces: session.workspaces,
                         };
                         m.start_polling(cx);
                     }
@@ -159,25 +152,20 @@ impl AppModel {
         self.polls = 0;
         self.poll = Some(cx.spawn(async move |this, cx| {
             loop {
-                let Ok(Some((client, workspaces, stats, p50))) = this.update(cx, |m, _| {
-                    let Auth::SignedIn {
-                        client, workspaces, ..
-                    } = &m.auth
-                    else {
+                let Ok(Some((client, stats, p50))) = this.update(cx, |m, _| {
+                    let Auth::SignedIn { client, .. } = &m.auth else {
                         return None;
                     };
                     let stats = m.polls.is_multiple_of(STATS_EVERY);
                     m.polls += 1;
                     let p50 = m.snapshot.as_ref().map(|s| s.p50.clone());
-                    Some((client.clone(), workspaces.clone(), stats, p50))
+                    Some((client.clone(), stats, p50))
                 }) else {
                     return;
                 };
                 let result = cx
                     .background_executor()
-                    .spawn(
-                        async move { fetch(&client, &workspaces, stats, p50.unwrap_or_default()) },
-                    )
+                    .spawn(async move { fetch(&client, stats, p50.unwrap_or_default()) })
                     .await;
                 let keep_going = this
                     .update(cx, |m, cx| m.on_fetched(result, cx))
@@ -216,12 +204,17 @@ impl AppModel {
 /// now and then the step times.
 fn fetch(
     client: &Client,
-    workspaces: &[WorkspaceView],
     with_stats: bool,
     mut p50: HashMap<crate::api::StepView, f64>,
 ) -> Result<Snapshot, ApiError> {
+    // The server reads the user's workspaces from GitHub again each hour: ask each time.
+    let session = client.session()?;
+    if session.user.is_none() {
+        return Err(ApiError::SignedOut);
+    }
+    let workspaces = session.workspaces;
     let mut snapshot = Snapshot::default();
-    for ws in workspaces {
+    for ws in &workspaces {
         let id = ws.installation_id;
         let lanes = client.lanes(id)?;
         for lane in &lanes {
@@ -243,7 +236,7 @@ fn fetch(
         // The first workspace with merges sets the typical times: one number per step is
         // enough for a progress bar.
         p50.clear();
-        for ws in workspaces {
+        for ws in &workspaces {
             let steps = client.stats(ws.installation_id, STATS_DAYS)?.steps;
             if !steps.is_empty() {
                 p50 = steps.into_iter().map(|s| (s.step, s.p50_secs)).collect();
