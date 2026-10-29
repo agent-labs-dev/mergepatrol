@@ -15,6 +15,7 @@ mergepatrol-github = { version = "0.1.0", path = "../github" }
 mergepatrol-resolver = { version = "0.1.0", path = "../resolver" }
 mergepatrol-store = { version = "0.1.0", path = "../store" }
 mergepatrol-web = { version = "0.1.0", path = "../web" }
+reqwest = "0.13.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 serde_yaml = "0.9.34"

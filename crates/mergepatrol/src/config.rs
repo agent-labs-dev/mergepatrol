@@ -39,6 +39,11 @@ pub enum ExecutorConfig {
         memory: String,
         cpus: String,
     },
+    /// An execution of a Cloud Run Job per job, which reaches back to `public_url`.
+    CloudRun {
+        /// `projects/<p>/locations/<r>/jobs/<name>`.
+        job: String,
+    },
 }
 
 pub struct HostedApp {
@@ -91,7 +96,10 @@ impl Config {
                     memory: opt("MERGEPATROL_JOB_MEMORY", "4g"),
                     cpus: opt("MERGEPATROL_JOB_CPUS", "2"),
                 },
-                other => bail!("MERGEPATROL_EXECUTOR: {other:?} is not local or docker"),
+                "cloud-run" => ExecutorConfig::CloudRun {
+                    job: req("MERGEPATROL_CLOUD_RUN_JOB")?,
+                },
+                other => bail!("MERGEPATROL_EXECUTOR: {other:?} is not local, docker or cloud-run"),
             },
         })
     }

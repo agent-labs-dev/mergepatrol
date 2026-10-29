@@ -1,8 +1,10 @@
 //! Runs rebase jobs. A job runs the repo's code and an agent with a shell, so it is untrusted:
 //! in production each job gets its own gVisor container (`DockerExecutor`). `LocalExecutor`
-//! runs the job as a subprocess, for development.
+//! runs the job as a subprocess, for development. `RemoteExecutor` runs each job on another
+//! machine: a Cloud Run Job execution.
 
 pub mod protocol;
+pub mod remote;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -151,7 +153,7 @@ async fn run_with_spec(mut cmd: Command, spec: &JobSpec, timeout: Duration) -> R
     Ok(tail)
 }
 
-async fn read_result(out: &Path, logs: &str) -> Result<JobResult> {
+pub(crate) async fn read_result(out: &Path, logs: &str) -> Result<JobResult> {
     let json = tokio::fs::read(out.join(RESULT_FILE))
         .await
         .with_context(|| format!("the job wrote no result:\n{logs}"))?;
