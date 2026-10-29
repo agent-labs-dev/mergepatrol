@@ -42,6 +42,9 @@ pub struct PrSummary {
 pub struct Person {
     pub login: String,
     pub avatar_url: String,
+    /// A GitHub App, such as Mergepatrol itself, rather than a user.
+    #[serde(default)]
+    pub bot: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
