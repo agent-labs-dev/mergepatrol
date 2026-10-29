@@ -163,7 +163,8 @@ async fn orchestrator() -> Result<()> {
         repo_defaults: ctx.config.repo_defaults.clone(),
         analytics,
     };
-    let queues = tokio::spawn(queue::lead(ctx.clone(), pg));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let queues = tokio::spawn(queue::lead(ctx.clone(), pg, stopped));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");
@@ -171,10 +172,11 @@ async fn orchestrator() -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stopping().await;
-            // Lets go of the queue lock at once, so the instance that replaces this one takes
-            // over the queues while this one finishes its requests.
+            // Stops the queues and lets go of the queue lock first, so the instance that
+            // replaces this one takes over the queues while this one finishes its requests.
             tracing::info!("stopping");
-            queues.abort();
+            let _ = stop.send(true);
+            let _ = queues.await;
         })
         .await?;
     Ok(())

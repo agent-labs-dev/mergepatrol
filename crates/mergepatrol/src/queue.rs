@@ -23,7 +23,7 @@ use mergepatrol_github::{
     RepoSnapshot,
 };
 use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -139,27 +139,40 @@ impl mergepatrol_web::Wake for Wakers {
     }
 }
 
-/// Runs the queues while this instance holds the queue lock, and stops them if it loses it.
-/// Every instance serves the dashboard and the webhooks, but only one runs the queues.
-pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>) {
+/// Runs the queues while this instance holds the queue lock, and stops them if it loses it, or
+/// once `stop` is set. Every instance serves the dashboard and the webhooks, but only one runs
+/// the queues.
+pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<bool>) {
     let mut waiting = false;
     loop {
         match store.try_queue_lock().await {
             Ok(Some(mut lock)) => {
                 tracing::info!("holding the queue lock: running the queues");
                 waiting = false;
-                let _queues = (
-                    Spawned::spawn(supervise(ctx.clone())),
-                    Spawned::spawn(discover(ctx.clone())),
+                let (alive, mut stopped) = mpsc::channel::<()>(1);
+                let queues = (
+                    Spawned::spawn(supervise(ctx.clone(), alive.clone()), &alive),
+                    Spawned::spawn(discover(ctx.clone()), &alive),
                 );
-                loop {
-                    tokio::time::sleep(LOCK_EVERY).await;
+                let stopping = loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(LOCK_EVERY) => {}
+                        _ = stop.wait_for(|s| *s) => break true,
+                    }
                     let checked = tokio::time::timeout(LOCK_EVERY, lock.check()).await;
                     if let Err(e) = checked.map_err(anyhow::Error::from).and_then(|r| r) {
                         let error = format!("{e:#}");
                         tracing::error!(%error, "lost the queue lock: stopping the queues");
-                        break;
+                        break false;
                     }
+                };
+                // The lock goes only once every queue task has stopped, so the queues never run
+                // in two instances at once.
+                drop((queues, alive));
+                let _ = stopped.recv().await;
+                drop(lock);
+                if stopping {
+                    return;
                 }
             }
             Ok(None) if !waiting => {
@@ -171,16 +184,27 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>) {
                 tracing::error!(error = %format!("{e:#}"), "could not take the queue lock");
             }
         }
-        tokio::time::sleep(LOCK_EVERY).await;
+        tokio::select! {
+            _ = tokio::time::sleep(LOCK_EVERY) => {}
+            _ = stop.wait_for(|s| *s) => return,
+        }
     }
 }
 
-/// A spawned task that is stopped when it is dropped: stopping a task stops the ones it runs.
+/// Held by every queue task until it has stopped: the channel closes once all have.
+type Alive = mpsc::Sender<()>;
+
+/// A spawned queue task, which is stopped when it is dropped: stopping a task stops the ones it
+/// runs.
 struct Spawned(JoinHandle<()>);
 
 impl Spawned {
-    fn spawn(future: impl Future<Output = ()> + Send + 'static) -> Self {
-        Self(tokio::spawn(future))
+    fn spawn(future: impl Future<Output = ()> + Send + 'static, alive: &Alive) -> Self {
+        let alive = alive.clone();
+        Self(tokio::spawn(async move {
+            let _alive = alive;
+            future.await
+        }))
     }
 
     fn is_finished(&self) -> bool {
@@ -196,10 +220,10 @@ impl Drop for Spawned {
 
 /// Runs a queue for each repo that is on, and stops the queues of repos that are turned off.
 /// Waits until the GitHub App exists.
-async fn supervise(ctx: Arc<Ctx>) {
+async fn supervise(ctx: Arc<Ctx>, alive: Alive) {
     let mut running = Running::new();
     loop {
-        if let Err(e) = reconcile(&ctx, &mut running).await {
+        if let Err(e) = reconcile(&ctx, &mut running, &alive).await {
             tracing::error!(error = %format!("{e:#}"), "could not update the running queues");
         }
         tokio::time::sleep(SUPERVISE_EVERY).await;
@@ -268,7 +292,7 @@ async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
 /// Keyed by (installation, repo). The value keeps the App ID the task started with.
 type Running = HashMap<(u64, RepoName), (u64, Spawned)>;
 
-async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
+async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running, alive: &Alive) -> Result<()> {
     let Some(creds) = app_credentials(ctx).await? else {
         return Ok(());
     };
@@ -294,7 +318,10 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
             let (installation, repo) = slot.key().clone();
             tracing::info!(installation, %repo, "watching");
             let gh = App::from_credentials(&creds)?.installation(installation);
-            slot.insert((creds.id, Spawned::spawn(run_repo(ctx.clone(), gh, repo))));
+            slot.insert((
+                creds.id,
+                Spawned::spawn(run_repo(ctx.clone(), gh, repo), alive),
+            ));
         }
     }
     Ok(())
@@ -1939,33 +1966,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_a_task_stops_the_tasks_it_runs() {
-        // Dropped with the child task's future: when it is stopped.
-        struct Alive(Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for Alive {
-            fn drop(&mut self) {
-                self.0.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let child_alive = Alive(alive.clone());
-        let parent = Spawned::spawn(async move {
-            let _child = Spawned::spawn(async move {
-                let _alive = child_alive;
-                std::future::pending::<()>().await;
-            });
-            std::future::pending::<()>().await;
-        });
+    async fn a_task_keeps_the_channel_open_until_it_ends() {
+        let (alive, mut stopped) = mpsc::channel::<()>(1);
+        let (end, ended) = tokio::sync::oneshot::channel::<()>();
+        let _task = Spawned::spawn(
+            async move {
+                let _ = ended.await;
+            },
+            &alive,
+        );
+        drop(alive);
         tokio::task::yield_now().await;
-        assert!(alive.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            stopped.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        end.send(()).unwrap();
+        assert!(stopped.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_task_stops_the_tasks_it_runs() {
+        let (alive, mut stopped) = mpsc::channel::<()>(1);
+        let child_alive = alive.clone();
+        let parent = Spawned::spawn(
+            async move {
+                let _child = Spawned::spawn(std::future::pending(), &child_alive);
+                std::future::pending::<()>().await;
+            },
+            &alive,
+        );
+        drop(alive);
+        tokio::task::yield_now().await;
         drop(parent);
-        for _ in 0..100 {
-            if !alive.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("the child task still runs");
+        let ended = tokio::time::timeout(Duration::from_secs(1), stopped.recv()).await;
+        assert!(ended.is_ok(), "the child task still runs");
     }
 
     #[tokio::test(start_paused = true)]
