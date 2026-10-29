@@ -4,6 +4,7 @@
 mod job;
 mod lane;
 mod repo_config;
+mod spend;
 mod steps;
 
 pub use job::{CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
@@ -14,6 +15,7 @@ pub use lane::{
 pub use repo_config::{
     EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
 };
+pub use spend::{Spend, SpendTask};
 pub use steps::{Step, StepTimes, step_times};
 
 use serde::{Deserialize, Serialize};

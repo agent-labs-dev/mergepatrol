@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { lazy, type ReactNode, Suspense, useState } from "react";
 import { fetchFix } from "./api";
 import type { EventView } from "./api/EventView";
-import { duration, timeAgo } from "./ui";
+import type { SpendView } from "./api/SpendView";
+import { duration, llmName, timeAgo, usd } from "./ui";
 
 /** A PR's activity: what its time in the queue has cost, how far its latest run got, and its
  * events. `events` are newest first, as the API returns them. */
@@ -79,14 +80,6 @@ const isSha = (s: string) => /^[0-9a-f]{40}$/.test(s);
 const isFix = (events: EventView[], e: EventView) =>
   e.kind === "published" && isSha(e.message) && events[events.indexOf(e) + 1]?.kind === "fix";
 
-/** A `resolved` or `fix` event's agent run: `<files> in 46 turns, $0.46` or `5 turns`. */
-function spend(e: EventView) {
-  if (e.kind !== "resolved" && e.kind !== "fix") return null;
-  const m = e.message.match(/^(?:(.*) in )?(\d+) turns?(?:, \$([\d.]+))?$/);
-  if (!m) return null;
-  return { files: m[1] ?? "", turns: Number(m[2]), cost: m[3] === undefined ? null : Number(m[3]) };
-}
-
 /** Newest first, back to the latest `kind`; every event without one. A copy: callers reverse
  * it, and `events` is the query's cache. */
 function back(events: EventView[], kind: string) {
@@ -105,36 +98,73 @@ function latestRun(events: EventView[]) {
 }
 
 function Summary({ events, repo }: { events: EventView[]; repo: string }) {
-  const spends = events.flatMap((e) => spend(e) ?? []);
-  const turns = spends.reduce((t, s) => t + s.turns, 0);
-  const cost = spends.reduce((t, s) => t + (s.cost ?? 0), 0);
+  const spends = events.flatMap((e) => e.spend ?? []);
   const head = events.filter((e) => e.kind === "published").at(-1)?.message;
   const since = events[0]?.at;
   return (
     // The gaps between tiles are the border showing through, in two rows or one.
-    <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-4">
+    <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-5">
       <Tile label="In queue">
         {since ? duration((Date.now() - new Date(since).getTime()) / 1000) : "–"}
       </Tile>
       <Tile label="Runs">{events.filter((e) => e.kind === "rebasing").length}</Tile>
-      <Tile label="Claude">
-        {turns === 0 ? (
-          "–"
-        ) : (
-          <>
-            {cost > 0 && `$${cost.toFixed(2)} `}
-            <span className={cost > 0 ? "text-xs font-normal text-faint" : ""}>{turns} turns</span>
-          </>
-        )}
+      <Tile label="Head" className="max-sm:col-span-2">
+        {head && isSha(head) ? <Sha repo={repo} sha={head} /> : "–"}
       </Tile>
-      <Tile label="Head">{head && isSha(head) ? <Sha repo={repo} sha={head} /> : "–"}</Tile>
+      <Tile label="LLM" className="col-span-2">
+        {spends.length === 0 ? "–" : <LlmSpend spends={spends} />}
+      </Tile>
     </dl>
   );
 }
 
-function Tile({ label, children }: { label: string; children: ReactNode }) {
+/** What the agent runs cost, all told and split by task, and the models that ran them. */
+function LlmSpend({ spends }: { spends: SpendView[] }) {
+  const of = (task?: SpendView["task"]) => {
+    const runs = spends.filter((s) => !task || s.task === task);
+    return {
+      runs: runs.length,
+      turns: runs.reduce((t, s) => t + s.turns, 0),
+      cost: runs.reduce((t, s) => t + (s.cost_usd ?? 0), 0),
+    };
+  };
+  const all = of();
+  const tasks = (
+    [
+      ["Rebase", of("rebase")],
+      ["Fix", of("fix")],
+    ] as const
+  ).filter(([, t]) => t.runs > 0);
+  const llms = [...new Set(spends.map(llmName))];
   return (
-    <div className="bg-surface px-4 py-3">
+    <>
+      {all.cost > 0 && `${usd(all.cost)} `}
+      <span className={all.cost > 0 ? "text-xs font-normal text-faint" : ""}>
+        {all.turns} turns
+      </span>
+      <span className="mt-1 block text-xs font-normal text-muted">
+        {tasks
+          .map(([name, t]) => `${name} ${t.cost > 0 ? usd(t.cost) : `${t.turns} turns`}`)
+          .join(" · ")}
+      </span>
+      <span className="block truncate text-xs font-normal text-faint" title={llms.join(", ")}>
+        {llms.join(", ")}
+      </span>
+    </>
+  );
+}
+
+function Tile({
+  label,
+  className = "",
+  children,
+}: {
+  label: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`bg-surface px-4 py-3 ${className}`}>
       <dt className="text-xs text-muted">{label}</dt>
       <dd className="mt-0.5 text-base font-semibold tabular-nums">{children}</dd>
     </div>
@@ -229,13 +259,13 @@ function Message({
 }) {
   if (isSha(e.message)) return <Sha repo={repo} sha={e.message} />;
   if (e.kind === "conflict") return <Files paths={e.message} />;
-  const s = spend(e);
+  const s = e.spend;
   if (s)
     return (
       <span className="flex flex-wrap items-center gap-1">
         {s.files && <Files paths={s.files} />}
         <span className="rounded bg-violet-50 px-1.5 py-px text-violet-700 tabular-nums dark:bg-violet-400/10 dark:text-violet-300">
-          ✦ {s.turns} turns{s.cost !== null && ` · $${s.cost.toFixed(2)}`}
+          ✦ {s.turns} turns{s.cost_usd !== null && ` · ${usd(s.cost_usd)}`} · {llmName(s)}
         </span>
       </span>
     );

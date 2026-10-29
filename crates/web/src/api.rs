@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
     EFFORTS, Entry, EntryState, FixCiSettings, Person, Provider, REPO_CONFIG_PATH, RepoName,
-    RepoSettings, ResolverSettings, Step,
+    RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
 use mergepatrol_resolver::{KeyCheck, check_api_key};
@@ -170,6 +170,52 @@ pub struct EventView {
     pub at: String,
     pub kind: String,
     pub message: String,
+    /// What the agent spent, for a `resolved` or `fix` event.
+    pub spend: Option<SpendView>,
+}
+
+/// One agent run, from its event.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SpendView {
+    pub task: SpendTaskView,
+    /// The conflicted files, comma-separated. Empty for a fix.
+    pub files: String,
+    pub turns: u32,
+    pub cost_usd: Option<f64>,
+    /// `None` for runs from before events named them.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum SpendTaskView {
+    Rebase,
+    Fix,
+}
+
+impl From<SpendTask> for SpendTaskView {
+    fn from(t: SpendTask) -> Self {
+        match t {
+            SpendTask::Rebase => SpendTaskView::Rebase,
+            SpendTask::Fix => SpendTaskView::Fix,
+        }
+    }
+}
+
+impl From<Spend> for SpendView {
+    fn from(s: Spend) -> Self {
+        SpendView {
+            task: s.task.into(),
+            files: s.files,
+            turns: s.turns,
+            cost_usd: s.cost_usd,
+            model: s.model,
+            effort: s.effort,
+        }
+    }
 }
 
 /// One page of the PRs that left the queue, the newest first.
@@ -193,6 +239,72 @@ pub struct HistoryStatsView {
     pub merged_by_day: Vec<u32>,
     /// Where the merged PRs' time went, in the queue's order. Empty without a merge.
     pub steps: Vec<StepStatsView>,
+    /// The agent runs of the window, of every PR, by model and effort: the costliest first.
+    pub llms: Vec<LlmStatsView>,
+}
+
+/// What one model, at one effort, spent over a window.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct LlmStatsView {
+    /// `None` for runs from before events named them.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Resolving conflicts in rebases.
+    pub rebase: LlmRunsView,
+    /// Fixing failed checks.
+    pub fix: LlmRunsView,
+}
+
+#[derive(Default, Serialize, TS)]
+#[ts(export)]
+pub struct LlmRunsView {
+    pub runs: u32,
+    pub turns: u32,
+    /// Of the runs whose CLI told their cost.
+    pub cost_usd: f64,
+    /// The runs whose CLI did not, such as Codex's: `cost_usd` leaves them out.
+    pub unpriced: u32,
+}
+
+impl LlmRunsView {
+    fn add(&mut self, s: &Spend) {
+        self.runs += 1;
+        self.turns += s.turns;
+        match s.cost_usd {
+            Some(c) => self.cost_usd += c,
+            None => self.unpriced += 1,
+        }
+    }
+}
+
+/// The runs by model and effort, the costliest first.
+fn llm_stats(spends: Vec<Spend>) -> Vec<LlmStatsView> {
+    let mut by: Vec<LlmStatsView> = Vec::new();
+    for s in spends {
+        let i = match by
+            .iter()
+            .position(|l| l.model == s.model && l.effort == s.effort)
+        {
+            Some(i) => i,
+            None => {
+                by.push(LlmStatsView {
+                    model: s.model.clone(),
+                    effort: s.effort.clone(),
+                    rebase: LlmRunsView::default(),
+                    fix: LlmRunsView::default(),
+                });
+                by.len() - 1
+            }
+        };
+        match s.task {
+            SpendTask::Rebase => by[i].rebase.add(&s),
+            SpendTask::Fix => by[i].fix.add(&s),
+        }
+    }
+    let cost = |l: &LlmStatsView| l.rebase.cost_usd + l.fix.cost_usd;
+    by.sort_by(|a, b| cost(b).total_cmp(&cost(a)));
+    by
 }
 
 #[derive(Serialize, TS)]
@@ -496,6 +608,7 @@ pub(crate) async fn events(
         events
             .into_iter()
             .map(|e| EventView {
+                spend: Spend::parse(&e.kind, &e.message).map(SpendView::from),
                 repo: e.repo,
                 pr: e.pr as u32,
                 at: e.at,
@@ -611,11 +724,12 @@ pub(crate) async fn history_stats(
 ) -> Result<Json<HistoryStatsView>, ApiError> {
     let id = user.workspace(id)?;
     let (repo, days) = (q.repo()?, q.days()?);
-    let (current, previous, merged_by_day, steps) = tokio::try_join!(
+    let (current, previous, merged_by_day, steps, spends) = tokio::try_join!(
         app.store.exit_stats(id, days, 0),
         app.store.exit_stats(id, 2 * days, days),
         app.store.merged_by_day(id, repo.as_ref(), days),
         app.store.step_stats(id, repo.as_ref(), days),
+        app.store.spends(id, repo.as_ref(), days),
     )?;
     Ok(Json(HistoryStatsView {
         current: current.into_iter().map(StatsView::from).collect(),
@@ -630,6 +744,7 @@ pub(crate) async fn history_stats(
                 p95_secs: s.p95_secs,
             })
             .collect(),
+        llms: llm_stats(spends),
     }))
 }
 
@@ -988,6 +1103,32 @@ pub(crate) async fn delete_api_key(
 mod tests {
     use super::*;
     use mergepatrol_core::PrSummary;
+
+    #[test]
+    fn llm_stats_group_by_model_and_effort_costliest_first() {
+        let run = |kind: &str, message: &str| Spend::parse(kind, message).unwrap();
+        let stats = llm_stats(vec![
+            run("resolved", "a.rs in 3 turns, $0.40, by m at high effort"),
+            run("fix", "2 turns, $0.10, by m at high effort"),
+            run("fix", "5 turns, $1.00, by m at max effort"),
+            run("fix", "4 turns"),
+        ]);
+        let keys: Vec<_> = stats
+            .iter()
+            .map(|l| (l.model.as_deref(), l.effort.as_deref()))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (Some("m"), Some("max")),
+                (Some("m"), Some("high")),
+                (None, None)
+            ]
+        );
+        assert_eq!((stats[1].rebase.runs, stats[1].rebase.turns), (1, 3));
+        assert_eq!((stats[1].fix.runs, stats[1].fix.cost_usd), (1, 0.10));
+        assert_eq!((stats[2].fix.runs, stats[2].fix.unpriced), (1, 1));
+    }
 
     fn entry(number: u64, priority: bool, state: EntryState) -> Entry {
         Entry {

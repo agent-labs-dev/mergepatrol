@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step, StepTimes};
+use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Spend, Step, StepTimes};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
 use mergepatrol_github::{
@@ -710,6 +710,9 @@ impl Store for Mem {
         unreachable!()
     }
     async fn step_stats(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<StepStats>> {
+        unreachable!()
+    }
+    async fn spends(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<Spend>> {
         unreachable!()
     }
     async fn merged_by_day(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<u64>> {

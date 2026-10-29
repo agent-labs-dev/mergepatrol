@@ -3,12 +3,14 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { fetchExits, fetchHistoryStats } from "./api";
 import type { ExitView } from "./api/ExitView";
+import type { LlmRunsView } from "./api/LlmRunsView";
+import type { LlmStatsView } from "./api/LlmStatsView";
 import type { OutcomeView } from "./api/OutcomeView";
 import type { StatsView } from "./api/StatsView";
 import type { StepStatsView } from "./api/StepStatsView";
 import type { StepTimeView } from "./api/StepTimeView";
 import type { StepView } from "./api/StepView";
-import { Avatar, duration, secondary, timeAgo } from "./ui";
+import { Avatar, duration, llmName, secondary, timeAgo, usd } from "./ui";
 
 export const WINDOWS = [7, 30, 90] as const;
 export type Window = (typeof WINDOWS)[number];
@@ -37,7 +39,7 @@ export function History({ workspace }: { workspace: number }) {
     return <p className="p-6 text-bad">Could not load the history.</p>;
   if (!stats.data) return null;
 
-  const { current, previous, merged_by_day, steps } = stats.data;
+  const { current, previous, merged_by_day, steps, llms } = stats.data;
   const repos = current.filter((s) => s.repo !== null);
   const of = (all: StatsView[]) => all.find((s) => s.repo === (repo ?? null));
   const rows = exits.data?.pages.flatMap((p) => p.exits) ?? [];
@@ -95,6 +97,7 @@ export function History({ workspace }: { workspace: number }) {
             days={days}
           />
           <Steps steps={steps} />
+          <Llms llms={llms} days={days} />
         </div>
         {exits.data && rows.length === 0 && (
           <p className="p-6 text-faint">
@@ -518,6 +521,86 @@ function Steps({ steps }: { steps: StepStatsView[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** What the agents cost over the window, by model and effort, split into resolving rebase
+ * conflicts and fixing failed checks. */
+function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
+  if (llms.length === 0) return null;
+  const sum = (runs: (l: LlmStatsView) => LlmRunsView): LlmRunsView => ({
+    runs: llms.reduce((t, l) => t + runs(l).runs, 0),
+    turns: llms.reduce((t, l) => t + runs(l).turns, 0),
+    cost_usd: llms.reduce((t, l) => t + runs(l).cost_usd, 0),
+    unpriced: llms.reduce((t, l) => t + runs(l).unpriced, 0),
+  });
+  const rebase = sum((l) => l.rebase);
+  const fix = sum((l) => l.fix);
+  return (
+    <div className="mt-5">
+      <div className="mb-2 flex items-baseline justify-between">
+        <p className="text-xs font-medium text-muted">LLM spend</p>
+        <p className="text-xs text-faint">
+          {cost(both(rebase, fix))} over {rebase.runs + fix.runs} runs in the last {days} days
+        </p>
+      </div>
+      <table className="w-full text-xs">
+        <thead className="text-faint">
+          <tr>
+            <th className="py-1 text-left font-normal">Model</th>
+            <th className="py-1 text-right font-normal">Rebasing</th>
+            <th className="py-1 text-right font-normal">Fixing</th>
+            <th className="py-1 text-right font-normal">Total</th>
+          </tr>
+        </thead>
+        <tbody className="tabular-nums">
+          {llms.map((l) => (
+            <tr key={llmName(l)} className="border-t border-line-soft">
+              <td className="py-1 font-mono">{llmName(l)}</td>
+              <LlmRuns runs={l.rebase} />
+              <LlmRuns runs={l.fix} />
+              <td className="py-1 text-right font-medium">{cost(both(l.rebase, l.fix))}</td>
+            </tr>
+          ))}
+          {llms.length > 1 && (
+            <tr className="border-t border-line font-medium">
+              <td className="py-1">All models</td>
+              <LlmRuns runs={rebase} />
+              <LlmRuns runs={fix} />
+              <td className="py-1 text-right">{cost(both(rebase, fix))}</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const both = (a: LlmRunsView, b: LlmRunsView): LlmRunsView => ({
+  runs: a.runs + b.runs,
+  turns: a.turns + b.turns,
+  cost_usd: a.cost_usd + b.cost_usd,
+  unpriced: a.unpriced + b.unpriced,
+});
+
+/** The known cost: "–" when no run told it, "$1.20+" when only some did, such as Codex's. */
+const cost = (r: LlmRunsView) =>
+  r.unpriced === r.runs ? "–" : `${usd(r.cost_usd)}${r.unpriced > 0 ? "+" : ""}`;
+
+function LlmRuns({ runs }: { runs: LlmRunsView }) {
+  return (
+    <td
+      className="py-1 text-right"
+      title={`${runs.runs} ${runs.runs === 1 ? "run" : "runs"}, ${runs.turns} turns${runs.unpriced > 0 ? `, ${runs.unpriced} without a cost` : ""}`}
+    >
+      {runs.runs === 0 ? (
+        <span className="text-faint">–</span>
+      ) : (
+        <>
+          {cost(runs)} <span className="text-faint">· {runs.runs}×</span>
+        </>
+      )}
+    </td>
   );
 }
 
