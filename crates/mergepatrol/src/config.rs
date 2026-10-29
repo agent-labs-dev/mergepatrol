@@ -22,6 +22,11 @@ pub struct Config {
     pub bind: SocketAddr,
     pub max_jobs: usize,
     pub executor: ExecutorConfig,
+    /// Where jobs reach the orchestrator's Anthropic proxy. `public_url` by default.
+    pub job_proxy_url: String,
+    /// A second listener that serves only the proxy, for jobs that cannot reach `bind`: the
+    /// Docker sandbox network reaches the host on one port only.
+    pub job_proxy_bind: Option<SocketAddr>,
     /// The PostHog project key. Product analytics are off without it, as when self-hosted.
     pub posthog_key: Option<String>,
     pub posthog_host: String,
@@ -73,11 +78,17 @@ impl Config {
         repo_defaults.check().map_err(|e| {
             anyhow::anyhow!("MERGEPATROL_LABEL, _BATCH_SIZE, _MODEL or _EFFORT: {e}")
         })?;
+        let public_url = opt("MERGEPATROL_PUBLIC_URL", "http://localhost:8080");
         Ok(Self {
             secret_key,
             database_url: req("MERGEPATROL_DATABASE_URL")?,
             hosted_app: hosted_app()?,
-            public_url: opt("MERGEPATROL_PUBLIC_URL", "http://localhost:8080"),
+            job_proxy_url: opt("MERGEPATROL_JOB_PROXY_URL", &public_url),
+            job_proxy_bind: var("MERGEPATROL_JOB_PROXY_BIND")
+                .map(|b| b.parse())
+                .transpose()
+                .context("MERGEPATROL_JOB_PROXY_BIND")?,
+            public_url,
             repo_defaults,
             data_dir: opt("MERGEPATROL_DATA_DIR", "./data").into(),
             poll: Duration::from_secs(opt("MERGEPATROL_POLL_SECS", "60").parse()?),

@@ -4,6 +4,7 @@
 //! machine: a Cloud Run Job execution.
 
 pub mod protocol;
+pub mod proxy;
 pub mod remote;
 
 use std::path::{Path, PathBuf};
@@ -93,6 +94,8 @@ impl Executor for DockerExecutor {
                 "4096",
             ])
             .args(["--cap-drop", "ALL", "--security-opt", "no-new-privileges"])
+            // The Docker host, where the orchestrator's Anthropic proxy listens, by default.
+            .args(["--add-host", "host.docker.internal:host-gateway"])
             .arg(&self.image)
             .args(["job", "--out", "/out"]);
         let id = String::from_utf8(checked(create, "docker create").await?)?

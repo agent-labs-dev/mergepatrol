@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step, StepTimes};
 use mergepatrol_executor::LocalExecutor;
+use mergepatrol_executor::proxy::UPSTREAM;
 use mergepatrol_github::{BranchMerge, Checks, RequiredChecks, StackRef};
 use mergepatrol_store::{
     EventRecord, ExitQuery, ExitRecord, ExitStats, RepoState, SecretRecord, Session, StepStats,
@@ -707,6 +708,8 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             bind: "127.0.0.1:0".parse().unwrap(),
             max_jobs: 1,
             executor: ExecutorConfig::Local,
+            job_proxy_url: "http://localhost:8080".into(),
+            job_proxy_bind: None,
             posthog_key: None,
             posthog_host: String::new(),
         },
@@ -717,6 +720,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             program: PathBuf::new(),
             timeout: Duration::ZERO,
         }),
+        anthropic: Arc::new(AnthropicProxy::new(UPSTREAM)),
         jobs: Semaphore::new(1),
         wakers: Arc::default(),
         analytics: Analytics::default(),

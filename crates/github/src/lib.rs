@@ -6,7 +6,7 @@ mod files;
 mod repo;
 pub mod setup;
 
-pub use app::{App, Installation, InstallationInfo, RepoInfo};
+pub use app::{App, Installation, InstallationInfo, RepoInfo, revoke_token};
 pub use checks::{CheckState, Checks, RequiredChecks};
 pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{

@@ -405,6 +405,29 @@ fn json_ok<T: DeserializeOwned>((status, body): (StatusCode, String)) -> Result<
     Ok(serde_json::from_str(&body)?)
 }
 
+/// Revokes an installation token: the token itself is the credential.
+pub async fn revoke_token(token: &str) -> Result<()> {
+    revoke_token_at(API, token).await
+}
+
+async fn revoke_token_at(api: &str, token: &str) -> Result<()> {
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let build = || async {
+        Ok(http
+            .delete(format!("{api}/installation/token"))
+            .bearer_auth(token)
+            .headers(api_headers()))
+    };
+    let (status, body) = send(build, "revoke the read-only token").await?;
+    if !status.is_success() {
+        bail!("revoke the read-only token: {status} {body}");
+    }
+    Ok(())
+}
+
 fn api_headers() -> reqwest::header::HeaderMap {
     let mut h = reqwest::header::HeaderMap::new();
     h.insert("accept", "application/vnd.github+json".parse().unwrap());
@@ -573,5 +596,21 @@ mod tests {
         let res = gh.request(Method::GET, "/z", None).await.unwrap();
         assert_eq!(res.status, StatusCode::NOT_FOUND);
         assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_token_revokes_itself() {
+        let (gh, requests) = fake::serve(vec![(204, "", "")]).await;
+        revoke_token_at(&gh.app.api, "t").await.unwrap();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            ["DELETE /installation/token HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_revoke_fails() {
+        let (gh, _) = fake::serve(vec![(401, "", r#"{"message":"Bad credentials"}"#)]).await;
+        assert!(revoke_token_at(&gh.app.api, "t").await.is_err());
     }
 }

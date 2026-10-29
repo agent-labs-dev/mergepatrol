@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mergepatrol_analytics::Analytics;
+use mergepatrol_executor::proxy::{AnthropicProxy, UPSTREAM};
 use mergepatrol_executor::remote::{CloudRunLaunch, Mailbox, RemoteExecutor};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
 use mergepatrol_github::App;
@@ -98,6 +99,7 @@ async fn orchestrator() -> Result<()> {
     };
 
     let mailbox = Arc::new(Mailbox::default());
+    let anthropic = Arc::new(AnthropicProxy::new(UPSTREAM));
     let executor: Arc<dyn Executor> = match &config.executor {
         ExecutorConfig::Local => {
             tracing::warn!("jobs run as local processes, without a sandbox");
@@ -147,6 +149,7 @@ async fn orchestrator() -> Result<()> {
         hosted_app: hosted_app.clone(),
         store: store.clone(),
         executor,
+        anthropic: anthropic.clone(),
         jobs: Semaphore::new(config.max_jobs),
         wakers: Arc::default(),
         analytics: analytics.clone(),
@@ -166,9 +169,16 @@ async fn orchestrator() -> Result<()> {
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let queues = tokio::spawn(queue::lead(ctx.clone(), pg, stopped));
 
+    if let Some(proxy_bind) = ctx.config.job_proxy_bind {
+        let listener = tokio::net::TcpListener::bind(proxy_bind).await?;
+        tracing::info!(bind = %proxy_bind, "Anthropic proxy for jobs");
+        tokio::spawn(axum::serve(listener, anthropic.clone().router()).into_future());
+    }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");
-    let app = mergepatrol_web::router(store, vault, web).merge(mailbox.router());
+    let app = mergepatrol_web::router(store, vault, web)
+        .merge(mailbox.router())
+        .merge(anthropic.router());
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stopping().await;

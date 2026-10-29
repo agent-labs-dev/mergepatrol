@@ -125,7 +125,8 @@ When the file does not parse, the queue pauses, and **Repos** shows why, until t
 A rebase job runs the repo's code (the verify commands) and an agent with a shell. Mergepatrol treats it as untrusted:
 
 - The **orchestrator** holds the GitHub App key and the queue. It never runs repo code.
-- Each **job** runs `mergepatrol job` in its own container, from the job image. It gets a token that can only read the one repo, and the workspace's Anthropic key. It returns a git bundle.
+- Each **job** runs `mergepatrol job` in its own container, from the job image. It gets a GitHub token that can only read the one repo, and revokes it once it has fetched the repo. It returns a git bundle.
+- The workspace's Anthropic key stays in the orchestrator. A job calls the Anthropic API through the orchestrator's proxy at `/anthropic`, with a token that works only while the job runs, and for a set number of requests.
 - The orchestrator checks the bundle before it publishes: the result must sit on the base branch, and change no file that the PR did not change.
 
 In production the job containers use gVisor (`runsc`) on a network that cannot reach the cloud metadata server, private ranges, or the host. `deploy/sandbox-host.sh` sets that up on a Linux VM. Then set:
@@ -137,6 +138,8 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 | `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
 | `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
 | `MERGEPATROL_JOB_RESOLV_CONF` | Docker's default | A file on the Docker host, mounted as the jobs' `/etc/resolv.conf`. `/etc/mergepatrol/job-resolv.conf` on the sandbox network |
+| `MERGEPATROL_JOB_PROXY_URL` | `MERGEPATROL_PUBLIC_URL` | Where jobs reach the orchestrator's Anthropic proxy. `http://10.213.0.1:8081` on the sandbox network |
+| `MERGEPATROL_JOB_PROXY_BIND` | None | A second listener that serves only the proxy, for jobs that cannot reach the dashboard's. `0.0.0.0:8081` in `compose.yml` |
 | `MERGEPATROL_JOB_MEMORY` | `4g` | Memory limit per job |
 | `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
 

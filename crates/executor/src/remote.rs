@@ -146,7 +146,7 @@ async fn done(State(mb): State<Arc<Mailbox>>, UrlPath(token): UrlPath<String>) -
     }
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     let mut buf = [0u8; 32];
     getrandom::fill(&mut buf).expect("the OS has no random source");
     buf.iter().map(|b| format!("{b:02x}")).collect()
@@ -392,7 +392,7 @@ mod tests {
                 effort: String::new(),
                 timeout_secs: 1,
                 max_turns: 1,
-                anthropic_api_key: None,
+                anthropic: None,
             },
             task: Default::default(),
         }

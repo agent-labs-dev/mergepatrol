@@ -12,8 +12,10 @@ use crate::{FixRequest, GIVE_UP, Resolution, ResolveRequest, Resolver, fix_promp
 
 /// Runs Claude Code headless (`claude -p`) in the job's worktree.
 pub struct ClaudeResolver {
-    /// The workspace's Anthropic API key.
+    /// An Anthropic API key, or a job's token for the proxy at `base_url`.
     pub api_key: Option<String>,
+    /// The Anthropic API's URL. `None` is the CLI's default.
+    pub base_url: Option<String>,
     pub model: String,
     pub effort: String,
     pub timeout: Duration,
@@ -33,13 +35,12 @@ impl ClaudeResolver {
         tools.join(",")
     }
 
-    async fn run(
+    fn command(
         &self,
         workdir: &Path,
         prompt: String,
         verify: &[String],
-        transcript_path: &Path,
-    ) -> Result<Resolution> {
+    ) -> Result<tokio::process::Command> {
         let key = self
             .api_key
             .clone()
@@ -48,6 +49,9 @@ impl ClaudeResolver {
         cmd.current_dir(workdir).kill_on_drop(true);
         // `--bare` reads only ANTHROPIC_API_KEY, never a login on the machine.
         cmd.env("ANTHROPIC_API_KEY", key);
+        if let Some(url) = &self.base_url {
+            cmd.env("ANTHROPIC_BASE_URL", url);
+        }
         cmd.arg("-p")
             .arg(prompt)
             .args([
@@ -65,8 +69,20 @@ impl ClaudeResolver {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        Ok(cmd)
+    }
 
-        let mut child = cmd.spawn().context("spawn claude")?;
+    async fn run(
+        &self,
+        workdir: &Path,
+        prompt: String,
+        verify: &[String],
+        transcript_path: &Path,
+    ) -> Result<Resolution> {
+        let mut child = self
+            .command(workdir, prompt, verify)?
+            .spawn()
+            .context("spawn claude")?;
         let stdout = child.stdout.take().context("claude stdout")?;
         // Drain stderr as it comes, so a full pipe never blocks the CLI.
         let mut stderr = child.stderr.take().context("claude stderr")?;
@@ -193,5 +209,37 @@ pub async fn check_anthropic_key(key: &str) -> Result<KeyCheck> {
     match status.as_u16() {
         401 | 403 => Ok(KeyCheck::Invalid(message)),
         _ => bail!("the Anthropic API answered {status}: {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(cmd: &tokio::process::Command, name: &str) -> Option<String> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(k, _)| *k == name)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn the_cli_calls_the_api_at_the_base_url_with_the_token() {
+        let resolver = ClaudeResolver {
+            api_key: Some("job-token".into()),
+            base_url: Some("http://orchestrator/anthropic".into()),
+            model: "m".into(),
+            effort: "medium".into(),
+            timeout: Duration::from_secs(1),
+            max_turns: 1,
+        };
+        let cmd = resolver
+            .command(Path::new("."), "p".into(), &["cargo check".into()])
+            .unwrap();
+        assert_eq!(env(&cmd, "ANTHROPIC_API_KEY").as_deref(), Some("job-token"));
+        assert_eq!(
+            env(&cmd, "ANTHROPIC_BASE_URL").as_deref(),
+            Some("http://orchestrator/anthropic")
+        );
     }
 }
