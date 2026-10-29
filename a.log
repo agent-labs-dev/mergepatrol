@@ -1,5 +1,0 @@
-{"timestamp":"2026-10-29T10:36:50.785909Z","level":"WARN","fields":{"message":"no GitHub App yet: open the dashboard and enter this setup token","setup_token":"Nd5aVcqigpLiEO9RW_3BFpnu","url":"http://localhost:8080"},"target":"mergepatrol"}
-{"timestamp":"2026-10-29T10:36:50.786681Z","level":"WARN","fields":{"message":"jobs run as local processes, without a sandbox"},"target":"mergepatrol"}
-{"timestamp":"2026-10-29T10:36:50.787234Z","level":"INFO","fields":{"message":"dashboard","bind":"127.0.0.1:18081"},"target":"mergepatrol"}
-{"timestamp":"2026-10-29T10:36:50.812959Z","level":"INFO","fields":{"message":"holding the queue lock: running the queues"},"target":"mergepatrol::queue"}
-{"timestamp":"2026-10-29T10:36:56.742003Z","level":"INFO","fields":{"message":"stopping"},"target":"mergepatrol"}
