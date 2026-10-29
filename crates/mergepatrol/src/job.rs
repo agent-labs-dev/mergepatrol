@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mergepatrol_core::CheckFailure;
+use mergepatrol_core::{CheckFailure, FIXED_BY};
 use mergepatrol_executor::protocol::{
     BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, ResolverSpec, Task,
 };
@@ -264,7 +264,7 @@ async fn fix(
     git.commit_all(
         dir,
         &format!(
-            "Fix {}\n\nFixed-by: mergepatrol, {}",
+            "Fix {}\n\n{FIXED_BY}, {}",
             names.join(", "),
             resolver.name()
         ),

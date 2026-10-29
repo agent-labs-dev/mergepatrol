@@ -506,6 +506,44 @@ pub(crate) async fn events(
     ))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct FixQuery {
+    repo: String,
+    sha: String,
+}
+
+/// A fix the agent pushed, as a patch.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct FixView {
+    pub patch: String,
+    /// Files GitHub sends no patch for: binary, or too large.
+    pub omitted: Vec<String>,
+}
+
+/// The changes of the fix agent's commit `sha`. Not of any other commit.
+pub(crate) async fn fix(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path(id): Path<u64>,
+    Query(q): Query<FixQuery>,
+) -> Result<Json<FixView>, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = RepoName::parse(&q.repo).ok_or(ApiError::bad_request("repo must be owner/name"))?;
+    if q.sha.len() != 40 || !q.sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request("sha must be a commit SHA"));
+    }
+    let fix = installation(&app, id)
+        .await?
+        .fix_patch(&repo, &q.sha)
+        .await?
+        .ok_or_else(|| ApiError::Status(StatusCode::NOT_FOUND, "no such fix".into()))?;
+    Ok(Json(FixView {
+        patch: fix.patch,
+        omitted: fix.omitted,
+    }))
+}
+
 const HISTORY_PAGE: u32 = 50;
 
 #[derive(Deserialize)]

@@ -98,6 +98,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         // A workspace is one installation of the App: `{id}` is its installation ID.
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
+        .route("/api/w/{id}/fix", get(api::fix))
         .route("/api/w/{id}/history", get(api::history))
         .route("/api/w/{id}/history/stats", get(api::history_stats))
         .route("/api/w/{id}/repos", get(api::repos))
@@ -375,6 +376,21 @@ mod tests {
         );
         assert_eq!(
             get(&router, "/api/w/2/events?repo=o/r", Some(&cookie)).await,
+            StatusCode::NOT_FOUND
+        );
+        // Checked before GitHub sees it: it goes into the request's path.
+        assert_eq!(
+            get(&router, "/api/w/1/fix?repo=o/r&sha=../../x", Some(&cookie)).await,
+            StatusCode::BAD_REQUEST
+        );
+        let sha = "0".repeat(40);
+        assert_eq!(
+            get(
+                &router,
+                &format!("/api/w/2/fix?repo=o/r&sha={sha}"),
+                Some(&cookie)
+            )
+            .await,
             StatusCode::NOT_FOUND
         );
         assert_eq!(

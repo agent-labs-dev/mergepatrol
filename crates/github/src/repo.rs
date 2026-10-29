@@ -4,13 +4,43 @@ use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use mergepatrol_core::{LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review};
+use mergepatrol_core::{
+    FIXED_BY, LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review,
+};
 
 use crate::Installation;
 use crate::codeowners::{self, CodeOwners};
 
 /// Marks the one comment per PR that Mergepatrol keeps up to date.
 const STICKY_MARKER: &str = "<!-- mergepatrol:status -->";
+
+/// A commit's changes, as `git diff` prints them.
+#[derive(Debug, Default)]
+pub struct FixPatch {
+    pub patch: String,
+    /// Files GitHub sends no patch for: binary, or too large.
+    pub omitted: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CommitJson {
+    commit: CommitMessage,
+    #[serde(default)]
+    files: Vec<CommitFile>,
+}
+
+#[derive(Deserialize)]
+struct CommitMessage {
+    message: String,
+}
+
+#[derive(Deserialize)]
+struct CommitFile {
+    filename: String,
+    previous_filename: Option<String>,
+    status: String,
+    patch: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RepoSnapshot {
@@ -684,6 +714,53 @@ impl Installation {
         Ok(r["tree"]["sha"].as_str().context("commit tree")?.to_owned())
     }
 
+    /// The fix agent's commit `sha` as one unified patch. `None` for any other commit, one
+    /// without the `FIXED_BY` trailer, or for no commit at all.
+    pub async fn fix_patch(&self, repo: &RepoName, sha: &str) -> Result<Option<FixPatch>> {
+        let res = self
+            .request(Method::GET, &format!("/repos/{repo}/commits/{sha}"), None)
+            .await?;
+        if matches!(
+            res.status,
+            StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return Ok(None);
+        }
+        if !res.status.is_success() {
+            anyhow::bail!("get commit {sha}: {} {}", res.status, res.body);
+        }
+        let commit: CommitJson = serde_json::from_value(res.body).context("commit")?;
+        if !commit
+            .commit
+            .message
+            .lines()
+            .any(|l| l.starts_with(FIXED_BY))
+        {
+            return Ok(None);
+        }
+        let mut fix = FixPatch::default();
+        for f in commit.files {
+            let Some(patch) = f.patch else {
+                fix.omitted.push(f.filename);
+                continue;
+            };
+            let old = f.previous_filename.as_deref().unwrap_or(&f.filename);
+            let from = match f.status.as_str() {
+                "added" => "/dev/null".to_owned(),
+                _ => format!("a/{old}"),
+            };
+            let to = match f.status.as_str() {
+                "removed" => "/dev/null".to_owned(),
+                _ => format!("b/{}", f.filename),
+            };
+            fix.patch.push_str(&format!(
+                "diff --git a/{old} b/{}\n--- {from}\n+++ {to}\n{patch}\n",
+                f.filename
+            ));
+        }
+        Ok(Some(fix))
+    }
+
     /// Merges the PR through the asynchronous merge API, the only one GitHub offers for a stacked
     /// PR: for one, it merges every layer up to `number`, or none. Waits for the result. A merge
     /// already pending for the PR, from before a restart, is waited for rather than requested
@@ -1063,5 +1140,40 @@ mod tests {
             }]
         );
         assert_eq!(s.checks.as_deref(), Some("PENDING"));
+    }
+
+    const FIX_COMMIT: &str = r#"{"commit":{"message":"Fix test\n\nFixed-by: mergepatrol, claude (claude-opus-5-5)\nCo-authored-by: mergepatrol <m@x>"},"files":[
+        {"filename":"src/a.rs","status":"modified","patch":"@@ -1 +1 @@\n-a\n+b"},
+        {"filename":"src/new.rs","status":"added","patch":"@@ -0,0 +1 @@\n+n"},
+        {"filename":"src/c.rs","previous_filename":"src/old.rs","status":"renamed","patch":"@@ -1 +1 @@\n-x\n+y"},
+        {"filename":"logo.png","status":"modified"}
+    ]}"#;
+
+    #[tokio::test]
+    async fn a_fix_commit_comes_back_as_one_patch() {
+        let (gh, requests) = fake::serve(vec![(200, "", FIX_COMMIT)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let fix = gh.fix_patch(&repo, "abc").await.unwrap().unwrap();
+        assert_eq!(
+            fix.patch,
+            "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n\
+             diff --git a/src/new.rs b/src/new.rs\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1 @@\n+n\n\
+             diff --git a/src/old.rs b/src/c.rs\n--- a/src/old.rs\n+++ b/src/c.rs\n@@ -1 +1 @@\n-x\n+y\n"
+        );
+        assert_eq!(fix.omitted, ["logo.png"]);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            ["GET /repos/o/r/commits/abc HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_fix_agents_commits_have_a_fix_patch() {
+        let theirs = r#"{"commit":{"message":"feat: x"},"files":[]}"#;
+        let missing = r#"{"message":"No commit found for SHA: abc"}"#;
+        let (gh, _) = fake::serve(vec![(200, "", theirs), (422, "", missing)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        assert!(gh.fix_patch(&repo, "abc").await.unwrap().is_none());
+        assert!(gh.fix_patch(&repo, "abc").await.unwrap().is_none());
     }
 }

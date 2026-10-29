@@ -12,7 +12,7 @@ pub use checks::{CheckState, Checks, RequiredChecks};
 pub use codeowners::CodeOwners;
 pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{
-    BranchMerge, HeadRepository, MergeOutcome, PrDetails, PullRequest, RepoOwner, RepoSnapshot,
-    StackRef, TreeEntry,
+    BranchMerge, FixPatch, HeadRepository, MergeOutcome, PrDetails, PullRequest, RepoOwner,
+    RepoSnapshot, StackRef, TreeEntry,
 };
 pub use setup::{AppCredentials, GithubUser};
