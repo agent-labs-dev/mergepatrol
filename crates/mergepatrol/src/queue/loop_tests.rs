@@ -580,6 +580,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         jobs: Semaphore::new(1),
         wakers: Arc::default(),
         analytics: Analytics::default(),
+        authors: Default::default(),
     }
 }
 

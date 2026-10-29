@@ -58,6 +58,37 @@ pub struct Ctx {
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
     pub analytics: Analytics,
+    pub authors: Authors,
+}
+
+/// The author of each PR in a repo's queue, as of its last tick: the person its queue events
+/// count for.
+#[derive(Default)]
+pub struct Authors(std::sync::Mutex<HashMap<(u64, RepoName), HashMap<PrNumber, String>>>);
+
+impl Authors {
+    /// The PRs of the lane before it syncs, so a PR that just left still has its author, and
+    /// the labeled PRs, so one that just joined does.
+    fn update(&self, key: &LaneKey, lane: &Lane, labeled: &[PullRequest]) {
+        let left = lane
+            .entries
+            .iter()
+            .map(|e| (e.number, e.summary.author.clone()));
+        let labeled = labeled.iter().map(|pr| (pr.number, pr.summary().author));
+        let authors = left
+            .chain(labeled)
+            .filter_map(|(n, author)| Some((n, author?.login)))
+            .collect();
+        let mut map = self.0.lock().unwrap();
+        map.insert((key.installation_id, key.repo.clone()), authors);
+    }
+
+    fn get(&self, key: &LaneKey, number: PrNumber) -> Option<String> {
+        let map = self.0.lock().unwrap();
+        map.get(&(key.installation_id, key.repo.clone()))?
+            .get(&number)
+            .cloned()
+    }
 }
 
 /// Webhooks wake a repo's queue before its poll is due. Polling still runs, in case one is lost.
@@ -248,6 +279,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         trunk: snap.default_branch.clone(),
     };
     let mut lane = ctx.store.load_lane(&key).await?;
+    ctx.authors.update(&key, &lane, &snap.labeled);
 
     let mut candidates = Vec::new();
     for pr in &snap.labeled {
@@ -808,7 +840,7 @@ async fn merge_retrying(
     }
 }
 
-/// A queue event: shown on the dashboard, logged, and counted for its workspace.
+/// A queue event: shown on the dashboard, logged, and counted for its PR's author and workspace.
 async fn record(
     ctx: &Ctx,
     key: &LaneKey,
@@ -823,6 +855,7 @@ async fn record(
         &key.trunk,
         number,
         kind,
+        ctx.authors.get(key, number).as_deref(),
     );
     ctx.store.record(key, number, kind, message).await
 }
