@@ -4,8 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mergepatrol</title>
+    <script>
+      // Sets the theme before the first paint, so a dark page never flashes white. theme.ts
+      // keeps it up to date after.
+      const theme = localStorage.getItem("theme");
+      const dark =
+        theme === "dark" || (theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.classList.toggle("dark", dark);
+    </script>
   </head>
-  <body class="bg-neutral-950 text-neutral-100">
+  <body class="bg-page text-sm text-fg antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

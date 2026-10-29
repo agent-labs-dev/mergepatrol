@@ -7,6 +7,8 @@ import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
 import { CreateApp, Install, SignIn, UnlockSetup } from "./Setup";
+import { type Theme, useTheme } from "./theme";
+import { Avatar, Mark, ThemeToggle } from "./ui";
 
 /** Setup and sign-in errors come back from the server as `?error=`. */
 function useRedirectError() {
@@ -18,24 +20,27 @@ function useRedirectError() {
 export function App() {
   const session = useQuery({ queryKey: ["session"], queryFn: fetchSession });
   const [error, dismiss] = useRedirectError();
+  const [theme, setTheme] = useTheme();
 
   return (
     <>
       {error && (
-        <div className="flex justify-between bg-red-950 px-4 py-2 text-sm text-red-200">
+        <div className="flex justify-between border-b border-red-200 bg-red-50 px-5 py-2 text-sm text-red-800 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
           <span>{error}</span>
-          <button type="button" onClick={dismiss}>
+          <button type="button" onClick={dismiss} className="font-medium hover:opacity-70">
             Dismiss
           </button>
         </div>
       )}
-      {session.error && <p className="p-8 text-red-400">{session.error.message}</p>}
-      {session.data && <Screen session={session.data} />}
+      {session.error && <p className="p-8 text-sm text-bad">{session.error.message}</p>}
+      {session.data && <Screen session={session.data} theme={theme} setTheme={setTheme} />}
     </>
   );
 }
 
-function Screen({ session }: { session: SessionView }) {
+type ThemeProps = { theme: Theme; setTheme: (t: Theme) => void };
+
+function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
   if (session.status === "needs_setup") {
     return session.setup_unlocked ? <CreateApp /> : <UnlockSetup />;
   }
@@ -44,7 +49,7 @@ function Screen({ session }: { session: SessionView }) {
     return session.workspaces.length === 0 ? (
       <Install app={session.app} />
     ) : (
-      <Dashboard session={session} />
+      <Dashboard session={session} {...theme} />
     );
   }
   return null;
@@ -65,7 +70,7 @@ function useWorkspace(workspaces: WorkspaceView[]) {
   return [id, choose] as const;
 }
 
-function Dashboard({ session }: { session: SessionView }) {
+function Dashboard({ session, theme, setTheme }: { session: SessionView } & ThemeProps) {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<(typeof tabs)[number]>("Queue");
   const [workspace, setWorkspace] = useWorkspace(session.workspaces);
@@ -75,57 +80,66 @@ function Dashboard({ session }: { session: SessionView }) {
   });
   const app = session.app;
   if (!app) return null;
+  const current = session.workspaces.find((w) => w.installation_id === workspace);
 
   return (
-    <main className="mx-auto max-w-5xl p-8">
-      <header className="mb-6 flex items-center justify-between">
-        <div className="flex items-baseline gap-6">
-          <h1 className="text-2xl font-semibold">Mergepatrol</h1>
-          <nav className="flex gap-4 text-sm">
-            {tabs.map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={t === tab ? "text-white" : "text-neutral-500 hover:text-neutral-300"}
-              >
-                {t}
-              </button>
+    <div className="flex h-screen flex-col">
+      <header className="border-b border-line bg-surface">
+        <div className="flex h-12 items-center gap-3 px-5">
+          <Mark />
+          <span className="text-faint">/</span>
+          {current && <Avatar src={current.avatar_url} alt={current.account} />}
+          <select
+            value={workspace}
+            onChange={(e) => {
+              if (e.target.value === "install") location.href = app.install_url;
+              else setWorkspace(Number(e.target.value));
+            }}
+            className="field-sizing-content bg-transparent font-medium outline-none"
+          >
+            {session.workspaces.map((w) => (
+              <option key={w.installation_id} value={w.installation_id}>
+                {w.account}
+              </option>
             ))}
-          </nav>
-        </div>
-        {session.user && (
-          <div className="flex items-center gap-3 text-sm">
-            <select
-              value={workspace}
-              onChange={(e) => {
-                if (e.target.value === "install") location.href = app.install_url;
-                else setWorkspace(Number(e.target.value));
-              }}
-              className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1"
-            >
-              {session.workspaces.map((w) => (
-                <option key={w.installation_id} value={w.installation_id}>
-                  {w.account}
-                </option>
-              ))}
-              <option value="install">Add a workspace…</option>
-            </select>
-            <img src={session.user.avatar_url} alt="" className="h-6 w-6 rounded-full" />
-            <span>{session.user.login}</span>
-            <button
-              type="button"
-              className="text-neutral-500 hover:text-neutral-300"
-              onClick={() => signOut.mutate()}
-            >
-              Sign out
-            </button>
+            <option value="install">Add a workspace…</option>
+          </select>
+          <div className="ml-auto flex items-center gap-3">
+            <ThemeToggle theme={theme} onChange={setTheme} />
+            {session.user && (
+              <>
+                <Avatar src={session.user.avatar_url} alt={session.user.login} size="size-7" />
+                <button
+                  type="button"
+                  className="text-muted hover:text-fg"
+                  onClick={() => signOut.mutate()}
+                >
+                  Sign out
+                </button>
+              </>
+            )}
           </div>
-        )}
+        </div>
+        <nav className="flex gap-5 px-5">
+          {tabs.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={`-mb-px border-b-2 pb-2.5 ${
+                t === tab ? "border-fg text-fg" : "border-transparent text-muted hover:text-fg"
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </nav>
       </header>
-      {tab === "Queue" && <Queue workspace={workspace} />}
-      {tab === "Repos" && <Repos workspace={workspace} app={app} />}
-      {tab === "Settings" && <Settings workspace={workspace} />}
-    </main>
+      <main className="min-h-0 flex-1">
+        {tab === "Queue" && <Queue workspace={workspace} />}
+        {tab === "Repos" && <Repos workspace={workspace} app={app} />}
+        {tab === "Settings" && <Settings workspace={workspace} />}
+      </main>
+    </div>
   );
 }
