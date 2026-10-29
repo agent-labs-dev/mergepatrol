@@ -84,7 +84,8 @@ pub enum Event {
     HeadMoved,
     /// The trunk is no longer the SHA we rebased onto.
     BaseMoved,
-    NeedsApproval,
+    /// GitHub would not merge the PR yet, for this reason: a draft, or a review is missing.
+    OnHold(String),
     Merged,
     MergeRejected(String),
 }
@@ -185,7 +186,7 @@ impl Job {
                     })
                 }
             }
-            (_, E::NeedsApproval) => Transition::Held("waiting for an approval".into()),
+            (_, E::OnHold(reason)) => Transition::Held(reason),
 
             (phase, event) => panic!("event {event:?} is not valid in phase {phase:?}"),
         }
@@ -323,8 +324,8 @@ mod tests {
     fn dismissed_approval_holds() {
         let job = rebased(Job::start(7, 0));
         assert!(matches!(
-            job.step(Event::NeedsApproval),
-            Transition::Held(_)
+            job.step(Event::OnHold("waiting for a required review".into())),
+            Transition::Held(r) if r == "waiting for a required review"
         ));
     }
 }

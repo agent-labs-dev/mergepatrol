@@ -73,6 +73,13 @@ pub enum LaneChange {
         number: PrNumber,
         was_active: bool,
     },
+    /// A waiting PR went on hold, or its reason changed.
+    Held {
+        number: PrNumber,
+        reason: String,
+    },
+    /// A held PR can merge again, and waits in its place.
+    Released(PrNumber),
 }
 
 /// The queue of one (repo, trunk). One job at a time: a single PR, or a batch of PRs tested
@@ -126,24 +133,32 @@ impl Lane {
                 Some(e) => {
                     e.priority = c.priority;
                     e.summary = c.summary.clone();
-                    if e.state != EntryState::Active {
-                        e.state = match &c.hold {
-                            Some(reason) => EntryState::Held(reason.clone()),
-                            None => EntryState::Waiting,
-                        };
+                    if e.state == EntryState::Active || e.state == hold_state(c) {
+                        continue;
                     }
+                    e.state = hold_state(c);
+                    changes.push(match &c.hold {
+                        Some(reason) => LaneChange::Held {
+                            number: c.number,
+                            reason: reason.clone(),
+                        },
+                        None => LaneChange::Released(c.number),
+                    });
                 }
                 None => {
                     self.entries.push(Entry {
                         number: c.number,
                         priority: c.priority,
-                        state: match &c.hold {
-                            Some(reason) => EntryState::Held(reason.clone()),
-                            None => EntryState::Waiting,
-                        },
+                        state: hold_state(c),
                         summary: c.summary.clone(),
                     });
                     changes.push(LaneChange::Enqueued(c.number));
+                    if let Some(reason) = &c.hold {
+                        changes.push(LaneChange::Held {
+                            number: c.number,
+                            reason: reason.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -250,6 +265,14 @@ impl Lane {
     }
 }
 
+/// Where a PR that is not active belongs: on hold, or waiting.
+fn hold_state(c: &Candidate) -> EntryState {
+    match &c.hold {
+        Some(reason) => EntryState::Held(reason.clone()),
+        None => EntryState::Waiting,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,8 +327,27 @@ mod tests {
             c(2),
         ]);
         assert_eq!(lane.next(1), [2]);
-        lane.sync(&[c(1), c(2)]);
+        assert_eq!(lane.sync(&[c(1), c(2)]), [LaneChange::Released(1)]);
         assert_eq!(lane.next(1), [1]);
+    }
+
+    #[test]
+    fn going_on_hold_is_reported_once_per_reason() {
+        let mut lane = Lane::default();
+        let held = |reason: &str| Candidate {
+            hold: Some(reason.into()),
+            ..c(1)
+        };
+        let report = |reason: &str| LaneChange::Held {
+            number: 1,
+            reason: reason.into(),
+        };
+        assert_eq!(
+            lane.sync(&[held("draft")]),
+            [LaneChange::Enqueued(1), report("draft")]
+        );
+        assert!(lane.sync(&[held("draft")]).is_empty());
+        assert_eq!(lane.sync(&[held("review")]), [report("review")]);
     }
 
     #[test]

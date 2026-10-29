@@ -25,7 +25,7 @@ The rebase rewrites the PR branch, and a fix adds a commit to it. Before pushing
 
 Mergepatrol keeps one comment on each queued PR up to date. It says one of:
 
-- **On hold**: the PR is a draft, waits for an approval, or has changes requested. It keeps its place, and runs once GitHub shows it ready.
+- **On hold**: the PR is a draft, waits for a required review, or has changes requested. Mergepatrol comments the reason on the PR. It keeps its place, and runs once GitHub shows it ready.
 - **Ejected**: the rebase, the checks or the merge failed, and the comment says which. The trigger label is gone and `<label>:failed` is on. Fix the cause, push, then add `<label>` again.
 - **Merged**: done. The queue labels are removed.
 
