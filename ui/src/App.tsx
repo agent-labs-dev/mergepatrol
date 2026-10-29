@@ -2,10 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, Outlet, useNavigate, useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
-import { fetchSession, logout } from "./api";
+import { fetchSession, fetchSettings, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
+import * as NoKey from "./NoKeyBanner.prototype";
+import { useVariant } from "./PrototypeSwitcher";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { type ThemeProps, useTheme } from "./theme";
 import { Avatar, feedbackUrl, Mark, ThemeToggle } from "./ui";
@@ -86,6 +88,15 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
     },
   });
   useWorkspaceAnalytics(session, current);
+  // PROTOTYPE: the no-key banner variants.
+  const [variant, switcher] = useVariant(NoKey.variants);
+  const [skipped, setSkipped] = useState(false);
+  const settings = useQuery({
+    queryKey: ["settings", current?.installation_id],
+    queryFn: () => fetchSettings(current?.installation_id ?? 0),
+    enabled: !!current,
+  });
+  const noKey = settings.data !== undefined && !settings.data.anthropic_api_key;
   const app = session.app;
   if (!app) return null;
   if (!current)
@@ -99,6 +110,8 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
 
   return (
     <div className="flex h-screen flex-col">
+      {switcher}
+      {noKey && variant === "A" && <NoKey.Strip account={current.account} />}
       <header className="border-b border-line bg-surface">
         <div className="flex h-12 items-center gap-3 px-5">
           <Mark />
@@ -120,6 +133,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
             ))}
             <option value="install">Add a workspace…</option>
           </select>
+          {noKey && variant === "C" && skipped && <NoKey.HeaderPill account={current.account} />}
           <div className="ml-auto flex items-center gap-3">
             <a
               className="text-muted hover:text-fg"
@@ -160,7 +174,11 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
           ))}
         </nav>
       </header>
-      <main className="min-h-0 flex-1">
+      {noKey && variant === "B" && <NoKey.InlineSetup workspace={current.installation_id} />}
+      <main className="relative min-h-0 flex-1">
+        {noKey && variant === "C" && !skipped && (
+          <NoKey.Gate workspace={current.installation_id} onSkip={() => setSkipped(true)} />
+        )}
         <WorkspaceContext value={{ workspace: current.installation_id, app }}>
           <Outlet />
         </WorkspaceContext>
