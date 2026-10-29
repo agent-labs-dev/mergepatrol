@@ -48,6 +48,18 @@ export function Settings({ workspace }: { workspace: number }) {
             The agent uses it when a rebase has conflicts, and to fix failed checks. It is stored
             encrypted, and never shown again.
           </p>
+          <p className="mt-1 text-muted">
+            Create a key for Mergepatrol alone, in an{" "}
+            <a
+              href="https://platform.claude.com/settings/workspaces"
+              target="_blank"
+              rel="noreferrer"
+              className="text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg"
+            >
+              Anthropic workspace
+            </a>{" "}
+            with a spend limit. If it leaks, the limit caps what it can cost.
+          </p>
           <input
             type="password"
             autoComplete="off"
