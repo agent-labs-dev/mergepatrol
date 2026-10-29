@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use reqwest::{Method, StatusCode};
 use serde_json::Value;
 
@@ -97,15 +97,19 @@ impl Installation {
                 None,
             )
             .await?;
-        if res.status == StatusCode::FORBIDDEN {
-            strict = true;
-        } else if res.status.is_success() {
-            strict |= res.body["strict"] == true;
-            for c in res.body["contexts"].as_array().into_iter().flatten() {
-                if let Some(c) = c.as_str() {
-                    names.push(c.to_owned());
+        match res.status {
+            s if s.is_success() => {
+                strict |= res.body["strict"] == true;
+                for c in res.body["contexts"].as_array().into_iter().flatten() {
+                    if let Some(c) = c.as_str() {
+                        names.push(c.to_owned());
+                    }
                 }
             }
+            // The branch has no classic protection, or none for status checks.
+            StatusCode::NOT_FOUND => {}
+            StatusCode::FORBIDDEN => strict = true,
+            s => bail!("required status checks of {branch}: {s} {}", res.body),
         }
         names.sort();
         names.dedup();
