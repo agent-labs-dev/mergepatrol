@@ -672,9 +672,7 @@ pub(crate) async fn set_repo(
 /// The repo of a URL's `{owner}/{name}`. Each is one path segment, but `%2F` decodes to a
 /// slash: a repo stored with one would break every read of the repos.
 fn repo_name(owner: String, name: String) -> Result<RepoName, ApiError> {
-    RepoName::parse(&format!("{owner}/{name}"))
-        .filter(|r| !r.owner.contains('/'))
-        .ok_or_else(|| ApiError::bad_request("not a repo"))
+    RepoName::parse(&format!("{owner}/{name}")).ok_or_else(|| ApiError::bad_request("not a repo"))
 }
 
 /// Mergepatrol's branch for the PR that changes a repo's config file.
