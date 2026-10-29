@@ -490,6 +490,8 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             bind: "127.0.0.1:0".parse().unwrap(),
             max_jobs: 1,
             executor: ExecutorConfig::Local,
+            posthog_key: None,
+            posthog_host: String::new(),
         },
         hosted_app: None,
         vault: Arc::new(Vault::new(store.clone(), &format!("{}=", "A".repeat(43))).unwrap()),
@@ -500,6 +502,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         }),
         jobs: Semaphore::new(1),
         wakers: Arc::default(),
+        analytics: Analytics::default(),
     }
 }
 

@@ -131,6 +131,16 @@ This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public A
 | Variable | What it is |
 | --- | --- |
 | `MERGEPATROL_CLOUD_RUN_JOB` | `projects/<p>/locations/<r>/jobs/<name>`, with `MERGEPATROL_EXECUTOR=cloud-run` |
+| `MERGEPATROL_POSTHOG_KEY` | The PostHog project key. Turns on product analytics (below) |
+| `MERGEPATROL_POSTHOG_HOST` | The PostHog host. `https://us.i.posthog.com` by default |
+
+### Analytics
+
+With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics to PostHog. Without it, as when self-hosted, it sends nothing, and the dashboard does not load PostHog.
+
+- A person is a GitHub login. The dashboard identifies the signed-in user, and the server sends `signed in`.
+- A `workspace` group is an installation of the App, keyed by its installation ID, with the account's name. The dashboard groups what the user does under the workspace in view.
+- Each queue event goes to its workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number, and no person.
 
 ## Crates
 
@@ -143,6 +153,7 @@ This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public A
 | `executor` | Runs a rebase job: as a local process, or in a container. The job protocol |
 | `store` | The `Store` trait, Postgres, and the encrypted secrets. Tests need the dev Postgres from `compose.dev.yml` |
 | `web` | The HTTP server: JSON API and the dashboard |
+| `analytics` | Product analytics in PostHog, for the hosted Mergepatrol |
 | `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
 
 ## Contributing

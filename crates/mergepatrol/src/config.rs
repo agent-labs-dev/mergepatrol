@@ -22,6 +22,9 @@ pub struct Config {
     pub bind: SocketAddr,
     pub max_jobs: usize,
     pub executor: ExecutorConfig,
+    /// The PostHog project key. Product analytics are off without it, as when self-hosted.
+    pub posthog_key: Option<String>,
+    pub posthog_host: String,
 }
 
 /// Where rebase jobs run.
@@ -94,6 +97,8 @@ impl Config {
                 },
                 other => bail!("MERGEPATROL_EXECUTOR: {other:?} is not local, docker or cloud-run"),
             },
+            posthog_key: var("MERGEPATROL_POSTHOG_KEY"),
+            posthog_host: opt("MERGEPATROL_POSTHOG_HOST", "https://us.i.posthog.com"),
         })
     }
 }

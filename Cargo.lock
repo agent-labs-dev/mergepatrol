@@ -1222,6 +1222,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "mergepatrol-analytics",
  "mergepatrol-core",
  "mergepatrol-executor",
  "mergepatrol-git",
@@ -1237,6 +1238,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mergepatrol-analytics"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1327,6 +1338,7 @@ dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
  "hmac",
+ "mergepatrol-analytics",
  "mergepatrol-core",
  "mergepatrol-github",
  "mergepatrol-resolver",

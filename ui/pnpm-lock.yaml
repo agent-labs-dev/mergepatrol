@@ -10,6 +10,9 @@ importers:
       "@tanstack/react-query":
         specifier: ^5.105.0
         version: 5.105.0(@types/react@19.3.0)(react@19.3.1)
+      posthog-js:
+        specifier: ^1.440.0
+        version: 1.440.0(@types/react@19.3.0)(react@19.3.1)
       react:
         specifier: ^19.3.1
         version: 19.3.1
@@ -180,6 +183,24 @@ packages:
     resolution:
       {
         integrity: sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q==,
+      }
+
+  "@posthog/browser-common@0.9.12":
+    resolution:
+      {
+        integrity: sha512-pKYLYgV0o4UK5PAQ3OTlZpQnKvcBpG+UOqWYa+W41Omec8TlI6FXzGMHdYMTmaymxii0vi9R4jLVi7JQSr4vnQ==,
+      }
+
+  "@posthog/core@1.61.1":
+    resolution:
+      {
+        integrity: sha512-qyMTxPfjeJkHIhpcukOgBN3BWXbCyFRPz8/Voy5qZtVh9NZqj3EhC6LLeYZuJhL3WpqhQTgn2FMIwAo/ag6fmw==,
+      }
+
+  "@posthog/types@1.417.0":
+    resolution:
+      {
+        integrity: sha512-r/+gvmiE6egR6kkuMhEjOOE3Sm1pR00iFPQNoZZ0YvnZSsqGk7hK2IvQzcqjSRufG5Jf0EwhDMr5YOGtmf2/8g==,
       }
 
   "@rolldown/binding-android-arm-eabi@1.2.15":
@@ -500,6 +521,12 @@ packages:
         integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==,
       }
 
+  "@types/trusted-types@2.0.7":
+    resolution:
+      {
+        integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==,
+      }
+
   "@typescript/typescript-aix-ppc64@7.0.2":
     resolution:
       {
@@ -699,6 +726,12 @@ packages:
       oxc-transform-react:
         optional: true
 
+  core-js@3.51.0:
+    resolution:
+      {
+        integrity: sha512-7bDKx/5jm5MxzsXxc93g6Z2+4ZsuT/MddrfRmTDJNAkWsYWHU8EVNEsBiIEWnMAMCHMmRfUEjkuo3jeNBOIHRw==,
+      }
+
   csstype@3.2.3:
     resolution:
       {
@@ -711,6 +744,12 @@ packages:
         integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==,
       }
     engines: { node: ">=8" }
+
+  dompurify@3.4.17:
+    resolution:
+      {
+        integrity: sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==,
+      }
 
   enhanced-resolve@5.26.0:
     resolution:
@@ -730,6 +769,12 @@ packages:
     peerDependenciesMeta:
       picomatch:
         optional: true
+
+  fflate@0.4.9:
+    resolution:
+      {
+        integrity: sha512-zdxgIEddhfsyCaWpJ2SdXEP8ZMrKJ6+5jl4OupODcywU0IhRk6gdXuVGcPICyfx2H97hVK7xmJtRLPjkxAX8Vw==,
+      }
 
   fsevents@2.3.3:
     resolution:
@@ -1006,6 +1051,37 @@ packages:
       }
     engines: { node: ^10 || ^12 || >=14 }
 
+  posthog-js@1.440.0:
+    resolution:
+      {
+        integrity: sha512-M5/7NE8fgR8Qi3Jl8UizWjum7xnxu68C3ddaewxbxhsD23Pj/a1O5f1n+oWrKoGBS2loWJma4IXb3MFv1/FNLw==,
+      }
+    peerDependencies:
+      "@types/react": ">=16.8.0"
+      react: ">=16.8.0"
+    peerDependenciesMeta:
+      "@types/react":
+        optional: true
+      react:
+        optional: true
+
+  preact@10.29.8:
+    resolution:
+      {
+        integrity: sha512-ej2aVZ+vZ8WO7tvlQWRM9N63A0KzF9q4mWJfDUHgYaIofWY9hu74QdnQrjoPMmZi2/nZ5gN0bJCQF49xQqx09Q==,
+      }
+    peerDependencies:
+      preact-render-to-string: ">=5"
+    peerDependenciesMeta:
+      preact-render-to-string:
+        optional: true
+
+  query-selector-shadow-dom@1.0.1:
+    resolution:
+      {
+        integrity: sha512-lT5yCqEBgfoMYpf3F2xQRK7zEr1rhIIZuceDK6+xRkJQ4NMbHTwXqk4NkwDwQMNqXgG9r9fyHnzwNVs6zV5KRw==,
+      }
+
   react-dom@19.3.1:
     resolution:
       {
@@ -1116,6 +1192,18 @@ packages:
       yaml:
         optional: true
 
+  web-vitals@6.2.1:
+    resolution:
+      {
+        integrity: sha512-rLcLXA2sx6+9dE88NHFubwTtGxpK4yYBLj6qHPdFoCaLr0cXGb4efOqtKLlm4loGA4OEKHIQKMKzZkKyOh5ctw==,
+      }
+
+  web-vitals@6.2.3:
+    resolution:
+      {
+        integrity: sha512-Dmy+vdO1UPMqXiAtZSNayhl4f794Bxfd94W4HIj2HlYtczEQfEOon969memlcpcHrTuOKLa5baFjX7WbgmOq+A==,
+      }
+
 snapshots:
   "@biomejs/biome@2.6.3":
     optionalDependencies:
@@ -1180,6 +1268,20 @@ snapshots:
       "@jridgewell/sourcemap-codec": 1.6.0
 
   "@oxc-project/types@0.155.0": {}
+
+  "@posthog/browser-common@0.9.12":
+    dependencies:
+      "@posthog/core": 1.61.1
+      "@posthog/types": 1.417.0
+      preact: 10.29.8
+    transitivePeerDependencies:
+      - preact-render-to-string
+
+  "@posthog/core@1.61.1":
+    dependencies:
+      "@posthog/types": 1.417.0
+
+  "@posthog/types@1.417.0": {}
 
   "@rolldown/binding-android-arm-eabi@1.2.15":
     optional: true
@@ -1313,6 +1415,9 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
+  "@types/trusted-types@2.0.7":
+    optional: true
+
   "@typescript/typescript-aix-ppc64@7.0.2":
     optional: true
 
@@ -1378,9 +1483,15 @@ snapshots:
       "@rolldown/pluginutils": 1.0.1
       vite: 8.3.5(jiti@2.7.0)
 
+  core-js@3.51.0: {}
+
   csstype@3.2.3: {}
 
   detect-libc@2.1.2: {}
+
+  dompurify@3.4.17:
+    optionalDependencies:
+      "@types/trusted-types": 2.0.7
 
   enhanced-resolve@5.26.0:
     dependencies:
@@ -1390,6 +1501,8 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
+
+  fflate@0.4.9: {}
 
   fsevents@2.3.3:
     optional: true
@@ -1512,6 +1625,28 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.2
 
+  posthog-js@1.440.0(@types/react@19.3.0)(react@19.3.1):
+    dependencies:
+      "@posthog/browser-common": 0.9.12
+      "@posthog/core": 1.61.1
+      "@posthog/types": 1.417.0
+      core-js: 3.51.0
+      dompurify: 3.4.17
+      fflate: 0.4.9
+      preact: 10.29.8
+      query-selector-shadow-dom: 1.0.1
+      web-vitals: 6.2.3
+      web-vitals-soft-navs: web-vitals@6.2.1
+    optionalDependencies:
+      "@types/react": 19.3.0
+      react: 19.3.1
+    transitivePeerDependencies:
+      - preact-render-to-string
+
+  preact@10.29.8: {}
+
+  query-selector-shadow-dom@1.0.1: {}
+
   react-dom@19.3.1(react@19.3.1):
     dependencies:
       react: 19.3.1
@@ -1586,3 +1721,7 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
       jiti: 2.7.0
+
+  web-vitals@6.2.1: {}
+
+  web-vitals@6.2.3: {}

@@ -13,13 +13,15 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use mergepatrol_analytics::Analytics;
 use mergepatrol_core::RepoSettings;
 use mergepatrol_github::AppCredentials;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
 
 pub use api::*;
 pub use auth::{
-    AppView, ManifestForm, ManifestRequest, SessionStatus, SessionView, Unlock, UserView,
+    AnalyticsView, AppView, ManifestForm, ManifestRequest, SessionStatus, SessionView, Unlock,
+    UserView,
 };
 pub use webhook::Wake;
 
@@ -35,6 +37,8 @@ pub struct WebConfig {
     pub wake: Arc<dyn Wake>,
     /// The settings of a repo whose config file leaves them out.
     pub repo_defaults: RepoSettings,
+    /// Product analytics: off self-hosted.
+    pub analytics: Analytics,
 }
 
 #[derive(Clone)]
@@ -48,6 +52,7 @@ struct AppState {
     pending: Arc<Mutex<HashMap<String, auth::Pending>>>,
     wake: Arc<dyn Wake>,
     repo_defaults: Arc<RepoSettings>,
+    analytics: Analytics,
 }
 
 impl AppState {
@@ -76,6 +81,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         pending: Arc::default(),
         wake: config.wake,
         repo_defaults: Arc::new(config.repo_defaults),
+        analytics: config.analytics,
     };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -199,6 +205,7 @@ mod tests {
                 },
                 verify: Vec::new(),
             },
+            analytics: Analytics::default(),
         };
         (router(store, vault, config), "mp_session=tok".into())
     }

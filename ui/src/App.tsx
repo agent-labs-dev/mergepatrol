@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
 import { fetchSession, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
@@ -20,6 +21,7 @@ function useRedirectError() {
 
 export function App() {
   const session = useQuery({ queryKey: ["session"], queryFn: fetchSession });
+  useAnalytics(session.data);
   const [error, dismiss] = useRedirectError();
   const [theme, setTheme] = useTheme();
 
@@ -75,11 +77,15 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
   const [workspace, setWorkspace] = useWorkspace(session.workspaces);
   const signOut = useMutation({
     mutationFn: logout,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["session"] }),
+    onSuccess: () => {
+      resetAnalytics();
+      return queryClient.invalidateQueries({ queryKey: ["session"] });
+    },
   });
+  const current = session.workspaces.find((w) => w.installation_id === workspace);
+  useWorkspaceAnalytics(session, current);
   const app = session.app;
   if (!app) return null;
-  const current = session.workspaces.find((w) => w.installation_id === workspace);
 
   return (
     <div className="flex h-screen flex-col">
