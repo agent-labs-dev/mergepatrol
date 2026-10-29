@@ -77,9 +77,9 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
 
 Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own model API keys. A user sees the workspaces that GitHub lets them access, as of their sign-in. Sign in again after you install the App somewhere new.
 
-## Hosted
+## Run it with an App you made yourself
 
-The hosted Mergepatrol uses one public GitHub App, which we create by hand on GitHub, rather than with the setup in the dashboard. Set its credentials, and the setup token and the App creation are skipped:
+The hosted Mergepatrol uses one public GitHub App, which we create by hand on GitHub, rather than with the setup in the dashboard. A self-hosted Mergepatrol can do the same. Set the App's credentials, and the setup token and the App creation are skipped:
 
 | Variable | What it is |
 | --- | --- |
@@ -102,6 +102,7 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
 | `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
+| `MERGEPATROL_MAX_JOBS` | `4` | The most rebase and fix jobs that run at once, across every queue |
 | `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
 | `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
@@ -204,7 +205,7 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 | `core` | The queue and its state machine. Pure logic, no I/O |
 | `github` | GitHub App auth, the REST and GraphQL calls, and publishing commits through the Git Data API |
 | `git` | Local git: fetch, worktrees, rebase |
-| `resolver` | The `Resolver` trait, and the Claude implementation |
+| `resolver` | The `Resolver` trait, and its implementations: Claude Code for Anthropic, Codex for OpenAI |
 | `executor` | Runs a rebase job: as a local process, or in a container. The job protocol |
 | `store` | The `Store` trait, Postgres, and the encrypted secrets. Tests need the dev Postgres from `compose.dev.yml` |
 | `web` | The HTTP server: JSON API and the dashboard |
