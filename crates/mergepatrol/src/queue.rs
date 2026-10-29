@@ -229,7 +229,13 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, rebase: &dyn Rebase, repo: &RepoName) 
     };
     ctx.store.set_config_error(installation, repo, None).await?;
     let labels = settings.labels();
-    let snap = gh.snapshot(repo, &labels.trigger).await?;
+    let snap = gh.snapshot(repo, &labels).await?;
+    // So people find the labels in GitHub's picker, not only in the docs.
+    for spec in labels.specs() {
+        if snap.missing_labels.iter().any(|m| m == spec.name) {
+            gh.create_label(repo, &spec).await?;
+        }
+    }
     let key = LaneKey {
         installation_id: installation,
         repo: repo.clone(),
@@ -560,7 +566,7 @@ async fn test_and_merge(
     let head = &batch.steps.last().expect("a batch has PRs").1.sha;
     let opened = Instant::now();
     let tested = loop {
-        let now = gh.snapshot(repo, &settings.label).await?;
+        let now = gh.snapshot(repo, &settings.labels()).await?;
         if let Some(why) = stale(&now, snap, batch) {
             break Tested::Stale(why);
         }

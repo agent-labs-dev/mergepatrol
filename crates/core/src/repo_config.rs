@@ -32,6 +32,35 @@ pub struct Labels {
     pub failed: String,
 }
 
+/// A label as Mergepatrol creates it on a repo that lacks it.
+pub struct LabelSpec<'a> {
+    pub name: &'a str,
+    pub color: &'static str,
+    pub description: &'static str,
+}
+
+impl Labels {
+    pub fn specs(&self) -> [LabelSpec<'_>; 3] {
+        [
+            LabelSpec {
+                name: &self.trigger,
+                color: "0e8a16",
+                description: "Queue this PR: Mergepatrol rebases, tests and merges it",
+            },
+            LabelSpec {
+                name: &self.priority,
+                color: "d93f0b",
+                description: "Jump the Mergepatrol queue",
+            },
+            LabelSpec {
+                name: &self.failed,
+                color: "b60205",
+                description: "Mergepatrol ejected this PR; see its comment",
+            },
+        ]
+    }
+}
+
 /// The file as written: every setting optional.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

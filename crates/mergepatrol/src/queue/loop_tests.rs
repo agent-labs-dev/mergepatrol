@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use mergepatrol_core::ResolverSettings;
+use mergepatrol_core::{LabelSpec, Labels, ResolverSettings};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_github::{BranchMerge, Checks, RequiredChecks};
 use mergepatrol_store::{EventRecord, RepoState, SecretRecord, Session, Workspace};
@@ -62,6 +62,8 @@ struct State {
     /// The titles of the draft PRs opened, and the branches deleted.
     drafts: Vec<String>,
     deleted: Vec<String>,
+    /// The labels the repo has.
+    repo_labels: Vec<String>,
 }
 
 impl State {
@@ -147,8 +149,9 @@ impl GitHub for Fake {
         Ok(self.state.lock().unwrap().config.clone())
     }
 
-    async fn snapshot(&self, _: &RepoName, label: &str) -> Result<RepoSnapshot> {
+    async fn snapshot(&self, _: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
         let s = self.state.lock().unwrap();
+        let label = &labels.trigger;
         Ok(RepoSnapshot {
             id: "R".into(),
             default_branch: "main".into(),
@@ -158,6 +161,11 @@ impl GitHub for Fake {
                 .prs
                 .values()
                 .filter(|pr| pr.has_label(label) && !s.merged.contains(&pr.number))
+                .cloned()
+                .collect(),
+            missing_labels: [&labels.trigger, &labels.priority, &labels.failed]
+                .into_iter()
+                .filter(|l| !s.repo_labels.contains(l))
                 .cloned()
                 .collect(),
         })
@@ -288,6 +296,13 @@ impl GitHub for Fake {
 
     async fn commit_tree(&self, _: &RepoName, sha: &str) -> Result<String> {
         Ok(self.state.lock().unwrap().tree(sha))
+    }
+
+    async fn create_label(&self, _: &RepoName, label: &LabelSpec<'_>) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        assert!(!s.repo_labels.iter().any(|l| l == label.name));
+        s.repo_labels.push(label.name.into());
+        Ok(())
     }
 
     async fn add_label(&self, _: &RepoName, number: PrNumber, label: &str) -> Result<()> {
@@ -581,6 +596,20 @@ async fn the_config_file_sets_the_label() {
     }));
     run.drain().await;
     assert_eq!(run.merged(), [2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_queue_labels_are_created_once() {
+    let run = Run::new(Fake::new(|s| {
+        s.config = Some("version: 1\nlabel: ship\n".into());
+        s.repo_labels = vec!["ship:priority".into()];
+    }));
+    run.tick().await;
+    run.tick().await;
+    assert_eq!(
+        run.gh.with(|s| s.repo_labels.clone()),
+        ["ship:priority", "ship", "ship:failed"]
+    );
 }
 
 #[tokio::test(start_paused = true)]

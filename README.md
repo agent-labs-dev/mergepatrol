@@ -44,7 +44,7 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
    4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file (below). Merge it, and the repo queues.
    5. In **Settings**, add your Anthropic API key. Mergepatrol checks it with Anthropic, then stores it encrypted.
 
-4. Add the `mergepatrol` label to a PR to queue it.
+4. Add the `mergepatrol` label to a PR to queue it. Mergepatrol creates the queue labels on each repo it queues.
 
 Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own Anthropic API key. A user sees the workspaces that GitHub lets them access, as of their sign-in. Sign in again after you install the App somewhere new.
 
@@ -96,7 +96,7 @@ The verify commands run after an agent resolution, before the publish.
 
 A repo queues once its default branch has the file. Mergepatrol looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Repos** override the file, until you choose **Follow the config file**.
 
-The dashboard edits the file through PRs. **Set up** opens a PR that adds the file with the defaults, and **Settings** opens one that changes it. Both come from the branch `mergepatrol/config`: a second change updates the open PR. The queue uses the new settings once the PR merges.
+The dashboard edits the file through PRs. **Set up** opens a PR that adds the file with the defaults, and the `mergepatrol` agent skill at `.agents/skills/mergepatrol/SKILL.md` and `.claude/skills/mergepatrol/SKILL.md`, so coding agents in the repo queue their PRs rather than merge them. **Settings** opens one that changes the file. Both come from the branch `mergepatrol/config`: a second change updates the open PR. The queue uses the new settings once the PR merges.
 
 When the file does not parse, the queue pauses, and **Repos** shows why, until the file is fixed.
 
