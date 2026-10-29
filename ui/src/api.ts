@@ -1,5 +1,6 @@
 import type { EventView } from "./api/EventView";
 import type { ExitsPage } from "./api/ExitsPage";
+import type { FixView } from "./api/FixView";
 import type { HistoryStatsView } from "./api/HistoryStatsView";
 import type { LaneView } from "./api/LaneView";
 import type { ManifestForm } from "./api/ManifestForm";
@@ -50,6 +51,10 @@ export const fetchLanes = (id: number) => get<LaneView[]>(w(id, "/lanes"));
 
 export const fetchEvents = (id: number, repo: string, pr?: number) =>
   get<EventView[]>(w(id, `/events?repo=${encodeURIComponent(repo)}${pr ? `&pr=${pr}` : ""}`));
+
+/** The changes of the fix agent's commit `sha`. */
+export const fetchFix = (id: number, repo: string, sha: string) =>
+  get<FixView>(w(id, `/fix?repo=${encodeURIComponent(repo)}&sha=${sha}`));
 
 /** The query string of the defined values. */
 const query = (params: Record<string, string | number | undefined>) =>

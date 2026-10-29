@@ -1,14 +1,18 @@
-import { type ReactNode, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { lazy, type ReactNode, Suspense, useState } from "react";
+import { fetchFix } from "./api";
 import type { EventView } from "./api/EventView";
 import { duration, timeAgo } from "./ui";
 
 /** A PR's activity: what its time in the queue has cost, how far its latest run got, and its
  * events. `events` are newest first, as the API returns them. */
 export function Activity({
+  workspace,
   events,
   repo,
   renderMessage,
 }: {
+  workspace: number;
   events: EventView[];
   repo: string;
   /** A message as text, with its `#n` PR links. */
@@ -31,18 +35,29 @@ export function Activity({
         </div>
         <table className="w-full text-xs">
           <tbody>
-            {shown.map((e) => (
-              // Events have no ID in the API yet.
-              <tr key={`${e.at} ${e.kind}`} className="border-b border-line-soft align-baseline">
-                <td className="w-16 py-1.5 pr-3 whitespace-nowrap text-faint tabular-nums">
-                  <time title={new Date(e.at).toLocaleString()}>{timeAgo(e.at)}</time>
-                </td>
-                <td className="w-20 py-1.5 pr-3 font-medium capitalize">{e.kind}</td>
-                <td className="py-1.5 text-muted">
-                  <Message event={e} repo={repo} renderMessage={renderMessage} />
-                </td>
-              </tr>
-            ))}
+            {shown.map((e) => {
+              const row = (message: ReactNode) => (
+                // Events have no ID in the API yet.
+                <tr key={`${e.at} ${e.kind}`} className="border-b border-line-soft align-baseline">
+                  <td className="w-16 py-1.5 pr-3 whitespace-nowrap text-faint tabular-nums">
+                    <time title={new Date(e.at).toLocaleString()}>{timeAgo(e.at)}</time>
+                  </td>
+                  <td className="w-20 py-1.5 pr-3 font-medium capitalize">{e.kind}</td>
+                  <td className="py-1.5 text-muted">{message}</td>
+                </tr>
+              );
+              return isFix(events, e) ? (
+                <Fix
+                  key={`${e.at} ${e.kind}`}
+                  workspace={workspace}
+                  repo={repo}
+                  sha={e.message}
+                  row={row}
+                />
+              ) : (
+                row(<Message event={e} repo={repo} renderMessage={renderMessage} />)
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -58,6 +73,11 @@ const isKey = (e: EventView) =>
 const attempt = (e: EventView) => /attempt \d+ of \d+$/.test(e.message);
 
 const isSha = (s: string) => /^[0-9a-f]{40}$/.test(s);
+
+/** A `published` of the agent's fix: the queue publishes it right after the job's `fix`.
+ * `events` are newest first. */
+const isFix = (events: EventView[], e: EventView) =>
+  e.kind === "published" && isSha(e.message) && events[events.indexOf(e) + 1]?.kind === "fix";
 
 /** A `resolved` or `fix` event's agent run: `<files> in 46 turns, $0.46` or `5 turns`. */
 function spend(e: EventView) {
@@ -220,6 +240,80 @@ function Message({
     );
   return (
     <span className="font-mono break-words whitespace-pre-wrap">{renderMessage(e.message)}</span>
+  );
+}
+
+const FixDiff = lazy(() => import("./FixDiff"));
+
+/** A published fix: its head, and what the fix changed, which opens below its row. */
+function Fix({
+  workspace,
+  repo,
+  sha,
+  row,
+}: {
+  workspace: number;
+  repo: string;
+  sha: string;
+  row: (message: ReactNode) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const fix = useQuery({
+    queryKey: ["fix", workspace, repo, sha],
+    queryFn: () => fetchFix(workspace, repo, sha),
+    // A commit never changes.
+    staleTime: Infinity,
+    retry: false,
+  });
+  const files = fix.data ? fileCount(fix.data.patch) : 0;
+  return (
+    <>
+      {row(
+        <span className="flex flex-wrap items-center gap-2">
+          <Sha repo={repo} sha={sha} />
+          {fix.data && (
+            <button
+              type="button"
+              onClick={() => setOpen(!open)}
+              aria-expanded={open}
+              className="rounded border border-line px-1.5 py-px text-fg-2 hover:bg-sunken"
+            >
+              {open ? "▾" : "▸"} {files} {files === 1 ? "file" : "files"} ·{" "}
+              <Changes patch={fix.data.patch} />
+            </button>
+          )}
+        </span>,
+      )}
+      {open && fix.data && (
+        <tr>
+          <td colSpan={3} className="border-b border-line-soft py-2">
+            <Suspense fallback={<p className="text-xs text-faint">Loading the diff…</p>}>
+              <FixDiff fix={fix.data} />
+            </Suspense>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+const fileCount = (patch: string) => patch.match(/^diff --git /gm)?.length ?? 0;
+
+/** A patch's added and removed lines: those in its hunks, not its file headers. */
+function Changes({ patch }: { patch: string }) {
+  let adds = 0;
+  let dels = 0;
+  let inHunk = false;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("diff --git ")) inHunk = false;
+    else if (line.startsWith("@@")) inHunk = true;
+    else if (inHunk && line.startsWith("+")) adds++;
+    else if (inHunk && line.startsWith("-")) dels++;
+  }
+  return (
+    <span className="font-mono tabular-nums">
+      <span className="text-ok">+{adds}</span> <span className="text-bad">−{dels}</span>
+    </span>
   );
 }
 

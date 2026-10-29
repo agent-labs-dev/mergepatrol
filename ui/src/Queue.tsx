@@ -293,6 +293,7 @@ function Detail({
       {events.data?.length === 0 && <p className="text-faint">Nothing yet.</p>}
       {!!events.data?.length && (
         <Activity
+          workspace={workspace}
           events={events.data}
           repo={lane.repo}
           renderMessage={(message) =>

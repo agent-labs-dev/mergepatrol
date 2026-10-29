@@ -4,7 +4,9 @@ use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use mergepatrol_core::{LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review};
+use mergepatrol_core::{
+    FIXED_BY, LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review,
+};
 
 use crate::Installation;
 use crate::codeowners::{self, CodeOwners};
@@ -684,6 +686,37 @@ impl Installation {
         Ok(r["tree"]["sha"].as_str().context("commit tree")?.to_owned())
     }
 
+    /// The fix agent's commit `sha` as `git diff` prints it. `None` for any other commit, one
+    /// without the `FIXED_BY` trailer, or for no commit at all.
+    pub async fn fix_patch(&self, repo: &RepoName, sha: &str) -> Result<Option<String>> {
+        let res = self
+            .request(
+                Method::GET,
+                &format!("/repos/{repo}/git/commits/{sha}"),
+                None,
+            )
+            .await?;
+        if matches!(
+            res.status,
+            StatusCode::NOT_FOUND | StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return Ok(None);
+        }
+        if !res.status.is_success() {
+            anyhow::bail!("get commit {sha}: {} {}", res.status, res.body);
+        }
+        let message = res.body["message"].as_str().context("commit message")?;
+        if !message.lines().any(|l| l.starts_with(FIXED_BY)) {
+            return Ok(None);
+        }
+        let path = format!("/repos/{repo}/commits/{sha}");
+        let (status, diff) = self.get_text(&path, "application/vnd.github.diff").await?;
+        if !status.is_success() {
+            anyhow::bail!("get the diff of {sha}: {status} {diff}");
+        }
+        Ok(Some(diff))
+    }
+
     /// Merges the PR through the asynchronous merge API, the only one GitHub offers for a stacked
     /// PR: for one, it merges every layer up to `number`, or none. Waits for the result. A merge
     /// already pending for the PR, from before a restart, is waited for rather than requested
@@ -1063,5 +1096,33 @@ mod tests {
             }]
         );
         assert_eq!(s.checks.as_deref(), Some("PENDING"));
+    }
+
+    const FIX_COMMIT: &str = r#"{"message":"Fix test\n\nFixed-by: mergepatrol, claude (claude-opus-5-5)\nCo-authored-by: mergepatrol <m@x>"}"#;
+    const FIX_DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
+
+    #[tokio::test]
+    async fn a_fix_commit_comes_back_as_its_diff() {
+        let (gh, requests) = fake::serve(vec![(200, "", FIX_COMMIT), (200, "", FIX_DIFF)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let patch = gh.fix_patch(&repo, "abc").await.unwrap().unwrap();
+        assert_eq!(patch, FIX_DIFF);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /repos/o/r/git/commits/abc HTTP/1.1",
+                "GET /repos/o/r/commits/abc HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_fix_agents_commits_have_a_fix_patch() {
+        let theirs = r#"{"message":"feat: x"}"#;
+        let missing = r#"{"message":"No commit found for SHA: abc"}"#;
+        let (gh, _) = fake::serve(vec![(200, "", theirs), (422, "", missing)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        assert!(gh.fix_patch(&repo, "abc").await.unwrap().is_none());
+        assert!(gh.fix_patch(&repo, "abc").await.unwrap().is_none());
     }
 }
