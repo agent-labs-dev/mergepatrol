@@ -73,7 +73,12 @@ export function Queue({ workspace }: { workspace: number }) {
         <ol>
           {lane.entries.map((e, i) => (
             <li key={e.number}>
-              <Row entry={e} place={i + 1} selected={e === entry} onClick={() => setPr(e.number)} />
+              <Row
+                entry={e}
+                place={e.state === "held" ? null : i + 1}
+                selected={e === entry}
+                onClick={() => setPr(e.number)}
+              />
             </li>
           ))}
         </ol>
@@ -116,7 +121,8 @@ function Row({
   onClick,
 }: {
   entry: EntryView;
-  place: number;
+  /** `null` for a held PR: it has no place until it is released. */
+  place: number | null;
   selected: boolean;
   onClick: () => void;
 }) {

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use mergepatrol_core::{EntryState, Person, PrSummary, RepoName};
+use mergepatrol_core::{Entry, EntryState, Person, PrSummary, RepoName};
 use mergepatrol_github::App;
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
 use mergepatrol_store::{ANTHROPIC_API_KEY, Scope};
@@ -206,14 +206,25 @@ pub(crate) async fn lanes(
             .map(|(key, lane)| LaneView {
                 repo: key.repo.to_string(),
                 trunk: key.trunk,
-                entries: lane
-                    .entries
+                entries: in_merge_order(lane.entries)
                     .into_iter()
                     .map(|e| EntryView::new(e.number, e.priority, e.state, e.summary))
                     .collect(),
             })
             .collect(),
     ))
+}
+
+/// The order the queue takes them in, as `Lane::next` picks: the job, then waiting priority PRs,
+/// then waiting PRs, each by place. Held PRs last.
+fn in_merge_order(mut entries: Vec<Entry>) -> Vec<Entry> {
+    entries.sort_by_key(|e| match e.state {
+        EntryState::Active => 0,
+        EntryState::Waiting if e.priority => 1,
+        EntryState::Waiting => 2,
+        EntryState::Held(_) => 3,
+    });
+    entries
 }
 
 pub(crate) async fn events(
@@ -347,4 +358,31 @@ pub(crate) async fn delete_anthropic_key(
         .await?;
     tracing::info!(installation = id, "the Anthropic API key was removed");
     settings_view(&app, id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(number: u64, priority: bool, state: EntryState) -> Entry {
+        Entry {
+            number,
+            priority,
+            state,
+            summary: PrSummary::default(),
+        }
+    }
+
+    #[test]
+    fn lanes_list_prs_in_the_order_they_merge() {
+        let entries = vec![
+            entry(1, false, EntryState::Held("draft".into())),
+            entry(2, false, EntryState::Waiting),
+            entry(3, true, EntryState::Waiting),
+            entry(4, false, EntryState::Active),
+            entry(5, false, EntryState::Waiting),
+        ];
+        let order: Vec<u64> = in_merge_order(entries).iter().map(|e| e.number).collect();
+        assert_eq!(order, [4, 3, 2, 5, 1]);
+    }
 }
