@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const RESULT_FILE: &str = "result.json";
 pub const BUNDLE_FILE: &str = "result.bundle";
 
-/// No `Debug`: it holds a GitHub token and an API key.
+/// No `Debug`: it holds a GitHub token and a token for the Anthropic proxy.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JobSpec {
     /// `owner/name`.
@@ -52,8 +52,18 @@ pub struct ResolverSpec {
     pub effort: String,
     pub timeout_secs: u64,
     pub max_turns: u32,
-    /// The workspace's own key. Without it, a conflict fails the job.
-    pub anthropic_api_key: Option<String>,
+    /// The Anthropic API, through the orchestrator's proxy. `None` when the workspace has no
+    /// key: then a conflict fails the job.
+    pub anthropic: Option<AnthropicAccess>,
+}
+
+/// The job calls the Anthropic API at `base_url` with `token`, which the proxy swaps for the
+/// workspace's key. The key itself never reaches the job.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AnthropicAccess {
+    pub base_url: String,
+    /// Good until the job ends.
+    pub token: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -44,6 +44,7 @@ async fn claude_resolves_a_rename_conflict() {
 
     let resolver = ClaudeResolver {
         api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+        base_url: None,
         model: "claude-opus-5-5".into(),
         effort: "medium".into(),
         timeout: Duration::from_secs(300),

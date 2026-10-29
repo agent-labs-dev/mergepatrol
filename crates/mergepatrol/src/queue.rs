@@ -17,7 +17,10 @@ use mergepatrol_core::{
     Transition,
 };
 use mergepatrol_executor::Executor;
-use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
+use mergepatrol_executor::protocol::{
+    AnthropicAccess, BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task,
+};
+use mergepatrol_executor::proxy::{AnthropicProxy, Granted, PREFIX, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
@@ -62,6 +65,8 @@ pub struct Ctx {
     pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
     pub executor: Arc<dyn Executor>,
+    /// Holds the workspaces' Anthropic keys for the jobs, which get tokens.
+    pub anthropic: Arc<AnthropicProxy>,
     /// Sandboxed jobs running at once, across repos. A PR waiting for its checks holds none.
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
@@ -1553,7 +1558,8 @@ struct Below<'a> {
     upstream: &'a str,
 }
 
-/// The spec of a job on the PR at `head`, which sits on, or goes onto, `onto`.
+/// The spec of a job on the PR at `head`, which sits on, or goes onto, `onto`. Its Anthropic
+/// token works until the `Granted` is dropped: keep it for as long as the job runs.
 #[allow(clippy::too_many_arguments)]
 async fn job_spec(
     ctx: &Ctx,
@@ -1565,8 +1571,13 @@ async fn job_spec(
     onto: &str,
     below: Option<Below<'_>>,
     task: Task,
-) -> Result<JobSpec> {
-    Ok(JobSpec {
+) -> Result<(JobSpec, Option<Granted>)> {
+    let granted = ctx
+        .vault
+        .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
+        .await?
+        .map(|k| ctx.anthropic.grant(k, REQUESTS_PER_JOB));
+    let spec = JobSpec {
         repo: key.repo.to_string(),
         clone_url: clone_url(&key.repo),
         token: gh.read_token(&key.repo).await?,
@@ -1584,13 +1595,14 @@ async fn job_spec(
             effort: settings.resolver.effort.clone(),
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
-            anthropic_api_key: ctx
-                .vault
-                .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
-                .await?,
+            anthropic: granted.as_ref().map(|g| AnthropicAccess {
+                base_url: format!("{}{PREFIX}", ctx.config.job_proxy_url.trim_end_matches('/')),
+                token: g.token.clone(),
+            }),
         },
         task,
-    })
+    };
+    Ok((spec, granted))
 }
 
 /// Runs a job in the sandbox, with its output in `out`. `Err` says why it failed.
@@ -1691,7 +1703,7 @@ async fn fix_and_publish(
         branch: &unit.layers[layer - 1].head_ref_name,
         upstream: base,
     });
-    let spec = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
+    let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
@@ -1823,7 +1835,8 @@ async fn rebase_layers(
         let upstream = below.as_ref().map(|b| b.upstream.to_owned());
         let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
         let out = ctx.config.data_dir.join("jobs").join(&job_id);
-        let spec = job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
+        let (spec, _granted) =
+            job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
         let local_head = check_job_output(
             git,

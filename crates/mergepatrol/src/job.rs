@@ -3,6 +3,7 @@
 //! and resolves conflicts with the agent, or has the agent fix the PR's failed checks. It runs
 //! the verify commands after the agent, and writes the result as a git bundle. It holds no
 //! credential that can write to GitHub: the orchestrator checks the bundle and publishes it.
+//! Nor does it hold the Anthropic key: it calls the API through the orchestrator's proxy.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -78,6 +79,10 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     }
     let refspecs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
     git.fetch(dir, &spec.token, &refspecs).await?;
+    // The job needs the token for this fetch only. It ends before any of the repo's code runs.
+    if !spec.token.is_empty() {
+        mergepatrol_github::revoke_token(&spec.token).await?;
+    }
     for sha in [&spec.head_sha, &spec.trunk_sha] {
         if git
             .rev_parse(dir, &format!("{sha}^{{commit}}"))
@@ -89,8 +94,10 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     }
     git.checkout_detached(dir, &spec.head_sha).await?;
 
+    let anthropic = spec.resolver.anthropic.as_ref();
     let resolver = ClaudeResolver {
-        api_key: spec.resolver.anthropic_api_key.clone(),
+        api_key: anthropic.map(|a| a.token.clone()),
+        base_url: anthropic.map(|a| a.base_url.clone()),
         model: spec.resolver.model.clone(),
         effort: spec.resolver.effort.clone(),
         timeout: Duration::from_secs(spec.resolver.timeout_secs),

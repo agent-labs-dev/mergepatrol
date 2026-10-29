@@ -3,7 +3,11 @@ services:
   mergepatrol:
     build: { context: ., target: orchestrator }
     # The dashboard has its own sign-in, but this is a spike: keep it on this machine.
-    ports: ["127.0.0.1:8080:8080"]
+    ports:
+      - "127.0.0.1:8080:8080"
+      # The Anthropic proxy, for the jobs. On the sandbox network, only its gateway reaches
+      # the host: deploy/sandbox-host.sh says what to set.
+      - "${MERGEPATROL_JOB_PROXY_PUBLISH:-8081}:8081"
     volumes:
       - data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -21,12 +25,15 @@ services:
       MERGEPATROL_EXECUTOR: docker
       MERGEPATROL_JOB_IMAGE: mergepatrol-job:latest
       # On Linux with gVisor installed (see deploy/sandbox-host.sh): runsc, mergepatrol-jobs,
-      # and /etc/mergepatrol/job-resolv.conf.
+      # and /etc/mergepatrol/job-resolv.conf. Then also set MERGEPATROL_JOB_PROXY_PUBLISH and
+      # MERGEPATROL_JOB_PROXY_URL, as the script says.
       MERGEPATROL_JOB_RUNTIME: ${MERGEPATROL_JOB_RUNTIME:-}
       MERGEPATROL_JOB_NETWORK: ${MERGEPATROL_JOB_NETWORK:-}
       MERGEPATROL_JOB_RESOLV_CONF: ${MERGEPATROL_JOB_RESOLV_CONF:-}
       MERGEPATROL_JOB_MEMORY: ${MERGEPATROL_JOB_MEMORY:-}
       MERGEPATROL_JOB_CPUS: ${MERGEPATROL_JOB_CPUS:-}
+      MERGEPATROL_JOB_PROXY_BIND: 0.0.0.0:8081
+      MERGEPATROL_JOB_PROXY_URL: ${MERGEPATROL_JOB_PROXY_URL:-http://host.docker.internal:8081}
     depends_on:
       postgres: { condition: service_healthy }
       job-image: { condition: service_started }

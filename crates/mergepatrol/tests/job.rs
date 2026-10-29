@@ -60,7 +60,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
             effort: "medium".into(),
             timeout_secs: 60,
             max_turns: 5,
-            anthropic_api_key: None,
+            anthropic: None,
         },
         task: Default::default(),
     }
