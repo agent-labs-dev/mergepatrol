@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prototype": "VITE_PROTOTYPE_MOCK=1 vite --port 5199",
     "build": "tsc --noEmit && vite build",
     "check": "biome check ."
   },
