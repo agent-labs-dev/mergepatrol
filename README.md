@@ -175,6 +175,8 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 
 The job image has git, the Claude and Codex CLIs, Rust, Go, Python, and Node with pnpm, for the verify commands.
 
+Each release publishes both images, tagged with its version and `latest`: `ghcr.io/agent-labs-dev/mergepatrol`, the orchestrator, and `ghcr.io/agent-labs-dev/mergepatrol-job`. To run a release instead of building, set `MERGEPATROL_JOB_IMAGE=ghcr.io/agent-labs-dev/mergepatrol-job:<version>`.
+
 ## On GCP
 
 `deploy/gcp/bootstrap.sh` sets up one environment in a GCP project with billing linked, and deploys it with `deploy/gcp/cloudbuild.yaml`. The orchestrator runs as the Cloud Run service `mergepatrol`, as one instance that is always on, with Cloud SQL Postgres. Only the instance that holds a lock in Postgres runs the queues, so the new instance of a deploy waits until the old one has stopped. On SIGTERM, an instance lets go of the lock at once. Each job runs as an execution of the Cloud Run Job `mergepatrol-job`, which Cloud Run sandboxes with gVisor. The job's service account has no roles, and the job has no way into the orchestrator but its link: `<MERGEPATROL_PUBLIC_URL>/jobs/<token>`. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done. The token is in the execution's arguments, so anyone who can read the project's Cloud Run executions can see it.

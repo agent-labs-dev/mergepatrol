@@ -1,0 +1,34 @@
+# Publishes both images to GitHub's container registry for each release tag, so a self-hoster
+# can pull them instead of building from source. deploy.yml builds its own for GCP.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: echo "$TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The job image keeps the name MERGEPATROL_JOB_IMAGE defaults to, under the registry.
+      # The source label links each package to this repo.
+      - run: |
+          version="${GITHUB_REF_NAME#v}"
+          for target in orchestrator job; do
+            image="ghcr.io/$GITHUB_REPOSITORY"
+            if [ "$target" = job ]; then image="$image-job"; fi
+            docker build --target "$target" \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.version=$version" \
+              --tag "$image:$version" --tag "$image:latest" .
+            docker push --all-tags "$image"
+          done
