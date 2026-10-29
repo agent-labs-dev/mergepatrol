@@ -1,0 +1,15 @@
+diff --git a/crates/store/tests/exits.rs b/crates/store/tests/exits.rs
+index a4d77c9..b81f0e2 100644
+--- a/crates/store/tests/exits.rs
++++ b/crates/store/tests/exits.rs
+@@ -41,8 +41,8 @@ async fn exits_page_newest_first() {
+     for n in 1..=3 {
+         store.record_exit(&repo, exit(n)).await.unwrap();
+     }
+-    let page = store.exits(&repo, None, 2).await.unwrap();
+-    // The store returns one past the page; the API trims it.
+-    assert_eq!(page.iter().map(|e| e.number).collect::<Vec<_>>(), [3, 2, 1]);
++    // Exits share a second on a fast runner: the order is by ID, not by time.
++    let page = store.exits(&repo, None, 2).await.unwrap();
++    assert_eq!(page.iter().map(|e| e.id).collect::<Vec<_>>(), [3, 2, 1]);
+ }

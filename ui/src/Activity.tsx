@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 import type { EventView } from "./api/EventView";
+import { PrototypeFeed, prototypeOn } from "./prototype-fix-diff/variants";
 import { duration, timeAgo } from "./ui";
 
 /** A PR's activity: what its time in the queue has cost, how far its latest run got, and its
@@ -16,6 +17,18 @@ export function Activity({
 }) {
   const [all, setAll] = useState(false);
   const shown = all ? events : events.filter(isKey);
+  const row = (e: EventView, message?: ReactNode) => (
+    // Events have no ID in the API yet.
+    <tr key={`${e.at} ${e.kind}`} className="border-b border-line-soft align-baseline">
+      <td className="w-16 py-1.5 pr-3 whitespace-nowrap text-faint tabular-nums">
+        <time title={new Date(e.at).toLocaleString()}>{timeAgo(e.at)}</time>
+      </td>
+      <td className="w-20 py-1.5 pr-3 font-medium capitalize">{e.kind}</td>
+      <td className="py-1.5 text-muted">
+        {message ?? <Message event={e} repo={repo} renderMessage={renderMessage} />}
+      </td>
+    </tr>
+  );
   return (
     <div className="space-y-4">
       <Summary events={sinceEnqueued(events)} repo={repo} />
@@ -29,22 +42,13 @@ export function Activity({
             All {events.length}
           </Filter>
         </div>
-        <table className="w-full text-xs">
-          <tbody>
-            {shown.map((e) => (
-              // Events have no ID in the API yet.
-              <tr key={`${e.at} ${e.kind}`} className="border-b border-line-soft align-baseline">
-                <td className="w-16 py-1.5 pr-3 whitespace-nowrap text-faint tabular-nums">
-                  <time title={new Date(e.at).toLocaleString()}>{timeAgo(e.at)}</time>
-                </td>
-                <td className="w-20 py-1.5 pr-3 font-medium capitalize">{e.kind}</td>
-                <td className="py-1.5 text-muted">
-                  <Message event={e} repo={repo} renderMessage={renderMessage} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {prototypeOn() ? (
+          <PrototypeFeed events={events} shown={shown} repo={repo} row={row} />
+        ) : (
+          <table className="w-full text-xs">
+            <tbody>{shown.map((e) => row(e))}</tbody>
+          </table>
+        )}
       </div>
     </div>
   );
