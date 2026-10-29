@@ -11,17 +11,7 @@ export const field =
   "h-9 rounded-md border border-line-strong bg-surface px-3 text-sm shadow-xs outline-none placeholder:text-faint focus:border-fg focus:ring-2 focus:ring-fg/10";
 
 export function Mark() {
-  return (
-    <svg viewBox="0 0 20 20" className="size-5" aria-hidden>
-      <rect width="20" height="20" rx="5" className="fill-fg" />
-      <path
-        d="M6 14V6l4 4 4-4v8"
-        className="fill-none stroke-surface"
-        strokeWidth="1.8"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return <img src="/favicon.svg" className="size-5" alt="" />;
 }
 
 export function Avatar({ src, alt, size = "size-5" }: { src: string; alt: string; size?: string }) {
