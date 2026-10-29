@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde_json::Value;
 
 use mergepatrol_core::RepoName;
@@ -88,7 +88,8 @@ impl Installation {
                 }
             }
         }
-        // Classic protection needs the "administration: read" permission. Without it, rulesets are all we see.
+        // Classic protection needs the "administration: read" permission. Without it, rulesets are
+        // all we see, and the trunk counts as strict: a batch would be rejected on a strict one.
         let res = self
             .request(
                 Method::GET,
@@ -96,7 +97,9 @@ impl Installation {
                 None,
             )
             .await?;
-        if res.status.is_success() {
+        if res.status == StatusCode::FORBIDDEN {
+            strict = true;
+        } else if res.status.is_success() {
             strict |= res.body["strict"] == true;
             for c in res.body["contexts"].as_array().into_iter().flatten() {
                 if let Some(c) = c.as_str() {
