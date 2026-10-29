@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 export const themes = ["light", "dark", "system"] as const;
 export type Theme = (typeof themes)[number];
+export type ThemeProps = { theme: Theme; setTheme: (t: Theme) => void };
 
 const media = matchMedia("(prefers-color-scheme: dark)");
 

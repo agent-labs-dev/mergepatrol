@@ -139,20 +139,6 @@ export function CreateApp() {
   );
 }
 
-export function SignIn() {
-  return (
-    <Card title="Sign in">
-      <Body>
-        Mergepatrol rebases your pull requests, tests them together, and resolves conflicts with an
-        agent.
-      </Body>
-      <a className={`${primary} mt-5 w-full`} href="/auth/login">
-        Sign in with GitHub
-      </a>
-    </Card>
-  );
-}
-
 /** Signed in, but the App is on no account the user can access. */
 export function Install({ app }: { app: AppView }) {
   return (
