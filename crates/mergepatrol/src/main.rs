@@ -150,6 +150,7 @@ async fn orchestrator() -> Result<()> {
         wakers: Arc::default(),
         analytics: analytics.clone(),
         prs: Default::default(),
+        job_errors: Default::default(),
         config,
     });
 

@@ -45,6 +45,9 @@ const RESOLVER_MAX_TURNS: u32 = 50;
 const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 const MERGE_RETRIES: u32 = 15;
 const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
+/// How long a PR's job may keep failing on errors outside it, such as a GitHub outage, before
+/// the PR is ejected. Shorter failures leave it at the head of the queue, to run again.
+const JOB_ERRORS_FOR: Duration = Duration::from_secs(30 * 60);
 /// A fix may change any file but these: CI's own config, and the queue's.
 const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
 
@@ -60,6 +63,25 @@ pub struct Ctx {
     pub wakers: Arc<Wakers>,
     pub analytics: Analytics,
     pub prs: Prs,
+    pub job_errors: JobErrors,
+}
+
+/// Since when each PR's job has failed on every try, on errors outside the job.
+#[derive(Default)]
+pub struct JobErrors(std::sync::Mutex<HashMap<(u64, RepoName, PrNumber), Instant>>);
+
+impl JobErrors {
+    /// How long the PR's job has failed, this time included.
+    fn failed(&self, key: &LaneKey, number: PrNumber) -> Duration {
+        let mut map = self.0.lock().unwrap();
+        let key = (key.installation_id, key.repo.clone(), number);
+        map.entry(key).or_insert_with(Instant::now).elapsed()
+    }
+
+    fn clear(&self, key: &LaneKey, number: PrNumber) {
+        let mut map = self.0.lock().unwrap();
+        map.remove(&(key.installation_id, key.repo.clone(), number));
+    }
 }
 
 /// Each PR in a repo's queue as of its last tick: whose queue events they are, and what the
@@ -381,8 +403,13 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
 
     let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, &unit).await {
         Ok(o) => o,
+        // Not the PR's fault, and likely to pass: it stays active, so the next tick runs it again.
+        Err(e) if ctx.job_errors.failed(&key, number) < JOB_ERRORS_FOR => {
+            return Err(e.context(format!("the job of #{number}")));
+        }
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
+    ctx.job_errors.clear(&key, number);
     finish(ctx, &settings, gh, &key, &mut lane, &unit, outcome).await?;
     Ok(Ran::Job)
 }
