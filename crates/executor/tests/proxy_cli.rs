@@ -8,7 +8,7 @@ use axum::Router;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use mergepatrol_core::Provider;
-use mergepatrol_executor::proxy::{Api, ApiProxy, Upstreams};
+use mergepatrol_executor::proxy::{Api, ApiProxy, Credential, Upstreams};
 
 /// A stub model API that records the path and the credential of each request, and refuses it,
 /// so the CLI gives up.
@@ -55,7 +55,11 @@ async fn claude_reaches_the_api_with_the_key_through_the_proxy() {
         serve(proxy.clone().router()).await,
         Api::Messages.prefix()
     );
-    let granted = proxy.grant(Provider::Anthropic, "sk-ant-real".into(), 10);
+    let granted = proxy.grant(
+        Provider::Anthropic,
+        Credential::ApiKey("sk-ant-real".into()),
+        10,
+    );
 
     let home = tempfile::tempdir().unwrap();
     let run = tokio::process::Command::new("claude")
@@ -95,7 +99,11 @@ async fn codex_reaches_the_api_with_the_key_through_the_proxy() {
         serve(proxy.clone().router()).await,
         Api::Responses.prefix()
     );
-    let granted = proxy.grant(Provider::OpenAi, "sk-openai-real".into(), 10);
+    let granted = proxy.grant(
+        Provider::OpenAi,
+        Credential::ApiKey("sk-openai-real".into()),
+        10,
+    );
 
     let home = tempfile::tempdir().unwrap();
     let provider = |k: &str, v: &str| ["-c".to_owned(), format!("model_providers.mp.{k}={v}")];

@@ -27,6 +27,7 @@ tracing = "0.1.44"
 ts-rs = "12.0.1"
 
 [dev-dependencies]
+mergepatrol-resolver = { path = "../resolver", features = ["testing"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "migrate", "macros"] }
 tokio = { version = "1.54.1", features = ["macros", "rt"] }
 tower = { version = "0.5.3", features = ["util"] }

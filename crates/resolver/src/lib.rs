@@ -1,11 +1,15 @@
 //! The agent: resolves the conflicts of one commit in a stopped rebase, or fixes the failed
 //! checks of a PR. It edits files only: the caller checks the result and commits it.
 
+mod chatgpt;
 mod claude;
 mod cli;
 mod codex;
 mod keys;
 
+#[cfg(any(test, feature = "testing"))]
+pub use chatgpt::testing;
+pub use chatgpt::{ChatGptAuth, ChatGptLogin, DeviceLogin};
 pub use claude::ClaudeResolver;
 pub use codex::CodexResolver;
 pub use keys::{KeyCheck, check_api_key};

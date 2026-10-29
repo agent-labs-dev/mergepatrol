@@ -422,7 +422,7 @@ async fn an_openai_conflict_is_resolved_through_the_proxy() {
     use std::sync::Arc;
 
     use mergepatrol_executor::protocol::ApiAccess;
-    use mergepatrol_executor::proxy::{Api, ApiProxy, Upstreams};
+    use mergepatrol_executor::proxy::{Api, ApiProxy, Credential, Upstreams};
 
     let env = |name: &str| std::env::var(name).ok();
     let proxy = Arc::new(ApiProxy::new(Upstreams {
@@ -435,7 +435,7 @@ async fn an_openai_conflict_is_resolved_through_the_proxy() {
     let key = env("JOB_LIVE_OPENAI_KEY")
         .or_else(|| env("OPENAI_API_KEY"))
         .expect("an API key");
-    let granted = proxy.grant(Provider::OpenAi, key.into(), 100);
+    let granted = proxy.grant(Provider::OpenAi, Credential::ApiKey(key.into()), 100);
 
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");

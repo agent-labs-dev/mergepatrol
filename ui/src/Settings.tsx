@@ -1,19 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { capture } from "./analytics";
 import {
   deleteApiKey,
+  deleteChatGptLogin,
   fetchBilling,
   fetchSettings,
   freeSeat,
   openPortal,
+  pollChatGptLogin,
   setApiKey,
+  startChatGptLogin,
   startCheckout,
 } from "./api";
 import type { ApiKeyView } from "./api/ApiKeyView";
 import type { BillingView } from "./api/BillingView";
+import type { ChatGptView } from "./api/ChatGptView";
 import type { SettingsView } from "./api/SettingsView";
 import { danger, ErrorText, field, Narrow, primary, secondary, timeAgo } from "./ui";
+
+const link =
+  "text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg";
 
 /** What a key looks like, for the empty field. */
 const PLACEHOLDERS: Record<string, string> = {
@@ -37,7 +44,12 @@ export function Settings({ workspace }: { workspace: number }) {
       <div className="flex flex-col gap-4">
         {billing.data && <Billing workspace={workspace} billing={billing.data} />}
         {settings.data.api_keys.map((k) => (
-          <KeyForm key={k.provider.id} workspace={workspace} apiKey={k} />
+          <div key={k.provider.id} className="contents">
+            <KeyForm workspace={workspace} apiKey={k} />
+            {k.provider.id === "openai" && (
+              <ChatGptForm workspace={workspace} chatgpt={settings.data.chatgpt} />
+            )}
+          </div>
         ))}
       </div>
     </Narrow>
@@ -184,7 +196,7 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
               href="https://platform.claude.com/settings/workspaces"
               target="_blank"
               rel="noreferrer"
-              className="text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg"
+              className={link}
             >
               Anthropic workspace
             </a>{" "}
@@ -228,5 +240,107 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
         </span>
       </div>
     </form>
+  );
+}
+
+/** Signs the workspace in to a ChatGPT plan, with a code the user enters at OpenAI. */
+function ChatGptForm({ workspace, chatgpt }: { workspace: number; chatgpt: ChatGptView }) {
+  const queryClient = useQueryClient();
+  const { login, sign_in } = chatgpt;
+  const onSettings = (data: SettingsView) =>
+    queryClient.setQueryData(["settings", workspace], data);
+
+  const start = useMutation({
+    mutationFn: () => startChatGptLogin(workspace),
+    onSuccess: onSettings,
+  });
+  const poll = useMutation({
+    mutationFn: () => pollChatGptLogin(workspace),
+    onSuccess: (data) => {
+      if (data.chatgpt.login && !login) capture("chatgpt connected");
+      onSettings(data);
+    },
+    // The sign-in is over: the server dropped it.
+    onError: () => queryClient.invalidateQueries({ queryKey: ["settings", workspace] }),
+  });
+  const remove = useMutation({
+    mutationFn: () => deleteChatGptLogin(workspace),
+    onSuccess: (data) => {
+      if (login) capture("chatgpt disconnected");
+      onSettings(data);
+    },
+  });
+
+  // Asks until the user has entered the code, or the code expires.
+  const code = sign_in?.user_code;
+  const interval = (sign_in?.interval_secs ?? 5) * 1000;
+  const { mutate, isPending } = poll;
+  useEffect(() => {
+    if (!code) return;
+    const timer = setInterval(() => {
+      if (!isPending) mutate();
+    }, interval);
+    return () => clearInterval(timer);
+  }, [code, interval, mutate, isPending]);
+
+  return (
+    <div className="rounded-lg border border-line bg-surface">
+      <div className="p-4 sm:p-5">
+        <h2 className="font-semibold">ChatGPT plan</h2>
+        <p className="mt-1 text-muted">
+          Codex runs on your ChatGPT plan instead of the OpenAI API key, in repos whose config
+          chooses OpenAI. Mergepatrol signs in the way the Codex CLI does, which OpenAI could stop
+          at any time: keep an API key to switch back to.
+        </p>
+        {sign_in && (
+          <div className="mt-4 flex flex-col gap-2">
+            <p>
+              Open{" "}
+              <a href={sign_in.verification_url} target="_blank" rel="noreferrer" className={link}>
+                {sign_in.verification_url}
+              </a>
+              , sign in, and enter this code:
+            </p>
+            <p className="font-mono text-xl tracking-widest">{sign_in.user_code}</p>
+            <p className="text-muted">
+              Waiting for you to enter it. The code works for 15 minutes.
+            </p>
+          </div>
+        )}
+        <ErrorText error={start.error ?? poll.error ?? remove.error} />
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-lg border-t border-line bg-page px-4 py-3 sm:px-5">
+        {login ? (
+          <span className="text-muted" title={login.updated_at}>
+            Signed in as <span className="font-mono">{login.hint}</span>, updated{" "}
+            {timeAgo(login.updated_at)}
+          </span>
+        ) : (
+          <span className="text-muted">Not signed in.</span>
+        )}
+        <span className="ml-auto flex gap-2">
+          {(login || sign_in) && (
+            <button
+              type="button"
+              onClick={() => remove.mutate()}
+              disabled={remove.isPending}
+              className={login ? danger : secondary}
+            >
+              {login ? "Sign out" : "Cancel"}
+            </button>
+          )}
+          {!sign_in && (
+            <button
+              type="button"
+              onClick={() => start.mutate()}
+              disabled={start.isPending}
+              className={primary}
+            >
+              {login ? "Sign in again" : "Sign in with ChatGPT"}
+            </button>
+          )}
+        </span>
+      </div>
+    </div>
   );
 }

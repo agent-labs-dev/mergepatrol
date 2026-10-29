@@ -850,6 +850,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             timeout: Duration::ZERO,
         }),
         proxy: Arc::new(ApiProxy::new(Upstreams::default())),
+        chatgpt: Default::default(),
         jobs: Semaphore::new(1),
         wakers: Arc::default(),
         analytics: Analytics::default(),

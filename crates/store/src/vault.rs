@@ -22,6 +22,11 @@ pub fn api_key_secret(provider: Provider) -> &'static str {
         Provider::OpenRouter => "openrouter-api-key",
     }
 }
+/// A workspace's ChatGPT login, as JSON: `mergepatrol_resolver::ChatGptLogin`. Codex uses it
+/// instead of the OpenAI API key.
+pub const CHATGPT_LOGIN: &str = "chatgpt-login";
+/// A ChatGPT sign-in the user has yet to finish, as JSON: `mergepatrol_resolver::DeviceLogin`.
+pub const CHATGPT_DEVICE_LOGIN: &str = "chatgpt-device-login";
 /// The GitHub App, as JSON: `mergepatrol_github::AppCredentials`.
 pub const GITHUB_APP: &str = "github-app";
 
@@ -58,7 +63,6 @@ impl Vault {
     }
 
     pub async fn set(&self, scope: Scope, name: &str, value: &str) -> Result<()> {
-        let (nonce, ciphertext) = self.encrypt(scope, name, value)?;
         let hint: String = value
             .chars()
             .rev()
@@ -67,6 +71,18 @@ impl Vault {
             .into_iter()
             .rev()
             .collect();
+        self.set_with_hint(scope, name, value, hint).await
+    }
+
+    /// Like `set`, with what `status` shows of it, for a value whose end says nothing.
+    pub async fn set_with_hint(
+        &self,
+        scope: Scope,
+        name: &str,
+        value: &str,
+        hint: String,
+    ) -> Result<()> {
+        let (nonce, ciphertext) = self.encrypt(scope, name, value)?;
         self.store
             .put_secret(
                 scope,
