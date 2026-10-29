@@ -1,13 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    EFFORTS, Entry, EntryState, FixCiSettings, Person, Provider, REPO_CONFIG_PATH, RepoName,
-    RepoSettings, ResolverSettings, Spend, SpendTask, Step,
+    EFFORTS, Entry, EntryState, FixCiSettings, Labels, Person, PrSummary, Provider,
+    REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
-use mergepatrol_github::{App, Installation, Proposal, PullRef};
+use mergepatrol_github::{App, Installation, Proposal, PullRef, setup};
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
     CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
@@ -38,6 +38,26 @@ pub struct EntryView {
     pub state: EntryStateView,
     /// Why the PR is held.
     pub detail: Option<String>,
+    #[serde(flatten)]
+    pub pull: PullView,
+    /// A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
+    pub layers: Vec<u32>,
+}
+
+/// An open PR that is not in the queue.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct OpenPullView {
+    pub number: u32,
+    pub draft: bool,
+    #[serde(flatten)]
+    pub pull: PullView,
+}
+
+/// What the dashboard shows of a PR, queued or not.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct PullView {
     pub title: String,
     pub url: String,
     /// `None` for a deleted account.
@@ -56,8 +76,6 @@ pub struct EntryView {
     pub requested: Vec<PersonView>,
     /// The head commit's combined checks. `None` without checks.
     pub checks: Option<ChecksView>,
-    /// A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
-    pub layers: Vec<u32>,
 }
 
 #[derive(Serialize, TS)]
@@ -121,6 +139,15 @@ impl EntryView {
             priority,
             state,
             detail,
+            pull: pr.into(),
+            layers: layers.into_iter().map(|n| n as u32).collect(),
+        }
+    }
+}
+
+impl From<PrSummary> for PullView {
+    fn from(pr: PrSummary) -> Self {
+        PullView {
             title: pr.title,
             url: pr.url,
             author: pr.author.map(PersonView::from),
@@ -151,7 +178,6 @@ impl EntryView {
                 Some(_) => Some(ChecksView::Pending),
                 None => None,
             },
-            layers: layers.into_iter().map(|n| n as u32).collect(),
         }
     }
 }
@@ -940,6 +966,144 @@ pub(crate) async fn set_repo(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// How many open PRs the queue page lists below the queue.
+const OPEN_PULLS: u32 = 50;
+
+/// The repo's open PRs into its default branch that are not in its queue, updated last first.
+pub(crate) async fn open_pulls(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name)): Path<(u64, String, String)>,
+) -> Result<Json<Vec<OpenPullView>>, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let gh = installation(&app, id).await?;
+    let (labels, trunk) = repo_labels(&app, &gh, &repo).await?;
+    // A stack's layers are in the queue with it, though one layer alone may have the label.
+    let queued: HashSet<u64> = app
+        .store
+        .lanes(id)
+        .await?
+        .into_iter()
+        .filter(|(key, _)| key.repo == repo)
+        .flat_map(|(_, lane)| lane.entries)
+        .flat_map(|e| std::iter::once(e.number).chain(e.layers))
+        .collect();
+    let pulls = gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await?;
+    Ok(Json(
+        pulls
+            .into_iter()
+            .filter(|pr| !pr.has_label(&labels.trigger) && !queued.contains(&pr.number))
+            .map(|pr| OpenPullView {
+                number: pr.number as u32,
+                draft: pr.is_draft,
+                pull: pr.summary().into(),
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct QueuePull {
+    /// To the front of the queue.
+    pub priority: bool,
+}
+
+/// Queues the PR, or changes the priority of a queued one. The labels do it, put on as the
+/// user, so GitHub checks that they may.
+pub(crate) async fn queue_pull(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+    Json(body): Json<QueuePull>,
+) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let token = user.github_token(&app)?;
+    let gh = installation(&app, id).await?;
+    let (labels, _) = repo_labels(&app, &gh, &repo).await?;
+    let mut add = vec![labels.trigger.as_str()];
+    if body.priority {
+        add.push(&labels.priority);
+    } else {
+        // A stack has priority while any of its layers has the label.
+        for n in layers(&gh, &repo, number).await? {
+            as_user(
+                setup::remove_label_as(&token, &repo.to_string(), n, &labels.priority).await,
+                &repo,
+            )?;
+        }
+    }
+    as_user(
+        setup::add_labels_as(&token, &repo.to_string(), number, &add).await,
+        &repo,
+    )?;
+    tracing::info!(installation = id, %repo, number, priority = body.priority, "queued from the dashboard");
+    app.wake.wake(id, repo);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Takes the PR out of the queue, and its stack if it is in one, as the user.
+pub(crate) async fn dequeue_pull(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let token = user.github_token(&app)?;
+    let gh = installation(&app, id).await?;
+    let (labels, _) = repo_labels(&app, &gh, &repo).await?;
+    for n in layers(&gh, &repo, number).await? {
+        for label in [&labels.trigger, &labels.priority] {
+            as_user(
+                setup::remove_label_as(&token, &repo.to_string(), n, label).await,
+                &repo,
+            )?;
+        }
+    }
+    tracing::info!(installation = id, %repo, number, "dequeued from the dashboard");
+    app.wake.wake(id, repo);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The repo's queue labels, and its default branch, as the config file there sets them.
+async fn repo_labels(
+    app: &AppState,
+    gh: &Installation,
+    repo: &RepoName,
+) -> Result<(Labels, String), ApiError> {
+    let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
+    let settings = RepoSettings::from_file(file.text.as_deref(), &app.repo_defaults)
+        .map_err(|e| ApiError::Status(StatusCode::CONFLICT, e))?;
+    Ok((settings.labels(), file.branch))
+}
+
+/// The PRs whose labels queue `number`: its stack's layers, or the PR alone.
+async fn layers(gh: &Installation, repo: &RepoName, number: u64) -> anyhow::Result<Vec<u64>> {
+    Ok(match gh.pull_request(repo, number).await?.stack {
+        Some(stack) => gh.stack_layers(repo, stack.number).await?,
+        None => vec![number],
+    })
+}
+
+/// A change made as the user: GitHub's refusal is theirs to read.
+fn as_user(result: anyhow::Result<()>, repo: &RepoName) -> Result<(), ApiError> {
+    result.map_err(|e| {
+        if e.is::<setup::Refused>() {
+            ApiError::Status(
+                StatusCode::FORBIDDEN,
+                format!("You need triage access to {repo} to change its queue."),
+            )
+        } else if e.is::<setup::Revoked>() {
+            ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into())
+        } else {
+            e.into()
+        }
+    })
+}
+
 /// The repo of a URL's `{owner}/{name}`. Each is one path segment, but `%2F` decodes to a
 /// slash: a repo stored with one would break every read of the repos.
 fn repo_name(owner: String, name: String) -> Result<RepoName, ApiError> {
@@ -1341,6 +1505,15 @@ mod tests {
             layers: Vec::new(),
             heads: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_entry_has_its_pull_request_fields_at_the_top() {
+        let view = EntryView::new(entry(1, true, EntryState::Waiting));
+        let json = serde_json::to_value(view).unwrap();
+        assert_eq!(json["number"], 1);
+        assert_eq!(json["title"], "");
+        assert!(json.get("pull").is_none());
     }
 
     #[test]

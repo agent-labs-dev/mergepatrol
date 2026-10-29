@@ -6,8 +6,10 @@ import type { HistoryStatsView } from "./api/HistoryStatsView";
 import type { LaneView } from "./api/LaneView";
 import type { ManifestForm } from "./api/ManifestForm";
 import type { ManifestRequest } from "./api/ManifestRequest";
+import type { OpenPullView } from "./api/OpenPullView";
 import type { OutcomeView } from "./api/OutcomeView";
 import type { PullRequestRef } from "./api/PullRequestRef";
+import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
@@ -122,3 +124,15 @@ export const pollChatGptLogin = (id: number) =>
 /** Signs out, or cancels a sign-in. */
 export const deleteChatGptLogin = (id: number) =>
   send<SettingsView>("DELETE", w(id, "/settings/chatgpt"));
+
+/** The repo's open PRs into its default branch that are not in its queue. */
+export const fetchOpenPulls = (id: number, repo: string) =>
+  get<OpenPullView[]>(w(id, `/repos/${repo}/open`));
+
+/** Queues the PR, or changes the priority of a queued one, as the user. */
+export const queuePull = (id: number, repo: string, pr: number, priority: boolean) =>
+  call("PUT", w(id, `/repos/${repo}/pulls/${pr}/queue`), { priority } satisfies QueuePull);
+
+/** Takes the PR, and its stack, out of the queue, as the user. */
+export const dequeuePull = (id: number, repo: string, pr: number) =>
+  call("DELETE", w(id, `/repos/${repo}/pulls/${pr}/queue`));

@@ -1,11 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Activity } from "./Activity";
-import { fetchEvents, fetchLanes } from "./api";
+import { dequeuePull, fetchEvents, fetchLanes, fetchOpenPulls, queuePull } from "./api";
 import type { ChecksView } from "./api/ChecksView";
 import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
+import type { OpenPullView } from "./api/OpenPullView";
 import { Avatar, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
@@ -21,6 +22,14 @@ export function Queue({ workspace }: { workspace: number }) {
     queryFn: () => fetchLanes(workspace),
     refetchInterval: 3000,
   });
+  const current = lanes.data?.find((l) => laneKey(l) === laneId) ?? lanes.data?.[0];
+  const open = useQuery({
+    queryKey: ["open", workspace, current?.repo],
+    queryFn: () => fetchOpenPulls(workspace, current?.repo ?? ""),
+    enabled: current !== undefined,
+    refetchInterval: 10_000,
+  });
+  const actions = useActions(workspace, current);
 
   if (lanes.isError) return <p className="p-6 text-bad">Could not load the queue.</p>;
   if (lanes.data?.length === 0)
@@ -37,19 +46,40 @@ export function Queue({ workspace }: { workspace: number }) {
     );
   if (!lanes.data) return null;
 
-  const lane = lanes.data.find((l) => laneKey(l) === laneId) ?? lanes.data[0];
-  const entry = lane.entries.find((e) => e.number === pr) ?? lane.entries[0];
+  const lane = current ?? lanes.data[0];
+  const { pending } = actions;
+  const unqueued = [
+    ...(open.data ?? []).map(asItem),
+    // Queued, gone from the open PRs, and not in the lane yet: a poll of each came between.
+    ...[...pending.values()].flatMap((p) =>
+      p.kind === "queueing" && !open.data?.some((o) => o.number === p.item.number) ? [p.item] : [],
+    ),
+  ].filter((i) => !entryOf(lane, i.number));
+  const items: Item[] = [...lane.entries, ...unqueued];
+  const entry = items.find((e) => e.number === pr) ?? items[0];
   // The queue lists the active PRs first, so the batch is the head of the lane.
   const batched = lane.batch === null ? [] : lane.entries.filter((e) => e.state === "active");
   const rest = lane.entries.slice(batched.length);
   const picked = entry !== undefined && entry.number === pr;
-  const row = (e: EntryView) => (
-    <Row
-      entry={e}
-      place={e.state === "held" ? null : lane.entries.indexOf(e) + 1}
-      selected={e === entry}
-      onClick={() => setPr(e.number)}
-    />
+  const row = (e: Item) => (
+    <div
+      className={`group flex items-stretch border-b border-line-soft hover:bg-page ${
+        e === entry ? "lg:bg-page" : ""
+      }`}
+    >
+      <Row
+        entry={e}
+        place={
+          e.state === "held" || e.state === "open"
+            ? null
+            : lane.entries.findIndex((q) => q.number === e.number) + 1
+        }
+        selected={e === entry}
+        pending={pending.get(e.number)?.kind}
+        onClick={() => setPr(e.number)}
+      />
+      <RowActions item={e} actions={actions} busy={pending.has(e.number)} />
+    </div>
   );
   return (
     <div className="flex h-full flex-col lg:grid lg:grid-cols-[220px_minmax(360px,1fr)_minmax(400px,1.1fr)]">
@@ -86,7 +116,19 @@ export function Queue({ workspace }: { workspace: number }) {
           <p className="font-medium">{lane.repo}</p>
           <p className="text-xs text-muted">Merge order into {lane.trunk}</p>
         </div>
-        {lane.entries.length === 0 && <p className="p-4 text-faint">Empty</p>}
+        {actions.error && (
+          <p className="flex items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-red-800 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
+            {actions.error}
+            <button
+              type="button"
+              onClick={actions.dismiss}
+              className="shrink-0 font-medium hover:opacity-70"
+            >
+              Dismiss
+            </button>
+          </p>
+        )}
+        {lane.entries.length === 0 && <p className="p-4 text-faint">Nothing queued</p>}
         <ol>
           {lane.batch !== null && (
             <li className="border-b border-line-soft">
@@ -113,6 +155,21 @@ export function Queue({ workspace }: { workspace: number }) {
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
+        {unqueued.length > 0 && (
+          <>
+            <p className="mt-6 flex items-center justify-between border-y border-line bg-sunken px-4 py-2 text-xs text-muted">
+              <span>
+                <span className="font-medium text-fg-2">Open</span> · not queued
+              </span>
+              <span className="tabular-nums">{unqueued.length}</span>
+            </p>
+            <ol>
+              {unqueued.map((e) => (
+                <li key={e.number}>{row(e)}</li>
+              ))}
+            </ol>
+          </>
+        )}
       </div>
       <div className={`min-h-0 flex-1 overflow-y-auto ${picked ? "" : "max-lg:hidden"}`}>
         {entry && (
@@ -129,7 +186,186 @@ export function Queue({ workspace }: { workspace: number }) {
   );
 }
 
-const stateBadge: Record<EntryView["state"], [string, string]> = {
+/** A PR in the list: queued, or open and not queued. An open one has no priority or place. */
+type Item = Omit<EntryView, "state"> & { state: EntryView["state"] | "open" };
+
+/** An open PR as the list shows it: `detail` says what the queue would do with it. */
+const asItem = (p: OpenPullView): Item => ({
+  ...p,
+  priority: false,
+  state: "open",
+  layers: [],
+  detail: p.draft
+    ? "A draft: the queue holds it until it is ready."
+    : p.review_decision === "changes_requested"
+      ? "Changes requested: the queue holds it until they are approved."
+      : null,
+});
+
+/** A click the queue has not caught up with: GitHub has the labels, the lane not yet. */
+type Pending = { kind: "queueing" | "removing"; item: Item; repo: string };
+
+/** The queue looks at a repo within seconds of a label change. Past this, stop waiting. */
+const PENDING_MS = 60_000;
+
+/** The lane's entry for `n`: a PR's, or its stack's. */
+const entryOf = (lane: LaneView, n: number) =>
+  lane.entries.find((e) => e.number === n || e.layers.includes(n));
+
+const pendingKey = (repo: string, n: number) => `${repo}#${n}`;
+
+function useActions(workspace: number, lane: LaneView | undefined) {
+  const client = useQueryClient();
+  const [pending, setPending] = useState(new Map<string, Pending & { at: number }>());
+  const [error, setError] = useState<string | null>(null);
+  const drop = (key: string) =>
+    setPending((p) => {
+      const next = new Map(p);
+      next.delete(key);
+      return next;
+    });
+  // Each poll of the lane may show what a click did, and then the open PRs change too. A poll
+  // that changes nothing keeps the same lane, so the expiry needs its own timer.
+  useEffect(() => {
+    const prune = () =>
+      setPending((p) => {
+        const next = new Map(
+          [...p].filter(([, { kind, item, repo, at }]) => {
+            const e = lane?.repo === repo ? entryOf(lane, item.number) : undefined;
+            const done =
+              lane?.repo === repo && (kind === "removing" ? !e : e?.priority === item.priority);
+            return !done && Date.now() - at < PENDING_MS;
+          }),
+        );
+        if (next.size === p.size) return p;
+        client.invalidateQueries({ queryKey: ["open"] });
+        return next;
+      });
+    prune();
+    const timer = setInterval(prune, 5_000);
+    return () => clearInterval(timer);
+  }, [lane, client]);
+  const mutation = useMutation({
+    mutationFn: ({ kind, item, repo }: Pending) =>
+      kind === "removing"
+        ? dequeuePull(workspace, repo, prOf(item))
+        : queuePull(workspace, repo, prOf(item), item.priority),
+    onMutate: (p) => {
+      setError(null);
+      setPending((m) =>
+        new Map(m).set(pendingKey(p.repo, p.item.number), { ...p, at: Date.now() }),
+      );
+    },
+    onError: (e, p) => {
+      setError(e.message);
+      drop(pendingKey(p.repo, p.item.number));
+    },
+    // The open PRs stay as they are, the clicked one in its place, until the lane has it.
+    onSuccess: () => client.invalidateQueries({ queryKey: ["lanes"] }),
+  });
+  const repo = lane?.repo ?? "";
+  return {
+    /** The lane's clicks still to show, by PR. */
+    pending: new Map(
+      [...pending.values()].filter((p) => p.repo === repo).map((p) => [p.item.number, p]),
+    ) as ReadonlyMap<number, Pending>,
+    error,
+    dismiss: () => setError(null),
+    queue: (item: Item, priority: boolean) =>
+      mutation.mutate({ kind: "queueing", item: { ...item, priority }, repo }),
+    remove: (item: Item) => mutation.mutate({ kind: "removing", item, repo }),
+  };
+}
+type Actions = ReturnType<typeof useActions>;
+
+const icons = {
+  // Two chevrons up: to the front of the queue.
+  priority: "M4 8.5 8 4.5l4 4M4 12.5l4-4 4 4",
+  queue: "M8 3.5v9M3.5 8h9",
+  remove: "M4.5 4.5l7 7M11.5 4.5l-7 7",
+};
+
+function IconButton({
+  icon,
+  label,
+  onClick,
+  disabled,
+  className,
+}: {
+  icon: keyof typeof icons;
+  label: string;
+  onClick: () => void;
+  disabled: boolean;
+  className: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      className={`grid size-7 place-items-center rounded-md hover:bg-sunken disabled:opacity-40 ${className}`}
+    >
+      <svg
+        viewBox="0 0 16 16"
+        className="size-4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
+      >
+        <path d={icons[icon]} />
+      </svg>
+    </button>
+  );
+}
+
+/** Two slots at the end of every row, so every row lines up: priority, then queue or remove.
+ * A queued PR's are faint until hovered, but for a priority it has. */
+function RowActions({ item, actions, busy }: { item: Item; actions: Actions; busy: boolean }) {
+  const quiet = "text-faint/60 group-hover:text-muted group-focus-within:text-muted";
+  const open = item.state === "open";
+  return (
+    <span className="flex shrink-0 items-start gap-0.5 pt-2.5 pr-3">
+      <IconButton
+        icon="priority"
+        label={open ? "Priority queue" : item.priority ? "Drop priority" : "Make priority"}
+        disabled={busy}
+        onClick={() => actions.queue(item, !item.priority)}
+        className={
+          item.priority
+            ? "text-hot"
+            : open
+              ? "text-muted hover:text-hot"
+              : `${quiet} hover:text-hot!`
+        }
+      />
+      {open ? (
+        <IconButton
+          icon="queue"
+          label="Queue"
+          disabled={busy}
+          onClick={() => actions.queue(item, false)}
+          className="text-muted hover:text-fg"
+        />
+      ) : (
+        <IconButton
+          icon="remove"
+          label="Remove from queue"
+          disabled={busy}
+          onClick={() => actions.remove(item)}
+          className={`${quiet} hover:text-bad!`}
+        />
+      )}
+    </span>
+  );
+}
+
+const stateBadge: Record<Item["state"], [string, string]> = {
+  open: ["Not queued", "bg-surface text-muted ring-line-strong"],
   active: [
     "Testing",
     "bg-blue-50 text-blue-700 ring-blue-600/20 dark:bg-blue-400/10 dark:text-blue-300 dark:ring-blue-400/30",
@@ -141,7 +377,7 @@ const stateBadge: Record<EntryView["state"], [string, string]> = {
   ],
 };
 
-function State({ entry }: { entry: EntryView }) {
+function State({ entry }: { entry: Item }) {
   const [label, style] = stateBadge[entry.state];
   return (
     <span className={`rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}>
@@ -151,22 +387,24 @@ function State({ entry }: { entry: EntryView }) {
 }
 
 /** A PR saved before the queue kept its details has no title until the next tick. */
-const titleOf = (e: EntryView) => e.title || `Pull request #${prOf(e)}`;
+const titleOf = (e: Item) => e.title || `Pull request #${prOf(e)}`;
 /** A PR's own number, or a stack's top layer: the queue records a stack's events on each layer. */
-const prOf = (e: EntryView) => e.layers.at(-1) ?? e.number;
-const refsOf = (e: EntryView) =>
+const prOf = (e: Item) => e.layers.at(-1) ?? e.number;
+const refsOf = (e: Item) =>
   e.layers.length ? `Stack ${e.layers.map((n) => `#${n}`).join(" ")}` : `#${e.number}`;
 
 function Row({
   entry: e,
   place,
   selected,
+  pending,
   onClick,
 }: {
-  entry: EntryView;
-  /** `null` for a held PR: it has no place until it is released. */
+  entry: Item;
+  /** `null` for a held or open PR: it has no place until it is released or queued. */
   place: number | null;
   selected: boolean;
+  pending?: Pending["kind"];
   onClick: () => void;
 }) {
   return (
@@ -174,7 +412,7 @@ function Row({
       type="button"
       onClick={onClick}
       // A narrow screen lists the PRs only while none is open, so none shows as selected there.
-      className={`flex w-full gap-3 border-b border-line-soft px-4 py-3 text-left hover:bg-page ${
+      className={`flex min-w-0 flex-1 gap-3 px-4 py-3 text-left ${
         selected ? "lg:bg-page lg:shadow-[inset_2px_0_0_0_var(--color-fg)]" : ""
       }`}
     >
@@ -199,7 +437,17 @@ function Row({
             <Diff entry={e} />
           </span>
         </span>
-        {e.detail && <span className="mt-1 block text-warn">{e.detail}</span>}
+        {pending ? (
+          <span className="mt-1 block text-muted">
+            {pending === "removing"
+              ? "Leaving the queue…"
+              : e.state === "open"
+                ? "Queueing…"
+                : "Changing its priority…"}
+          </span>
+        ) : (
+          e.detail && <span className="mt-1 block text-warn">{e.detail}</span>
+        )}
       </span>
     </button>
   );
@@ -222,7 +470,7 @@ function Checks({ checks, label }: { checks: ChecksView | null; label?: boolean 
   );
 }
 
-function Diff({ entry: e }: { entry: EntryView }) {
+function Diff({ entry: e }: { entry: Item }) {
   if (!e.url) return null;
   return (
     <span className="font-mono tabular-nums">
@@ -241,7 +489,7 @@ function Detail({
 }: {
   workspace: number;
   lane: LaneView;
-  entry: EntryView;
+  entry: Item;
   onSelect: (pr: number) => void;
   /** Back to the PRs, on a screen too narrow to show them beside it. */
   onBack: () => void;
@@ -421,7 +669,7 @@ const decision: Record<NonNullable<EntryView["review_decision"]>, [string, strin
   changes_requested: ["Changes requested", "text-bad"],
 };
 
-function Reviews({ entry: e }: { entry: EntryView }) {
+function Reviews({ entry: e }: { entry: Item }) {
   const [text, color] = e.review_decision
     ? decision[e.review_decision]
     : ["Not required", "text-muted"];

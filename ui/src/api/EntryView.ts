@@ -9,7 +9,11 @@ export type EntryView = { number: number, priority: boolean, state: EntryStateVi
 /**
  * Why the PR is held.
  */
-detail: string | null, title: string, url: string, 
+detail: string | null, 
+/**
+ * A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
+ */
+layers: Array<number>, title: string, url: string, 
 /**
  * `None` for a deleted account.
  */
@@ -29,8 +33,4 @@ requested: Array<PersonView>,
 /**
  * The head commit's combined checks. `None` without checks.
  */
-checks: ChecksView | null, 
-/**
- * A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
- */
-layers: Array<number>, };
+checks: ChecksView | null, };

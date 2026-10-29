@@ -355,6 +355,54 @@ async fn user_get(token: &str, path: &str) -> Result<reqwest::Response> {
     Ok(res)
 }
 
+/// GitHub refused the user's change: they lack the access it needs.
+#[derive(Debug)]
+pub struct Refused;
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GitHub refused the user's change")
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Adds labels to a PR as the user, so GitHub checks that they may: it takes triage access.
+/// `Refused` when they lack it.
+pub async fn add_labels_as(token: &str, repo: &str, number: u64, labels: &[&str]) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/issues/{number}/labels");
+    let req = client()?.post(url).json(&json!({ "labels": labels }));
+    user_write(token, req).await?.error_for_status()?;
+    Ok(())
+}
+
+/// Removes a label from a PR as the user. A label the PR does not have is no error.
+pub async fn remove_label_as(token: &str, repo: &str, number: u64, label: &str) -> Result<()> {
+    let mut url = Url::parse(&format!("{API}/repos/{repo}/issues/{number}/labels"))?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("not a base URL"))?
+        .push(label);
+    let res = user_write(token, client()?.delete(url)).await?;
+    if res.status() != reqwest::StatusCode::NOT_FOUND {
+        res.error_for_status()?;
+    }
+    Ok(())
+}
+
+/// A 401 is `Revoked`, a 403 `Refused`.
+async fn user_write(token: &str, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    let res = req
+        .bearer_auth(token)
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await?;
+    match res.status() {
+        reqwest::StatusCode::UNAUTHORIZED => Err(Revoked.into()),
+        reqwest::StatusCode::FORBIDDEN => Err(Refused.into()),
+        _ => Ok(res),
+    }
+}
+
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))

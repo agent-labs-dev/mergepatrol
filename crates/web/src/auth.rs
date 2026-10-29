@@ -20,7 +20,7 @@ use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
 use mergepatrol_analytics::WorkspaceInfo;
 use mergepatrol_github::setup::{self, Pkce, random_token};
 use mergepatrol_github::setup::{Revoked, UserInstallation, UserToken};
-use mergepatrol_store::{GITHUB_APP, LoginCode, Scope, Session, SessionKind, Workspace};
+use mergepatrol_store::{GITHUB_APP, LoginCode, Scope, Sealed, Session, SessionKind, Workspace};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -139,6 +139,9 @@ pub struct ManifestForm {
 /// A signed-in user, and the installations they could access when they signed in.
 pub(crate) struct SignedIn {
     installations: Vec<u64>,
+    token_hash: String,
+    /// Their GitHub token, sealed. `None` for a session from before sessions kept it.
+    github: Option<Sealed>,
 }
 
 impl SignedIn {
@@ -153,6 +156,23 @@ impl SignedIn {
             ))
         }
     }
+
+    /// The user's GitHub token, to act as them, so GitHub checks what they may do.
+    pub(crate) fn github_token(&self, state: &AppState) -> Result<String, ApiError> {
+        let sign_in = || ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into());
+        let sealed = self.github.as_ref().ok_or_else(sign_in)?;
+        let json = state
+            .vault
+            .open(&session_secret(&self.token_hash), sealed)
+            .map_err(|_| sign_in())?;
+        let token: UserToken =
+            serde_json::from_str(json.expose_secret()).map_err(|e| ApiError::Internal(e.into()))?;
+        // `recheck` refreshes it before it can expire, unless GitHub was down.
+        if token.expired(unix_now()) {
+            return Err(sign_in());
+        }
+        Ok(token.access_token)
+    }
 }
 
 impl FromRequestParts<AppState> for SignedIn {
@@ -162,8 +182,16 @@ impl FromRequestParts<AppState> for SignedIn {
         match current_session(&parts.headers, state).await? {
             Some(Session {
                 kind: SessionKind::User { installations, .. },
+                github,
                 ..
-            }) => Ok(SignedIn { installations }),
+            }) => Ok(SignedIn {
+                installations,
+                // `current_session` found it, so the request has a token.
+                token_hash: session_token(&parts.headers)
+                    .map(|t| hash(&t))
+                    .unwrap_or_default(),
+                github,
+            }),
             _ => Err(ApiError::Status(
                 StatusCode::UNAUTHORIZED,
                 "sign in first".into(),
@@ -692,7 +720,8 @@ async fn recheck(
     };
     let mut token: UserToken = serde_json::from_str(json.expose_secret())?;
     let mut checked = session.clone();
-    if token.expired(now) {
+    // Ahead of the next check, so the token works for requests until then.
+    if token.expired(now + RECHECK) {
         let Some(refresh) = &token.refresh_token else {
             return Err(Revoked.into());
         };
