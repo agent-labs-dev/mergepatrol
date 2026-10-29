@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use mergepatrol_executor::remote::{CloudRunLaunch, Mailbox, RemoteExecutor};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
 use mergepatrol_github::App;
 use mergepatrol_github::setup::random_token;
@@ -27,12 +28,12 @@ const JOB_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("job") {
-        // `mergepatrol job --out <dir>`: runs inside the sandbox, with no config.
-        let out = match args.get(2..4) {
-            Some([flag, dir]) if flag == "--out" => PathBuf::from(dir),
-            _ => anyhow::bail!("usage: mergepatrol job --out <dir>"),
+        // `mergepatrol job --out <dir>` or `--remote <link>`: runs inside the sandbox, with no config.
+        return match args.get(2..4) {
+            Some([flag, dir]) if flag == "--out" => job::main(PathBuf::from(dir)).await,
+            Some([flag, link]) if flag == "--remote" => job::main_remote(link).await,
+            _ => anyhow::bail!("usage: mergepatrol job --out <dir> | --remote <link>"),
         };
-        return job::main(out).await;
     }
     orchestrator().await
 }
@@ -83,6 +84,7 @@ async fn orchestrator() -> Result<()> {
         }
     };
 
+    let mailbox = Arc::new(Mailbox::default());
     let executor: Arc<dyn Executor> = match &config.executor {
         ExecutorConfig::Local => {
             tracing::warn!("jobs run as local processes, without a sandbox");
@@ -110,6 +112,19 @@ async fn orchestrator() -> Result<()> {
                 timeout: JOB_TIMEOUT,
             })
         }
+        ExecutorConfig::CloudRun { job } => {
+            tracing::info!(%job, "jobs run as Cloud Run Job executions");
+            Arc::new(RemoteExecutor {
+                mailbox: mailbox.clone(),
+                base_url: config.public_url.clone(),
+                launch: Box::new(CloudRunLaunch {
+                    job: job.clone(),
+                    timeout: JOB_TIMEOUT,
+                    http: reqwest::Client::new(),
+                }),
+                timeout: JOB_TIMEOUT,
+            })
+        }
     };
 
     let bind = config.bind;
@@ -133,6 +148,7 @@ async fn orchestrator() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");
-    axum::serve(listener, mergepatrol_web::router(store, vault, web)).await?;
+    let app = mergepatrol_web::router(store, vault, web).merge(mailbox.router());
+    axum::serve(listener, app).await?;
     Ok(())
 }

@@ -1229,6 +1229,7 @@ dependencies = [
  "mergepatrol-resolver",
  "mergepatrol-store",
  "mergepatrol-web",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1251,8 +1252,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "getrandom 0.4.3",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

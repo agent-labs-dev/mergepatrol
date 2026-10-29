@@ -97,7 +97,7 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `local` runs it as a process, without isolation, for development |
+| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `cloud-run` runs it as a Cloud Run Job execution (below). `local` runs it as a process, without isolation, for development |
 | `MERGEPATROL_JOB_IMAGE` | `mergepatrol-job:latest` | The job image (`docker build --target job`) |
 | `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
 | `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
@@ -106,6 +106,14 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 | `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
 
 The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for the verify commands.
+
+## On GCP
+
+`deploy/gcp/bootstrap.sh` sets up one environment in a GCP project with billing linked, and deploys it with `deploy/gcp/cloudbuild.yaml`. The orchestrator runs as the Cloud Run service `mergepatrol`, as one instance that is always on, with Cloud SQL Postgres. Each job runs as an execution of the Cloud Run Job `mergepatrol-job`, which Cloud Run sandboxes with gVisor. The job's service account has no roles, and the job has no way into the orchestrator but its link: `<MERGEPATROL_PUBLIC_URL>/jobs/<token>`. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done. The token is in the execution's arguments, so anyone who can read the project's Cloud Run executions can see it.
+
+| Variable | What it is |
+| --- | --- |
+| `MERGEPATROL_CLOUD_RUN_JOB` | `projects/<p>/locations/<r>/jobs/<name>`, with `MERGEPATROL_EXECUTOR=cloud-run` |
 
 ## Crates
 

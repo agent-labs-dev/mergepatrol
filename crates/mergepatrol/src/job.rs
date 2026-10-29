@@ -1,4 +1,5 @@
-//! `mergepatrol job`: the part that runs inside the sandbox. It reads a `JobSpec` from stdin,
+//! `mergepatrol job`: the part that runs inside the sandbox. It reads a `JobSpec` from stdin (or
+//! from its link, with `--remote`),
 //! fetches the repo with a read-only token, rebases, resolves conflicts with the agent, runs the
 //! verify commands, and writes the result as a git bundle. It holds no credential that can
 //! write to GitHub: the orchestrator checks the bundle and publishes it.
@@ -10,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use mergepatrol_executor::protocol::{
     BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE,
 };
+use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{ClaudeResolver, Resolution, ResolveRequest, Resolver};
 use tokio::io::AsyncReadExt;
@@ -22,11 +24,25 @@ pub async fn main(out: PathBuf) -> Result<()> {
     let mut input = Vec::new();
     tokio::io::stdin().read_to_end(&mut input).await?;
     let spec: JobSpec = serde_json::from_slice(&input).context("bad job spec on stdin")?;
+    run_to(&spec, &out).await
+}
+
+/// `mergepatrol job --remote <link>`: on a machine of its own, which reaches the orchestrator
+/// only through the link.
+pub async fn main_remote(link: &str) -> Result<()> {
+    let spec = remote::fetch_spec(link).await?;
+    let out = std::env::temp_dir().join("mergepatrol-out");
+    run_to(&spec, &out).await?;
+    remote::upload(link, &out, remote::CHUNK_BYTES).await
+}
+
+async fn run_to(spec: &JobSpec, out: &Path) -> Result<()> {
+    let out = out.to_owned();
     tokio::fs::create_dir_all(&out).await?;
 
     let repo_dir = std::env::temp_dir().join(format!("mergepatrol-job-{}", std::process::id()));
     let mut events = Vec::new();
-    let outcome = match run(&spec, &repo_dir, &out, &mut events).await {
+    let outcome = match run(spec, &repo_dir, &out, &mut events).await {
         Ok(()) => JobOutcome::Rebased,
         Err(e) => JobOutcome::Failed {
             reason: format!("{e:#}"),
