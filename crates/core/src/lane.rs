@@ -117,6 +117,20 @@ pub struct Lane {
     /// What the batch's branch holds, once built: what a restart needs to pick the batch up.
     #[serde(default)]
     pub batch_built: Option<BuiltBatch>,
+    /// The merge GitHub was asked for, until the queue sees it through. Still set at startup
+    /// means a restart cut the wait for it short.
+    #[serde(default)]
+    pub merging: Option<PendingMerge>,
+}
+
+/// A merge of an entry: GitHub merges its top PR at `head`, and every layer below with it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMerge {
+    pub number: PrNumber,
+    /// The entry's PRs: a stack's layers, or the PR itself.
+    pub prs: Vec<PrNumber>,
+    pub top: PrNumber,
+    pub head: String,
 }
 
 /// A batch's branch: the trunk commit it starts from, then each PR merged onto it in order.

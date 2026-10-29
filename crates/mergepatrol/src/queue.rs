@@ -13,7 +13,8 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_core::{
     BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
-    LayerHead, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
+    LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings,
+    Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
@@ -386,9 +387,16 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         trunk: snap.default_branch.clone(),
     };
     let mut lane = ctx.store.load_lane(&key).await?;
-    let units = units(gh, repo, &snap.labeled).await?;
+    let mut units = units(gh, repo, &snap.labeled).await?;
     let layers: Vec<PullRequest> = units.iter().flat_map(|u| u.layers.clone()).collect();
     ctx.prs.update(&key, &lane, &layers);
+    if let Some(merge) = lane.merging.clone() {
+        let method = &snap.merge_method;
+        let number = merge.number;
+        if resume_merge(ctx, &settings, gh, &key, &mut lane, &units, merge, method).await? {
+            units.retain(|u| u.number != number);
+        }
+    }
 
     let mut candidates = Vec::new();
     for unit in &units {
@@ -486,7 +494,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     lane.activate(number);
     ctx.store.save_lane(&key, &lane).await?;
 
-    let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, &unit).await {
+    let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, &mut lane, &unit).await {
         Ok(o) => o,
         // Not the PR's fault, and likely to pass: it stays active, so the next tick runs it again.
         Err(e) if ctx.job_errors.failed(&key, number) < JOB_ERRORS_FOR => {
@@ -683,19 +691,10 @@ async fn finish(
 ) -> Result<()> {
     let repo = &key.repo;
     let prs = unit.prs();
+    lane.merging = None;
     match outcome {
         Outcome::Merged(sha) => {
-            lane.remove(unit.number);
-            exit_all(ctx, key, &prs, "merged", &sha, None).await?;
-            let labels = settings.labels();
-            let comment = format!("Merged as {sha}.");
-            comment_all(gh, repo, &prs, &comment).await?;
-            for n in &prs {
-                tokio::try_join!(
-                    gh.remove_label(repo, *n, &labels.trigger),
-                    gh.remove_label(repo, *n, &labels.priority),
-                )?;
-            }
+            merged(ctx, settings, gh, key, lane, unit.number, &prs, &sha).await?
         }
         Outcome::Ejected(reason) => {
             lane.eject(unit.number);
@@ -725,6 +724,88 @@ async fn finish(
         }
     }
     ctx.store.save_lane(key, lane).await
+}
+
+/// The entry `number` merged as `sha`, with its PRs `prs`.
+#[allow(clippy::too_many_arguments)]
+async fn merged(
+    ctx: &Ctx,
+    settings: &RepoSettings,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    lane: &mut Lane,
+    number: PrNumber,
+    prs: &[PrNumber],
+    sha: &str,
+) -> Result<()> {
+    let repo = &key.repo;
+    lane.remove(number);
+    exit_all(ctx, key, prs, "merged", sha, None).await?;
+    let labels = settings.labels();
+    comment_all(gh, repo, prs, &format!("Merged as {sha}.")).await?;
+    for n in prs {
+        tokio::try_join!(
+            gh.remove_label(repo, *n, &labels.trigger),
+            gh.remove_label(repo, *n, &labels.priority),
+        )?;
+    }
+    Ok(())
+}
+
+/// Saves in the lane the merge of `unit` at its top's `head`, before GitHub is asked for it: a
+/// restart while GitHub merges leaves it to `resume_merge`, not to the sync, which takes merged
+/// PRs for dequeued.
+async fn start_merge(
+    ctx: &Ctx,
+    key: &LaneKey,
+    lane: &mut Lane,
+    unit: &Unit,
+    head: &str,
+) -> Result<()> {
+    lane.merging = Some(PendingMerge {
+        number: unit.number,
+        prs: unit.prs(),
+        top: unit.top().number,
+        head: head.to_owned(),
+    });
+    ctx.store.save_lane(key, lane).await
+}
+
+/// Sees through the merge a restart cut short, and whether it merged. Asked again while it is
+/// still open, GitHub waits for the merge pending, or merges it as the job would have. Otherwise
+/// it merged, or it left the queue unmerged.
+#[allow(clippy::too_many_arguments)]
+async fn resume_merge(
+    ctx: &Ctx,
+    settings: &RepoSettings,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    lane: &mut Lane,
+    units: &[Unit],
+    merge: PendingMerge,
+    method: &str,
+) -> Result<bool> {
+    let repo = &key.repo;
+    let open = units.iter().any(|u| {
+        u.number == merge.number
+            && u.top().number == merge.top
+            && u.top().head_ref_oid == merge.head
+            && u.hold_reason().is_none()
+    });
+    let sha = if open {
+        match gh.merge(repo, merge.top, &merge.head, method).await? {
+            MergeOutcome::Merged { sha } => Some(sha),
+            MergeOutcome::Rejected(_) => None,
+        }
+    } else {
+        gh.merged_as(repo, merge.top, &merge.head).await?
+    };
+    lane.merging = None;
+    if let Some(sha) = &sha {
+        merged(ctx, settings, gh, key, lane, merge.number, &merge.prs, sha).await?;
+    }
+    ctx.store.save_lane(key, lane).await?;
+    Ok(sha.is_some())
 }
 
 fn on_hold(reason: &str) -> String {
@@ -1058,6 +1139,7 @@ async fn merge_batch(
             return finish(ctx, settings, gh, key, lane, tested, Outcome::Held(reason)).await;
         }
         let top = tested.top();
+        start_merge(ctx, key, lane, tested, &top.head_ref_oid).await?;
         match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &snap.merge_method).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
@@ -1212,6 +1294,7 @@ async fn run_job(
     sandbox: &dyn Sandbox,
     key: &LaneKey,
     snap: &RepoSnapshot,
+    lane: &mut Lane,
     unit: &Unit,
 ) -> Result<Outcome> {
     let repo = &key.repo;
@@ -1322,9 +1405,14 @@ async fn run_job(
                     Event::OnHold(reason)
                 } else {
                     let top = now.top().number;
+                    start_merge(ctx, key, lane, &now, head).await?;
                     match gh.merge(repo, top, head, &snap.merge_method).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),
-                        MergeOutcome::Rejected(r) => Event::MergeRejected(r),
+                        MergeOutcome::Rejected(r) => {
+                            lane.merging = None;
+                            ctx.store.save_lane(key, lane).await?;
+                            Event::MergeRejected(r)
+                        }
                     }
                 }
             }

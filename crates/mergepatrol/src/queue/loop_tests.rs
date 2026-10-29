@@ -71,6 +71,17 @@ struct State {
     stacks: BTreeMap<PrNumber, Vec<PrNumber>>,
     /// How many PR reads fail next, as in a GitHub outage.
     outage: u32,
+    /// Whether the next merge never answers, as when a restart cuts the wait short. `Merged`:
+    /// GitHub merges it meanwhile; `Pending`: not yet.
+    merge_hangs: Option<MergeHang>,
+    /// Each merged PR's merge commit.
+    merge_commits: HashMap<PrNumber, String>,
+}
+
+#[derive(Clone, Copy)]
+enum MergeHang {
+    Merged,
+    Pending,
 }
 
 impl State {
@@ -179,6 +190,53 @@ impl Fake {
     /// While a job waits for checks: one change to GitHub per `checks` call.
     fn then(&self, action: impl FnOnce(&mut State) + Send + 'static) {
         self.actions.lock().unwrap().push_back(Box::new(action));
+    }
+
+    /// As the asynchronous merge does: a stacked PR merges with every layer below it, or none.
+    fn merge_now(&self, number: PrNumber, sha: &str, _: &str) -> Result<MergeOutcome> {
+        let mut s = self.state.lock().unwrap();
+        if s.head(number) != sha {
+            return Ok(MergeOutcome::Rejected("head moved".into()));
+        }
+        let layers: Vec<PrNumber> = s
+            .up_to(number)
+            .into_iter()
+            .filter(|n| !s.merged.contains(n))
+            .collect();
+        // As a ruleset does: every required check must have passed on each layer's head.
+        for n in &layers {
+            let checks = s.checks_of(&s.head(*n));
+            if let Some(missing) = s
+                .required
+                .iter()
+                .find(|r| checks.get(*r) != Some(&CheckState::Passed))
+            {
+                return Ok(MergeOutcome::Rejected(format!(
+                    "Required status check \"{missing}\" is expected."
+                )));
+            }
+            if s.rejects.contains(n) {
+                return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
+            }
+        }
+        s.merges += 1;
+        let mut tree = s.tree(&s.trunk.clone());
+        for n in &layers {
+            tree = format!("{tree}-{n}");
+            if s.diverges.contains(n) {
+                tree.push('x');
+            }
+        }
+        s.trunk = format!("merge-{number}");
+        let trunk = s.trunk.clone();
+        s.trees.insert(trunk.clone(), tree);
+        for n in &layers {
+            s.merge_commits.insert(*n, trunk.clone());
+        }
+        s.merged.extend(layers);
+        Ok(MergeOutcome::Merged {
+            sha: s.trunk.clone(),
+        })
     }
 
     fn with<T>(&self, f: impl FnOnce(&State) -> T) -> T {
@@ -291,54 +349,34 @@ impl GitHub for Fake {
             .collect())
     }
 
-    /// As the asynchronous merge does: a stacked PR merges with every layer below it, or none.
     async fn merge(
         &self,
         _: &RepoName,
         number: PrNumber,
         sha: &str,
-        _: &str,
+        method: &str,
     ) -> Result<MergeOutcome> {
-        let mut s = self.state.lock().unwrap();
-        if s.head(number) != sha {
-            return Ok(MergeOutcome::Rejected("head moved".into()));
-        }
-        let layers: Vec<PrNumber> = s
-            .up_to(number)
-            .into_iter()
-            .filter(|n| !s.merged.contains(n))
-            .collect();
-        // As a ruleset does: every required check must have passed on each layer's head.
-        for n in &layers {
-            let checks = s.checks_of(&s.head(*n));
-            if let Some(missing) = s
-                .required
-                .iter()
-                .find(|r| checks.get(*r) != Some(&CheckState::Passed))
-            {
-                return Ok(MergeOutcome::Rejected(format!(
-                    "Required status check \"{missing}\" is expected."
-                )));
+        let hang = self.state.lock().unwrap().merge_hangs.take();
+        if let Some(hang) = hang {
+            if let MergeHang::Merged = hang {
+                self.merge_now(number, sha, method)?;
             }
-            if s.rejects.contains(n) {
-                return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
-            }
+            std::future::pending::<()>().await;
         }
-        s.merges += 1;
-        let mut tree = s.tree(&s.trunk.clone());
-        for n in &layers {
-            tree = format!("{tree}-{n}");
-            if s.diverges.contains(n) {
-                tree.push('x');
-            }
-        }
-        s.trunk = format!("merge-{number}");
-        let trunk = s.trunk.clone();
-        s.trees.insert(trunk, tree);
-        s.merged.extend(layers);
-        Ok(MergeOutcome::Merged {
-            sha: s.trunk.clone(),
-        })
+        self.merge_now(number, sha, method)
+    }
+
+    async fn merged_as(
+        &self,
+        _: &RepoName,
+        number: PrNumber,
+        head: &str,
+    ) -> Result<Option<String>> {
+        let s = self.state.lock().unwrap();
+        Ok(s.merge_commits
+            .get(&number)
+            .filter(|_| s.head(number) == head)
+            .cloned())
     }
 
     async fn create_branch(&self, _: &RepoName, branch: &str, sha: &str) -> Result<()> {
@@ -1455,6 +1493,71 @@ async fn a_batch_cut_short_by_a_restart_picks_up_where_it_was() {
         run.kinds(1),
         ["enqueued", "batch", "batch-resumed", "merged"]
     );
+}
+
+/// Ticks until the next merge, which a restart cuts short: GitHub merges it meanwhile, or not.
+async fn cut_short_while_merging(run: &Run, hang: MergeHang) {
+    run.gh.with_mut(|s| s.merge_hangs = Some(hang));
+    let cut = tokio::time::timeout(Duration::from_secs(3600), run.tick()).await;
+    assert!(cut.is_err(), "the tick ran on");
+    assert!(run.gh.with(|s| s.merge_hangs.is_none()), "no merge yet");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_that_lands_during_a_restart_is_seen_through() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    cut_short_while_merging(&run, MergeHang::Merged).await;
+    run.tick().await;
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "merged"]
+    );
+    assert_eq!(run.exits(), [(1, "merged".into(), "PR 1".into())]);
+    assert!(run.labels(1).is_empty());
+    let last = run.gh.with(|s| s.comments.last().cloned());
+    assert_eq!(last, Some((1, "Merged as merge-1.".into())));
+    assert!(run.lane().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_still_pending_after_a_restart_is_waited_for() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    cut_short_while_merging(&run, MergeHang::Pending).await;
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.gh.with(|s| s.merges), 1);
+    // Not rebased again.
+    assert_eq!(run.rebase.count(), 1);
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_that_merges_during_a_restart_is_seen_through() {
+    let run = Run::new(Fake::new(|s| s.add_stack(10, &[1, 2], &[2])));
+    cut_short_while_merging(&run, MergeHang::Merged).await;
+    run.tick().await;
+    for n in [1, 2] {
+        assert_eq!(
+            run.kinds(n),
+            ["enqueued", "rebasing", "published", "merged"]
+        );
+        assert!(run.labels(n).is_empty());
+    }
+    assert!(run.lane().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_merge_that_lands_during_a_restart_is_seen_through() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    cut_short_while_merging(&run, MergeHang::Merged).await;
+    run.drain().await;
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(run.kinds(1), ["enqueued", "batch", "merged"]);
+    assert!(run.labels(1).is_empty());
+    assert!(run.lane().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
