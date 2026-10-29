@@ -367,6 +367,10 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::for_appearance(window.appearance());
+        // As tall as the window may get: `dropdown` also keeps it inside the screen's work area.
+        let max_height = window.display(cx).map_or(px(MAX_HEIGHT as f32), |d| {
+            d.visible_bounds().size.height.min(px(MAX_HEIGHT as f32))
+        });
         let model = self.model.read(cx);
         let body = match &model.auth {
             Auth::SignedOut { error } => {
@@ -412,7 +416,7 @@ impl Render for Panel {
                     .relative()
                     .flex_none()
                     .w(px(WIDTH as f32))
-                    .max_h(px(MAX_HEIGHT as f32))
+                    .max_h(max_height)
                     .flex()
                     .flex_col()
                     .child(div().id("body").min_h_0().overflow_y_scroll().child(body))
