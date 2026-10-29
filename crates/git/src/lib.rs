@@ -3,9 +3,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tokio::io::AsyncWriteExt;
+
+/// The longest a fetch may take. A first fetch of a large repo is slow; a stalled one is cut
+/// short sooner, by `http.lowSpeedTime`.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Committer of the local rebase. The published commits get GitHub's bot identity instead.
 const COMMITTER: (&str, &str) = ("mergepatrol", "mergepatrol@users.noreply.github.com");
@@ -47,25 +52,55 @@ impl TreeChange {
 }
 
 impl Git {
-    /// A bare repo at `path` that caches the objects of one GitHub repo.
+    /// A bare repo at `path` that caches the objects of one GitHub repo, with `url` as `origin`.
+    /// Heals one that a crash left half made, or that a killed git left locked: only the repo's
+    /// queue uses its cache, one git at a time, so a lock file here is stale.
     pub async fn ensure_cache(&self, path: &Path, url: &str) -> Result<()> {
-        if path.join("HEAD").exists() {
-            return Ok(());
-        }
         tokio::fs::create_dir_all(path).await?;
+        // On an existing repo, `init` only fills in what is missing.
         self.run(path, &["init", "--bare", "-q"]).await?;
-        self.run(path, &["remote", "add", "origin", url]).await?;
+        remove_locks(path).await?;
+        match self.run(path, &["remote", "get-url", "origin"]).await {
+            Ok(current) if current.trim() == url => {}
+            Ok(_) => {
+                _ = self
+                    .run(path, &["remote", "set-url", "origin", url])
+                    .await?
+            }
+            Err(_) => _ = self.run(path, &["remote", "add", "origin", url]).await?,
+        }
         Ok(())
     }
 
     /// Fetches `refspecs`. The token goes in through the environment, not the arguments,
     /// so it does not show in `ps`. An empty token fetches without auth.
     pub async fn fetch(&self, repo: &Path, token: &str, refspecs: &[&str]) -> Result<()> {
-        let mut args = vec!["fetch", "-q", "--no-tags", "--force", "origin"];
+        self.fetch_within(repo, token, refspecs, FETCH_TIMEOUT)
+            .await
+    }
+
+    async fn fetch_within(
+        &self,
+        repo: &Path,
+        token: &str,
+        refspecs: &[&str],
+        timeout: Duration,
+    ) -> Result<()> {
+        // A connection that stalls is dropped, rather than waited on.
+        let mut args = vec![
+            "-c",
+            "http.lowSpeedLimit=1000",
+            "-c",
+            "http.lowSpeedTime=60",
+        ];
+        args.extend(["fetch", "-q", "--no-tags", "--force", "origin"]);
         args.extend(refspecs);
         let mut cmd = self.git(repo, &args);
         authorize(&mut cmd, token);
-        output(cmd, "git fetch").await?;
+        // Dropping the command kills git.
+        tokio::time::timeout(timeout, output(cmd, "git fetch"))
+            .await
+            .with_context(|| format!("git fetch: no result after {}s", timeout.as_secs()))??;
         Ok(())
     }
 
@@ -427,6 +462,29 @@ async fn input(cmd: &mut tokio::process::Command, stdin: &[u8], what: &str) -> R
     Ok(out.stdout)
 }
 
+/// Removes the lock files that a git killed mid-write left: under `refs/`, and at the top of the
+/// repo, such as `packed-refs.lock` and `shallow.lock`.
+async fn remove_locks(repo: &Path) -> Result<()> {
+    fn walk(dir: &Path, deep: bool) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                if deep || entry.file_name() == "refs" {
+                    walk(&path, true)?;
+                }
+            } else if path.extension().is_some_and(|e| e == "lock") {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+    let repo = repo.to_owned();
+    tokio::task::spawn_blocking(move || walk(&repo, false))
+        .await?
+        .context("remove stale lock files")
+}
+
 fn lines(s: &str) -> Vec<String> {
     s.lines()
         .filter(|l| !l.is_empty())
@@ -467,6 +525,34 @@ pub fn cache_path(data_dir: &Path, owner: &str, name: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn a_fetch_that_hangs_is_cut_short() {
+        // A server that accepts the connection, then says nothing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/r.git", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                open.push(conn);
+            }
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache.git");
+        Git.ensure_cache(&cache, &url).await.unwrap();
+        let start = std::time::Instant::now();
+        let err = Git
+            .fetch_within(
+                &cache,
+                "",
+                &["+refs/heads/main:refs/x"],
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no result after 1s"), "{err:#}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
     use super::*;
 
     #[test]
