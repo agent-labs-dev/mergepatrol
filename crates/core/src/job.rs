@@ -38,6 +38,19 @@ pub enum EjectReason {
     MergeRejected(String),
 }
 
+impl EjectReason {
+    /// What kind of reason it is, for analytics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RebaseFailed(_) => "rebase-failed",
+            Self::ChecksFailed { .. } => "checks-failed",
+            Self::FixFailed { .. } => "fix-failed",
+            Self::BaseMovedOutsideQueue => "base-moved",
+            Self::MergeRejected(_) => "merge-rejected",
+        }
+    }
+}
+
 impl std::fmt::Display for EjectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

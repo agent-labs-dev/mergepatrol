@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
+import { capture } from "./analytics";
 import { fetchRepoConfig, proposeRepoConfig } from "./api";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
@@ -36,7 +37,10 @@ function Form({
   const set = (patch: Partial<RepoSettingsView>) => setDraft({ ...draft, ...patch });
   const propose = useMutation({
     mutationFn: (settings: RepoSettingsView) => proposeRepoConfig(workspace, repo, settings),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repo-config", workspace, repo] }),
+    onSuccess: () => {
+      capture("repo config proposed", { repo });
+      return queryClient.invalidateQueries({ queryKey: ["repo-config", workspace, repo] });
+    },
   });
 
   const submit = (e: FormEvent) => {

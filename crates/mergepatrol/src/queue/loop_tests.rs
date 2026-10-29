@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step};
+use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step, StepTimes};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_github::{BranchMerge, Checks, RequiredChecks, StackRef};
 use mergepatrol_store::{
@@ -581,10 +581,10 @@ impl Store for Mem {
         outcome: &str,
         _: &str,
         summary: &PrSummary,
-    ) -> Result<()> {
+    ) -> Result<Option<StepTimes>> {
         let exit = (pr, outcome.into(), summary.title.clone());
         self.exits.lock().unwrap().push(exit);
-        Ok(())
+        Ok(None)
     }
     async fn exits(&self, _: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
         unreachable!()

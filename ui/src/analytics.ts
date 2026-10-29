@@ -51,6 +51,11 @@ export function useWorkspaceAnalytics(session: SessionView, workspace: Workspace
   }, [config, workspace]);
 }
 
+/** An event for the signed-in user, in the workspace in view. Nothing when analytics are off. */
+export function capture(event: string, properties?: Record<string, unknown>) {
+  client?.then((posthog) => posthog.capture(event, properties));
+}
+
 export function resetAnalytics() {
   client?.then((posthog) => posthog.reset());
 }

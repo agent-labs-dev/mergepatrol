@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
+import { capture } from "./analytics";
 import { deleteAnthropicKey, fetchSettings, setAnthropicKey } from "./api";
 import { danger, ErrorText, field, Narrow, primary, timeAgo } from "./ui";
 
@@ -17,11 +18,17 @@ export function Settings({ workspace }: { workspace: number }) {
   };
   const save = useMutation({
     mutationFn: (value: string) => setAnthropicKey(workspace, value),
-    onSuccess: onSaved,
+    onSuccess: (data) => {
+      capture("api key set");
+      onSaved(data);
+    },
   });
   const remove = useMutation({
     mutationFn: () => deleteAnthropicKey(workspace),
-    onSuccess: onSaved,
+    onSuccess: (data) => {
+      capture("api key removed");
+      onSaved(data);
+    },
   });
 
   if (!settings.data) return null;

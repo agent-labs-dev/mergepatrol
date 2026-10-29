@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
-use mergepatrol_analytics::Analytics;
+use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_core::{
     BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
     LayerHead, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
@@ -288,7 +288,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     for unit in &units {
         if unit.layers.iter().any(|pr| pr.is_cross_repository) {
             let why = "PRs from forks are not supported yet.";
-            eject(ctx, &settings, gh, &key, &unit.prs(), why).await?;
+            eject(ctx, &settings, gh, &key, &unit.prs(), why, "fork").await?;
             continue;
         }
         let hold = if unit.base != snap.default_branch {
@@ -331,7 +331,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         };
         let prs = prs_of.get(&number).cloned().unwrap_or(vec![number]);
         if kind == "dequeued" {
-            exit_all(ctx, &key, &prs, kind, &message).await?;
+            exit_all(ctx, &key, &prs, kind, &message, None).await?;
         } else {
             record_all(ctx, &key, &prs, kind, &message).await?;
         }
@@ -522,9 +522,10 @@ async fn exit_all(
     prs: &[PrNumber],
     outcome: &str,
     detail: &str,
+    reason: Option<&str>,
 ) -> Result<()> {
     for n in prs {
-        exit(ctx, key, *n, outcome, detail).await?;
+        exit(ctx, key, *n, outcome, detail, reason).await?;
     }
     Ok(())
 }
@@ -573,7 +574,7 @@ async fn finish(
     match outcome {
         Outcome::Merged(sha) => {
             lane.remove(unit.number);
-            exit_all(ctx, key, &prs, "merged", &sha).await?;
+            exit_all(ctx, key, &prs, "merged", &sha, None).await?;
             let labels = settings.labels();
             let comment = format!("Merged as {sha}.");
             comment_all(gh, repo, &prs, &comment).await?;
@@ -586,7 +587,16 @@ async fn finish(
         }
         Outcome::Ejected(reason) => {
             lane.eject(unit.number);
-            eject(ctx, settings, gh, key, &prs, &format!("Ejected: {reason}.")).await?;
+            eject(
+                ctx,
+                settings,
+                gh,
+                key,
+                &prs,
+                &format!("Ejected: {reason}."),
+                reason.kind(),
+            )
+            .await?;
         }
         Outcome::Held(reason) => {
             lane.hold(unit.number, reason.clone());
@@ -595,7 +605,7 @@ async fn finish(
         }
         Outcome::Cancelled => {
             lane.remove(unit.number);
-            exit_all(ctx, key, &prs, "cancelled", "the label was removed").await?;
+            exit_all(ctx, key, &prs, "cancelled", "the label was removed", None).await?;
         }
         Outcome::Restarted(why) => {
             lane.stop();
@@ -1014,7 +1024,6 @@ async fn record(
     kind: &str,
     message: &str,
 ) -> Result<()> {
-    tracing::info!(repo = %key.repo, pr = number, kind, detail = message, "queue");
     ctx.analytics.queue_event(
         key.installation_id,
         &key.repo.to_string(),
@@ -1023,22 +1032,44 @@ async fn record(
         kind,
         ctx.prs.author(key, number).as_deref(),
     );
+    log(ctx, key, number, kind, message).await
+}
+
+/// A queue event, shown on the dashboard and logged but not counted.
+async fn log(ctx: &Ctx, key: &LaneKey, number: PrNumber, kind: &str, message: &str) -> Result<()> {
+    tracing::info!(repo = %key.repo, pr = number, kind, detail = message, "queue");
     ctx.store.record(key, number, kind, message).await
 }
 
-/// A PR left the queue: the event, and the PR as it was then, for the history.
+/// A PR left the queue: the event, and the PR as it was then, for the history. `reason` is an
+/// ejected PR's kind of reason.
 async fn exit(
     ctx: &Ctx,
     key: &LaneKey,
     number: PrNumber,
     outcome: &str,
     detail: &str,
+    reason: Option<&str>,
 ) -> Result<()> {
-    record(ctx, key, number, outcome, detail).await?;
+    log(ctx, key, number, outcome, detail).await?;
     let summary = ctx.prs.get(key, number).unwrap_or_default();
-    ctx.store
+    let steps = ctx
+        .store
         .record_exit(key, number, outcome, detail, &summary)
-        .await
+        .await?;
+    ctx.analytics.queue_exit(
+        key.installation_id,
+        &key.repo.to_string(),
+        &key.trunk,
+        number,
+        outcome,
+        ctx.prs.author(key, number).as_deref(),
+        &Exit {
+            steps: steps.as_ref(),
+            reason,
+        },
+    );
+    Ok(())
 }
 
 async fn eject(
@@ -1048,6 +1079,7 @@ async fn eject(
     key: &LaneKey,
     prs: &[PrNumber],
     why: &str,
+    reason: &str,
 ) -> Result<()> {
     let labels = settings.labels();
     let comment = format!("{why}\n\nAdd `{}` again to retry.", labels.trigger);
@@ -1055,7 +1087,7 @@ async fn eject(
         gh.remove_label(&key.repo, *n, &labels.trigger).await?;
         gh.add_label(&key.repo, *n, &labels.failed).await?;
         gh.sticky_comment(&key.repo, *n, &comment).await?;
-        exit(ctx, key, *n, "ejected", why).await?;
+        exit(ctx, key, *n, "ejected", why, Some(reason)).await?;
     }
     Ok(())
 }

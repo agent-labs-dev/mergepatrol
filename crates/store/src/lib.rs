@@ -112,7 +112,8 @@ pub trait Store: Send + Sync {
         pr: Option<PrNumber>,
         limit: u32,
     ) -> Result<Vec<EventRecord>>;
-    /// A PR left the queue. Its time in the queue runs from its last `enqueued` event.
+    /// A PR left the queue. Its time in the queue runs from its last `enqueued` event. Returns
+    /// where that time went: none for a PR that left before it joined.
     async fn record_exit(
         &self,
         key: &LaneKey,
@@ -120,7 +121,7 @@ pub trait Store: Send + Sync {
         outcome: &str,
         detail: &str,
         summary: &PrSummary,
-    ) -> Result<()>;
+    ) -> Result<Option<StepTimes>>;
     async fn exits(&self, query: &ExitQuery<'_>) -> Result<Vec<ExitRecord>>;
     /// Each repo's, then every repo's together, from `from_days` ago to `to_days` ago.
     async fn exit_stats(
@@ -375,7 +376,7 @@ impl Store for PgStore {
         outcome: &str,
         detail: &str,
         summary: &PrSummary,
-    ) -> Result<()> {
+    ) -> Result<Option<StepTimes>> {
         // From the time it last joined: none for a PR ejected before it joined.
         let events = sqlx::query(
             "SELECT extract(epoch FROM at)::FLOAT8 AS at, kind FROM events
@@ -396,9 +397,7 @@ impl Store for PgStore {
             .collect();
         let events: Vec<(f64, &str)> = events.iter().map(|(at, k)| (*at, k.as_str())).collect();
         let enqueued_at = events.first().map(|(at, _)| *at);
-        let steps = enqueued_at
-            .map(|_| serde_json::to_value(step_times(&events)))
-            .transpose()?;
+        let steps = enqueued_at.map(|_| step_times(&events));
         sqlx::query(
             "INSERT INTO exits
                 (installation_id, repo, trunk, pr, outcome, detail, summary, enqueued_at, steps)
@@ -412,10 +411,10 @@ impl Store for PgStore {
         .bind(detail)
         .bind(serde_json::to_value(summary)?)
         .bind(enqueued_at)
-        .bind(steps)
+        .bind(steps.as_ref().map(serde_json::to_value).transpose()?)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(steps)
     }
 
     async fn exits(&self, q: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
@@ -932,20 +931,22 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        store
+        let steps = store
             .record_exit(&a, 1, "merged", "abc", &summary)
             .await
             .unwrap();
+        assert!(steps.is_some_and(|s| s[&Step::Waiting] > 3599.0));
         store.record(&b, 2, "enqueued", "").await.unwrap();
         store
             .record_exit(&b, 2, "ejected", "no", &summary)
             .await
             .unwrap();
         // Ejected before it joined.
-        store
+        let steps = store
             .record_exit(&b, 3, "ejected", "fork", &summary)
             .await
             .unwrap();
+        assert_eq!(steps, None);
         store
             .record_exit(&b, 4, "dequeued", "", &summary)
             .await
