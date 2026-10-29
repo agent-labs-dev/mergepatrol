@@ -24,8 +24,10 @@ fn repo() -> RepoName {
 #[derive(Default)]
 struct Fake {
     state: Mutex<State>,
-    actions: Mutex<VecDeque<Box<dyn FnOnce(&mut State) + Send>>>,
+    actions: Mutex<VecDeque<Action>>,
 }
+
+type Action = Box<dyn FnOnce(&mut State) + Send>;
 
 #[derive(Default)]
 struct State {
@@ -41,6 +43,8 @@ struct State {
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
     comments: Vec<(PrNumber, String)>,
     merges: u32,
+    /// Merged PRs stay, closed, as on GitHub.
+    merged: Vec<PrNumber>,
 }
 
 impl State {
@@ -119,7 +123,7 @@ impl GitHub for Fake {
             labeled: s
                 .prs
                 .values()
-                .filter(|pr| pr.has_label(label))
+                .filter(|pr| pr.has_label(label) && !s.merged.contains(&pr.number))
                 .cloned()
                 .collect(),
         })
@@ -174,7 +178,7 @@ impl GitHub for Fake {
         }
         s.merges += 1;
         s.trunk = format!("merge-{number}");
-        s.prs.remove(&number);
+        s.merged.push(number);
         Ok(MergeOutcome::Merged {
             sha: s.trunk.clone(),
         })
@@ -419,6 +423,21 @@ async fn a_labeled_pr_is_rebased_checked_and_merged() {
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
     assert!(run.lane().is_empty());
     assert!(matches!(run.tick().await, Ran::Idle));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merged_pr_loses_the_queue_labels() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.prs
+            .get_mut(&1)
+            .unwrap()
+            .labels
+            .push(format!("{TRIGGER}:priority"));
+    }));
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+    assert!(run.labels(1).is_empty(), "{:?}", run.labels(1));
 }
 
 #[tokio::test(start_paused = true)]
