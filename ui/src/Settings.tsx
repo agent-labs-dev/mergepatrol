@@ -44,20 +44,20 @@ export function Settings({ workspace }: { workspace: number }) {
   );
 }
 
-/** What each state of the plan says about private repos. */
+/** The plan in one line. */
 function planText(b: BillingView) {
-  const price = `$${b.pricing.price_usd} a month per seat. A developer takes a seat when their PR first joins a private repo's queue`;
+  const price = `$${b.pricing.price_usd}/seat/month`;
   switch (b.access) {
     case "new":
-      return `Private repos need a subscription, which starts with a free trial of ${b.pricing.trial_days} days, no card needed. Then ${price}.`;
+      return `Private repos: free for ${b.pricing.trial_days} days, then ${price}.`;
     case "trial": {
       const left = b.trial_days_left ?? 0;
-      return `On the free trial: ${left} ${left === 1 ? "day" : "days"} left. Add a card in Manage billing to keep going after it. ${price}.`;
+      return `Free trial: ${left} ${left === 1 ? "day" : "days"} left.`;
     }
     case "subscribed":
-      return `Subscribed: ${price}.`;
+      return `${price}.`;
     case "ended":
-      return `The subscription has ended: PRs on private repos wait on hold until you subscribe again. ${price}.`;
+      return "Subscription ended. Private repos are paused.";
   }
 }
 
@@ -89,17 +89,11 @@ function Billing({ workspace, billing }: { workspace: number; billing: BillingVi
     <section className="rounded-lg border border-line bg-surface">
       <div className="p-4 sm:p-5">
         <h2 className="font-semibold">Plan</h2>
-        <p className="mt-1 text-muted">
-          Public repos are free, up to {billing.pricing.fair_use_prs} queued PRs and{" "}
-          {billing.pricing.fair_use_jobs} jobs an hour across the workspace. Every repo uses your
-          own model API key, below.
-        </p>
         <p className="mt-1 text-muted">{planText(billing)}</p>
         {n > 0 && (
           <div className="mt-3">
             <p>
               {n} {n === 1 ? "seat" : "seats"}
-              {live && <span className="text-muted">. A freed seat drops off the next bill.</span>}
             </p>
             <ul className="mt-2 flex flex-col divide-y divide-line rounded-md border border-line">
               {billing.seats.map((login) => (
@@ -111,7 +105,7 @@ function Billing({ workspace, billing }: { workspace: number; billing: BillingVi
                     disabled={free.isPending}
                     className="text-muted hover:text-fg"
                   >
-                    Free
+                    Remove
                   </button>
                 </li>
               ))}

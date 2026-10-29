@@ -111,7 +111,7 @@ function Pricing({ pricing }: { pricing: PricingView }) {
           points={[
             `A free trial of ${pricing.trial_days} days, no card needed`,
             "A seat is a developer who queues PRs, taken with their first one",
-            "Free a seat in Settings any time",
+            "Remove a seat in Settings any time",
           ]}
         />
       </div>
