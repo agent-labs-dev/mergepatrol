@@ -274,7 +274,7 @@ fn rejection(body: &Value) -> String {
         .to_owned()
 }
 
-const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } } stack { number baseRefName }
+const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 100) { nodes { name } } stack { number baseRefName }
   files(first: 100) { nodes { path } }
   maintainerCanModify headRepository { nameWithOwner owner { __typename } }
   url createdAt additions deletions changedFiles author { __typename login avatarUrl }
@@ -285,7 +285,7 @@ const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecis
 impl Installation {
     pub async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
         let query = format!(
-            "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!) {{
+            "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!, $after: String) {{
               repository(owner: $owner, name: $name) {{
                 id
                 trigger: label(name: $label) {{ name }}
@@ -294,25 +294,45 @@ impl Installation {
                 viewerDefaultMergeMethod
                 defaultBranchRef {{ name target {{ oid }} }}
                 {code_owners}
-                pullRequests(states: OPEN, labels: [$label], first: 100, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
+                pullRequests(states: OPEN, labels: [$label], first: 100, after: $after, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
                   nodes {{ {PR_FIELDS} }}
+                  pageInfo {{ hasNextPage endCursor }}
                 }}
               }}
             }}",
             code_owners = codeowners::FIELDS,
         );
-        let data: Value = self
-            .graphql(
-                &query,
-                json!({
-                    "owner": repo.owner,
-                    "name": repo.name,
-                    "label": labels.trigger,
-                    "priority": labels.priority,
-                    "failed": labels.failed,
-                }),
-            )
-            .await?;
+        // The labeled PRs come 100 a page. The rest of the repo is the same on every page: the
+        // first page's counts.
+        let mut first: Option<Value> = None;
+        let mut labeled: Vec<PullRequest> = Vec::new();
+        let mut after = Value::Null;
+        loop {
+            let data: Value = self
+                .graphql(
+                    &query,
+                    json!({
+                        "owner": repo.owner,
+                        "name": repo.name,
+                        "label": labels.trigger,
+                        "priority": labels.priority,
+                        "failed": labels.failed,
+                        "after": after,
+                    }),
+                )
+                .await?;
+            let prs = &data["repository"]["pullRequests"];
+            let page: Vec<PullRequest> = serde_json::from_value(prs["nodes"].clone())?;
+            labeled.extend(page);
+            let next = &prs["pageInfo"];
+            let more = next["hasNextPage"] == true;
+            after = next["endCursor"].clone();
+            first.get_or_insert(data);
+            if !more || after.is_null() {
+                break;
+            }
+        }
+        let data = first.expect("one page at least");
         let r = &data["repository"];
         let missing_labels = [
             ("trigger", &labels.trigger),
@@ -323,8 +343,6 @@ impl Installation {
         .filter(|(alias, _)| r[alias].is_null())
         .map(|(_, name)| name.clone())
         .collect();
-        let mut labeled: Vec<PullRequest> =
-            serde_json::from_value(r["pullRequests"]["nodes"].clone())?;
         let owners = CodeOwners::from_repository(r);
         for pr in &mut labeled {
             pr.check_code_owners(owners.as_ref());
@@ -818,20 +836,30 @@ impl Installation {
         body: &str,
     ) -> Result<()> {
         let body = format!("{STICKY_MARKER}\n{body}");
-        let comments: Vec<Value> = self
-            .rest(
-                Method::GET,
-                &format!("/repos/{repo}/issues/{number}/comments?per_page=100"),
-                None,
-            )
-            .await?;
-        let mine = comments.iter().find(|c| {
-            c["user"]["type"] == "Bot"
-                && c["body"]
-                    .as_str()
-                    .is_some_and(|b| b.starts_with(STICKY_MARKER))
-        });
-        match mine.and_then(|c| c["id"].as_u64()) {
+        // Page by page, oldest first, until ours: a busy PR has more than a page.
+        let mut mine = None;
+        for page in 1.. {
+            let comments: Vec<Value> = self
+                .rest(
+                    Method::GET,
+                    &format!("/repos/{repo}/issues/{number}/comments?per_page=100&page={page}"),
+                    None,
+                )
+                .await?;
+            mine = comments
+                .iter()
+                .find(|c| {
+                    c["user"]["type"] == "Bot"
+                        && c["body"]
+                            .as_str()
+                            .is_some_and(|b| b.starts_with(STICKY_MARKER))
+                })
+                .and_then(|c| c["id"].as_u64());
+            if mine.is_some() || comments.len() < 100 {
+                break;
+            }
+        }
+        match mine {
             Some(id) => {
                 let _: Value = self
                     .rest(
@@ -861,6 +889,74 @@ mod tests {
     use crate::app::fake;
 
     const NOT_MERGEABLE: &str = r#"{"message":"Pull Request is not mergeable"}"#;
+
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    /// A labeled PR as the snapshot query returns it.
+    fn pr_node(number: u64) -> String {
+        format!(
+            r#"{{"number":{number},"title":"t","body":"","isDraft":false,"isCrossRepository":false,"reviewDecision":null,"baseRefName":"main","headRefName":"b{number}","headRefOid":"h{number}","labels":{{"nodes":[{{"name":"mp"}}]}},"stack":null,"url":"u","createdAt":"2026-10-01T00:00:00Z","additions":0,"deletions":0,"changedFiles":0,"author":null,"latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[]}}}}"#
+        )
+    }
+
+    fn snapshot_page(numbers: std::ops::Range<u64>, next: Option<&str>) -> &'static str {
+        let nodes: Vec<String> = numbers.map(pr_node).collect();
+        let page_info = match next {
+            Some(cursor) => format!(r#"{{"hasNextPage":true,"endCursor":"{cursor}"}}"#),
+            None => r#"{"hasNextPage":false,"endCursor":null}"#.into(),
+        };
+        leak(format!(
+            r#"{{"data":{{"repository":{{"id":"R","trigger":{{"name":"mp"}},"priority":null,"failed":{{"name":"mp:failed"}},"viewerDefaultMergeMethod":"SQUASH","defaultBranchRef":{{"name":"main","target":{{"oid":"t"}}}},"pullRequests":{{"nodes":[{}],"pageInfo":{page_info}}}}}}}}}"#,
+            nodes.join(",")
+        ))
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_reads_every_page_of_labeled_prs() {
+        let (gh, requests) = fake::serve(vec![
+            (200, "", snapshot_page(1..101, Some("c1"))),
+            (200, "", snapshot_page(101..103, None)),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let labels = Labels {
+            trigger: "mp".into(),
+            priority: "mp:priority".into(),
+            failed: "mp:failed".into(),
+        };
+        let snap = gh.snapshot(&repo, &labels).await.unwrap();
+        let numbers: Vec<u64> = snap.labeled.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, (1..103).collect::<Vec<_>>());
+        assert_eq!(snap.missing_labels, ["mp:priority"]);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_sticky_comment_is_found_past_the_first_page() {
+        let others: Vec<String> = (0..100)
+            .map(|i| format!(r#"{{"id":{i},"user":{{"type":"User"}},"body":"lgtm"}}"#))
+            .collect();
+        let mine =
+            format!(r#"[{{"id":4242,"user":{{"type":"Bot"}},"body":"{STICKY_MARKER}\nold"}}]"#);
+        let (gh, requests) = fake::serve(vec![
+            (200, "", leak(format!("[{}]", others.join(",")))),
+            (200, "", leak(mine)),
+            (200, "", "{}"),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        gh.sticky_comment(&repo, 7, "new").await.unwrap();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /repos/o/r/issues/7/comments?per_page=100&page=1 HTTP/1.1",
+                "GET /repos/o/r/issues/7/comments?per_page=100&page=2 HTTP/1.1",
+                "PATCH /repos/o/r/issues/comments/4242 HTTP/1.1",
+            ]
+        );
+    }
 
     async fn merge_answered(pr: &'static str) -> (MergeOutcome, Vec<String>) {
         let (gh, requests) = fake::serve(vec![(405, "", NOT_MERGEABLE), (200, "", pr)]).await;
