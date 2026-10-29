@@ -18,7 +18,7 @@ use mergepatrol_core::{
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
-    AnthropicAccess, BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task,
+    AnthropicAccess, BUNDLE_FILE, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
 };
 use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
@@ -49,7 +49,6 @@ const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 const DISCOVER_EVERY: Duration = Duration::from_secs(5 * 60);
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const RESOLVER_MAX_TURNS: u32 = 50;
-const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 const MERGE_RETRIES: u32 = 15;
 const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// How long a PR's job may keep failing on errors outside it, such as a GitHub outage, before
