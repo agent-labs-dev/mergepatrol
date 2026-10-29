@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -94,7 +95,10 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::login_callback))
         .route("/auth/logout", post(auth::logout))
-        .route("/webhooks/github", post(webhook::receive))
+        .route(
+            "/webhooks/github",
+            post(webhook::receive).layer(DefaultBodyLimit::max(webhook::MAX_BODY_BYTES)),
+        )
         // A workspace is one installation of the App: `{id}` is its installation ID.
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
@@ -330,6 +334,41 @@ mod tests {
         assert_eq!(
             deliver(&router, DELIVERY, &signature).await,
             StatusCode::NO_CONTENT
+        );
+        assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_owned())]);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_big_delivery_still_wakes_its_repo(pool: PgPool) {
+        let woken = Arc::new(Woken::default());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), woken.clone()).await;
+        // A push with many commits: over axum's default 2 MB.
+        let filler = "x".repeat(3 * 1024 * 1024);
+        let body = format!(
+            r#"{{"action":"labeled","installation":{{"id":7}},"repository":{{"full_name":"o/r"}},"filler":"{filler}"}}"#
+        );
+        let signature = webhook::sign("hush", body.as_bytes());
+        assert_eq!(
+            deliver(&router, &body, &signature).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_owned())]);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_delivery_whose_write_fails_still_wakes_its_repo(pool: PgPool) {
+        let woken = Arc::new(Woken::default());
+        let (router, _) = with_app(pool.clone(), Some(app(Some("hush"))), woken.clone()).await;
+        // The write fails, as when the database is away.
+        sqlx::query("DROP TABLE label_heads")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let body = r#"{"action":"labeled","installation":{"id":7},"repository":{"full_name":"o/r"},"label":{"name":"mp"},"pull_request":{"number":1,"head":{"sha":"s1","repo":{"full_name":"fork/r"}}}}"#;
+        let signature = webhook::sign("hush", body.as_bytes());
+        assert_eq!(
+            deliver(&router, body, &signature).await,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_owned())]);
     }
