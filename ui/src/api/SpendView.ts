@@ -6,6 +6,10 @@ import type { SpendTaskView } from "./SpendTaskView";
  */
 export type SpendView = { task: SpendTaskView, 
 /**
+ * Whether the run did its task. One that did not still spent.
+ */
+done: boolean, 
+/**
  * The conflicted files, comma-separated. Empty for a fix.
  */
 files: string, turns: number, cost_usd: number | null, 

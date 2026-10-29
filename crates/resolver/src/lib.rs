@@ -39,15 +39,24 @@ pub struct FixRequest<'a> {
     pub transcript: &'a Path,
 }
 
+/// How an agent run ended, and what it spent: every run that started has one, however it ended.
 #[derive(Debug)]
-pub enum Resolution {
-    Resolved {
-        turns: u32,
-        cost_usd: Option<f64>,
-    },
+pub struct Resolution {
+    pub turns: u32,
+    /// `None` when the CLI did not say, as Codex never does, or when the run was cut short
+    /// before the CLI could.
+    pub cost_usd: Option<f64>,
+    pub outcome: Outcome,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    Resolved,
     /// The agent was not sure, or the failure is not the PR's to fix, and said why. Mergepatrol
     /// ejects the PR rather than guess.
     GaveUp(String),
+    /// The run broke: it went over its turns or its time, or the CLI failed.
+    Failed(String),
 }
 
 #[async_trait]
@@ -55,6 +64,7 @@ pub trait Resolver: Send + Sync {
     /// Goes in the `Resolved-by:` trailer, for example `claude (claude-opus-5-5)`.
     fn name(&self) -> String;
 
+    /// An error when the agent never started: no key, or no CLI.
     async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution>;
 
     async fn fix(&self, req: FixRequest<'_>) -> Result<Resolution>;

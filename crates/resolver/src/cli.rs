@@ -4,20 +4,28 @@ use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// Runs `cmd`, handing each event to `on_event`, which stops the run with an error. Returns the
-/// CLI's exit status and its stderr.
+/// How a CLI run ended, once it started.
+pub(crate) enum Ended {
+    /// The CLI exited by itself, with its stderr.
+    Exited(ExitStatus, String),
+    /// It was killed: `on_event` stopped it, or it ran out of time. Why.
+    Stopped(String),
+}
+
+/// Runs `cmd`, handing each event to `on_event`, which stops the run with an error. An error
+/// when the CLI could not start or be read.
 pub(crate) async fn stream(
     mut cmd: Command,
     name: &str,
     timeout: Duration,
     transcript_path: &Path,
     mut on_event: impl FnMut(&Value) -> Result<()>,
-) -> Result<(ExitStatus, String)> {
+) -> Result<Ended> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -38,21 +46,30 @@ pub(crate) async fn stream(
     }
     let mut transcript = tokio::fs::File::create(transcript_path).await?;
 
+    // The outer error is reading the CLI, the inner one `on_event` stopping it.
     let read = async {
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next_line().await? {
             transcript.write_all(line.as_bytes()).await?;
             transcript.write_all(b"\n").await?;
-            if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                on_event(&event)?;
+            if let Ok(event) = serde_json::from_str::<Value>(&line)
+                && let Err(e) = on_event(&event)
+            {
+                return anyhow::Ok(Err(e));
             }
         }
-        anyhow::Ok(())
+        Ok(Ok(()))
     };
     match tokio::time::timeout(timeout, read).await {
-        Ok(r) => r?,
-        Err(_) => bail!("{name} did not finish in {timeout:?}"),
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => return Ok(Ended::Stopped(format!("{e:#}"))),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Ok(Ended::Stopped(format!(
+                "{name} did not finish in {timeout:?}"
+            )));
+        }
     }
     let status = child.wait().await?;
-    Ok((status, stderr.await?))
+    Ok(Ended::Exited(status, stderr.await?))
 }

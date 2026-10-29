@@ -5,7 +5,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use mergepatrol_core::{CheckFailure, Provider};
-use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
+use mergepatrol_executor::protocol::{
+    ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task,
+};
 use mergepatrol_executor::{Executor, LocalExecutor};
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -223,6 +225,80 @@ async fn an_openai_fix_runs_codex_and_needs_its_key() {
     assert!(reason.contains("no OpenAI API key"), "{reason}");
     assert_eq!(result.events[0].kind, "fixing");
     assert!(!out.join(BUNDLE_FILE).exists());
+}
+
+/// An executor whose job finds, on its `PATH`, a `claude` that takes one turn, says `answer`
+/// and that the run cost $0.12, and changes nothing.
+fn with_fake_claude(dir: &Path, answer: &str) -> LocalExecutor {
+    let bin = dir.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let events = [
+        serde_json::json!({ "type": "assistant" }),
+        serde_json::json!({ "type": "result", "result": answer, "total_cost_usd": 0.12 }),
+    ];
+    let lines: String = events.iter().map(|e| format!("echo '{e}'\n")).collect();
+    let script = |path: &Path, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(&bin.join("claude"), &lines);
+    let job = dir.join("job.sh");
+    script(
+        &job,
+        &format!(
+            "PATH={}:$PATH exec {} \"$@\"\n",
+            bin.display(),
+            env!("CARGO_BIN_EXE_mergepatrol")
+        ),
+    );
+    LocalExecutor {
+        program: job,
+        timeout: Duration::from_secs(60),
+    }
+}
+
+#[tokio::test]
+async fn a_fix_that_fails_still_tells_what_it_spent() {
+    for (answer, why) in [
+        (
+            "MERGEPATROL_GIVE_UP: a flaky test",
+            "the agent gave up: a flaky test",
+        ),
+        ("Fixed.", "the agent changed nothing"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+        let mut spec = spec(&origin, &head, &trunk);
+        spec.resolver.api = Some(ApiAccess {
+            base_url: "http://127.0.0.1:9".into(),
+            token: "job-token".into(),
+        });
+        spec.task = Task::FixChecks {
+            failures: vec![CheckFailure {
+                name: "ci".into(),
+                details: "it broke".into(),
+            }],
+        };
+        let out = tmp.path().join("out");
+        let result = with_fake_claude(tmp.path(), answer)
+            .run("t5", &spec, &out)
+            .await
+            .unwrap();
+        let JobOutcome::Failed { reason } = &result.outcome else {
+            panic!("{result:?}")
+        };
+        assert!(reason.contains(why), "{reason}");
+        let spent = result.events.last().unwrap();
+        assert_eq!(spent.kind, "unfixed", "{result:?}");
+        assert_eq!(
+            spent.message,
+            "1 turns, $0.12, by claude-opus-5-5 at medium effort"
+        );
+    }
 }
 
 /// The same clean rebase, in a container from the job image, through `DockerExecutor`.

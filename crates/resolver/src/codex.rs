@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use mergepatrol_core::Provider;
 use serde_json::Value;
 
-use crate::{FixRequest, Resolution, ResolveRequest, Resolver, cli, fix_prompt, gave_up, prompt};
+use crate::cli::{self, Ended};
+use crate::{
+    FixRequest, Outcome, Resolution, ResolveRequest, Resolver, fix_prompt, gave_up, prompt,
+};
 
 /// The environment variable Codex reads the API key from.
 const KEY_VAR: &str = "MERGEPATROL_API_KEY";
@@ -67,11 +70,11 @@ impl CodexResolver {
     async fn run(&self, workdir: &Path, prompt: String, transcript: &Path) -> Result<Resolution> {
         let cmd = self.command(workdir, prompt)?;
         let mut run = Run::default();
-        let (status, stderr) = cli::stream(cmd, "codex", self.timeout, transcript, |event| {
+        let ended = cli::stream(cmd, "codex", self.timeout, transcript, |event| {
             run.on(event, self.max_turns)
         })
         .await?;
-        run.outcome(status, &stderr)
+        Ok(run.end(ended))
     }
 }
 
@@ -117,21 +120,33 @@ impl Run {
         Ok(())
     }
 
-    fn outcome(self, status: std::process::ExitStatus, stderr: &str) -> Result<Resolution> {
-        if let Some(why) = self.failed {
-            bail!("codex: {why}");
-        }
-        if !self.completed {
-            bail!("codex exited ({status}) with no result: {}", stderr.trim());
-        }
-        if let Some(reason) = gave_up(&self.last_message) {
-            return Ok(Resolution::GaveUp(reason));
-        }
-        Ok(Resolution::Resolved {
+    fn end(self, ended: Ended) -> Resolution {
+        Resolution {
             turns: self.turns,
             // Codex reports tokens, not what they cost.
             cost_usd: None,
-        })
+            outcome: self.outcome(ended),
+        }
+    }
+
+    fn outcome(&self, ended: Ended) -> Outcome {
+        let (status, stderr) = match ended {
+            Ended::Stopped(why) => return Outcome::Failed(why),
+            Ended::Exited(status, stderr) => (status, stderr),
+        };
+        if let Some(why) = &self.failed {
+            return Outcome::Failed(format!("codex: {why}"));
+        }
+        if !self.completed {
+            return Outcome::Failed(format!(
+                "codex exited ({status}) with no result: {}",
+                stderr.trim()
+            ));
+        }
+        match gave_up(&self.last_message) {
+            Some(reason) => Outcome::GaveUp(reason),
+            None => Outcome::Resolved,
+        }
     }
 }
 
@@ -206,8 +221,8 @@ mod tests {
         json!({ "type": "item.completed", "item": { "type": kind, "text": text } })
     }
 
-    fn ok() -> std::process::ExitStatus {
-        std::process::ExitStatus::from_raw(0)
+    fn ok(stderr: &str) -> Ended {
+        Ended::Exited(std::process::ExitStatus::from_raw(0), stderr.into())
     }
 
     #[test]
@@ -223,13 +238,11 @@ mod tests {
         ] {
             run.on(&e, 10).unwrap();
         }
-        match run.outcome(ok(), "").unwrap() {
-            Resolution::Resolved { turns, cost_usd } => {
-                assert_eq!(turns, 3);
-                assert_eq!(cost_usd, None);
-            }
-            other => panic!("{other:?}"),
-        }
+        let r = run.end(ok(""));
+        assert_eq!(
+            (r.turns, r.cost_usd, r.outcome),
+            (3, None, Outcome::Resolved)
+        );
     }
 
     #[test]
@@ -242,33 +255,40 @@ mod tests {
         )
         .unwrap();
         run.on(&json!({ "type": "turn.completed" }), 10).unwrap();
-        match run.outcome(ok(), "").unwrap() {
-            Resolution::GaveUp(reason) => assert_eq!(reason, "both sides rename it"),
-            other => panic!("{other:?}"),
-        }
+        assert_eq!(
+            run.end(ok("")).outcome,
+            Outcome::GaveUp("both sides rename it".into())
+        );
     }
 
     #[test]
-    fn too_many_turns_stop_the_run() {
+    fn too_many_turns_stop_the_run_and_keep_its_turns() {
         let mut run = Run::default();
         for _ in 0..3 {
             run.on(&item("command_execution", ""), 3).unwrap();
         }
-        assert!(run.on(&item("command_execution", ""), 3).is_err());
+        let why = run.on(&item("command_execution", ""), 3).unwrap_err();
+        let r = run.end(Ended::Stopped(format!("{why:#}")));
+        assert_eq!(r.turns, 4);
+        assert_eq!(r.outcome, Outcome::Failed("Codex went over 3 turns".into()));
     }
 
     #[test]
-    fn a_failed_or_unfinished_turn_is_an_error() {
+    fn a_failed_or_unfinished_turn_fails_the_run() {
         let mut run = Run::default();
         run.on(
             &json!({ "type": "turn.failed", "error": { "message": "401 Unauthorized" } }),
             10,
         )
         .unwrap();
-        let err = run.outcome(ok(), "").unwrap_err();
-        assert!(err.to_string().contains("401 Unauthorized"), "{err}");
+        assert_eq!(
+            run.end(ok("")).outcome,
+            Outcome::Failed("codex: 401 Unauthorized".into())
+        );
 
-        let err = Run::default().outcome(ok(), "boom").unwrap_err();
-        assert!(err.to_string().contains("no result: boom"), "{err}");
+        let Outcome::Failed(why) = Run::default().end(ok("boom")).outcome else {
+            panic!("an unfinished run failed");
+        };
+        assert!(why.contains("no result: boom"), "{why}");
     }
 }
