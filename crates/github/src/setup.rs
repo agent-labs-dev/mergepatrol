@@ -31,7 +31,18 @@ impl AppCredentials {
     }
 }
 
-/// The App that Mergepatrol needs. No webhook: the spike polls, so it also works on localhost.
+/// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves.
+pub const WEBHOOK_EVENTS: [&str; 6] = [
+    "pull_request",
+    "pull_request_review",
+    "push",
+    "check_suite",
+    "check_run",
+    "status",
+];
+
+/// The App that Mergepatrol needs. GitHub only delivers webhooks to a public URL, so on
+/// http (localhost) the webhook is off and the queue only polls.
 pub fn manifest(public_url: &str, owner: &str) -> Value {
     // App names are unique across GitHub, and at most 34 characters.
     let mut name = format!("mergepatrol-{owner}");
@@ -43,6 +54,11 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
         "redirect_url": format!("{public_url}/setup/callback"),
         "callback_urls": [format!("{public_url}/auth/callback")],
         "setup_url": format!("{public_url}/setup/installed"),
+        "hook_attributes": {
+            "url": format!("{public_url}/webhooks/github"),
+            "active": public_url.starts_with("https://"),
+        },
+        "default_events": WEBHOOK_EVENTS,
         "public": false,
         "default_permissions": {
             "contents": "write",

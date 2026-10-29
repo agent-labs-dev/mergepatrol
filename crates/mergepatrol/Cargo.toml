@@ -24,4 +24,4 @@ tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
 [dev-dependencies]
 mergepatrol-executor = { path = "../executor" }
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "test-util"] }

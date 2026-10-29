@@ -56,6 +56,7 @@ async fn orchestrator() -> Result<()> {
                     h.private_key.clone(),
                     h.client_id.clone(),
                     h.client_secret.clone(),
+                    h.webhook_secret.clone(),
                 )
                 .await?;
             tracing::info!(app = %creds.slug, "hosted GitHub App");
@@ -117,6 +118,7 @@ async fn orchestrator() -> Result<()> {
         store: store.clone(),
         executor,
         jobs: Semaphore::new(config.max_jobs),
+        wakers: Arc::default(),
         config,
     });
 
@@ -124,6 +126,7 @@ async fn orchestrator() -> Result<()> {
         hosted_app,
         public_url: ctx.config.public_url.clone(),
         setup_token,
+        wake: ctx.wakers.clone(),
     };
     tokio::spawn(queue::supervise(ctx.clone()));
 

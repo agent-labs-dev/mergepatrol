@@ -18,7 +18,7 @@ use mergepatrol_github::{
     App, AppCredentials, CheckState, Installation, MergeOutcome, PullRequest, RepoSnapshot,
 };
 use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Scope, Store, Vault};
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::config::Config;
@@ -41,6 +41,31 @@ pub struct Ctx {
     pub store: Arc<dyn Store>,
     pub executor: Arc<dyn Executor>,
     pub jobs: Semaphore,
+    pub wakers: Arc<Wakers>,
+}
+
+/// Webhooks wake a repo's queue before its poll is due. Polling still runs, in case one is lost.
+#[derive(Default)]
+pub struct Wakers(std::sync::Mutex<HashMap<(u64, RepoName), Arc<Notify>>>);
+
+impl Wakers {
+    fn get(&self, installation: u64, repo: &RepoName) -> Arc<Notify> {
+        let mut map = self.0.lock().unwrap();
+        map.entry((installation, repo.clone())).or_default().clone()
+    }
+
+    /// Waits `timeout`, or less if a webhook arrives for the repo meanwhile, or arrived since
+    /// the last wait.
+    async fn wait(&self, installation: u64, repo: &RepoName, timeout: Duration) {
+        let woken = self.get(installation, repo);
+        let _ = tokio::time::timeout(timeout, woken.notified()).await;
+    }
+}
+
+impl mergepatrol_web::Wake for Wakers {
+    fn wake(&self, installation: u64, repo: RepoName) {
+        self.get(installation, &repo).notify_one();
+    }
 }
 
 /// Runs a queue for each repo that is on in the dashboard, and stops the queues of repos that
@@ -112,7 +137,7 @@ async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
                 tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "tick failed")
             }
         }
-        tokio::time::sleep(ctx.config.poll).await;
+        ctx.wakers.wait(gh.id, &repo, ctx.config.poll).await;
     }
 }
 
@@ -329,7 +354,9 @@ async fn run_job(
                             if required.is_empty() && checks.by_name.is_empty() =>
                         {
                             if published_at.elapsed() < NO_CHECKS_GRACE {
-                                tokio::time::sleep(CHECKS_POLL).await;
+                                ctx.wakers
+                                    .wait(key.installation_id, repo, CHECKS_POLL)
+                                    .await;
                                 continue;
                             }
                             Event::ChecksPassed
@@ -337,7 +364,9 @@ async fn run_job(
                         (CheckState::Passed, _) => Event::ChecksPassed,
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
                         (CheckState::Pending, _) => {
-                            tokio::time::sleep(CHECKS_POLL).await;
+                            ctx.wakers
+                                .wait(key.installation_id, repo, CHECKS_POLL)
+                                .await;
                             continue;
                         }
                     }
@@ -568,6 +597,24 @@ mod tests {
             .await
             .unwrap();
         check_job_output(&Git, &cache, &out, 1, &trunk, &head).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_webhook_cuts_the_wait_short_even_when_it_came_first() {
+        use mergepatrol_web::Wake;
+        let wakers = Wakers::default();
+        let repo = RepoName::parse("o/r").unwrap();
+        let hour = Duration::from_secs(3600);
+
+        wakers.wake(1, repo.clone());
+        let start = tokio::time::Instant::now();
+        wakers.wait(1, &repo, hour).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+
+        // Another repo's webhook does not count.
+        wakers.wake(1, RepoName::parse("o/other").unwrap());
+        wakers.wait(1, &repo, hour).await;
+        assert_eq!(start.elapsed(), hour);
     }
 
     #[tokio::test]

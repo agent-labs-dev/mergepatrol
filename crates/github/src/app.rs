@@ -55,6 +55,7 @@ impl App {
         pem: String,
         client_id: String,
         client_secret: String,
+        webhook_secret: Option<String>,
     ) -> Result<crate::AppCredentials> {
         let info: Value = self
             .http
@@ -77,7 +78,7 @@ impl App {
             slug: s(&info["slug"])?,
             client_id,
             client_secret,
-            webhook_secret: None,
+            webhook_secret,
             pem,
             owner: s(&info["owner"]["login"])?,
             html_url: s(&info["html_url"])?,

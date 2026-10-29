@@ -4,6 +4,7 @@
 mod api;
 mod auth;
 mod ui;
+mod webhook;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,7 @@ pub use api::*;
 pub use auth::{
     AppView, ManifestForm, ManifestRequest, SessionStatus, SessionView, Unlock, UserView,
 };
+pub use webhook::Wake;
 
 pub struct WebConfig {
     /// The hosted GitHub App, from the environment. `None` self-hosted: the App is created in
@@ -28,6 +30,8 @@ pub struct WebConfig {
     pub public_url: String,
     /// Unlocks the first-run setup. `None` once the GitHub App exists.
     pub setup_token: Option<String>,
+    /// Webhooks wake the queue of the repo they name.
+    pub wake: Arc<dyn Wake>,
 }
 
 #[derive(Clone)]
@@ -39,6 +43,7 @@ struct AppState {
     setup_token: Arc<Mutex<Option<String>>>,
     /// OAuth and manifest flows in progress, by their `state` parameter.
     pending: Arc<Mutex<HashMap<String, auth::Pending>>>,
+    wake: Arc<dyn Wake>,
 }
 
 impl AppState {
@@ -65,6 +70,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         hosted_app: config.hosted_app.map(Arc::new),
         setup_token: Arc::new(Mutex::new(config.setup_token)),
         pending: Arc::default(),
+        wake: config.wake,
     };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -76,6 +82,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/auth/login", get(auth::login))
         .route("/auth/callback", get(auth::login_callback))
         .route("/auth/logout", post(auth::logout))
+        .route("/webhooks/github", post(webhook::receive))
         // A workspace is one installation of the App: `{id}` is its installation ID.
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
@@ -131,8 +138,28 @@ mod tests {
 
     const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
+    #[derive(Default)]
+    struct Woken(Mutex<Vec<(u64, String)>>);
+
+    impl Wake for Woken {
+        fn wake(&self, installation: u64, repo: mergepatrol_core::RepoName) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((installation, repo.to_string()));
+        }
+    }
+
     /// A router, and the cookie of a user who can access installation 1 only.
     async fn signed_in(pool: PgPool) -> (Router, String) {
+        with_app(pool, None, Arc::default()).await
+    }
+
+    async fn with_app(
+        pool: PgPool,
+        hosted_app: Option<AppCredentials>,
+        wake: Arc<Woken>,
+    ) -> (Router, String) {
         let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool).await.unwrap());
         let vault = Arc::new(Vault::new(store.clone(), KEY).unwrap());
         let expires_at = (std::time::SystemTime::now()
@@ -150,9 +177,10 @@ mod tests {
             .await
             .unwrap();
         let config = WebConfig {
-            hosted_app: None,
+            hosted_app,
             public_url: "http://localhost:8080".into(),
             setup_token: None,
+            wake,
         };
         (router(store, vault, config), "mp_session=tok".into())
     }
@@ -211,5 +239,70 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(get(&router, "/api/session", None).await, StatusCode::OK);
+    }
+
+    fn app(webhook_secret: Option<&str>) -> AppCredentials {
+        AppCredentials {
+            id: 1,
+            slug: "mp".into(),
+            client_id: "c".into(),
+            client_secret: "s".into(),
+            webhook_secret: webhook_secret.map(str::to_owned),
+            pem: String::new(),
+            owner: "o".into(),
+            html_url: "https://github.com/apps/mp".into(),
+        }
+    }
+
+    async fn deliver(router: &Router, body: &str, signature: &str) -> StatusCode {
+        let req = Request::post("/webhooks/github")
+            .header("x-github-event", "pull_request")
+            .header("x-hub-signature-256", signature)
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    const DELIVERY: &str =
+        r#"{"action":"labeled","installation":{"id":7},"repository":{"full_name":"o/r"}}"#;
+
+    #[sqlx::test(migrations = false)]
+    async fn a_signed_webhook_wakes_its_repo(pool: PgPool) {
+        let woken = Arc::new(Woken::default());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), woken.clone()).await;
+        let signature = webhook::sign("hush", DELIVERY.as_bytes());
+        assert_eq!(
+            deliver(&router, DELIVERY, &signature).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_owned())]);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_badly_signed_webhook_wakes_nothing(pool: PgPool) {
+        let woken = Arc::new(Woken::default());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), woken.clone()).await;
+        let forged = webhook::sign("guess", DELIVERY.as_bytes());
+        assert_eq!(
+            deliver(&router, DELIVERY, &forged).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            deliver(&router, DELIVERY, "").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(woken.0.lock().unwrap().is_empty());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn without_a_webhook_secret_webhooks_are_off(pool: PgPool) {
+        let woken = Arc::new(Woken::default());
+        let (router, _) = with_app(pool, Some(app(None)), woken.clone()).await;
+        let signature = webhook::sign("", DELIVERY.as_bytes());
+        assert_eq!(
+            deliver(&router, DELIVERY, &signature).await,
+            StatusCode::NOT_FOUND
+        );
+        assert!(woken.0.lock().unwrap().is_empty());
     }
 }

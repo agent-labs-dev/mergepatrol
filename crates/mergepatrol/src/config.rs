@@ -44,6 +44,8 @@ pub struct HostedApp {
     pub private_key: String,
     pub client_id: String,
     pub client_secret: String,
+    /// Off without it: the queue only polls.
+    pub webhook_secret: Option<String>,
 }
 
 pub struct Labels {
@@ -110,6 +112,7 @@ fn hosted_app() -> Result<Option<HostedApp>> {
             private_key: key.clone(),
             client_id: client_id.clone(),
             client_secret: secret.clone(),
+            webhook_secret: var("MERGEPATROL_GITHUB_WEBHOOK_SECRET"),
         })),
         _ => bail!(
             "set all of {} for the hosted GitHub App, or none",
