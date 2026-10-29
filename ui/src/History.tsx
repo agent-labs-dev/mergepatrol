@@ -73,6 +73,7 @@ export function History({ workspace }: { workspace: number }) {
           <Segmented
             name="list"
             label="List"
+            fill
             options={LISTS}
             value={list}
             text={(l) => (l === "repos" ? "Repos" : "Developers")}
@@ -272,6 +273,7 @@ function Segmented<T extends string | number | undefined>({
   value,
   text,
   onChange,
+  fill,
 }: {
   name: string;
   label: string;
@@ -279,6 +281,8 @@ function Segmented<T extends string | number | undefined>({
   value: T;
   text: (option: T) => string;
   onChange: (option: T) => void;
+  /** Stretch the options evenly across the container's width. */
+  fill?: boolean;
 }) {
   return (
     <fieldset className="flex rounded-md bg-sunken p-0.5 text-xs">
@@ -286,7 +290,7 @@ function Segmented<T extends string | number | undefined>({
       {options.map((o) => (
         <label
           key={String(o)}
-          className="cursor-pointer rounded px-2 py-1 text-muted hover:text-fg has-checked:bg-surface has-checked:text-fg has-checked:shadow-xs has-checked:ring-1 has-checked:ring-line has-focus-visible:ring-2 has-focus-visible:ring-fg/30"
+          className={`${fill ? "flex-1 text-center " : ""}cursor-pointer rounded px-2 py-1 text-muted hover:text-fg has-checked:bg-surface has-checked:text-fg has-checked:shadow-xs has-checked:ring-1 has-checked:ring-line has-focus-visible:ring-2 has-focus-visible:ring-fg/30`}
         >
           <input
             type="radio"
