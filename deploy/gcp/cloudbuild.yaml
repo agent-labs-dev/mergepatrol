@@ -63,6 +63,7 @@ steps:
 
   # One instance, always on: the queue runs in the background, not per request, and two
   # instances would run every queue twice. The repo caches live in memory, hence 4Gi.
+  # Public without an allUsers binding, which the org's domain-restricted sharing refuses.
   - id: deploy-orchestrator
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     waitFor: [push, deploy-job]
@@ -74,7 +75,7 @@ steps:
       - --region=${_REGION}
       - --image=${_REPO}/orchestrator:${BUILD_ID}
       - --service-account=mergepatrol@${PROJECT_ID}.iam.gserviceaccount.com
-      - --allow-unauthenticated
+      - --no-invoker-iam-check
       - --min-instances=1
       - --max-instances=1
       - --no-cpu-throttling

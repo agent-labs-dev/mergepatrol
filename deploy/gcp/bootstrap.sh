@@ -17,6 +17,8 @@ DB_USER=mergepatrol
 
 g() { gcloud --project="$PROJECT" "$@"; }
 secret() { g secrets describe "$1" >/dev/null 2>&1; }
+# A new service account takes a moment to show up in IAM, so a grant on one retries.
+grant() { for _ in 1 2 3 4 5 6; do g "$@" >/dev/null && return; sleep 10; done; return 1; }
 
 g services enable run.googleapis.com sqladmin.googleapis.com artifactregistry.googleapis.com \
   cloudbuild.googleapis.com secretmanager.googleapis.com iam.googleapis.com
@@ -33,16 +35,17 @@ for sa in mergepatrol mergepatrol-job; do
 done
 ORCH="serviceAccount:mergepatrol@$PROJECT.iam.gserviceaccount.com"
 for role in roles/cloudsql.client roles/secretmanager.secretAccessor roles/run.developer; do
-  g projects add-iam-policy-binding "$PROJECT" --member="$ORCH" --role="$role" --condition=None >/dev/null
+  grant projects add-iam-policy-binding "$PROJECT" --member="$ORCH" --role="$role" --condition=None
 done
-g iam service-accounts add-iam-policy-binding "mergepatrol-job@$PROJECT.iam.gserviceaccount.com" \
-  --member="$ORCH" --role=roles/iam.serviceAccountUser >/dev/null
+grant iam service-accounts add-iam-policy-binding "mergepatrol-job@$PROJECT.iam.gserviceaccount.com" \
+  --member="$ORCH" --role=roles/iam.serviceAccountUser
 
 # Cloud Build deploys both, as their service accounts.
 NUMBER=$(g projects describe "$PROJECT" --format='value(projectNumber)')
 BUILD="serviceAccount:$NUMBER-compute@developer.gserviceaccount.com"
-for role in roles/run.admin roles/artifactregistry.writer roles/logging.logWriter roles/iam.serviceAccountUser; do
-  g projects add-iam-policy-binding "$PROJECT" --member="$BUILD" --role="$role" --condition=None >/dev/null
+for role in roles/run.admin roles/artifactregistry.writer roles/logging.logWriter roles/iam.serviceAccountUser \
+  roles/storage.objectViewer; do
+  grant projects add-iam-policy-binding "$PROJECT" --member="$BUILD" --role="$role" --condition=None
 done
 
 if ! g sql instances describe "$SQL" >/dev/null 2>&1; then
