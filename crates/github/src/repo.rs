@@ -502,7 +502,14 @@ impl Installation {
                 &format!("/repos/{repo}/pulls/{number}/merge-async"),
                 Some(json!({ "sha": sha, "merge_method": method, "merge_action": "direct_merge" })),
             )
-            .await?;
+            .await;
+        // A merge can go through though its reply says otherwise: lost in a 502, or a retry that
+        // found it merged already.
+        let answered = matches!(&res, Ok(r) if matches!(r.status, StatusCode::OK | StatusCode::ACCEPTED | StatusCode::CONFLICT));
+        if !answered && let Some(sha) = self.merged_as(repo, number, sha).await? {
+            return Ok(MergeOutcome::Merged { sha });
+        }
+        let res = res?;
         let mut result = match res.status {
             StatusCode::OK | StatusCode::ACCEPTED | StatusCode::CONFLICT => res.body,
             StatusCode::BAD_REQUEST
@@ -555,6 +562,21 @@ impl Installation {
             .as_str()
             .context("merge commit")?
             .to_owned())
+    }
+
+    /// The merge commit of the PR, if it merged at `head`.
+    async fn merged_as(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        head: &str,
+    ) -> Result<Option<String>> {
+        let pr: Value = self
+            .rest(Method::GET, &format!("/repos/{repo}/pulls/{number}"), None)
+            .await?;
+        Ok((pr["merged"] == true && pr["head"]["sha"] == head)
+            .then(|| pr["merge_commit_sha"].as_str().map(str::to_owned))
+            .flatten())
     }
 
     /// Creates the label, unless the repo already has it.
@@ -655,6 +677,44 @@ impl Installation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::fake;
+
+    const NOT_MERGEABLE: &str = r#"{"message":"Pull Request is not mergeable"}"#;
+
+    async fn merge_answered(pr: &'static str) -> (MergeOutcome, Vec<String>) {
+        let (gh, requests) = fake::serve(vec![(405, "", NOT_MERGEABLE), (200, "", pr)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let outcome = gh.merge(&repo, 7, "abc", "squash").await.unwrap();
+        let requests = requests.lock().unwrap().clone();
+        (outcome, requests)
+    }
+
+    #[tokio::test]
+    async fn a_merge_that_went_through_counts_though_its_reply_failed() {
+        let pr = r#"{"merged":true,"head":{"sha":"abc"},"merge_commit_sha":"m1"}"#;
+        let (outcome, requests) = merge_answered(pr).await;
+        assert!(
+            matches!(&outcome, MergeOutcome::Merged { sha } if sha == "m1"),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            requests,
+            [
+                "PUT /repos/o/r/pulls/7/merge-async HTTP/1.1",
+                "GET /repos/o/r/pulls/7 HTTP/1.1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_merge_stays_rejected() {
+        let pr = r#"{"merged":false,"head":{"sha":"abc"},"merge_commit_sha":null}"#;
+        let (outcome, _) = merge_answered(pr).await;
+        assert!(
+            matches!(&outcome, MergeOutcome::Rejected(m) if m.contains("not mergeable")),
+            "{outcome:?}"
+        );
+    }
 
     #[test]
     fn summary_reads_graphql() {

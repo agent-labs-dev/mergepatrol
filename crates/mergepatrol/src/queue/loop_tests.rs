@@ -69,6 +69,8 @@ struct State {
     repo_labels: Vec<String>,
     /// Each stack's PRs, bottom to top.
     stacks: BTreeMap<PrNumber, Vec<PrNumber>>,
+    /// How many PR reads fail next, as in a GitHub outage.
+    outage: u32,
 }
 
 impl State {
@@ -222,6 +224,10 @@ impl GitHub for Fake {
 
     async fn pull_request(&self, _: &RepoName, number: PrNumber) -> Result<PullRequest> {
         let mut s = self.state.lock().unwrap();
+        if s.outage > 0 {
+            s.outage -= 1;
+            bail!("GET /pulls/{number}: 502 Bad Gateway");
+        }
         let mut pr = s.prs[&number].clone();
         if let Some((old, reads)) = s.stale.get_mut(&number) {
             pr.head_ref_oid = old.clone();
@@ -677,6 +683,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         wakers: Arc::default(),
         analytics: Analytics::default(),
         prs: Default::default(),
+        job_errors: Default::default(),
     }
 }
 
@@ -719,9 +726,11 @@ impl Run {
     }
 
     async fn tick(&self) -> Ran {
-        tick(&self.ctx, &*self.gh, &self.rebase, &repo())
-            .await
-            .unwrap()
+        self.try_tick().await.unwrap()
+    }
+
+    async fn try_tick(&self) -> Result<Ran> {
+        tick(&self.ctx, &*self.gh, &self.rebase, &repo()).await
     }
 
     /// The event kinds of one PR, in order.
@@ -1047,6 +1056,58 @@ async fn a_failed_rebase_ejects() {
     run.rebase.fail = Some("conflict in a.txt".into());
     run.tick().await;
     assert_eq!(run.kinds(1), ["enqueued", "rebasing", "ejected"]);
+    assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_github_outage_keeps_the_pr_in_its_place() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.outage = 1;
+    }));
+    let Err(err) = run.try_tick().await else {
+        panic!("the tick passed during the outage");
+    };
+    assert!(format!("{err:#}").contains("502"), "{err:#}");
+    assert_eq!(run.lane(), [(1, "Active".into())]);
+    assert_eq!(run.labels(1), [TRIGGER]);
+
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.exits().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_queued_again_gets_a_new_window_for_errors() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.outage = 1;
+    }));
+    assert!(run.try_tick().await.is_err());
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.clear());
+    run.tick().await;
+    tokio::time::advance(JOB_ERRORS_FOR).await;
+    run.gh.with_mut(|s| {
+        s.prs.get_mut(&1).unwrap().labels.push(TRIGGER.into());
+        s.outage = 1;
+    });
+    assert!(run.try_tick().await.is_err());
+    assert_eq!(run.lane(), [(1, "Active".into())]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_whose_job_keeps_failing_is_ejected() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.outage = u32::MAX;
+    }));
+    assert!(run.try_tick().await.is_err());
+    tokio::time::advance(JOB_ERRORS_FOR - Duration::from_secs(1)).await;
+    assert!(run.try_tick().await.is_err());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.kinds(1), ["enqueued", "ejected"]);
     assert_eq!(run.labels(1), [FAILED]);
 }
 
