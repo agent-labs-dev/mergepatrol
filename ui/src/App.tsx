@@ -1,21 +1,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { Link, Navigate, Outlet, useNavigate, useParams } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
 import { fetchSession, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
-import { Queue } from "./Queue";
-import { Repos } from "./Repos";
-import { Settings } from "./Settings";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { type ThemeProps, useTheme } from "./theme";
 import { Avatar, feedbackUrl, Mark, ThemeToggle } from "./ui";
+import { WorkspaceContext } from "./workspace";
 
-/** Setup and sign-in errors come back from the server as `?error=`. */
+/** Setup and sign-in errors come back from the server as `?error=`, read before the router starts. */
+const redirectError = new URLSearchParams(location.search).get("error");
+if (redirectError) history.replaceState(null, "", location.pathname);
+
 function useRedirectError() {
-  const [error, setError] = useState(() => new URLSearchParams(location.search).get("error"));
-  if (error && location.search) history.replaceState(null, "", location.pathname);
+  const [error, setError] = useState(redirectError);
   return [error, () => setError(null)] as const;
 }
 
@@ -56,25 +57,26 @@ function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
   return null;
 }
 
-const tabs = ["Queue", "Repos", "Settings"] as const;
+const tabs = [
+  ["Queue", "/$account/queue"],
+  ["Repos", "/$account/repos"],
+  ["Settings", "/$account/settings"],
+] as const;
 
-/** The workspace in view, kept across reloads. Falls back to the first one. */
-function useWorkspace(workspaces: WorkspaceView[]) {
+/** The workspace opened last, for a path that names none. Falls back to the first one. */
+function remembered(workspaces: WorkspaceView[]) {
   const stored = Number(localStorage.getItem("workspace"));
-  const [id, setId] = useState(
-    workspaces.some((w) => w.installation_id === stored) ? stored : workspaces[0].installation_id,
-  );
-  const choose = (next: number) => {
-    localStorage.setItem("workspace", String(next));
-    setId(next);
-  };
-  return [id, choose] as const;
+  return workspaces.find((w) => w.installation_id === stored) ?? workspaces[0];
 }
 
 function Dashboard({ session, theme, setTheme }: { session: SessionView } & ThemeProps) {
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<(typeof tabs)[number]>("Queue");
-  const [workspace, setWorkspace] = useWorkspace(session.workspaces);
+  const navigate = useNavigate();
+  const { account } = useParams({ strict: false });
+  const current = session.workspaces.find((w) => w.account === account);
+  useEffect(() => {
+    if (current) localStorage.setItem("workspace", String(current.installation_id));
+  }, [current]);
   const signOut = useMutation({
     mutationFn: logout,
     onSuccess: () => {
@@ -82,10 +84,17 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
       return queryClient.invalidateQueries({ queryKey: ["session"] });
     },
   });
-  const current = session.workspaces.find((w) => w.installation_id === workspace);
   useWorkspaceAnalytics(session, current);
   const app = session.app;
   if (!app) return null;
+  if (!current)
+    return (
+      <Navigate
+        to="/$account/queue"
+        params={{ account: remembered(session.workspaces).account }}
+        replace
+      />
+    );
 
   return (
     <div className="flex h-screen flex-col">
@@ -93,17 +102,18 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
         <div className="flex h-12 items-center gap-3 px-5">
           <Mark />
           <span className="text-faint">/</span>
-          {current && <Avatar src={current.avatar_url} alt={current.account} />}
+          <Avatar src={current.avatar_url} alt={current.account} />
           <select
-            value={workspace}
+            value={current.account}
             onChange={(e) => {
               if (e.target.value === "install") location.href = app.install_url;
-              else setWorkspace(Number(e.target.value));
+              // The same page in the other workspace, without this one's selection.
+              else navigate({ to: ".", params: { account: e.target.value }, search: {} });
             }}
             className="field-sizing-content bg-transparent font-medium outline-none"
           >
             {session.workspaces.map((w) => (
-              <option key={w.installation_id} value={w.installation_id}>
+              <option key={w.installation_id} value={w.account}>
                 {w.account}
               </option>
             ))}
@@ -135,24 +145,24 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
           </div>
         </div>
         <nav className="flex gap-5 px-5">
-          {tabs.map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={`-mb-px border-b-2 pb-2.5 ${
-                t === tab ? "border-fg text-fg" : "border-transparent text-muted hover:text-fg"
-              }`}
+          {tabs.map(([label, to]) => (
+            <Link
+              key={to}
+              to={to}
+              params={{ account: current.account }}
+              className="-mb-px border-b-2 pb-2.5"
+              activeProps={{ className: "border-fg text-fg" }}
+              inactiveProps={{ className: "border-transparent text-muted hover:text-fg" }}
             >
-              {t}
-            </button>
+              {label}
+            </Link>
           ))}
         </nav>
       </header>
       <main className="min-h-0 flex-1">
-        {tab === "Queue" && <Queue workspace={workspace} />}
-        {tab === "Repos" && <Repos workspace={workspace} app={app} />}
-        {tab === "Settings" && <Settings workspace={workspace} />}
+        <WorkspaceContext value={{ workspace: current.installation_id, app }}>
+          <Outlet />
+        </WorkspaceContext>
       </main>
     </div>
   );

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.105.0",
+    "@tanstack/react-router": "^1.170.46",
     "posthog-js": "^1.440.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
