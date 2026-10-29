@@ -88,7 +88,7 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 | `MERGEPATROL_JOB_IMAGE` | `mergepatrol-job:latest` | The job image (`docker build --target job`) |
 | `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
 | `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
-| `MERGEPATROL_JOB_DNS` | Docker's default | DNS servers for jobs, comma-separated. `1.1.1.1,8.8.8.8` on the sandbox network |
+| `MERGEPATROL_JOB_RESOLV_CONF` | Docker's default | A file on the Docker host, mounted as the jobs' `/etc/resolv.conf`. `/etc/mergepatrol/job-resolv.conf` on the sandbox network |
 | `MERGEPATROL_JOB_MEMORY` | `4g` | Memory limit per job |
 | `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
 

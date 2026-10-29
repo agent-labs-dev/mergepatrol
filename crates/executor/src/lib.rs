@@ -39,17 +39,18 @@ impl Executor for LocalExecutor {
 }
 
 /// One container per job: `docker create`, `docker start` with the spec on stdin, then
-/// `docker cp` the output out. No bind mounts, so it also works when the orchestrator itself
-/// runs in a container and talks to the host's Docker.
+/// `docker cp` the output out. The only bind mount is `resolv_conf`, a host file, so it also
+/// works when the orchestrator itself runs in a container and talks to the host's Docker.
 pub struct DockerExecutor {
     pub image: String,
     /// `runsc` for gVisor. `None` uses Docker's default runtime.
     pub runtime: Option<String>,
     /// A network whose host firewall blocks the metadata server and private ranges.
     pub network: Option<String>,
-    /// DNS servers for the job. Needed on the sandbox network, whose firewall blocks Docker's
-    /// embedded DNS. Empty uses Docker's default.
-    pub dns: Vec<String>,
+    /// A file on the Docker host, mounted as the job's `/etc/resolv.conf`. Needed with gVisor on
+    /// a user-defined network: there Docker's embedded DNS is out of the sandbox's reach, and
+    /// `--dns` does not replace it (gVisor FAQ). `None` uses Docker's default.
+    pub resolv_conf: Option<String>,
     pub memory: String,
     pub cpus: String,
     pub timeout: Duration,
@@ -62,19 +63,21 @@ impl Executor for DockerExecutor {
         let name = format!("mergepatrol-job-{job_id}");
         // A container left over from a crash would block the name.
         let _ = Command::new("docker")
-            .args(["rm", "-f", &name])
+            .args(["rm", "-f", "-v", &name])
             .output()
             .await;
         let mut create = Command::new("docker");
-        create.args(["create", "-i", "--name", &name]);
+        // `/out` is a volume: under gVisor, writes to the container's own filesystem stay in
+        // the sandbox's memory, where `docker cp` cannot see them.
+        create.args(["create", "-i", "--name", &name, "-v", "/out"]);
         if let Some(runtime) = &self.runtime {
             create.args(["--runtime", runtime]);
         }
         if let Some(network) = &self.network {
             create.args(["--network", network]);
         }
-        for server in &self.dns {
-            create.args(["--dns", server]);
+        if let Some(file) = &self.resolv_conf {
+            create.args(["-v", &format!("{file}:/etc/resolv.conf:ro")]);
         }
         create
             .args([
@@ -108,7 +111,7 @@ impl Executor for DockerExecutor {
         .await;
 
         if let Err(e) = Command::new("docker")
-            .args(["rm", "-f", &id])
+            .args(["rm", "-f", "-v", &id])
             .output()
             .await
         {

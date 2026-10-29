@@ -156,7 +156,7 @@ async fn docker_executor_runs_a_job_in_a_container() {
         image: "mergepatrol-job:latest".into(),
         runtime: None,
         network: None,
-        dns: vec![],
+        resolv_conf: None,
         memory: "1g".into(),
         cpus: "1".into(),
         timeout: Duration::from_secs(120),

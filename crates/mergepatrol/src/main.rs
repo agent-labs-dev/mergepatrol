@@ -95,7 +95,7 @@ async fn orchestrator() -> Result<()> {
             image,
             runtime,
             network,
-            dns,
+            resolv_conf,
             memory,
             cpus,
         } => {
@@ -104,7 +104,7 @@ async fn orchestrator() -> Result<()> {
                 image: image.clone(),
                 runtime: runtime.clone(),
                 network: network.clone(),
-                dns: dns.clone(),
+                resolv_conf: resolv_conf.clone(),
                 memory: memory.clone(),
                 cpus: cpus.clone(),
                 timeout: JOB_TIMEOUT,

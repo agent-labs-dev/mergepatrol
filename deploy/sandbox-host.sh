@@ -5,11 +5,12 @@
 #     metadata server, private ranges, or this host.
 # Run as root. Safe to run again (for example from the VM's startup script).
 # Then set MERGEPATROL_JOB_RUNTIME=runsc, MERGEPATROL_JOB_NETWORK=mergepatrol-jobs, and
-# MERGEPATROL_JOB_DNS=1.1.1.1,8.8.8.8 (the firewall blocks Docker's embedded DNS).
+# MERGEPATROL_JOB_RESOLV_CONF=/etc/mergepatrol/job-resolv.conf.
 set -euo pipefail
 
 NETWORK=mergepatrol-jobs
 SUBNET=10.213.0.0/24
+RESOLV_CONF=/etc/mergepatrol/job-resolv.conf
 
 if ! command -v runsc >/dev/null; then
   curl -fsSL https://gvisor.dev/archive.key | gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
@@ -27,6 +28,11 @@ if ! docker network inspect "$NETWORK" >/dev/null 2>&1; then
     -o com.docker.network.bridge.name=mp-jobs "$NETWORK"
 fi
 
+# Under gVisor, a user-defined network's embedded DNS (127.0.0.11) is out of the sandbox's
+# reach, and --dns does not replace it (gVisor FAQ). Jobs get public resolvers instead.
+mkdir -p "$(dirname "$RESOLV_CONF")"
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$RESOLV_CONF"
+
 # Jobs to the outside: no metadata server, no private or shared ranges.
 for dst in 169.254.0.0/16 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10; do
   iptables -C DOCKER-USER -s "$SUBNET" -d "$dst" -j DROP 2>/dev/null \
@@ -35,4 +41,4 @@ done
 # Jobs to this host (the Docker API, the dashboard, anything listening): no.
 iptables -C INPUT -i mp-jobs -j DROP 2>/dev/null || iptables -I INPUT -i mp-jobs -j DROP
 
-echo "ready: MERGEPATROL_JOB_RUNTIME=runsc MERGEPATROL_JOB_NETWORK=$NETWORK MERGEPATROL_JOB_DNS=1.1.1.1,8.8.8.8"
+echo "ready: MERGEPATROL_JOB_RUNTIME=runsc MERGEPATROL_JOB_NETWORK=$NETWORK MERGEPATROL_JOB_RESOLV_CONF=$RESOLV_CONF"
