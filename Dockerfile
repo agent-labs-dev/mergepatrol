@@ -5,7 +5,7 @@
 FROM node:24-bookworm-slim AS ui
 WORKDIR /src/ui
 RUN corepack enable
-COPY ui/package.json ui/pnpm-lock.yaml ./
+COPY ui/package.json ui/pnpm-lock.yaml ui/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY ui/ ./
 RUN pnpm build
