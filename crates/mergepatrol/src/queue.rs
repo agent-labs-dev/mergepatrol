@@ -55,6 +55,7 @@ pub struct Ctx {
     pub vault: Arc<Vault>,
     pub store: Arc<dyn Store>,
     pub executor: Arc<dyn Executor>,
+    /// Sandboxed jobs running at once, across repos. A PR waiting for its checks holds none.
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
     pub analytics: Analytics,
@@ -367,7 +368,6 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     lane.activate(number);
     ctx.store.save_lane(&key, &lane).await?;
 
-    let _slot = ctx.jobs.acquire().await?;
     let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, number).await {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
@@ -1165,6 +1165,7 @@ async fn run_sandboxed(
 ) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(out).await;
     record(ctx, key, number, "job", job_id).await?;
+    let _slot = ctx.jobs.acquire().await?;
     let result = ctx
         .executor
         .run(job_id, spec, out)

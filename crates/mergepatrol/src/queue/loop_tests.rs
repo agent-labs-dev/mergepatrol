@@ -701,6 +701,25 @@ async fn a_labeled_pr_is_rebased_checked_and_merged() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn only_the_sandbox_takes_a_job_slot() {
+    // Other repos' jobs hold every slot. The scripted sandbox takes none, so the PR's wait for
+    // its checks, and its merge, must not either.
+    let mut run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Pending);
+        s.required = vec!["ci".into()];
+    }));
+    run.ctx.jobs = Semaphore::new(0);
+    run.gh.then(|_| {});
+    run.gh.then(|s| {
+        s.checks.insert("ci".into(), CheckState::Passed);
+    });
+    let ran = tokio::time::timeout(Duration::from_secs(3600), run.tick()).await;
+    assert!(matches!(ran, Ok(Ran::Job)), "the job waited for a slot");
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_config_file_sets_the_label() {
     let run = Run::new(Fake::new(|s| {
         s.config = Some("version: 1\nlabel: ship\n".into());
