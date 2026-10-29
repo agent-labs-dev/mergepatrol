@@ -188,16 +188,18 @@ impl Installation {
         struct Tok {
             token: String,
         }
-        let req = self
-            .app
-            .http
-            .post(format!(
-                "{}/app/installations/{}/access_tokens",
-                self.app.api, self.id
-            ))
-            .bearer_auth(self.app.jwt()?)
-            .headers(api_headers());
-        let tok: Tok = json_ok(send(req, "create an access token").await?)?;
+        let mint = || async {
+            Ok(self
+                .app
+                .http
+                .post(format!(
+                    "{}/app/installations/{}/access_tokens",
+                    self.app.api, self.id
+                ))
+                .bearer_auth(self.app.jwt()?)
+                .headers(api_headers()))
+        };
+        let tok: Tok = json_ok(send(mint, "create an access token").await?)?;
         // Tokens live one hour.
         *cached = Some((
             tok.token.clone(),
@@ -212,17 +214,21 @@ impl Installation {
         struct Tok {
             token: String,
         }
-        let req = self
-            .app
-            .http
-            .post(format!(
-                "{}/app/installations/{}/access_tokens",
-                self.app.api, self.id
-            ))
-            .bearer_auth(self.app.jwt()?)
-            .headers(api_headers())
-            .json(&json!({ "repositories": [repo.name], "permissions": { "contents": "read" } }));
-        let tok: Tok = json_ok(send(req, "create a read-only token").await?)?;
+        let permissions =
+            json!({ "repositories": [repo.name], "permissions": { "contents": "read" } });
+        let mint = || async {
+            Ok(self
+                .app
+                .http
+                .post(format!(
+                    "{}/app/installations/{}/access_tokens",
+                    self.app.api, self.id
+                ))
+                .bearer_auth(self.app.jwt()?)
+                .headers(api_headers())
+                .json(&permissions))
+        };
+        let tok: Tok = json_ok(send(mint, "create a read-only token").await?)?;
         Ok(tok.token)
     }
 
@@ -260,16 +266,20 @@ impl Installation {
         path: &str,
         body: Option<Value>,
     ) -> Result<Response> {
-        let mut req = self
-            .app
-            .http
-            .request(method.clone(), format!("{}{path}", self.app.api))
-            .bearer_auth(self.token().await?)
-            .headers(api_headers());
-        if let Some(body) = body {
-            req = req.json(&body);
-        }
-        let (status, text) = send(req, &format!("{method} {path}")).await?;
+        let (method, body) = (&method, body.as_ref());
+        let build = || async move {
+            let mut req = self
+                .app
+                .http
+                .request(method.clone(), format!("{}{path}", self.app.api))
+                .bearer_auth(self.token().await?)
+                .headers(api_headers());
+            if let Some(body) = body {
+                req = req.json(body);
+            }
+            Ok(req)
+        };
+        let (status, text) = send(build, &format!("{method} {path}")).await?;
         let body = if text.is_empty() {
             Value::Null
         } else {
@@ -316,13 +326,17 @@ const ATTEMPTS: u32 = 5;
 /// The longest wait for a rate limit to lift. Beyond it, the request fails.
 const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(10 * 60);
 
-/// Sends `req`, and again after a transient failure: a network error, a 5xx, or a rate limit.
-/// The status and body of the last response.
-async fn send(req: RequestBuilder, what: &str) -> Result<(StatusCode, String)> {
+/// Sends the request `build` makes, and again after a transient failure: a network error, a 5xx,
+/// or a rate limit. Each attempt builds it anew, so its token is not one that expired while it
+/// waited. The status and body of the last response.
+async fn send<F: Future<Output = Result<RequestBuilder>>>(
+    build: impl Fn() -> F,
+    what: &str,
+) -> Result<(StatusCode, String)> {
     let mut backoff = Duration::from_secs(1);
     let mut attempt = 1;
     let (status, _, body) = loop {
-        let sent = send_once(req.try_clone().context("a request with a streamed body")?).await;
+        let sent = send_once(build().await?).await;
         let wait = match &sent {
             Ok((status, headers, body)) => retry_after(*status, headers, body, backoff, unix_now()),
             Err(_) => Some(backoff),
@@ -527,6 +541,19 @@ mod tests {
         let v: Value = gh.rest(Method::GET, "/x", None).await.unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(*requests.lock().unwrap(), ["GET /x HTTP/1.1"; 2]);
+    }
+
+    #[tokio::test]
+    async fn each_attempt_builds_the_request_anew() {
+        let (gh, _) = fake::serve(vec![(429, "retry-after: 0\r\n", ""), (200, "", "{}")]).await;
+        let built = std::sync::atomic::AtomicU32::new(0);
+        let build = || async {
+            built.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(gh.app.http.get(format!("{}/w", gh.app.api)))
+        };
+        let (status, _) = send(build, "GET /w").await.unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(built.into_inner(), 2);
     }
 
     #[tokio::test]

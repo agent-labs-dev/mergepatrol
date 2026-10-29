@@ -338,6 +338,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         let (number, kind, message, comment) = match change {
             LaneChange::Enqueued(n) => (n, "enqueued", "added to the queue".to_owned(), None),
             LaneChange::Dequeued { number, .. } => {
+                ctx.job_errors.clear(&key, number);
                 (number, "dequeued", "left the queue".to_owned(), None)
             }
             LaneChange::Held { number, reason } => {

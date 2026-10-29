@@ -1078,6 +1078,25 @@ async fn a_github_outage_keeps_the_pr_in_its_place() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pr_queued_again_gets_a_new_window_for_errors() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.outage = 1;
+    }));
+    assert!(run.try_tick().await.is_err());
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.clear());
+    run.tick().await;
+    tokio::time::advance(JOB_ERRORS_FOR).await;
+    run.gh.with_mut(|s| {
+        s.prs.get_mut(&1).unwrap().labels.push(TRIGGER.into());
+        s.outage = 1;
+    });
+    assert!(run.try_tick().await.is_err());
+    assert_eq!(run.lane(), [(1, "Active".into())]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_pr_whose_job_keeps_failing_is_ejected() {
     let run = Run::new(Fake::new(|s| {
         s.add_pr(1);
