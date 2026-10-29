@@ -28,11 +28,11 @@ pub struct PullRef {
     pub url: String,
 }
 
-/// A change to one file, proposed on `branch`.
+/// A change to files, proposed on `branch`.
 pub struct Proposal<'a> {
     pub base: &'a BranchFile,
-    pub path: &'a str,
-    pub content: &'a str,
+    /// Paths and their text.
+    pub files: &'a [(&'a str, &'a str)],
     pub branch: &'a str,
     pub title: &'a str,
     pub body: &'a str,
@@ -148,18 +148,20 @@ impl Installation {
         Ok(prs.first().and_then(pull_ref))
     }
 
-    /// Commits the file on `branch`, from the default branch's head, and opens a PR from it, or
+    /// Commits the files on `branch`, from the default branch's head, and opens a PR from it, or
     /// updates the one open. The branch is Mergepatrol's: whatever was on it is replaced.
     pub async fn propose_file(&self, repo: &RepoName, p: Proposal<'_>) -> Result<PullRef> {
-        let blob = self.create_blob(repo, p.content.as_bytes()).await?;
+        let mut entries = Vec::with_capacity(p.files.len());
+        for (path, text) in p.files {
+            entries.push(TreeEntry {
+                path: (*path).to_owned(),
+                mode: "100644".into(),
+                kind: "blob",
+                sha: Some(self.create_blob(repo, text.as_bytes()).await?),
+            });
+        }
         let base_tree = self.commit_tree(repo, &p.base.sha).await?;
-        let entry = TreeEntry {
-            path: p.path.to_owned(),
-            mode: "100644".into(),
-            kind: "blob",
-            sha: Some(blob),
-        };
-        let tree = self.create_tree(repo, &base_tree, &[entry]).await?;
+        let tree = self.create_tree(repo, &base_tree, &entries).await?;
         let commit = self
             .create_commit(repo, p.title, &tree, &p.base.sha)
             .await?;

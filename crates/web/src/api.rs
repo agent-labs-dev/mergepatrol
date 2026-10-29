@@ -397,6 +397,11 @@ pub(crate) async fn set_repo(
 /// Mergepatrol's branch for the PR that changes a repo's config file.
 const CONFIG_BRANCH: &str = "mergepatrol/config";
 
+/// The skill that tells a repo's agents how its queue works. The setup PR adds it.
+const SKILL: &str = include_str!("skill.md");
+/// Where agents look for repo skills: `.agents` for most, `.claude` for Claude Code.
+const SKILL_DIRS: [&str; 2] = [".agents/skills", ".claude/skills"];
+
 /// The repo's settings as its default branch has them, and the PR that would change them.
 pub(crate) async fn repo_config(
     State(app): State<AppState>,
@@ -454,14 +459,19 @@ pub(crate) async fn propose_repo_config(
             format!("`{}` already has these settings.", base.branch),
         ));
     }
-    let (title, body) = config_pr(&settings, base.text.is_some(), &base.branch);
+    let skills = match base.text {
+        Some(_) => Vec::new(),
+        None => skill_paths(&gh, &repo).await?,
+    };
+    let (title, body) = config_pr(&settings, base.text.is_some(), &base.branch, &skills);
+    let mut files = vec![(REPO_CONFIG_PATH, content.as_str())];
+    files.extend(skills.iter().map(|p| (p.as_str(), SKILL)));
     let pr = gh
         .propose_file(
             &repo,
             Proposal {
                 base: &base,
-                path: REPO_CONFIG_PATH,
-                content: &content,
+                files: &files,
                 branch: CONFIG_BRANCH,
                 title,
                 body: &body,
@@ -472,7 +482,25 @@ pub(crate) async fn propose_repo_config(
     Ok(Json(pr.into()))
 }
 
-fn config_pr(settings: &RepoSettings, update: bool, branch: &str) -> (&'static str, String) {
+/// The skill's path in each skills dir, but one that links to the other: a commit cannot write
+/// through a symlink, and the link already shows the skill there.
+async fn skill_paths(gh: &Installation, repo: &RepoName) -> Result<Vec<String>, ApiError> {
+    let mut paths = Vec::new();
+    for dir in SKILL_DIRS {
+        // A symlink is a blob, so it has text. A dir has none.
+        if gh.default_branch_file(repo, dir).await?.text.is_none() {
+            paths.push(format!("{dir}/mergepatrol/SKILL.md"));
+        }
+    }
+    Ok(paths)
+}
+
+fn config_pr(
+    settings: &RepoSettings,
+    update: bool,
+    branch: &str,
+    skills: &[String],
+) -> (&'static str, String) {
     let verify = if settings.verify.is_empty() {
         "none".to_owned()
     } else {
@@ -487,6 +515,15 @@ fn config_pr(settings: &RepoSettings, update: bool, branch: &str) -> (&'static s
         "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: `{}`, effort `{}`\n- Verify commands: {verify}",
         settings.label, settings.batch_size, settings.resolver.model, settings.resolver.effort
     );
+    let skills = if skills.is_empty() {
+        String::new()
+    } else {
+        let paths: Vec<String> = skills.iter().map(|p| format!("`{p}`")).collect();
+        format!(
+            "\n\nIt also adds the `mergepatrol` agent skill, at {}, so coding agents in this repo queue their PRs instead of merging them.",
+            paths.join(" and ")
+        )
+    };
     if update {
         (
             "Update the Mergepatrol settings",
@@ -498,7 +535,7 @@ fn config_pr(settings: &RepoSettings, update: bool, branch: &str) -> (&'static s
         (
             "Set up Mergepatrol",
             format!(
-                "This PR adds `{REPO_CONFIG_PATH}` with the settings below. Once it merges into `{branch}`, Mergepatrol runs a merge queue on this repo: add the `{}` label to a PR to queue it.\n\n{list}\n\nTo change the settings later, edit the file, or use the Mergepatrol dashboard, which opens a PR like this one.",
+                "This PR adds `{REPO_CONFIG_PATH}` with the settings below. Once it merges into `{branch}`, Mergepatrol runs a merge queue on this repo: add the `{}` label to a PR to queue it.\n\n{list}{skills}\n\nTo change the settings later, edit the file, or use the Mergepatrol dashboard, which opens a PR like this one.",
                 settings.label
             ),
         )

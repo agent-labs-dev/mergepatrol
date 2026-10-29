@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{PrNumber, REPO_CONFIG_PATH, RepoName};
+use mergepatrol_core::{LabelSpec, Labels, PrNumber, REPO_CONFIG_PATH, RepoName};
 use mergepatrol_github::{
     BranchMerge, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot, RequiredChecks,
 };
@@ -13,7 +13,7 @@ pub trait GitHub: Send + Sync {
     fn installation_id(&self) -> u64;
     /// The repo's config file on its default branch.
     async fn config_file(&self, repo: &RepoName) -> Result<Option<String>>;
-    async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot>;
+    async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot>;
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest>;
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String>;
     async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks>;
@@ -43,6 +43,7 @@ pub trait GitHub: Send + Sync {
         body: &str,
     ) -> Result<PrNumber>;
     async fn commit_tree(&self, repo: &RepoName, sha: &str) -> Result<String>;
+    async fn create_label(&self, repo: &RepoName, label: &LabelSpec<'_>) -> Result<()>;
     async fn add_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()>;
     async fn remove_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()>;
     async fn sticky_comment(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()>;
@@ -56,8 +57,8 @@ impl GitHub for Installation {
     async fn config_file(&self, repo: &RepoName) -> Result<Option<String>> {
         Ok(self.default_branch_file(repo, REPO_CONFIG_PATH).await?.text)
     }
-    async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot> {
-        Installation::snapshot(self, repo, label).await
+    async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
+        Installation::snapshot(self, repo, labels).await
     }
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest> {
         Installation::pull_request(self, repo, number).await
@@ -107,6 +108,9 @@ impl GitHub for Installation {
     }
     async fn commit_tree(&self, repo: &RepoName, sha: &str) -> Result<String> {
         Installation::commit_tree(self, repo, sha).await
+    }
+    async fn create_label(&self, repo: &RepoName, label: &LabelSpec<'_>) -> Result<()> {
+        Installation::create_label(self, repo, label).await
     }
     async fn add_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()> {
         Installation::add_label(self, repo, number, label).await

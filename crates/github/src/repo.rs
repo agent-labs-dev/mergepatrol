@@ -4,7 +4,7 @@ use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use mergepatrol_core::{Person, PrNumber, PrSummary, RepoName, Review};
+use mergepatrol_core::{LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review};
 
 use crate::Installation;
 
@@ -21,6 +21,8 @@ pub struct RepoSnapshot {
     pub merge_method: String,
     /// Open PRs with the trigger label, oldest first.
     pub labeled: Vec<PullRequest>,
+    /// Queue labels the repo does not have yet.
+    pub missing_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -191,11 +193,14 @@ const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecis
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
 
 impl Installation {
-    pub async fn snapshot(&self, repo: &RepoName, label: &str) -> Result<RepoSnapshot> {
+    pub async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
         let query = format!(
-            "query($owner: String!, $name: String!, $label: String!) {{
+            "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!) {{
               repository(owner: $owner, name: $name) {{
                 id
+                trigger: label(name: $label) {{ name }}
+                priority: label(name: $priority) {{ name }}
+                failed: label(name: $failed) {{ name }}
                 viewerDefaultMergeMethod
                 defaultBranchRef {{ name target {{ oid }} }}
                 pullRequests(states: OPEN, labels: [$label], first: 100, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
@@ -207,10 +212,25 @@ impl Installation {
         let data: Value = self
             .graphql(
                 &query,
-                json!({ "owner": repo.owner, "name": repo.name, "label": label }),
+                json!({
+                    "owner": repo.owner,
+                    "name": repo.name,
+                    "label": labels.trigger,
+                    "priority": labels.priority,
+                    "failed": labels.failed,
+                }),
             )
             .await?;
         let r = &data["repository"];
+        let missing_labels = [
+            ("trigger", &labels.trigger),
+            ("priority", &labels.priority),
+            ("failed", &labels.failed),
+        ]
+        .into_iter()
+        .filter(|(alias, _)| r[alias].is_null())
+        .map(|(_, name)| name.clone())
+        .collect();
         Ok(RepoSnapshot {
             id: r["id"].as_str().context("repository.id")?.to_owned(),
             default_branch: r["defaultBranchRef"]["name"]
@@ -226,6 +246,7 @@ impl Installation {
                 .unwrap_or("MERGE")
                 .to_lowercase(),
             labeled: serde_json::from_value(r["pullRequests"]["nodes"].clone())?,
+            missing_labels,
         })
     }
 
@@ -438,6 +459,27 @@ impl Installation {
             )),
             s => anyhow::bail!("merge #{number}: {s} {}", res.body),
         }
+    }
+
+    /// Creates the label, unless the repo already has it.
+    pub async fn create_label(&self, repo: &RepoName, label: &LabelSpec<'_>) -> Result<()> {
+        let res = self
+            .request(
+                Method::POST,
+                &format!("/repos/{repo}/labels"),
+                Some(json!({
+                    "name": label.name,
+                    "color": label.color,
+                    "description": label.description,
+                })),
+            )
+            .await?;
+        let exists = res.status == StatusCode::UNPROCESSABLE_ENTITY
+            && res.body["errors"][0]["code"] == "already_exists";
+        if !res.status.is_success() && !exists {
+            anyhow::bail!("create label {}: {} {}", label.name, res.status, res.body);
+        }
+        Ok(())
     }
 
     pub async fn add_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()> {
