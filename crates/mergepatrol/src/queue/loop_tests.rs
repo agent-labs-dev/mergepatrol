@@ -768,6 +768,9 @@ impl Store for Mem {
     async fn delete_session(&self, _: &str) -> Result<()> {
         unreachable!()
     }
+    async fn delete_expired_sessions(&self, _: i64) -> Result<u64> {
+        unreachable!()
+    }
 }
 
 fn ctx(store: Arc<Mem>) -> Ctx {
@@ -1238,6 +1241,52 @@ async fn a_failed_rebase_ejects() {
     run.tick().await;
     assert_eq!(run.kinds(1), ["enqueued", "rebasing", "ejected"]);
     assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merged_pr_leaves_no_refs_in_the_cache() {
+    let mut run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+    }));
+    let tmp = tempfile::tempdir().unwrap();
+    run.ctx.config.data_dir = tmp.path().to_owned();
+    let cache = cache_path(tmp.path(), "o", "r");
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&cache)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    std::fs::create_dir_all(&cache).unwrap();
+    git(&["init", "-q", "--bare"]);
+    let empty_tree = git(&["hash-object", "-t", "tree", "-w", "/dev/null"]);
+    let commit = git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit-tree",
+        &empty_tree,
+        "-m",
+        "c",
+    ]);
+    for r in ["pr/1", "result/1", "pr/2"] {
+        git(&["update-ref", &format!("refs/mergepatrol/{r}"), &commit]);
+    }
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(
+        git(&["for-each-ref", "--format=%(refname)", "refs/mergepatrol"]),
+        "refs/mergepatrol/pr/2"
+    );
 }
 
 #[tokio::test(start_paused = true)]

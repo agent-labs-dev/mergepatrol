@@ -81,3 +81,35 @@ async fn a_lock_left_by_a_killed_git_is_cleared() {
     assert!(!cache.join("packed-refs.lock").exists());
     assert!(!cache.join("config.lock").exists());
 }
+
+#[tokio::test]
+async fn deleting_a_prs_refs_keeps_the_others() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let head = origin(&src);
+    let cache = tmp.path().join("cache.git");
+    let git = Git;
+    git.ensure_cache(&cache, src.to_str().unwrap())
+        .await
+        .unwrap();
+    git.fetch(&cache, "", &[MAIN]).await.unwrap();
+    for r in ["pr/1", "pr/12", "result/1", "publish/1"] {
+        sh(
+            &cache,
+            &["update-ref", &format!("refs/mergepatrol/{r}"), &head],
+        );
+    }
+    let one = [
+        "refs/mergepatrol/pr/1",
+        "refs/mergepatrol/result/1",
+        "refs/mergepatrol/publish/1",
+    ];
+    git.delete_refs(&cache, &one).await.unwrap();
+    let left = sh(
+        &cache,
+        &["for-each-ref", "--format=%(refname)", "refs/mergepatrol"],
+    );
+    assert_eq!(left, "refs/mergepatrol/pr/12");
+    // Nothing left to delete is fine.
+    git.delete_refs(&cache, &one).await.unwrap();
+}
