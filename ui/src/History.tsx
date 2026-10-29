@@ -314,7 +314,8 @@ function Sparkline({ counts }: { counts: number[] }) {
   const y = (n: number) => SPARK_H - 2 - (n / max) * (SPARK_H - 4);
   const points = counts.map((n, i) => `${x(i)},${y(n)}`).join(" ");
   const last = counts.length - 1;
-  const shown = hover ?? last;
+  // A day tapped in a longer window may be past the end of this one.
+  const shown = Math.min(hover ?? last, last);
   const ago = last - shown;
   const pick = (el: Element, clientX: number) => {
     const r = el.getBoundingClientRect();
