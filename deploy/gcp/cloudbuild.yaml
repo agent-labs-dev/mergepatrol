@@ -9,6 +9,8 @@ substitutions:
   # The live Stripe price per seat, in the product `Mergepatrol`. Not secret.
   _STRIPE_PRICE: price_1UVzi1PwOsXo1dyk78nfPqCb
   _REPO: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/mergepatrol
+# deploy/gcp/bootstrap.sh makes it. gcloud streams the log from here to whoever submits the build.
+logsBucket: gs://${PROJECT_ID}_cloudbuild-logs
 options:
   dynamicSubstitutions: true
   machineType: E2_HIGHCPU_8

@@ -65,13 +65,21 @@ g iam workload-identity-pools providers describe github --location=global \
     --attribute-condition="assertion.repository_id=='$REPO_ID' && assertion.ref=='refs/heads/main'"
 grant iam service-accounts add-iam-policy-binding "$DEPLOY" --role=roles/iam.workloadIdentityUser \
   --member="principalSet://iam.googleapis.com/projects/$NUMBER/locations/global/workloadIdentityPools/github/attribute.repository_id/$REPO_ID"
-# Submits the build and streams its log; the build itself deploys, as the account above.
-for role in roles/cloudbuild.builds.editor roles/serviceusage.serviceUsageConsumer roles/storage.admin \
-  roles/viewer; do
+# Submits the build and streams its log; the build itself deploys, as the account above. No
+# project-wide read role: that reads each job's link in its execution's arguments and in the logs.
+for role in roles/cloudbuild.builds.editor roles/serviceusage.serviceUsageConsumer roles/storage.admin; do
   grant projects add-iam-policy-binding "$PROJECT" --member="serviceAccount:$DEPLOY" --role="$role" --condition=None
 done
 grant iam service-accounts add-iam-policy-binding "${BUILD#serviceAccount:}" \
   --member="serviceAccount:$DEPLOY" --role=roles/iam.serviceAccountUser
+# gcloud streams a build's log from Cloud Build's own bucket only for a project Viewer, so the
+# build writes it to this one, which storage.admin reads.
+LOGS=gs://${PROJECT}_cloudbuild-logs
+g storage buckets describe "$LOGS" >/dev/null 2>&1 \
+  || g storage buckets create "$LOGS" --location="$REGION" --uniform-bucket-level-access \
+    --public-access-prevention
+grant storage buckets add-iam-policy-binding "$LOGS" --member="$BUILD" \
+  --role=roles/storage.legacyBucketWriter
 
 if ! g sql instances describe "$SQL" >/dev/null 2>&1; then
   g sql instances create "$SQL" --database-version=POSTGRES_17 --edition=enterprise \
