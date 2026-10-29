@@ -318,12 +318,23 @@ mod tests {
             }
             req.body(Body::empty()).unwrap()
         };
-        // Past the check of the state, up to GitHub's conversion of the code, which fails here.
-        let (back, _) = redirect(&send(&after, callback(Some(&manifest))).await);
+        // Past the checks, up to GitHub's conversion of the code, which fails here.
+        let both = format!("mp_session=setup; {manifest}");
+        let (back, _) = redirect(&send(&after, callback(Some(&both))).await);
         assert!(back.starts_with("/?error="), "{back}");
-        assert!(!back.contains("expired"), "{back}");
-        let (back, _) = redirect(&send(&after, callback(None)).await);
+        assert!(
+            !back.contains("expired") && !back.contains("setup%20token"),
+            "{back}"
+        );
+        let (back, _) = redirect(&send(&after, callback(Some("mp_session=setup"))).await);
         assert!(back.contains("expired"), "{back}");
+        // Anyone can set the cookie to match the state: without the setup session, refused.
+        let forged = Request::get("/setup/callback?code=c&state=x")
+            .header("cookie", "mp_manifest=x")
+            .body(Body::empty())
+            .unwrap();
+        let (back, _) = redirect(&send(&after, forged).await);
+        assert!(back.contains("setup%20token"), "{back}");
     }
 
     async fn get(router: &Router, path: &str, cookie: Option<&str>) -> StatusCode {
