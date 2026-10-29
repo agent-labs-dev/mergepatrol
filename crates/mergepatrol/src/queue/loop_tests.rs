@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step, StepTimes};
 use mergepatrol_executor::LocalExecutor;
-use mergepatrol_executor::proxy::UPSTREAM;
+use mergepatrol_executor::proxy::Upstreams;
 use mergepatrol_github::{
     BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
 };
@@ -790,7 +790,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             program: PathBuf::new(),
             timeout: Duration::ZERO,
         }),
-        anthropic: Arc::new(AnthropicProxy::new(UPSTREAM)),
+        proxy: Arc::new(ApiProxy::new(Upstreams::default())),
         jobs: Semaphore::new(1),
         wakers: Arc::default(),
         analytics: Analytics::default(),

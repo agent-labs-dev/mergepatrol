@@ -20,6 +20,16 @@ use serde::{Deserialize, Serialize};
 
 pub type PrNumber = u64;
 
+/// Who runs the agent's model, with the workspace's own key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Anthropic,
+    OpenAi,
+    /// Any model OpenRouter serves, through its Anthropic or its OpenAI API.
+    OpenRouter,
+}
+
 /// A required check that failed, with what GitHub shows of why: the check's output, its
 /// annotations, and the end of its log. The fix agent reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
