@@ -647,7 +647,7 @@ impl Store for PgStore {
         )
         .bind(installation_id as i64)
         .bind(repo.map(|r| r.to_string()))
-        .bind([SpendTask::Rebase, SpendTask::Fix].map(SpendTask::event_kind))
+        .bind(SpendTask::event_kinds())
         .bind(days as i32)
         .fetch_all(&self.pool)
         .await?;
@@ -1245,6 +1245,10 @@ mod tests {
             .await
             .unwrap();
         store.record(&a, 1, "fixing", "ci").await.unwrap();
+        store
+            .record(&a, 1, "unfixed", &format!("5 turns{run}"))
+            .await
+            .unwrap();
         store.record(&b, 2, "fix", "4 turns").await.unwrap();
         store.record(&a, 3, "fix", "9 turns").await.unwrap();
         sqlx::query("UPDATE events SET at = now() - interval '40 days' WHERE pr = 3")
@@ -1253,11 +1257,15 @@ mod tests {
             .unwrap();
 
         let all = store.spends(1, None, 30).await.unwrap();
-        assert_eq!(all.len(), 3);
+        assert_eq!(all.len(), 4);
         let only_a = store.spends(1, Some(&a.repo), 30).await.unwrap();
         assert_eq!(
-            only_a.iter().map(|s| s.task).collect::<Vec<_>>(),
-            [SpendTask::Rebase, SpendTask::Fix]
+            only_a.iter().map(|s| (s.task, s.done)).collect::<Vec<_>>(),
+            [
+                (SpendTask::Rebase, true),
+                (SpendTask::Fix, true),
+                (SpendTask::Fix, false)
+            ]
         );
         assert_eq!(only_a[0].model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(store.spends(2, None, 30).await.unwrap(), []);

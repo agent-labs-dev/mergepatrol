@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{CheckFailure, FIXED_BY, Spend, SpendTask};
 use mergepatrol_executor::protocol::{
     BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, ResolverSpec, Task,
@@ -17,7 +17,7 @@ use mergepatrol_executor::proxy::Api;
 use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
-    ClaudeResolver, CodexResolver, FixRequest, Resolution, ResolveRequest, Resolver,
+    ClaudeResolver, CodexResolver, FixRequest, Outcome, Resolution, ResolveRequest, Resolver,
 };
 use tokio::io::AsyncReadExt;
 
@@ -174,7 +174,7 @@ async fn rebase(
         let transcript = out
             .join("transcripts")
             .join(format!("{}.jsonl", &commit[..12]));
-        let outcome = resolver
+        let run = resolver
             .resolve(ResolveRequest {
                 workdir: dir,
                 conflicted_files: &files,
@@ -185,23 +185,21 @@ async fn rebase(
                 verify_commands: &spec.verify,
                 transcript: &transcript,
             })
-            .await;
-        match outcome {
-            Ok(Resolution::Resolved { turns, cost_usd }) => {
-                event(
-                    events,
-                    "resolved",
-                    spent(
-                        &spec.resolver,
-                        SpendTask::Rebase,
-                        files.join(", "),
-                        turns,
-                        cost_usd,
-                    ),
-                );
-            }
-            Ok(Resolution::GaveUp(reason)) => bail!("the resolver gave up: {reason}"),
-            Err(e) => bail!("the resolver failed: {e:#}"),
+            .await
+            .map_err(|e| anyhow!("the resolver failed: {e:#}"))?;
+        let done = run.outcome == Outcome::Resolved;
+        spent(
+            events,
+            &spec.resolver,
+            SpendTask::Rebase,
+            done,
+            files.join(", "),
+            &run,
+        );
+        match run.outcome {
+            Outcome::Resolved => {}
+            Outcome::GaveUp(reason) => bail!("the resolver gave up: {reason}"),
+            Outcome::Failed(why) => bail!("the resolver failed: {why}"),
         }
         for f in &files {
             let content = tokio::fs::read_to_string(dir.join(f))
@@ -244,7 +242,7 @@ async fn fix(
     let transcript = out
         .join("transcripts")
         .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
-    let outcome = resolver
+    let run = resolver
         .fix(FixRequest {
             workdir: dir,
             failures,
@@ -254,18 +252,36 @@ async fn fix(
             verify_commands: &spec.verify,
             transcript: &transcript,
         })
-        .await;
-    let spent = match outcome {
-        Ok(Resolution::Resolved { turns, cost_usd }) => spent(
-            &spec.resolver,
-            SpendTask::Fix,
-            String::new(),
-            turns,
-            cost_usd,
-        ),
-        Ok(Resolution::GaveUp(reason)) => bail!("the agent gave up: {reason}"),
-        Err(e) => bail!("the agent failed: {e:#}"),
-    };
+        .await
+        .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
+    // A fix is done once it is committed: until then, any failure leaves it unfixed.
+    let fixed = commit_fix(spec, git, resolver, &run.outcome, &names, dir, events).await;
+    spent(
+        events,
+        &spec.resolver,
+        SpendTask::Fix,
+        fixed.is_ok(),
+        String::new(),
+        &run,
+    );
+    fixed
+}
+
+/// Checks the agent's fix, and commits it.
+async fn commit_fix(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &dyn Resolver,
+    outcome: &Outcome,
+    names: &[&str],
+    dir: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    match outcome {
+        Outcome::Resolved => {}
+        Outcome::GaveUp(reason) => bail!("the agent gave up: {reason}"),
+        Outcome::Failed(why) => bail!("the agent failed: {why}"),
+    }
     if git.rev_parse(dir, "HEAD").await? != spec.head_sha {
         bail!("the agent moved HEAD");
     }
@@ -281,27 +297,28 @@ async fn fix(
             resolver.name()
         ),
     )
-    .await?;
-    event(events, "fix", spent);
-    Ok(())
+    .await
 }
 
+/// The event of an agent run, which says what it spent however it ended.
 fn spent(
+    events: &mut Vec<JobEvent>,
     resolver: &ResolverSpec,
     task: SpendTask,
+    done: bool,
     files: String,
-    turns: u32,
-    cost_usd: Option<f64>,
-) -> String {
-    Spend {
+    run: &Resolution,
+) {
+    let spend = Spend {
         task,
+        done,
         files,
-        turns,
-        cost_usd,
+        turns: run.turns,
+        cost_usd: run.cost_usd,
         model: Some(resolver.model.clone()),
         effort: Some(resolver.effort.clone()),
-    }
-    .message()
+    };
+    event(events, spend.kind(), spend.message());
 }
 
 /// Runs the repo's verify commands, which must pass after `what` the agent did.

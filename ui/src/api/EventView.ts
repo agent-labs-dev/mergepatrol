@@ -3,6 +3,7 @@ import type { SpendView } from "./SpendView";
 
 export type EventView = { repo: string, pr: number, at: string, kind: string, message: string, 
 /**
- * What the agent spent, for a `resolved` or `fix` event.
+ * What the agent spent, for an event of its run: `resolved`, `unresolved`, `fix` or
+ * `unfixed`.
  */
 spend: SpendView | null, };

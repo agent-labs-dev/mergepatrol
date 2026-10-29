@@ -3,8 +3,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use serde_json::Value;
 
-use crate::{FixRequest, Resolution, ResolveRequest, Resolver, cli, fix_prompt, gave_up, prompt};
+use crate::cli::{self, Ended};
+use crate::{
+    FixRequest, Outcome, Resolution, ResolveRequest, Resolver, fix_prompt, gave_up, prompt,
+};
 
 /// Runs Claude Code headless (`claude -p`) in the job's worktree.
 pub struct ClaudeResolver {
@@ -75,7 +79,7 @@ impl ClaudeResolver {
         let cmd = self.command(workdir, prompt, verify)?;
         let mut turns = 0;
         let mut result = None;
-        let (status, stderr) = cli::stream(cmd, "claude", self.timeout, transcript_path, |event| {
+        let ended = cli::stream(cmd, "claude", self.timeout, transcript_path, |event| {
             match event["type"].as_str() {
                 Some("assistant") => {
                     turns += 1;
@@ -89,27 +93,38 @@ impl ClaudeResolver {
             Ok(())
         })
         .await?;
-        let Some(result) = result else {
-            bail!("claude exited ({status}) with no result: {}", stderr.trim());
-        };
-
-        if result["is_error"].as_bool() == Some(true) {
-            bail!(
-                "claude: {}",
-                result["result"]
-                    .as_str()
-                    .or(result["subtype"].as_str())
-                    .unwrap_or("error")
-            );
-        }
-        let text = result["result"].as_str().unwrap_or_default();
-        if let Some(reason) = gave_up(text) {
-            return Ok(Resolution::GaveUp(reason));
-        }
-        Ok(Resolution::Resolved {
+        Ok(Resolution {
             turns,
-            cost_usd: result["total_cost_usd"].as_f64(),
+            cost_usd: result.as_ref().and_then(|r| r["total_cost_usd"].as_f64()),
+            outcome: outcome(ended, result.as_ref()),
         })
+    }
+}
+
+/// How the run ended, from the CLI's `result` event.
+fn outcome(ended: Ended, result: Option<&Value>) -> Outcome {
+    let (status, stderr) = match ended {
+        Ended::Stopped(why) => return Outcome::Failed(why),
+        Ended::Exited(status, stderr) => (status, stderr),
+    };
+    let Some(result) = result else {
+        return Outcome::Failed(format!(
+            "claude exited ({status}) with no result: {}",
+            stderr.trim()
+        ));
+    };
+    if result["is_error"].as_bool() == Some(true) {
+        return Outcome::Failed(format!(
+            "claude: {}",
+            result["result"]
+                .as_str()
+                .or(result["subtype"].as_str())
+                .unwrap_or("error")
+        ));
+    }
+    match gave_up(result["result"].as_str().unwrap_or_default()) {
+        Some(reason) => Outcome::GaveUp(reason),
+        None => Outcome::Resolved,
     }
 }
 
@@ -149,6 +164,36 @@ mod tests {
             .get_envs()
             .find(|(k, _)| *k == name)
             .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    fn exited() -> Ended {
+        use std::os::unix::process::ExitStatusExt;
+        Ended::Exited(std::process::ExitStatus::from_raw(0), String::new())
+    }
+
+    #[test]
+    fn every_ending_is_an_outcome() {
+        let result = |text: &str, is_error: bool| serde_json::json!({ "type": "result", "result": text, "is_error": is_error });
+        assert_eq!(
+            outcome(exited(), Some(&result("Done.", false))),
+            Outcome::Resolved
+        );
+        assert_eq!(
+            outcome(
+                exited(),
+                Some(&result("MERGEPATROL_GIVE_UP: a flaky test", false))
+            ),
+            Outcome::GaveUp("a flaky test".into())
+        );
+        assert_eq!(
+            outcome(exited(), Some(&result("overloaded", true))),
+            Outcome::Failed("claude: overloaded".into())
+        );
+        assert!(matches!(outcome(exited(), None), Outcome::Failed(_)));
+        assert_eq!(
+            outcome(Ended::Stopped("Claude went over 3 turns".into()), None),
+            Outcome::Failed("Claude went over 3 turns".into())
+        );
     }
 
     #[test]

@@ -170,7 +170,8 @@ pub struct EventView {
     pub at: String,
     pub kind: String,
     pub message: String,
-    /// What the agent spent, for a `resolved` or `fix` event.
+    /// What the agent spent, for an event of its run: `resolved`, `unresolved`, `fix` or
+    /// `unfixed`.
     pub spend: Option<SpendView>,
 }
 
@@ -179,6 +180,8 @@ pub struct EventView {
 #[ts(export)]
 pub struct SpendView {
     pub task: SpendTaskView,
+    /// Whether the run did its task. One that did not still spent.
+    pub done: bool,
     /// The conflicted files, comma-separated. Empty for a fix.
     pub files: String,
     pub turns: u32,
@@ -209,6 +212,7 @@ impl From<Spend> for SpendView {
     fn from(s: Spend) -> Self {
         SpendView {
             task: s.task.into(),
+            done: s.done,
             files: s.files,
             turns: s.turns,
             cost_usd: s.cost_usd,
@@ -259,7 +263,10 @@ pub struct LlmStatsView {
 #[derive(Default, Serialize, TS)]
 #[ts(export)]
 pub struct LlmRunsView {
+    /// Every run, whether it did its task or not.
     pub runs: u32,
+    /// The runs that did not: the agent gave up, broke, or left a fix that fails.
+    pub failed: u32,
     pub turns: u32,
     /// Of the runs whose CLI told their cost.
     pub cost_usd: f64,
@@ -270,6 +277,9 @@ pub struct LlmRunsView {
 impl LlmRunsView {
     fn add(&mut self, s: &Spend) {
         self.runs += 1;
+        if !s.done {
+            self.failed += 1;
+        }
         self.turns += s.turns;
         match s.cost_usd {
             Some(c) => self.cost_usd += c,
@@ -1110,6 +1120,7 @@ mod tests {
         let stats = llm_stats(vec![
             run("resolved", "a.rs in 3 turns, $0.40, by m at high effort"),
             run("fix", "2 turns, $0.10, by m at high effort"),
+            run("unfixed", "6 turns, $0.20, by m at high effort"),
             run("fix", "5 turns, $1.00, by m at max effort"),
             run("fix", "4 turns"),
         ]);
@@ -1126,7 +1137,9 @@ mod tests {
             ]
         );
         assert_eq!((stats[1].rebase.runs, stats[1].rebase.turns), (1, 3));
-        assert_eq!((stats[1].fix.runs, stats[1].fix.cost_usd), (1, 0.10));
+        let fix = &stats[1].fix;
+        assert_eq!((fix.runs, fix.failed, fix.turns), (2, 1, 8));
+        assert!((fix.cost_usd - 0.30).abs() < 1e-9);
         assert_eq!((stats[2].fix.runs, stats[2].fix.unpriced), (1, 1));
     }
 

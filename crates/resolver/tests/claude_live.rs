@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use mergepatrol_resolver::{ClaudeResolver, Resolution, ResolveRequest, Resolver};
+use mergepatrol_resolver::{ClaudeResolver, Outcome, ResolveRequest, Resolver};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git")
@@ -67,7 +67,7 @@ async fn claude_resolves_a_rename_conflict() {
 
     let result = std::fs::read_to_string(wt.join("greet.py")).unwrap();
     println!("{outcome:?}\n{result}");
-    assert!(matches!(outcome, Resolution::Resolved { .. }));
+    assert_eq!(outcome.outcome, Outcome::Resolved);
     assert!(!result.contains("<<<<<<<"));
     assert!(result.contains("person") && result.contains("!"));
 }

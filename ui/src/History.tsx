@@ -530,6 +530,7 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
   if (llms.length === 0) return null;
   const sum = (runs: (l: LlmStatsView) => LlmRunsView): LlmRunsView => ({
     runs: llms.reduce((t, l) => t + runs(l).runs, 0),
+    failed: llms.reduce((t, l) => t + runs(l).failed, 0),
     turns: llms.reduce((t, l) => t + runs(l).turns, 0),
     cost_usd: llms.reduce((t, l) => t + runs(l).cost_usd, 0),
     unpriced: llms.reduce((t, l) => t + runs(l).unpriced, 0),
@@ -578,6 +579,7 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
 
 const both = (a: LlmRunsView, b: LlmRunsView): LlmRunsView => ({
   runs: a.runs + b.runs,
+  failed: a.failed + b.failed,
   turns: a.turns + b.turns,
   cost_usd: a.cost_usd + b.cost_usd,
   unpriced: a.unpriced + b.unpriced,
@@ -591,7 +593,7 @@ function LlmRuns({ runs }: { runs: LlmRunsView }) {
   return (
     <td
       className="py-1 text-right"
-      title={`${runs.runs} ${runs.runs === 1 ? "run" : "runs"}, ${runs.turns} turns${runs.unpriced > 0 ? `, ${runs.unpriced} without a cost` : ""}`}
+      title={`${runs.runs} ${runs.runs === 1 ? "run" : "runs"}${runs.failed > 0 ? ` (${runs.failed} failed)` : ""}, ${runs.turns} turns${runs.unpriced > 0 ? `, ${runs.unpriced} without a cost` : ""}`}
     >
       {runs.runs === 0 ? (
         <span className="text-faint">–</span>
