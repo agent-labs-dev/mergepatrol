@@ -27,6 +27,7 @@ use mergepatrol_github::{
     RepoSnapshot,
 };
 use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
+use secrecy::ExposeSecret;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -326,7 +327,7 @@ async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
         return Ok(Some(app.clone()));
     }
     match ctx.vault.get(Scope::Instance, GITHUB_APP).await? {
-        Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+        Some(json) => Ok(Some(serde_json::from_str(json.expose_secret())?)),
         None => Ok(None),
     }
 }

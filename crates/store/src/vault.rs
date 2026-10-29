@@ -4,7 +4,9 @@ use aes_gcm::aead::{Aead, Generate, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
+use zeroize::Zeroizing;
 
 use crate::{Scope, SecretRecord, Store};
 
@@ -68,7 +70,7 @@ impl Vault {
             .await
     }
 
-    pub async fn get(&self, scope: Scope, name: &str) -> Result<Option<String>> {
+    pub async fn get(&self, scope: Scope, name: &str) -> Result<Option<SecretString>> {
         let Some(rec) = self.store.secret(scope, name).await? else {
             return Ok(None);
         };
@@ -90,7 +92,7 @@ impl Vault {
             if current {
                 continue;
             }
-            let (nonce, ciphertext) = self.encrypt(scope, &name, &value)?;
+            let (nonce, ciphertext) = self.encrypt(scope, &name, value.expose_secret())?;
             self.store
                 .replace_ciphertext(scope, &name, &rec.ciphertext, nonce, ciphertext)
                 .await?;
@@ -117,7 +119,12 @@ impl Vault {
     }
 
     /// The value, and whether the current key encrypted it.
-    fn decrypt(&self, scope: Scope, name: &str, rec: &SecretRecord) -> Result<(String, bool)> {
+    fn decrypt(
+        &self,
+        scope: Scope,
+        name: &str,
+        rec: &SecretRecord,
+    ) -> Result<(SecretString, bool)> {
         let nonce =
             Nonce::try_from(rec.nonce.as_slice()).map_err(|_| anyhow!("bad nonce for {name}"))?;
         let aad = aad(scope, name);
@@ -130,10 +137,13 @@ impl Vault {
                     msg: &rec.ciphertext,
                     aad: aad.as_bytes(),
                 };
-                cipher.decrypt(&nonce, payload).ok().map(|p| (i, p))
+                cipher
+                    .decrypt(&nonce, payload)
+                    .ok()
+                    .map(|p| (i, Zeroizing::new(p)))
             })
             .ok_or_else(|| anyhow!("cannot decrypt {name}: was MERGEPATROL_SECRET_KEY changed?"))?;
-        Ok((String::from_utf8(plain)?, i == 0))
+        Ok((std::str::from_utf8(&plain)?.into(), i == 0))
     }
 
     pub async fn status(&self, scope: Scope, name: &str) -> Result<Option<SecretStatus>> {
@@ -170,7 +180,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            vault.get(W, ANTHROPIC_API_KEY).await.unwrap().as_deref(),
+            vault
+                .get(W, ANTHROPIC_API_KEY)
+                .await
+                .unwrap()
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
             Some("sk-ant-secret-wxyz")
         );
         assert_eq!(
@@ -214,7 +229,11 @@ mod tests {
         // While both are set, the old key still decrypts.
         let both = Vault::new(store.clone(), &format!("{NEW}, {KEY}")).unwrap();
         assert_eq!(
-            both.get(W, ANTHROPIC_API_KEY).await.unwrap().as_deref(),
+            both.get(W, ANTHROPIC_API_KEY)
+                .await
+                .unwrap()
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
             Some("sk-ant-wxyz")
         );
         assert_eq!(both.rotate().await.unwrap(), 2);
@@ -222,14 +241,19 @@ mod tests {
 
         let new = Vault::new(store, NEW).unwrap();
         assert_eq!(
-            new.get(W, ANTHROPIC_API_KEY).await.unwrap().as_deref(),
+            new.get(W, ANTHROPIC_API_KEY)
+                .await
+                .unwrap()
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
             Some("sk-ant-wxyz")
         );
         assert_eq!(
             new.get(Scope::Instance, GITHUB_APP)
                 .await
                 .unwrap()
-                .as_deref(),
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
             Some("{}")
         );
         assert!(old.get(W, ANTHROPIC_API_KEY).await.is_err());
@@ -249,12 +273,12 @@ mod tests {
             .set(W, ANTHROPIC_API_KEY, "sk-ant-mine")
             .await
             .unwrap();
-        assert_eq!(
+        assert!(
             vault
                 .get(Scope::Installation(8), ANTHROPIC_API_KEY)
                 .await
-                .unwrap(),
-            None
+                .unwrap()
+                .is_none()
         );
 
         // Copy the row to another workspace: it must not decrypt there.

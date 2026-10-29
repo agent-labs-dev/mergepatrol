@@ -71,7 +71,7 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
    2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
    3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
    4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file (below). Merge it, and the repo queues.
-   5. In **Settings**, add your Anthropic API key. Mergepatrol checks it with Anthropic, then stores it encrypted.
+   5. In **Settings**, add your Anthropic API key. Mergepatrol checks it with Anthropic, then stores it encrypted. Create a key for Mergepatrol alone, in an Anthropic workspace with a spend limit, so a leaked key costs at most the limit.
 
 4. Add the `mergepatrol` label to a PR to queue it. Mergepatrol creates the queue labels on each repo it queues.
 

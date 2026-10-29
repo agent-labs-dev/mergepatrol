@@ -10,6 +10,7 @@ use mergepatrol_core::{
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
 use mergepatrol_store::{ANTHROPIC_API_KEY, ExitQuery, ExitRecord, ExitStats, RepoState, Scope};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -406,7 +407,8 @@ pub struct SecretView {
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct SetSecret {
-    pub value: String,
+    #[ts(type = "string")]
+    pub value: SecretString,
 }
 
 #[derive(Deserialize)]
@@ -857,7 +859,7 @@ pub(crate) async fn set_anthropic_key(
     Json(body): Json<SetSecret>,
 ) -> Result<Json<SettingsView>, ApiError> {
     let id = user.workspace(id)?;
-    let key = body.value.trim();
+    let key = body.value.expose_secret().trim();
     if key.is_empty() {
         return Err(ApiError::bad_request("the key is empty"));
     }
