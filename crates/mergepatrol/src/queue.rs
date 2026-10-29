@@ -13,7 +13,7 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, Candidate, CheckFailure, EjectReason, Event, Job, Lane, LaneChange,
-    Phase, PrNumber, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
+    Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
@@ -58,36 +58,34 @@ pub struct Ctx {
     pub jobs: Semaphore,
     pub wakers: Arc<Wakers>,
     pub analytics: Analytics,
-    pub authors: Authors,
+    pub prs: Prs,
 }
 
-/// The author of each PR in a repo's queue, as of its last tick: the person its queue events
-/// count for.
+/// Each PR in a repo's queue as of its last tick: whose queue events they are, and what the
+/// history keeps of it once it leaves.
 #[derive(Default)]
-pub struct Authors(std::sync::Mutex<HashMap<(u64, RepoName), HashMap<PrNumber, String>>>);
+pub struct Prs(std::sync::Mutex<HashMap<(u64, RepoName), HashMap<PrNumber, PrSummary>>>);
 
-impl Authors {
-    /// The PRs of the lane before it syncs, so a PR that just left still has its author, and
-    /// the labeled PRs, so one that just joined does.
+impl Prs {
+    /// The PRs of the lane before it syncs, so a PR that just left is still here, and the
+    /// labeled PRs, so one that just joined is.
     fn update(&self, key: &LaneKey, lane: &Lane, labeled: &[PullRequest]) {
-        let left = lane
-            .entries
-            .iter()
-            .map(|e| (e.number, e.summary.author.clone()));
-        let labeled = labeled.iter().map(|pr| (pr.number, pr.summary().author));
-        let authors = left
-            .chain(labeled)
-            .filter_map(|(n, author)| Some((n, author?.login)))
-            .collect();
+        let left = lane.entries.iter().map(|e| (e.number, e.summary.clone()));
+        let labeled = labeled.iter().map(|pr| (pr.number, pr.summary()));
+        let prs = left.chain(labeled).collect();
         let mut map = self.0.lock().unwrap();
-        map.insert((key.installation_id, key.repo.clone()), authors);
+        map.insert((key.installation_id, key.repo.clone()), prs);
     }
 
-    fn get(&self, key: &LaneKey, number: PrNumber) -> Option<String> {
+    fn get(&self, key: &LaneKey, number: PrNumber) -> Option<PrSummary> {
         let map = self.0.lock().unwrap();
         map.get(&(key.installation_id, key.repo.clone()))?
             .get(&number)
             .cloned()
+    }
+
+    fn author(&self, key: &LaneKey, number: PrNumber) -> Option<String> {
+        Some(self.get(key, number)?.author?.login)
     }
 }
 
@@ -279,7 +277,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         trunk: snap.default_branch.clone(),
     };
     let mut lane = ctx.store.load_lane(&key).await?;
-    ctx.authors.update(&key, &lane, &snap.labeled);
+    ctx.prs.update(&key, &lane, &snap.labeled);
 
     let mut candidates = Vec::new();
     for pr in &snap.labeled {
@@ -317,7 +315,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
                 record(ctx, &key, n, "enqueued", "added to the queue").await?
             }
             LaneChange::Dequeued { number, .. } => {
-                record(ctx, &key, number, "dequeued", "left the queue").await?
+                exit(ctx, &key, number, "dequeued", "left the queue").await?
             }
             LaneChange::Held { number, reason } => {
                 record(ctx, &key, number, "held", &reason).await?;
@@ -413,7 +411,7 @@ async fn finish(
     match outcome {
         Outcome::Merged(sha) => {
             lane.remove(number);
-            record(ctx, key, number, "merged", &sha).await?;
+            exit(ctx, key, number, "merged", &sha).await?;
             let labels = settings.labels();
             let comment = format!("Merged as {sha}.");
             tokio::try_join!(
@@ -442,7 +440,7 @@ async fn finish(
         }
         Outcome::Cancelled => {
             lane.remove(number);
-            record(ctx, key, number, "cancelled", "the label was removed").await?;
+            exit(ctx, key, number, "cancelled", "the label was removed").await?;
         }
     }
     ctx.store.save_lane(key, lane).await
@@ -855,9 +853,24 @@ async fn record(
         &key.trunk,
         number,
         kind,
-        ctx.authors.get(key, number).as_deref(),
+        ctx.prs.author(key, number).as_deref(),
     );
     ctx.store.record(key, number, kind, message).await
+}
+
+/// A PR left the queue: the event, and the PR as it was then, for the history.
+async fn exit(
+    ctx: &Ctx,
+    key: &LaneKey,
+    number: PrNumber,
+    outcome: &str,
+    detail: &str,
+) -> Result<()> {
+    record(ctx, key, number, outcome, detail).await?;
+    let summary = ctx.prs.get(key, number).unwrap_or_default();
+    ctx.store
+        .record_exit(key, number, outcome, detail, &summary)
+        .await
 }
 
 async fn eject(
@@ -877,7 +890,7 @@ async fn eject(
         &format!("{why}\n\nAdd `{}` again to retry.", labels.trigger),
     )
     .await?;
-    record(ctx, key, number, "ejected", why).await
+    exit(ctx, key, number, "ejected", why).await
 }
 
 #[allow(clippy::too_many_arguments)]

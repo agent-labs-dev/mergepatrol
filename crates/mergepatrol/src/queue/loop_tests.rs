@@ -5,10 +5,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings};
+use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Step};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_github::{BranchMerge, Checks, RequiredChecks};
-use mergepatrol_store::{EventRecord, RepoState, SecretRecord, Session, Workspace};
+use mergepatrol_store::{
+    EventRecord, ExitQuery, ExitRecord, ExitStats, RepoState, SecretRecord, Session, StepStats,
+    Workspace,
+};
 
 use super::*;
 use crate::config::ExecutorConfig;
@@ -460,11 +463,13 @@ impl Sandbox for Scripted {
     }
 }
 
-/// Lanes and events in memory. The queue loop uses nothing else of the store.
+/// Lanes, events and exits in memory. The queue loop uses nothing else of the store.
 #[derive(Default)]
 struct Mem {
     lanes: Mutex<HashMap<LaneKey, Lane>>,
     events: Mutex<Vec<(PrNumber, String, String)>>,
+    /// Each exit's PR, outcome, and title.
+    exits: Mutex<Vec<(PrNumber, String, String)>>,
     config_error: Mutex<Option<String>>,
 }
 
@@ -500,6 +505,30 @@ impl Store for Mem {
         _: Option<PrNumber>,
         _: u32,
     ) -> Result<Vec<EventRecord>> {
+        unreachable!()
+    }
+    async fn record_exit(
+        &self,
+        _: &LaneKey,
+        pr: PrNumber,
+        outcome: &str,
+        _: &str,
+        summary: &PrSummary,
+    ) -> Result<()> {
+        let exit = (pr, outcome.into(), summary.title.clone());
+        self.exits.lock().unwrap().push(exit);
+        Ok(())
+    }
+    async fn exits(&self, _: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
+        unreachable!()
+    }
+    async fn exit_stats(&self, _: u64, _: u32, _: u32) -> Result<Vec<ExitStats>> {
+        unreachable!()
+    }
+    async fn step_stats(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<StepStats>> {
+        unreachable!()
+    }
+    async fn merged_by_day(&self, _: u64, _: Option<&RepoName>, _: u32) -> Result<Vec<u64>> {
         unreachable!()
     }
     async fn put_secret(&self, _: Scope, _: &str, _: SecretRecord) -> Result<()> {
@@ -580,7 +609,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         jobs: Semaphore::new(1),
         wakers: Arc::default(),
         analytics: Analytics::default(),
-        authors: Default::default(),
+        prs: Default::default(),
     }
 }
 
@@ -638,6 +667,10 @@ impl Run {
             .filter(|(n, ..)| *n == number)
             .map(|(_, kind, _)| kind.clone())
             .collect()
+    }
+
+    fn exits(&self) -> Vec<(PrNumber, String, String)> {
+        self.store.exits.lock().unwrap().clone()
     }
 
     fn lane(&self) -> Vec<(PrNumber, String)> {
@@ -832,6 +865,24 @@ async fn a_failed_required_check_is_fixed_then_merged() {
     assert_eq!(run.merged(), [1]);
 }
 
+/// The history splits a PR's time by the events the queue records: a renamed event would leave
+/// its step at zero.
+#[tokio::test(start_paused = true)]
+async fn each_step_of_a_job_has_an_event_that_begins_it() {
+    let run = Run::new(Fake::new(failing_ci));
+    run.tick().await;
+    let kinds = run.kinds(1);
+    let events: Vec<(f64, &str)> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (i as f64, k.as_str()))
+        .collect();
+    let times = mergepatrol_core::step_times(&events);
+    for step in [Step::Waiting, Step::Rebasing, Step::Checks, Step::Fixing] {
+        assert!(times[&step] > 0.0, "{step:?} in {kinds:?}");
+    }
+}
+
 /// The commit has only a quick app's check at first. CI's `ci` turns up `after` polls later.
 fn quick_check_first(ci: CheckState, after: usize, run: &Run) {
     run.gh
@@ -911,6 +962,22 @@ async fn a_failed_rebase_ejects() {
     run.tick().await;
     assert_eq!(run.kinds(1), ["enqueued", "rebasing", "ejected"]);
     assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_history_keeps_each_pr_that_leaves_the_queue() {
+    let mut run = Run::new(Fake::new(|s| (1..=3).for_each(|n| s.add_pr(n))));
+    run.tick().await;
+    run.rebase.fail = Some("conflict".into());
+    run.tick().await;
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&3).unwrap().labels.clear());
+    run.tick().await;
+    let exit = |n: PrNumber, outcome: &str| (n, outcome.into(), format!("PR {n}"));
+    assert_eq!(
+        run.exits(),
+        [exit(1, "merged"), exit(2, "ejected"), exit(3, "dequeued")]
+    );
 }
 
 #[tokio::test(start_paused = true)]

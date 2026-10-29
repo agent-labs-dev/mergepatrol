@@ -4,6 +4,7 @@
 mod job;
 mod lane;
 mod repo_config;
+mod steps;
 
 pub use job::{EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
@@ -13,6 +14,7 @@ pub use lane::{
 pub use repo_config::{
     EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
 };
+pub use steps::{Step, StepTimes, step_times};
 
 use serde::{Deserialize, Serialize};
 
