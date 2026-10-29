@@ -12,6 +12,9 @@ use sha2::Sha256;
 
 use crate::{ApiError, AppState};
 
+/// GitHub's own cap on a delivery. A big push comes close; axum's default is 2 MB.
+pub(crate) const MAX_BODY_BYTES: usize = 25 * 1024 * 1024;
+
 /// Implemented by the queue.
 pub trait Wake: Send + Sync {
     fn wake(&self, installation: u64, repo: RepoName);
@@ -55,20 +58,24 @@ pub(crate) async fn receive(
         .and_then(RepoName::parse);
     if let (Some(installation), Some(repo)) = (installation, repo) {
         tracing::debug!(event, installation, %repo, "webhook");
+        let mut stored = Ok(());
         if event == Some("push")
             && let Some(has) = config_after_push(&payload)
         {
-            state.store.set_has_config(installation, &repo, has).await?;
+            stored = state.store.set_has_config(installation, &repo, has).await;
         }
         if event == Some("pull_request")
             && let Some((pr, label, head)) = fork_labeled(&payload)
         {
-            state
+            stored = state
                 .store
                 .set_label_head(installation, &repo, pr, label, head)
-                .await?;
+                .await;
         }
+        // The queue reads the rest from GitHub, so it wakes even when the write failed. The
+        // error still goes back, so the delivery shows as failed on GitHub, to send again.
         state.wake.wake(installation, repo);
+        stored?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
