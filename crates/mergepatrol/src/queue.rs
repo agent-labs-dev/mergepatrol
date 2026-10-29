@@ -43,6 +43,10 @@ const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
 /// How often the instance running the queues checks that it still holds the queue lock, and
 /// how often the others try to take it.
 const LOCK_EVERY: Duration = Duration::from_secs(5);
+/// How often to delete what nothing reads anymore.
+const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How long a job's output, with its agent's transcript, stays on disk: to look into a job.
+const JOB_OUTPUTS_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How soon a repo turned on in the dashboard starts its queue.
 const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 /// How often to look for the config file in every repo of every installation. A push webhook
@@ -196,6 +200,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                 let queues = (
                     Spawned::spawn(supervise(ctx.clone(), alive.clone()), &alive),
                     Spawned::spawn(discover(ctx.clone()), &alive),
+                    Spawned::spawn(prune(ctx.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -232,6 +237,51 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
             _ = stop.wait_for(|s| *s) => return,
         }
     }
+}
+
+/// Deletes what nothing reads anymore, every `PRUNE_EVERY`: expired sessions, and job outputs
+/// older than `JOB_OUTPUTS_FOR`.
+async fn prune(ctx: Arc<Ctx>) {
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        match ctx.store.delete_expired_sessions(now).await {
+            Ok(n) => tracing::info!(sessions = n, "deleted expired sessions"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not delete expired sessions")
+            }
+        }
+        let jobs = ctx.config.data_dir.join("jobs");
+        match prune_job_outputs(&jobs, JOB_OUTPUTS_FOR).await {
+            Ok(n) => tracing::info!(jobs = n, "deleted old job outputs"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not delete old job outputs"),
+        }
+        tokio::time::sleep(PRUNE_EVERY).await;
+    }
+}
+
+/// Deletes each job's output under `jobs` that has not changed for `age`: how many.
+async fn prune_job_outputs(jobs: &Path, age: Duration) -> Result<usize> {
+    let jobs = jobs.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut deleted = 0;
+        let entries = match std::fs::read_dir(&jobs) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let modified = entry.metadata()?.modified()?;
+            if modified.elapsed().unwrap_or_default() >= age {
+                std::fs::remove_dir_all(entry.path())?;
+                deleted += 1;
+            }
+        }
+        anyhow::Ok(deleted)
+    })
+    .await?
 }
 
 /// Held by every queue task until it has stopped: the channel closes once all have.
@@ -1498,6 +1548,7 @@ async fn exit(
     reason: Option<&str>,
 ) -> Result<()> {
     log(ctx, key, number, outcome, detail).await?;
+    forget_refs(ctx, key, number).await;
     let summary = ctx.prs.get(key, number).unwrap_or_default();
     let steps = ctx
         .store
@@ -1516,6 +1567,21 @@ async fn exit(
         },
     );
     Ok(())
+}
+
+/// Deletes the PR's refs in the repo's cache: once nothing points at its commits, git's
+/// automatic gc lets them go.
+async fn forget_refs(ctx: &Ctx, key: &LaneKey, number: PrNumber) {
+    let cache = cache_path(&ctx.config.data_dir, &key.repo.owner, &key.repo.name);
+    if !cache.join("HEAD").exists() {
+        return;
+    }
+    let patterns =
+        ["pr", "result", "publish"].map(|kind| format!("refs/mergepatrol/{kind}/{number}"));
+    let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    if let Err(e) = Git.delete_refs(&cache, &patterns).await {
+        tracing::warn!(repo = %key.repo, pr = number, error = %format!("{e:#}"), "could not delete the PR's refs");
+    }
 }
 
 async fn eject(
@@ -2442,6 +2508,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("may not: .github/ci.yml"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn only_old_job_outputs_are_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jobs = tmp.path().join("jobs");
+        for job in ["old", "new"] {
+            std::fs::create_dir_all(jobs.join(job)).unwrap();
+            std::fs::write(jobs.join(job).join("transcript.jsonl"), "{}").unwrap();
+        }
+        // Eight days ago, by its modified time.
+        let old = std::fs::File::open(jobs.join("old")).unwrap();
+        let then = std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        old.set_modified(then).unwrap();
+        assert_eq!(prune_job_outputs(&jobs, JOB_OUTPUTS_FOR).await.unwrap(), 1);
+        assert!(!jobs.join("old").exists());
+        assert!(jobs.join("new/transcript.jsonl").exists());
+        // No job yet: nothing to do.
+        assert_eq!(
+            prune_job_outputs(&tmp.path().join("none"), JOB_OUTPUTS_FOR)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
