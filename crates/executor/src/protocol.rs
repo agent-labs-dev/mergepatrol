@@ -15,6 +15,7 @@ pub struct JobSpec {
     pub clone_url: String,
     /// Read-only, and scoped to this repo. Empty fetches without auth.
     pub token: String,
+    /// The PR head's full ref: `refs/heads/<branch>`, or a fork PR's `refs/pull/<n>/head`.
     pub head_ref: String,
     pub head_sha: String,
     pub trunk: String,

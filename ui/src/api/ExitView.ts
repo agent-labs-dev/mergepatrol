@@ -12,7 +12,11 @@ export type ExitView = { id: number, repo: string, trunk: string, number: number
  */
 detail: string, title: string, url: string, author: PersonView | null, 
 /**
- * `None` for a PR ejected before it joined, such as one from a fork.
+ * From a fork.
+ */
+fork: boolean, 
+/**
+ * `None` for a PR ejected before it joined, such as a fork PR the queue cannot rebase.
  */
 enqueued_at: string | null, 
 /**

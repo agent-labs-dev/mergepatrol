@@ -178,6 +178,7 @@ function Row({
             </span>
           )}
           {e.priority && <span className="font-medium text-hot">↑ Priority</span>}
+          {e.fork && <span title="From a fork">Fork</span>}
           <span className="ml-auto flex items-center gap-2">
             <Checks checks={e.checks} />
             <Diff entry={e} />
@@ -264,6 +265,7 @@ function Detail({
             <span className="flex items-center gap-2">
               <State entry={e} />
               {e.priority && <span className="text-xs font-medium text-hot">↑ Priority</span>}
+              {e.fork && <span className="text-xs text-muted">From a fork</span>}
             </span>
           </Field>
           <Field label="Branch">

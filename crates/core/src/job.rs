@@ -38,6 +38,8 @@ pub enum EjectReason {
     MergeRejected(String),
     /// These required checks had not finished `CHECKS_TIMEOUT` after the publish.
     ChecksTimedOut(Vec<String>),
+    /// What the queue would have to do to a fork PR, it may not.
+    Fork(String),
 }
 
 /// How long a PR's required checks may take, after a publish. A check that never reports, as a
@@ -54,6 +56,7 @@ impl EjectReason {
             Self::BaseMovedOutsideQueue => "base-moved",
             Self::MergeRejected(_) => "merge-rejected",
             Self::ChecksTimedOut(_) => "checks-timed-out",
+            Self::Fork(_) => "fork",
         }
     }
 }
@@ -88,6 +91,7 @@ impl std::fmt::Display for EjectReason {
                 CHECKS_TIMEOUT.as_secs() / 3600,
                 names.join(", ")
             ),
+            Self::Fork(r) => f.write_str(r),
         }
     }
 }

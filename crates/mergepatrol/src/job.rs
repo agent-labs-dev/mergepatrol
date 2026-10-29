@@ -72,7 +72,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             "+refs/heads/{}:refs/remotes/origin/{}",
             spec.trunk, spec.trunk
         ),
-        format!("+refs/heads/{}:refs/mergepatrol/head", spec.head_ref),
+        format!("+{}:refs/mergepatrol/head", spec.head_ref),
     ];
     if let Some(base_ref) = &spec.base_ref {
         refspecs.push(format!("+refs/heads/{base_ref}:refs/mergepatrol/base"));
@@ -137,6 +137,12 @@ async fn rebase(
         .await?;
     while let RebaseStep::Conflict { commit, files } = step {
         event(events, "conflict", files.join(", "));
+        if resolver.api_key.is_none() {
+            bail!(
+                "it conflicts in {}, and the job has no Anthropic API key for an agent to resolve that",
+                files.join(", ")
+            );
+        }
         let commit_message = git.commit_message(dir, &commit).await?;
         let transcript = out
             .join("transcripts")

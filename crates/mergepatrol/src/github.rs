@@ -18,6 +18,14 @@ pub trait GitHub: Send + Sync {
     /// The open PRs of a stack, bottom to top.
     async fn stack_layers(&self, repo: &RepoName, stack: PrNumber) -> Result<Vec<PrNumber>>;
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String>;
+    /// A PR's head, from its pull ref: where a fork PR's head shows in the repo.
+    async fn pull_head(&self, repo: &RepoName, number: PrNumber) -> Result<String>;
+    /// Whether `head` needs a rebase onto `base`.
+    async fn behind(&self, repo: &RepoName, base: &str, head: &str) -> Result<bool>;
+    /// Whether workflow runs on `sha` wait for a maintainer's approval.
+    async fn awaiting_approval(&self, repo: &RepoName, sha: &str) -> Result<bool>;
+    /// Whether PR `number` changes a file under `dir`.
+    async fn changes_under(&self, repo: &RepoName, number: PrNumber, dir: &str) -> Result<bool>;
     async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks>;
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks>;
     /// What GitHub shows of why the checks `names` failed on `sha`.
@@ -84,6 +92,18 @@ impl GitHub for Installation {
     }
     async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String> {
         Installation::branch_sha(self, repo, branch).await
+    }
+    async fn pull_head(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
+        Installation::pull_head(self, repo, number).await
+    }
+    async fn behind(&self, repo: &RepoName, base: &str, head: &str) -> Result<bool> {
+        Installation::behind(self, repo, base, head).await
+    }
+    async fn awaiting_approval(&self, repo: &RepoName, sha: &str) -> Result<bool> {
+        Installation::awaiting_approval(self, repo, sha).await
+    }
+    async fn changes_under(&self, repo: &RepoName, number: PrNumber, dir: &str) -> Result<bool> {
+        Installation::changes_under(self, repo, number, dir).await
     }
     async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks> {
         Installation::required_checks(self, repo, branch).await

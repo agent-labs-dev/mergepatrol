@@ -61,21 +61,30 @@ impl Git {
     /// Fetches `refspecs`. The token goes in through the environment, not the arguments,
     /// so it does not show in `ps`. An empty token fetches without auth.
     pub async fn fetch(&self, repo: &Path, token: &str, refspecs: &[&str]) -> Result<()> {
-        use base64::Engine;
         let mut args = vec!["fetch", "-q", "--no-tags", "--force", "origin"];
         args.extend(refspecs);
         let mut cmd = self.git(repo, &args);
-        if !token.is_empty() {
-            let basic =
-                base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
-            cmd.env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                .env(
-                    "GIT_CONFIG_VALUE_0",
-                    format!("Authorization: Basic {basic}"),
-                );
-        }
+        authorize(&mut cmd, token);
         output(cmd, "git fetch").await?;
+        Ok(())
+    }
+
+    /// Pushes `sha` to `branch` at `url`, only while the branch is at `expected`. The token goes
+    /// in as `fetch`'s does.
+    pub async fn push_leased(
+        &self,
+        repo: &Path,
+        token: &str,
+        url: &str,
+        sha: &str,
+        branch: &str,
+        expected: &str,
+    ) -> Result<()> {
+        let lease = format!("--force-with-lease=refs/heads/{branch}:{expected}");
+        let refspec = format!("{sha}:refs/heads/{branch}");
+        let mut cmd = self.git(repo, &["push", "-q", "--no-verify", &lease, url, &refspec]);
+        authorize(&mut cmd, token);
+        output(cmd, "git push").await?;
         Ok(())
     }
 
@@ -375,6 +384,21 @@ impl Git {
     async fn run(&self, cwd: &Path, args: &[&str]) -> Result<String> {
         Ok(String::from_utf8(self.output(cwd, args).await?)?)
     }
+}
+
+/// Sends `token` as GitHub's basic auth, through the environment. An empty token sends none.
+fn authorize(cmd: &mut tokio::process::Command, token: &str) {
+    use base64::Engine;
+    if token.is_empty() {
+        return;
+    }
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Basic {basic}"),
+        );
 }
 
 async fn output(mut cmd: tokio::process::Command, what: &str) -> Result<Vec<u8>> {

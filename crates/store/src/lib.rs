@@ -172,6 +172,23 @@ pub trait Store: Send + Sync {
         error: Option<&str>,
     ) -> Result<()>;
 
+    /// A fork PR's head when `label` went on it, as the `labeled` webhook told.
+    async fn set_label_head(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        label: &str,
+        head_sha: &str,
+    ) -> Result<()>;
+    async fn label_head(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        label: &str,
+    ) -> Result<Option<String>>;
+
     /// Remembers the account of each installation, as GitHub showed it at a sign-in.
     async fn save_workspaces(&self, workspaces: &[Workspace]) -> Result<()>;
     async fn workspaces(&self, installation_ids: &[u64]) -> Result<Vec<Workspace>>;
@@ -673,6 +690,48 @@ impl Store for PgStore {
         Ok(())
     }
 
+    async fn set_label_head(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        label: &str,
+        head_sha: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO label_heads (installation_id, repo, pr, label, head_sha)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (installation_id, repo, pr, label) DO UPDATE SET head_sha = excluded.head_sha",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(pr as i64)
+        .bind(label)
+        .bind(head_sha)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn label_head(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        label: &str,
+    ) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT head_sha FROM label_heads
+             WHERE installation_id = $1 AND repo = $2 AND pr = $3 AND label = $4",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(pr as i64)
+        .bind(label)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()> {
         sqlx::query(
             "INSERT INTO repos (installation_id, repo, has_config) VALUES ($1, $2, $3)
@@ -883,6 +942,28 @@ mod tests {
         store.create_session("b", &dead).await.unwrap();
         assert_eq!(store.session("a").await.unwrap(), Some(live));
         assert_eq!(store.session("b").await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_label_head_is_the_latest_labeling(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let repo = RepoName::parse("o/r").unwrap();
+        assert_eq!(store.label_head(1, &repo, 7, "mp").await.unwrap(), None);
+        store.set_label_head(1, &repo, 7, "mp", "a").await.unwrap();
+        store.set_label_head(1, &repo, 7, "mp", "b").await.unwrap();
+        store
+            .set_label_head(1, &repo, 7, "other", "c")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .label_head(1, &repo, 7, "mp")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("b")
+        );
+        assert_eq!(store.label_head(2, &repo, 7, "mp").await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = false)]

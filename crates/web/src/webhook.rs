@@ -60,6 +60,14 @@ pub(crate) async fn receive(
         {
             state.store.set_has_config(installation, &repo, has).await?;
         }
+        if event == Some("pull_request")
+            && let Some((pr, label, head)) = fork_labeled(&payload)
+        {
+            state
+                .store
+                .set_label_head(installation, &repo, pr, label, head)
+                .await?;
+        }
         state.wake.wake(installation, repo);
     }
     Ok(StatusCode::NO_CONTENT)
@@ -113,6 +121,23 @@ fn config_after_push(payload: &Value) -> Option<bool> {
             None
         }
     })
+}
+
+/// A label went on a fork PR: the PR, the label, and the head it had then. The queue first sees
+/// the PR at its next poll, and a fork's author may push before that.
+fn fork_labeled(payload: &Value) -> Option<(u64, &str, &str)> {
+    if payload["action"].as_str()? != "labeled" {
+        return None;
+    }
+    let pr = &payload["pull_request"];
+    if pr["head"]["repo"]["full_name"] == payload["repository"]["full_name"] {
+        return None;
+    }
+    Some((
+        pr["number"].as_u64()?,
+        payload["label"]["name"].as_str()?,
+        pr["head"]["sha"].as_str()?,
+    ))
 }
 
 /// `signature` is GitHub's `X-Hub-Signature-256`: `sha256=` and the hex HMAC of the body.

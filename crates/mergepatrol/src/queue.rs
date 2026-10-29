@@ -57,6 +57,9 @@ const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 const JOB_ERRORS_FOR: Duration = Duration::from_secs(30 * 60);
 /// A fix may change any file but these: CI's own config, and the queue's.
 const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
+const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflow runs";
+/// How long to wait for a fork PR's pull ref to follow a push to the fork.
+const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 
 pub struct Ctx {
     pub config: Config,
@@ -363,6 +366,9 @@ enum Outcome {
     Cancelled,
     /// A stack gained or lost a PR while the job ran: it runs again, in its place.
     Restarted(String),
+    /// A fork PR's author pushed after it was queued: it leaves the queue, for a maintainer to
+    /// queue the new commits.
+    Pushed(String),
 }
 
 async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName) -> Result<Ran> {
@@ -407,18 +413,40 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
 
     let mut candidates = Vec::new();
     for unit in &units {
-        if unit.layers.iter().any(|pr| pr.is_cross_repository) {
-            let why = "PRs from forks are not supported yet.";
+        if unit.stacked && unit.layers.iter().any(|pr| pr.is_cross_repository) {
+            let why = "Stacks with a PR from a fork are not supported yet.";
             eject(ctx, &settings, gh, &key, &unit.prs(), why, "fork").await?;
             continue;
+        }
+        let mut pin = None;
+        if unit.fork() {
+            match fork_pin(ctx, &key, &mut lane, unit.top(), &labels.trigger).await? {
+                Ok(p) => pin = p,
+                Err(why) => {
+                    drop_pushed(ctx, &settings, gh, &key, unit.number, &why).await?;
+                    continue;
+                }
+            }
         }
         let hold = if unit.base != snap.default_branch {
             Some(format!(
                 "targets `{}`; only `{}` has a queue for now",
                 unit.base, snap.default_branch
             ))
+        } else if let Some(reason) = unit.hold_reason() {
+            Some(reason)
+        } else if unit.fork() {
+            match fork_block(gh, &key, &snap.trunk_sha, unit.top()).await? {
+                Some(Block::Hold(reason)) => Some(reason),
+                Some(Block::Eject(why)) => {
+                    let why = format!("Ejected: {why}.");
+                    eject(ctx, &settings, gh, &key, &unit.prs(), &why, "fork").await?;
+                    continue;
+                }
+                None => None,
+            }
         } else {
-            unit.hold_reason()
+            None
         };
         candidates.push(Candidate {
             number: unit.number,
@@ -426,6 +454,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
             hold,
             summary: unit.layers[0].summary(),
             layers: if unit.stacked { unit.prs() } else { Vec::new() },
+            pin,
         });
     }
 
@@ -536,6 +565,12 @@ impl Unit {
         self.layers.iter().map(|pr| pr.number).collect()
     }
 
+    /// A PR from a fork, whose author is not trusted: the queue never batches it, runs no agent
+    /// on it, and merges only a head it was queued at or published itself.
+    fn fork(&self) -> bool {
+        !self.stacked && self.top().is_cross_repository
+    }
+
     /// How comments name it: `#7`, or a stack's layers, `#7, #8, #9`.
     fn refs(&self) -> String {
         let refs: Vec<String> = self
@@ -586,10 +621,126 @@ impl Unit {
     async fn branch_heads(&self, gh: &dyn GitHub, repo: &RepoName) -> Result<Vec<String>> {
         let mut heads = Vec::with_capacity(self.layers.len());
         for pr in &self.layers {
-            heads.push(gh.branch_sha(repo, &pr.head_ref_name).await?);
+            heads.push(pr_head(gh, repo, pr).await?);
         }
         Ok(heads)
     }
+}
+
+/// A PR's head on GitHub now: its branch's, or for a fork PR, its pull ref's.
+async fn pr_head(gh: &dyn GitHub, repo: &RepoName, pr: &PullRequest) -> Result<String> {
+    match pr.is_cross_repository {
+        true => gh.pull_head(repo, pr.number).await,
+        false => gh.branch_sha(repo, &pr.head_ref_name).await,
+    }
+}
+
+/// What a fork PR's author pushed after a maintainer queued it, nobody queued: the queue merges
+/// only the head it was labeled at, from the `labeled` webhook, or at first sight without one,
+/// and the heads it published itself. `Ok` with the pin for a PR that joins the lane now, and
+/// `Err` with why it may not stay.
+async fn fork_pin(
+    ctx: &Ctx,
+    key: &LaneKey,
+    lane: &mut Lane,
+    pr: &PullRequest,
+    label: &str,
+) -> Result<std::result::Result<Option<String>, String>> {
+    let head = &pr.head_ref_oid;
+    let pushed = Err("new commits were pushed to it after it was queued".to_owned());
+    let Some(entry) = lane.entries.iter().find(|e| e.number == pr.number) else {
+        let labeled = ctx
+            .store
+            .label_head(key.installation_id, &key.repo, pr.number, label)
+            .await?;
+        return Ok(match labeled {
+            Some(pin) if pin != *head => pushed,
+            _ => Ok(Some(head.clone())),
+        });
+    };
+    Ok(match entry.heads.contains(head) {
+        true => Ok(None),
+        // Queued before the queue pinned fork PRs.
+        false if entry.heads.is_empty() => {
+            lane.accept(pr.number, head);
+            Ok(None)
+        }
+        false => pushed,
+    })
+}
+
+/// Takes a fork PR out of the queue, pushed to since it was queued, for a maintainer to look at
+/// the new commits.
+async fn drop_pushed(
+    ctx: &Ctx,
+    settings: &RepoSettings,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    number: PrNumber,
+    why: &str,
+) -> Result<()> {
+    let labels = settings.labels();
+    record(ctx, key, number, "pushed", why).await?;
+    gh.remove_label(&key.repo, number, &labels.trigger).await?;
+    gh.remove_label(&key.repo, number, &labels.priority).await?;
+    let comment = format!(
+        "Dequeued: {why}. Mergepatrol merges a PR from a fork only as it was when it was queued. Add `{}` again to queue the new commits.",
+        labels.trigger
+    );
+    gh.sticky_comment(&key.repo, number, &comment).await
+}
+
+/// What stops the queue from taking a fork PR on.
+#[derive(Debug, PartialEq, Eq)]
+enum Block {
+    /// A maintainer, or the author, can lift it without a push.
+    Hold(String),
+    /// Only the author's push can mend it, which drops the PR from the queue anyway.
+    Eject(String),
+}
+
+/// Why the queue cannot take fork PR `pr` on now, onto the trunk at `trunk_sha`. A PR already on
+/// the trunk needs nothing pushed to its fork.
+async fn fork_block(
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    trunk_sha: &str,
+    pr: &PullRequest,
+) -> Result<Option<Block>> {
+    let repo = &key.repo;
+    let trunk = &key.trunk;
+    if gh.awaiting_approval(repo, &pr.head_ref_oid).await? {
+        return Ok(Some(Block::Hold(AWAITING_APPROVAL.into())));
+    }
+    if !gh.behind(repo, trunk_sha, &pr.head_ref_oid).await? {
+        return Ok(None);
+    }
+    let rebase_it = format!("rebase it onto `{trunk}` yourself");
+    let org = pr
+        .head_repository
+        .as_ref()
+        .map(|r| r.owner.kind == "Organization");
+    Ok(match org {
+        None => Some(Block::Eject(format!(
+            "it is behind `{trunk}`, and its fork is gone, so Mergepatrol cannot push a rebase"
+        ))),
+        Some(true) => Some(Block::Eject(format!(
+            "it is behind `{trunk}`, and Mergepatrol cannot push to a fork that an organization owns: {rebase_it}"
+        ))),
+        Some(false)
+            if gh
+                .changes_under(repo, pr.number, ".github/workflows/")
+                .await? =>
+        {
+            Some(Block::Eject(format!(
+                "it is behind `{trunk}`, and it changes workflow files, which GitHub does not let Mergepatrol push to a fork: {rebase_it}"
+            )))
+        }
+        Some(false) if !pr.maintainer_can_modify => Some(Block::Hold(format!(
+            "it is behind `{trunk}`, and Mergepatrol can push the rebase to its fork only once its author allows edits by maintainers"
+        ))),
+        Some(false) => None,
+    })
 }
 
 /// The queue's units: each labeled PR, and each stack with a labeled layer, with all its open
@@ -676,6 +827,10 @@ async fn batchable(
         let Some(unit) = units.iter().find(|u| u.number == *number) else {
             break;
         };
+        // A batch's draft PR runs CI with the repo's secrets, which a fork's code must not get.
+        if unit.fork() {
+            break;
+        }
         for pr in &unit.layers {
             let checks = gh.checks(repo, &pr.head_ref_oid).await?;
             if checks.verdict(required).0 != CheckState::Passed {
@@ -728,6 +883,11 @@ async fn finish(
         Outcome::Restarted(why) => {
             lane.stop();
             record_all(ctx, key, &prs, "restarted", &why).await?;
+        }
+        Outcome::Pushed(why) => {
+            lane.remove(unit.number);
+            drop_pushed(ctx, settings, gh, key, unit.number, &why).await?;
+            exit(ctx, key, unit.number, "dequeued", &why, None).await?;
         }
     }
     ctx.store.save_lane(key, lane).await
@@ -1312,7 +1472,12 @@ async fn run_job(
 ) -> Result<Outcome> {
     let repo = &key.repo;
     let prs = unit.prs();
-    let mut job = Job::start(unit.number, settings.fix_ci.allowed());
+    // No agent fixes a fork PR: its code could read the agent's key.
+    let fix_attempts = match unit.fork() {
+        true => 0,
+        false => settings.fix_ci.allowed(),
+    };
+    let mut job = Job::start(unit.number, fix_attempts);
     let mut published_at = Instant::now();
     // Each layer's head as published, bottom to top, and the layer whose checks failed.
     let mut heads: Vec<String> = Vec::new();
@@ -1326,15 +1491,37 @@ async fn run_job(
         if let Some(why) = now.reshaped(gh, repo).await? {
             return Ok(Outcome::Restarted(why));
         }
+        if now.fork() {
+            let head = pr_head(gh, repo, now.top()).await?;
+            let queued = lane.entries.iter().find(|e| e.number == unit.number);
+            if !queued.is_some_and(|e| e.heads.contains(&head)) {
+                let why = "new commits were pushed to it after it was queued";
+                return Ok(Outcome::Pushed(why.into()));
+            }
+        }
 
         let event = match &job.phase {
-            Phase::Rebasing => {
+            Phase::Rebasing => 'rebase: {
+                if now.fork() {
+                    let trunk = gh.branch_sha(repo, &key.trunk).await?;
+                    match fork_block(gh, key, &trunk, now.top()).await? {
+                        Some(Block::Eject(why)) => {
+                            return Ok(Outcome::Ejected(EjectReason::Fork(why)));
+                        }
+                        Some(Block::Hold(reason)) => break 'rebase Event::OnHold(reason),
+                        None => {}
+                    }
+                }
                 record_all(ctx, key, &prs, "rebasing", &format!("onto {}", key.trunk)).await?;
                 let comment = format!("Rebasing onto `{}`.", key.trunk);
                 comment_all(gh, repo, &prs, &comment).await?;
                 let event = sandbox.rebase(key, snap, &now, settings).await?;
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
+                    if now.fork() {
+                        lane.accept(unit.number, head);
+                        ctx.store.save_lane(key, lane).await?;
+                    }
                     heads = now.branch_heads(gh, repo).await?;
                     record_all(ctx, key, &prs, "published", head).await?;
                     let comment = format!("Rebased to {head}. Waiting for checks.");
@@ -1378,6 +1565,10 @@ async fn run_job(
                             if published_at.elapsed() >= CHECKS_TIMEOUT =>
                         {
                             Event::ChecksTimedOut(names)
+                        (CheckState::Pending, _)
+                            if now.fork() && gh.awaiting_approval(repo, &heads[0]).await? =>
+                        {
+                            Event::OnHold(AWAITING_APPROVAL.into())
                         }
                         (CheckState::Pending, _) => {
                             ctx.wakers
@@ -1542,12 +1733,11 @@ async fn fetch_layers(
     git.ensure_cache(&cache, &clone_url(repo)).await?;
     let trunk_ref = format!("refs/remotes/origin/{}", key.trunk);
     let mut refspecs = vec![format!("+refs/heads/{}:{trunk_ref}", key.trunk)];
-    refspecs.extend(layers.iter().map(|pr| {
-        format!(
-            "+refs/heads/{}:refs/mergepatrol/pr/{}",
-            pr.head_ref_name, pr.number
-        )
-    }));
+    refspecs.extend(
+        layers
+            .iter()
+            .map(|pr| format!("+{}:refs/mergepatrol/pr/{}", head_ref(pr), pr.number)),
+    );
     let refspecs: Vec<&str> = refspecs.iter().map(String::as_str).collect();
     git.fetch(&cache, &gh.token().await?, &refspecs).await?;
     let mut heads = Vec::with_capacity(layers.len());
@@ -1559,6 +1749,14 @@ async fn fetch_layers(
     }
     let trunk = git.rev_parse(&cache, &trunk_ref).await?;
     Ok((cache, heads, trunk))
+}
+
+/// The full ref of a PR's head in the repo: its branch, or for a fork PR, its pull ref.
+fn head_ref(pr: &PullRequest) -> String {
+    match pr.is_cross_repository {
+        true => format!("refs/pull/{}/head", pr.number),
+        false => format!("refs/heads/{}", pr.head_ref_name),
+    }
 }
 
 fn clone_url(repo: &RepoName) -> String {
@@ -1586,16 +1784,20 @@ async fn job_spec(
     below: Option<Below<'_>>,
     task: Task,
 ) -> Result<(JobSpec, Option<Granted>)> {
-    let granted = ctx
-        .vault
-        .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
-        .await?
-        .map(|k| ctx.anthropic.grant(k, REQUESTS_PER_JOB));
+    // A fork PR's job gets no agent: without access, a conflict fails the job.
+    let granted = match pr.is_cross_repository {
+        true => None,
+        false => ctx
+            .vault
+            .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
+            .await?
+            .map(|k| ctx.anthropic.grant(k, REQUESTS_PER_JOB)),
+    };
     let spec = JobSpec {
         repo: key.repo.to_string(),
         clone_url: clone_url(&key.repo),
         token: gh.read_token(&key.repo).await?,
-        head_ref: pr.head_ref_name.clone(),
+        head_ref: head_ref(pr),
         head_sha: head.to_owned(),
         trunk: key.trunk.clone(),
         trunk_sha: onto.to_owned(),
@@ -1772,10 +1974,24 @@ async fn rebase_and_publish(
     }
     if let Err(e) = result {
         let failed = rebased.len();
-        return Ok(Event::RebaseFailed(match unit.stacked {
-            true => format!("#{}: {e:#}", unit.layers[failed].number),
-            false => format!("{e:#}"),
+        return Ok(Event::RebaseFailed(match (unit.stacked, unit.fork()) {
+            (true, _) => format!("#{}: {e:#}", unit.layers[failed].number),
+            (false, true) => format!(
+                "{e:#}. Mergepatrol runs no agent on a PR from a fork, so rebase it onto `{}` yourself",
+                key.trunk
+            ),
+            (false, false) => format!("{e:#}"),
         }));
+    }
+    if unit.fork() {
+        let pr = unit.top();
+        if moved.is_empty() {
+            return Ok(Event::Rebased {
+                head: heads[0].clone(),
+                base: trunk,
+            });
+        }
+        return publish_to_fork(gh, &git, &cache, key, pr, &heads[0], &rebased[0], trunk).await;
     }
 
     // Every layer, so that the update also fails if an author pushed to one left as it is: a
@@ -1797,6 +2013,62 @@ async fn rebase_and_publish(
     }
     Ok(Event::Rebased {
         head: rebased.pop().expect("a unit has a PR"),
+        base: trunk,
+    })
+}
+
+/// Moves fork PR `pr`'s branch from `before` to `after`, a commit created in this repo: GitHub
+/// lets the App push to a fork whose author allows edits by maintainers. The commit reaches the
+/// cache through a ref outside `refs/heads/`, on which no workflow runs the fork's code with this
+/// repo's secrets.
+#[allow(clippy::too_many_arguments)]
+async fn publish_to_fork(
+    gh: &Installation,
+    git: &Git,
+    cache: &Path,
+    key: &LaneKey,
+    pr: &PullRequest,
+    before: &str,
+    after: &str,
+    trunk: String,
+) -> Result<Event> {
+    let repo = &key.repo;
+    let fork = pr.head_repository.as_ref().context("the fork is gone")?;
+    let name = format!("refs/mergepatrol/publish/{}", pr.number);
+    gh.delete_ref(repo, &name).await?;
+    gh.create_ref(repo, &name, after).await?;
+    let fetched = git
+        .fetch(cache, &gh.token().await?, &[&format!("+{name}:{name}")])
+        .await;
+    gh.delete_ref(repo, &name).await?;
+    fetched?;
+    let url = format!("https://github.com/{}.git", fork.name_with_owner);
+    let pushed = git
+        .push_leased(
+            cache,
+            &gh.token().await?,
+            &url,
+            after,
+            &pr.head_ref_name,
+            before,
+        )
+        .await;
+    if let Err(e) = pushed {
+        if gh.pull_head(repo, pr.number).await? != before {
+            return Ok(Event::HeadMoved);
+        }
+        bail!("publishing to the fork failed: {e:#}");
+    }
+    // The checks and the merge go by the pull ref, which follows the fork's branch moments later.
+    let since = Instant::now();
+    while gh.pull_head(repo, pr.number).await? != after {
+        if since.elapsed() > PULL_REF_WAIT {
+            bail!("the PR did not show the push to its fork");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Ok(Event::Rebased {
+        head: after.to_owned(),
         base: trunk,
     })
 }

@@ -43,8 +43,29 @@ pub struct PullRequest {
     /// The stack the PR is a layer of. `None` outside a stack.
     #[serde(default)]
     pub stack: Option<StackRef>,
+    /// Whether the author lets maintainers, and so the App, push to a fork's branch.
+    #[serde(default)]
+    pub maintainer_can_modify: bool,
+    /// The repo the head branch is in: a fork's, for a PR from one. `None` once it is deleted.
+    #[serde(default)]
+    pub head_repository: Option<HeadRepository>,
     #[serde(flatten)]
     pub details: PrDetails,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadRepository {
+    /// `owner/name`.
+    pub name_with_owner: String,
+    pub owner: RepoOwner,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoOwner {
+    /// `User` or `Organization`.
+    #[serde(rename = "__typename")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +148,7 @@ impl PullRequest {
             author: d.author.map(Person::from),
             created_at: d.created_at,
             head_ref: self.head_ref_name.clone(),
+            fork: self.is_cross_repository,
             additions: d.additions,
             deletions: d.deletions,
             changed_files: d.changed_files,
@@ -216,6 +238,7 @@ fn rejection(body: &Value) -> String {
 }
 
 const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } } stack { number baseRefName }
+  maintainerCanModify headRepository { nameWithOwner owner { __typename } }
   url createdAt additions deletions changedFiles author { __typename login avatarUrl }
   latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login avatarUrl } } } }
@@ -319,6 +342,109 @@ impl Installation {
             )
             .await?;
         Ok(r["object"]["sha"].as_str().context("ref sha")?.to_owned())
+    }
+
+    /// The head of PR `number`, from its `refs/pull/<n>/head`: where a fork PR's head shows in
+    /// the base repo.
+    pub async fn pull_head(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
+        let r: Value = self
+            .rest(
+                Method::GET,
+                &format!("/repos/{repo}/git/ref/pull/{number}/head"),
+                None,
+            )
+            .await?;
+        Ok(r["object"]["sha"].as_str().context("ref sha")?.to_owned())
+    }
+
+    /// Whether `head` lacks commits of `base`: it needs a rebase onto it.
+    pub async fn behind(&self, repo: &RepoName, base: &str, head: &str) -> Result<bool> {
+        let r: Value = self
+            .rest(
+                Method::GET,
+                &format!("/repos/{repo}/compare/{base}...{head}"),
+                None,
+            )
+            .await?;
+        Ok(r["behind_by"].as_u64().context("behind_by")? > 0)
+    }
+
+    /// Whether workflow runs on `sha` wait for a maintainer to approve them, as GitHub has a
+    /// fork PR's from an outside contributor.
+    pub async fn awaiting_approval(&self, repo: &RepoName, sha: &str) -> Result<bool> {
+        let r: Value = self
+            .rest(
+                Method::GET,
+                &format!(
+                    "/repos/{repo}/actions/runs?head_sha={sha}&status=action_required&per_page=1"
+                ),
+                None,
+            )
+            .await?;
+        Ok(r["total_count"].as_u64().unwrap_or(0) > 0)
+    }
+
+    /// Whether PR `number` changes a file under `dir`.
+    pub async fn changes_under(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        dir: &str,
+    ) -> Result<bool> {
+        // GitHub lists at most 3000 files, 100 a page.
+        for page in 1..=30 {
+            let files: Value = self
+                .rest(
+                    Method::GET,
+                    &format!("/repos/{repo}/pulls/{number}/files?per_page=100&page={page}"),
+                    None,
+                )
+                .await?;
+            let files = files.as_array().context("PR files")?;
+            let under = |f: &Value| {
+                [&f["filename"], &f["previous_filename"]]
+                    .iter()
+                    .any(|n| n.as_str().is_some_and(|n| n.starts_with(dir)))
+            };
+            if files.iter().any(under) {
+                return Ok(true);
+            }
+            if files.len() < 100 {
+                break;
+            }
+        }
+        Ok(false)
+    }
+
+    /// Creates `name`, a full ref outside `refs/heads/`, so that no workflow runs on it.
+    pub async fn create_ref(&self, repo: &RepoName, name: &str, sha: &str) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/git/refs"),
+                Some(json!({ "ref": name, "sha": sha })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Deletes the full ref `name`, if it is there.
+    pub async fn delete_ref(&self, repo: &RepoName, name: &str) -> Result<()> {
+        let name = name.strip_prefix("refs/").context("a full ref")?;
+        let res = self
+            .request(
+                Method::DELETE,
+                &format!("/repos/{repo}/git/refs/{name}"),
+                None,
+            )
+            .await?;
+        if !res.status.is_success()
+            && res.status != StatusCode::NOT_FOUND
+            && res.status != StatusCode::UNPROCESSABLE_ENTITY
+        {
+            anyhow::bail!("delete ref {name}: {} {}", res.status, res.body);
+        }
+        Ok(())
     }
 
     pub async fn create_blob(&self, repo: &RepoName, content: &[u8]) -> Result<String> {

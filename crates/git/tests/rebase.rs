@@ -148,3 +148,42 @@ async fn bundles_carry_commits_between_repos() {
         .unwrap();
     assert_eq!(got, head);
 }
+
+#[tokio::test]
+async fn a_leased_push_moves_the_branch_only_from_where_it_was_expected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("work");
+    let fork = tmp.path().join("fork.git");
+    std::fs::create_dir_all(&work).unwrap();
+    sh(&work, &["init", "-q", "-b", "main"]);
+    let first = commit(&work, "a.txt", "one\n", "first");
+    sh(
+        tmp.path(),
+        &["init", "-q", "--bare", fork.to_str().unwrap()],
+    );
+    sh(
+        &work,
+        &[
+            "push",
+            "-q",
+            fork.to_str().unwrap(),
+            "main:refs/heads/topic",
+        ],
+    );
+    let second = commit(&work, "a.txt", "two\n", "second");
+    let third = commit(&work, "a.txt", "three\n", "third");
+    let url = format!("file://{}", fork.display());
+    let at = || sh(&fork, &["rev-parse", "refs/heads/topic"]);
+
+    // The branch moved since: the author pushed.
+    let stale = Git
+        .push_leased(&work, "", &url, &third, "topic", &second)
+        .await;
+    assert!(stale.is_err());
+    assert_eq!(at(), first);
+
+    Git.push_leased(&work, "", &url, &third, "topic", &first)
+        .await
+        .unwrap();
+    assert_eq!(at(), third);
+}
