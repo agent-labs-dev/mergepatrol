@@ -8,6 +8,7 @@ license.workspace = true
 anyhow = "1.0.104"
 async-trait = "0.1"
 axum = "0.8.9"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 mergepatrol-analytics = { version = "0.1.0", path = "../analytics" }
 mergepatrol-core = { version = "0.1.0", path = "../core" }
 mergepatrol-executor = { version = "0.1.0", path = "../executor" }

@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use futures_util::future::try_join_all;
 use mergepatrol_analytics::Analytics;
 use mergepatrol_core::{
     Candidate, EjectReason, Event, Job, Lane, LaneChange, Phase, PrNumber, REPO_CONFIG_PATH,
@@ -41,8 +42,8 @@ const DISCOVER_EVERY: Duration = Duration::from_secs(5 * 60);
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const RESOLVER_MAX_TURNS: u32 = 50;
 const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
-const MERGE_RETRIES: u32 = 3;
-const MERGE_RETRY_AFTER: Duration = Duration::from_secs(5);
+const MERGE_RETRIES: u32 = 15;
+const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 pub struct Ctx {
     pub config: Config,
@@ -381,12 +382,13 @@ async fn finish(
         Outcome::Merged(sha) => {
             lane.remove(number);
             record(ctx, key, number, "merged", &sha).await?;
-            gh.sticky_comment(&key.repo, number, &format!("Merged as {sha}."))
-                .await?;
             let labels = settings.labels();
-            for label in [&labels.trigger, &labels.priority] {
-                gh.remove_label(&key.repo, number, label).await?;
-            }
+            let comment = format!("Merged as {sha}.");
+            tokio::try_join!(
+                gh.sticky_comment(&key.repo, number, &comment),
+                gh.remove_label(&key.repo, number, &labels.trigger),
+                gh.remove_label(&key.repo, number, &labels.priority),
+            )?;
         }
         Outcome::Ejected(reason) => {
             lane.eject(number);
@@ -548,7 +550,7 @@ async fn test_and_merge(
     let draft = gh
         .open_draft_pr(repo, &batch.branch, &key.trunk, &title, &body)
         .await?;
-    for n in members {
+    try_join_all(members.iter().map(|n| async move {
         record(
             ctx,
             key,
@@ -562,8 +564,9 @@ async fn test_and_merge(
             *n,
             &format!("Testing together with {} in #{draft}.", refs(*n)),
         )
-        .await?;
-    }
+        .await
+    }))
+    .await?;
 
     let head = &batch.steps.last().expect("a batch has PRs").1.sha;
     let opened = Instant::now();
@@ -598,15 +601,16 @@ async fn test_and_merge(
         Tested::Failed(names) => {
             lane.batch_failed(members);
             let why = format!("required checks failed: {}", names.join(", "));
-            for n in members {
+            try_join_all(members.iter().map(|n| async {
                 record(ctx, key, *n, "batch-failed", &why).await?;
                 gh.sticky_comment(
                     repo,
                     *n,
                     &format!("The batch with {} failed: {why}. Mergepatrol now tests these PRs in smaller batches, to find the one that broke it.", refs(*n)),
                 )
-                .await?;
-            }
+                .await
+            }))
+            .await?;
             Ok(())
         }
         Tested::Passed => merge_batch(ctx, settings, gh, key, snap, lane, batch).await,

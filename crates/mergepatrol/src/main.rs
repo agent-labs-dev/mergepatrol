@@ -36,6 +36,10 @@ async fn main() -> Result<()> {
             _ => anyhow::bail!("usage: mergepatrol job --out <dir> | --remote <link>"),
         };
     }
+    if args.get(1).map(String::as_str) == Some("--version") {
+        println!("mergepatrol {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if let [_, cmd, url] = args.as_slice()
         && cmd == "hosted-manifest"
     {

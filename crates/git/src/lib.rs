@@ -315,6 +315,16 @@ impl Git {
             .to_owned())
     }
 
+    /// The objects reachable from `head` but not from `base`: commits, trees, and blobs.
+    pub async fn objects(&self, wt: &Path, base: &str, head: &str) -> Result<Vec<String>> {
+        let range = format!("{base}..{head}");
+        Ok(lines(
+            &self
+                .run(wt, &["rev-list", "--objects", "--no-object-names", &range])
+                .await?,
+        ))
+    }
+
     pub async fn read_blob(&self, wt: &Path, sha: &str) -> Result<Vec<u8>> {
         self.output(wt, &["cat-file", "blob", sha]).await
     }
@@ -426,5 +436,50 @@ mod tests {
             }
         );
         assert_eq!(changes[2].mode, "100755");
+    }
+
+    fn sh(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    fn commit(dir: &Path, file: &str, content: &str) -> String {
+        std::fs::write(dir.join(file), content).unwrap();
+        sh(dir, &["add", file]);
+        sh(dir, &["commit", "-q", "-m", file]);
+        sh(dir, &["rev-parse", "HEAD"])
+    }
+
+    /// What `publish` relies on to skip uploads: a rebase makes a new blob only for a file both
+    /// sides changed.
+    #[tokio::test]
+    async fn a_rebase_reuses_the_blobs_of_the_files_only_the_pr_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        sh(dir, &["init", "-q", "-b", "main"]);
+        commit(dir, "both.txt", "1\n2\n3\n4\n5\n");
+        let base = commit(dir, "base.txt", "base\n");
+        commit(dir, "pr.txt", "pr\n");
+        let head = commit(dir, "both.txt", "1\n2\n3\n4\npr\n");
+        sh(dir, &["checkout", "-q", "--detach", &base]);
+        let trunk = commit(dir, "both.txt", "trunk\n2\n3\n4\n5\n");
+        sh(dir, &["checkout", "-q", "--detach", &head]);
+        assert_eq!(Git.rebase(dir, &trunk).await.unwrap(), RebaseStep::Done);
+
+        let known: Vec<String> = Git.objects(dir, &trunk, &head).await.unwrap();
+        let commits = Git.commits(dir, &trunk, "HEAD").await.unwrap();
+        let new: Vec<&str> = commits
+            .iter()
+            .flat_map(|c| &c.changes)
+            .filter(|c| !known.contains(c.sha.as_ref().unwrap()))
+            .map(|c| c.path.as_str())
+            .collect();
+        assert_eq!(new, ["both.txt"]);
     }
 }
