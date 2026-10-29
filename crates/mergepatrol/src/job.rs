@@ -66,7 +66,7 @@ fn event(events: &mut Vec<JobEvent>, kind: &str, message: impl Into<String>) {
 async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>) -> Result<()> {
     let git = Git;
     git.init(dir, &spec.clone_url).await?;
-    git.fetch(
+    git.fetch_pr_side(
         dir,
         &spec.token,
         &[
@@ -76,6 +76,8 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             ),
             &format!("+refs/heads/{}:refs/mergepatrol/head", spec.head_ref),
         ],
+        &spec.trunk_sha,
+        &spec.head_sha,
     )
     .await?;
     for sha in [&spec.head_sha, &spec.trunk_sha] {

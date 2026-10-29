@@ -61,8 +61,55 @@ impl Git {
     /// Fetches `refspecs`. The token goes in through the environment, not the arguments,
     /// so it does not show in `ps`. An empty token fetches without auth.
     pub async fn fetch(&self, repo: &Path, token: &str, refspecs: &[&str]) -> Result<()> {
+        self.fetch_with(repo, token, &[], refspecs).await
+    }
+
+    /// Fetches `refspecs` shallow, then deeper, until it has `base` and `head`, and no commit of
+    /// `base..head` is cut off: a rebase replays them, and needs no more history. Unrelated
+    /// histories, and commits no branch has anymore, come in full.
+    pub async fn fetch_pr_side(
+        &self,
+        repo: &Path,
+        token: &str,
+        refspecs: &[&str],
+        base: &str,
+        head: &str,
+    ) -> Result<()> {
+        let shallow = repo.join(
+            self.run(repo, &["rev-parse", "--git-path", "shallow"])
+                .await?
+                .trim(),
+        );
+        let range = format!("{base}..{head}");
+        let mut depth = 64;
+        loop {
+            let flag = format!("--depth={depth}");
+            self.fetch_with(repo, token, &[&flag], refspecs).await?;
+            // Missing once the whole history is here.
+            let Ok(cut) = tokio::fs::read_to_string(&shallow).await else {
+                return Ok(());
+            };
+            // An error: the branches moved on, and `base` or `head` is deeper.
+            if let Ok(pr_side) = self.run(repo, &["rev-list", &range]).await
+                && !pr_side.lines().any(|c| cut.lines().any(|s| s == c))
+            {
+                return Ok(());
+            }
+            depth *= 4;
+        }
+    }
+
+    async fn fetch_with(
+        &self,
+        repo: &Path,
+        token: &str,
+        flags: &[&str],
+        refspecs: &[&str],
+    ) -> Result<()> {
         use base64::Engine;
-        let mut args = vec!["fetch", "-q", "--no-tags", "--force", "origin"];
+        let mut args = vec!["fetch", "-q", "--no-tags", "--force"];
+        args.extend(flags);
+        args.push("origin");
         args.extend(refspecs);
         let mut cmd = self.git(repo, &args);
         if !token.is_empty() {
