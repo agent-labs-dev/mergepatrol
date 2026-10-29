@@ -123,12 +123,7 @@ impl Installation {
     pub async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         let mut checks = Checks::default();
 
-        let runs = self
-            .all_pages(
-                &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
-                "check_runs",
-            )
-            .await?;
+        let runs = self.check_runs(repo, sha).await?;
         for run in &runs {
             let state = match (run["status"].as_str(), run["conclusion"].as_str()) {
                 (Some("completed"), Some("success" | "neutral" | "skipped")) => CheckState::Passed,
@@ -156,6 +151,59 @@ impl Installation {
 
         Ok(checks)
     }
+}
+
+impl Installation {
+    /// The check runs on `sha`, without those of a workflow run that a later run of the same
+    /// workflow replaced. A push that triggers a workflow twice cancels the first run, and its
+    /// gate jobs still fail.
+    async fn check_runs(&self, repo: &RepoName, sha: &str) -> Result<Vec<Value>> {
+        let runs = self
+            .all_pages(
+                &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
+                "check_runs",
+            )
+            .await?;
+        if !runs.iter().any(|r| r["app"]["slug"] == "github-actions") {
+            return Ok(runs);
+        }
+        let workflow_runs = self
+            .all_pages(
+                &format!("/repos/{repo}/actions/runs?head_sha={sha}"),
+                "workflow_runs",
+            )
+            .await?;
+        let replaced = replaced_suites(&workflow_runs);
+        Ok(runs
+            .into_iter()
+            .filter(|r| {
+                r["check_suite"]["id"]
+                    .as_u64()
+                    .is_none_or(|id| !replaced.contains(&id))
+            })
+            .collect())
+    }
+}
+
+/// The check suites of the workflow runs that a later run of the same workflow replaced.
+fn replaced_suites(workflow_runs: &[Value]) -> Vec<u64> {
+    let mut latest: BTreeMap<u64, u64> = BTreeMap::new();
+    for w in workflow_runs {
+        if let (Some(workflow), Some(id)) = (w["workflow_id"].as_u64(), w["id"].as_u64()) {
+            let newest = latest.entry(workflow).or_insert(id);
+            *newest = (*newest).max(id);
+        }
+    }
+    workflow_runs
+        .iter()
+        .filter(|w| {
+            w["workflow_id"]
+                .as_u64()
+                .and_then(|workflow| latest.get(&workflow))
+                .is_some_and(|newest| w["id"].as_u64() != Some(*newest))
+        })
+        .filter_map(|w| w["check_suite_id"].as_u64())
+        .collect()
 }
 
 /// The most a page of a list holds.
@@ -201,12 +249,7 @@ impl Installation {
         names: &[String],
     ) -> Result<Vec<CheckFailure>> {
         let mut found: BTreeMap<String, String> = BTreeMap::new();
-        let runs = self
-            .all_pages(
-                &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
-                "check_runs",
-            )
-            .await?;
+        let runs = self.check_runs(repo, sha).await?;
         for run in &runs {
             let Some(name) = run["name"]
                 .as_str()
@@ -529,6 +572,7 @@ mod tests {
         );
         let (gh, requests) = crate::app::fake::serve(vec![
             (200, "", Box::leak(runs.into_boxed_str())),
+            (200, "", r#"{"total_count":0,"workflow_runs":[]}"#),
             (200, "", "Integration suite failed"),
             (200, "", "FAIL auth.test.ts > reads the user once"),
             (200, "", r#"{"total_count":0,"statuses":[]}"#),
@@ -543,11 +587,41 @@ mod tests {
         assert_eq!(names, ["Integration Tests", "Integration Tests / shard-2"]);
         assert!(failures[1].details.contains("FAIL auth.test.ts"));
         assert_eq!(
-            requests.lock().unwrap()[1..3],
+            requests.lock().unwrap()[2..4],
             [
                 "GET /repos/o/r/actions/jobs/1/logs HTTP/1.1",
                 "GET /repos/o/r/actions/jobs/3/logs HTTP/1.1",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_that_a_later_run_replaced_does_not_count() {
+        // Two pushes in a second ran the workflow twice. The first run was cancelled, and its
+        // gate failed; the second still runs, and has no gate yet.
+        let runs = r#"{"total_count":3,"check_runs":[
+            {"name":"Integration Tests / shard-1","status":"in_progress","check_suite":{"id":20},"app":{"slug":"github-actions"}},
+            {"name":"Integration Tests","status":"completed","conclusion":"failure","check_suite":{"id":10},"app":{"slug":"github-actions"}},
+            {"name":"Lint","status":"completed","conclusion":"failure","check_suite":{"id":30},"app":{"slug":"github-actions"}}]}"#;
+        let workflow_runs = r#"{"total_count":3,"workflow_runs":[
+            {"id":2,"workflow_id":7,"check_suite_id":20},
+            {"id":1,"workflow_id":7,"check_suite_id":10},
+            {"id":3,"workflow_id":8,"check_suite_id":30}]}"#;
+        let (gh, _) = crate::app::fake::serve(vec![
+            (200, "", runs),
+            (200, "", workflow_runs),
+            (200, "", r#"{"total_count":0,"statuses":[]}"#),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let checks = gh.checks(&repo, "abc").await.unwrap();
+        assert_eq!(
+            checks.verdict(&["Integration Tests".into()]),
+            (CheckState::Pending, vec!["Integration Tests".to_owned()])
+        );
+        assert_eq!(
+            checks.verdict(&["Lint".into()]),
+            (CheckState::Failed, vec!["Lint".to_owned()])
         );
     }
 
