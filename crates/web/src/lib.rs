@@ -260,6 +260,28 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn a_repo_with_a_slash_in_its_owner_is_refused(pool: PgPool) {
+        let (router, cookie) = signed_in(pool).await;
+        let put = |path: &str| {
+            Request::put(path)
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap()
+        };
+        let status =
+            |req: Request<Body>| async { router.clone().oneshot(req).await.unwrap().status() };
+        assert_eq!(
+            status(put("/api/w/1/repos/o%2Fx/y")).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(put("/api/w/1/repos/o/y")).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn signed_out_gets_nothing(pool: PgPool) {
         let (router, _) = signed_in(pool).await;
         assert_eq!(

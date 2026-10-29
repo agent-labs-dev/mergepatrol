@@ -659,17 +659,24 @@ impl Store for PgStore {
         )
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(RepoState {
-                    repo: RepoName::parse(row.get("repo")).context("bad repo in store")?,
+        // A row that does not name a repo is skipped, not an error: it would stop every queue.
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let name: String = row.get("repo");
+                let Some(repo) = RepoName::parse(&name) else {
+                    tracing::warn!(repo = %name, "skipping a repo row that names no repo");
+                    return None;
+                };
+                Some(RepoState {
+                    repo,
                     installation_id: row.get::<i64, _>("installation_id") as u64,
                     enabled: row.get("enabled"),
                     has_config: row.get("has_config"),
                     config_error: row.get("config_error"),
                 })
             })
-            .collect()
+            .collect())
     }
 
     async fn set_repo_enabled(
@@ -964,6 +971,27 @@ mod tests {
             Some("b")
         );
         assert_eq!(store.label_head(2, &repo, 7, "mp").await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_row_that_names_no_repo_does_not_hide_the_others(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let a = RepoName::parse("o/a").unwrap();
+        store.set_repo_enabled(9, &a, Some(true)).await.unwrap();
+        // As `PUT /api/w/9/repos/o%2Fx/y` stored it.
+        let bad = RepoName {
+            owner: "o/x".into(),
+            name: "y".into(),
+        };
+        store.set_repo_enabled(9, &bad, Some(true)).await.unwrap();
+        let repos: Vec<String> = store
+            .repos()
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| s.repo.to_string())
+            .collect();
+        assert_eq!(repos, ["o/a"]);
     }
 
     #[sqlx::test(migrations = false)]
