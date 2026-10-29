@@ -2,7 +2,7 @@
 # Sets up Mergepatrol's one environment on GCP, then deploys it: the orchestrator as a Cloud
 # Run service, and each rebase job as an execution of a Cloud Run Job. Safe to run again.
 #
-#   PROJECT=mergepatrol REGION=us-west1 PUBLIC_URL=https://merge.bugpatrol.ai deploy/gcp/bootstrap.sh
+#   PROJECT=mergepatrol REGION=us-west1 PUBLIC_URL=https://mergepatrol.ai deploy/gcp/bootstrap.sh
 #
 # The project must exist with billing linked. After this, deploys run from cloudbuild.yaml.
 set -euo pipefail
@@ -10,7 +10,7 @@ set -euo pipefail
 PROJECT=${PROJECT:-mergepatrol}
 # A region with Cloud Run domain mappings, near nebula's us-west2.
 REGION=${REGION:-us-west1}
-PUBLIC_URL=${PUBLIC_URL:-https://merge.bugpatrol.ai}
+PUBLIC_URL=${PUBLIC_URL:-https://mergepatrol.ai}
 SQL=mergepatrol
 DB=mergepatrol
 DB_USER=mergepatrol
@@ -73,8 +73,9 @@ cat <<EOF
 Deployed. Left to do by hand:
   1. Map the domain: gcloud beta run domain-mappings create --project=$PROJECT --region=$REGION \\
        --service=mergepatrol --domain=${PUBLIC_URL#https://}
-     The domain must be verified for your Google account first (Search Console). Then point a
-     CNAME at ghs.googlehosted.com, DNS only: a Cloudflare proxy blocks Google's certificate.
+     The domain must be verified for your Google account first (Search Console). Then add the
+     records it prints (A/AAAA for an apex, a CNAME for a subdomain), DNS only: a Cloudflare
+     proxy blocks Google's certificate.
   2. Read the setup token: gcloud logging read --project=$PROJECT \\
        'resource.labels.service_name="mergepatrol" AND jsonPayload.setup_token:*' --limit=1
      and open $PUBLIC_URL to create the GitHub App.

@@ -3,7 +3,7 @@
 # orchestrator runs once per job. deploy/gcp/bootstrap.sh sets up what this needs.
 substitutions:
   _REGION: us-west1
-  _PUBLIC_URL: https://merge.bugpatrol.ai
+  _PUBLIC_URL: https://mergepatrol.ai
   _REPO: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/mergepatrol
 options:
   dynamicSubstitutions: true
