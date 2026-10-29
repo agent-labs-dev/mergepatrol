@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec};
+use mergepatrol_core::CheckFailure;
+use mergepatrol_executor::protocol::{BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task};
 use mergepatrol_executor::{Executor, LocalExecutor};
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -59,6 +60,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
             max_turns: 5,
             anthropic_api_key: None,
         },
+        task: Default::default(),
     }
 }
 
@@ -81,7 +83,7 @@ async fn clean_rebase_comes_back_as_a_bundle() {
         .run("t1", &spec(&origin, &head, &trunk), &out)
         .await
         .unwrap();
-    assert_eq!(result.outcome, JobOutcome::Rebased, "{result:?}");
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
 
     // The bundle holds one commit on top of the trunk, with both changes.
     let check = tmp.path().join("check");
@@ -118,6 +120,30 @@ async fn conflict_without_a_key_fails_with_the_reason() {
     };
     assert!(reason.contains("no Anthropic API key"), "{reason}");
     assert_eq!(result.events[0].kind, "conflict");
+    assert!(!out.join(BUNDLE_FILE).exists());
+}
+
+#[tokio::test]
+async fn fix_without_a_key_fails_with_the_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.task = Task::FixChecks {
+        failures: vec![CheckFailure {
+            name: "ci".into(),
+            details: "it broke".into(),
+        }],
+    };
+    let out = tmp.path().join("out");
+    let result = executor().run("t3", &spec, &out).await.unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(reason.contains("no Anthropic API key"), "{reason}");
+    assert_eq!(result.events[0].kind, "fixing");
     assert!(!out.join(BUNDLE_FILE).exists());
 }
 
@@ -168,7 +194,7 @@ async fn docker_executor_runs_a_job_in_a_container() {
     daemon.wait().unwrap();
 
     let result = result.unwrap();
-    assert_eq!(result.outcome, JobOutcome::Rebased, "{result:?}");
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
     assert!(out.join(BUNDLE_FILE).exists());
 }
 

@@ -4,8 +4,8 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    EFFORTS, Entry, EntryState, Person, PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings,
-    ResolverSettings,
+    EFFORTS, Entry, EntryState, FixCiSettings, Person, PrSummary, REPO_CONFIG_PATH, RepoName,
+    RepoSettings, ResolverSettings,
 };
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
 use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
@@ -186,6 +186,10 @@ pub struct RepoSettingsView {
     pub model: String,
     pub effort: String,
     pub verify: Vec<String>,
+    /// The agent fixes failed required checks.
+    pub fix_ci: bool,
+    /// The most fixes a PR gets, before it is ejected.
+    pub fix_ci_attempts: u32,
 }
 
 impl From<RepoSettings> for RepoSettingsView {
@@ -196,6 +200,8 @@ impl From<RepoSettings> for RepoSettingsView {
             model: s.resolver.model,
             effort: s.resolver.effort,
             verify: s.verify,
+            fix_ci: s.fix_ci.enabled,
+            fix_ci_attempts: s.fix_ci.attempts,
         }
     }
 }
@@ -215,6 +221,10 @@ impl From<RepoSettingsView> for RepoSettings {
                 .map(|c| c.trim().to_owned())
                 .filter(|c| !c.is_empty())
                 .collect(),
+            fix_ci: FixCiSettings {
+                enabled: v.fix_ci,
+                attempts: v.fix_ci_attempts,
+            },
         }
     }
 }
@@ -511,8 +521,13 @@ fn config_pr(
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let fix_ci = match settings.fix_ci.allowed() {
+        0 => "off".to_owned(),
+        1 => "on, one attempt".to_owned(),
+        n => format!("on, up to {n} attempts"),
+    };
     let list = format!(
-        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: `{}`, effort `{}`\n- Verify commands: {verify}",
+        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: `{}`, effort `{}`\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}",
         settings.label, settings.batch_size, settings.resolver.model, settings.resolver.effort
     );
     let skills = if skills.is_empty() {

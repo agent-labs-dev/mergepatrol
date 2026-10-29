@@ -106,11 +106,36 @@ function Form({
           </select>
         </Field>
       </div>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <Field id={`${id}-fix`} label="Fix failed checks" hint="The agent commits a fix">
+          <label className="flex h-9 items-center gap-2 text-fg-2">
+            <input
+              id={`${id}-fix`}
+              type="checkbox"
+              checked={draft.fix_ci}
+              onChange={(e) => set({ fix_ci: e.target.checked })}
+            />
+            On
+          </label>
+        </Field>
+        <Field id={`${id}-attempts`} label="Fix attempts" hint="Before the PR is ejected">
+          <input
+            id={`${id}-attempts`}
+            type="number"
+            min={1}
+            max={5}
+            disabled={!draft.fix_ci}
+            value={draft.fix_ci_attempts}
+            onChange={(e) => set({ fix_ci_attempts: Number(e.target.value) })}
+            className={`${field} w-full disabled:opacity-50`}
+          />
+        </Field>
+      </div>
       <div className="mt-3">
         <Field
           id={`${id}-verify`}
           label="Verify commands"
-          hint="One per line. They run after an agent resolution"
+          hint="One per line. They run after the agent resolves or fixes"
         >
           <textarea
             id={`${id}-verify`}

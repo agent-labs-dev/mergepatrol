@@ -204,6 +204,7 @@ mod tests {
                     effort: "medium".into(),
                 },
                 verify: Vec::new(),
+                fix_ci: Default::default(),
             },
             analytics: Analytics::default(),
         };

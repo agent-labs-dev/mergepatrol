@@ -10,6 +10,12 @@ pub enum Phase {
         head: String,
         base: String,
     },
+    /// The required checks `failed` on `head`: the agent commits a fix on top of it.
+    Fixing {
+        head: String,
+        base: String,
+        failed: Vec<String>,
+    },
     Merging {
         head: String,
     },
@@ -18,7 +24,15 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EjectReason {
     RebaseFailed(String),
-    ChecksFailed(Vec<String>),
+    /// `fixes` is how many fixes were tried before.
+    ChecksFailed {
+        names: Vec<String>,
+        fixes: u32,
+    },
+    FixFailed {
+        checks: Vec<String>,
+        reason: String,
+    },
     /// The trunk moved twice while the PR was in flight. Someone merges outside the queue.
     BaseMovedOutsideQueue,
     MergeRejected(String),
@@ -28,7 +42,19 @@ impl std::fmt::Display for EjectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RebaseFailed(r) => write!(f, "the rebase failed: {r}"),
-            Self::ChecksFailed(names) => write!(f, "required checks failed: {}", names.join(", ")),
+            Self::ChecksFailed { names, fixes } => {
+                write!(f, "required checks failed: {}", names.join(", "))?;
+                match fixes {
+                    0 => Ok(()),
+                    1 => write!(f, ", after a fix"),
+                    n => write!(f, ", after {n} fixes"),
+                }
+            }
+            Self::FixFailed { checks, reason } => write!(
+                f,
+                "required checks failed: {}, and the fix failed: {reason}",
+                checks.join(", ")
+            ),
             Self::BaseMovedOutsideQueue => {
                 write!(
                     f,
@@ -49,6 +75,11 @@ pub enum Event {
     RebaseFailed(String),
     ChecksPassed,
     ChecksFailed(Vec<String>),
+    /// The fix is published: `head` is the new PR head, on the same base.
+    Fixed {
+        head: String,
+    },
+    FixFailed(String),
     /// The PR head is no longer the SHA we published: the author pushed.
     HeadMoved,
     /// The trunk is no longer the SHA we rebased onto.
@@ -72,14 +103,20 @@ pub struct Job {
     pub number: PrNumber,
     pub phase: Phase,
     pub base_moves: u8,
+    /// How many times failed checks may be fixed. 0 ejects on the first failure.
+    pub fix_attempts: u32,
+    /// The fixes tried since the author last pushed.
+    pub fixes: u32,
 }
 
 impl Job {
-    pub fn start(number: PrNumber) -> Self {
+    pub fn start(number: PrNumber, fix_attempts: u32) -> Self {
         Self {
             number,
             phase: Phase::Rebasing,
             base_moves: 0,
+            fix_attempts,
+            fixes: 0,
         }
     }
 
@@ -94,8 +131,36 @@ impl Job {
                 let head = head.clone();
                 self.with(P::Merging { head })
             }
+            (P::AwaitingChecks { head, base }, E::ChecksFailed(failed))
+                if self.fixes < self.fix_attempts =>
+            {
+                let phase = P::Fixing {
+                    head: head.clone(),
+                    base: base.clone(),
+                    failed,
+                };
+                Transition::Continue(Job {
+                    phase,
+                    fixes: self.fixes + 1,
+                    ..self
+                })
+            }
             (P::AwaitingChecks { .. }, E::ChecksFailed(names)) => {
-                Transition::Ejected(EjectReason::ChecksFailed(names))
+                Transition::Ejected(EjectReason::ChecksFailed {
+                    names,
+                    fixes: self.fixes,
+                })
+            }
+
+            (P::Fixing { base, .. }, E::Fixed { head }) => {
+                let base = base.clone();
+                self.with(P::AwaitingChecks { head, base })
+            }
+            (P::Fixing { failed, .. }, E::FixFailed(reason)) => {
+                Transition::Ejected(EjectReason::FixFailed {
+                    checks: failed.clone(),
+                    reason,
+                })
             }
 
             (P::Merging { .. }, E::Merged) => Transition::Merged,
@@ -103,7 +168,12 @@ impl Job {
                 Transition::Ejected(EjectReason::MergeRejected(r))
             }
 
-            (_, E::HeadMoved) => self.with(P::Rebasing),
+            // New code from the author earns new fixes.
+            (_, E::HeadMoved) => Transition::Continue(Job {
+                phase: P::Rebasing,
+                fixes: 0,
+                ..self
+            }),
             (_, E::BaseMoved) => {
                 if self.base_moves >= 1 {
                     Transition::Ejected(EjectReason::BaseMovedOutsideQueue)
@@ -142,7 +212,7 @@ mod tests {
 
     #[test]
     fn happy_path() {
-        let job = rebased(Job::start(7));
+        let job = rebased(Job::start(7, 0));
         let Transition::Continue(job) = job.step(Event::ChecksPassed) else {
             panic!()
         };
@@ -152,7 +222,7 @@ mod tests {
 
     #[test]
     fn base_moves_once_then_ejects() {
-        let job = rebased(Job::start(7));
+        let job = rebased(Job::start(7, 0));
         let Transition::Continue(job) = job.step(Event::BaseMoved) else {
             panic!()
         };
@@ -166,7 +236,7 @@ mod tests {
 
     #[test]
     fn author_push_restarts_without_counting_as_churn() {
-        let job = rebased(Job::start(7));
+        let job = rebased(Job::start(7, 0));
         let Transition::Continue(job) = job.step(Event::HeadMoved) else {
             panic!()
         };
@@ -177,9 +247,81 @@ mod tests {
         };
     }
 
+    fn failed(job: Job) -> Transition {
+        job.step(Event::ChecksFailed(vec!["ci".into()]))
+    }
+
+    #[test]
+    fn without_fixes_a_failed_check_ejects() {
+        assert_eq!(
+            failed(rebased(Job::start(7, 0))),
+            Transition::Ejected(EjectReason::ChecksFailed {
+                names: vec!["ci".into()],
+                fixes: 0
+            })
+        );
+    }
+
+    #[test]
+    fn failed_checks_are_fixed_until_the_attempts_run_out() {
+        let mut job = rebased(Job::start(7, 2));
+        for n in 1..=2 {
+            let Transition::Continue(fixing) = failed(job) else {
+                panic!()
+            };
+            assert!(matches!(&fixing.phase, Phase::Fixing { base, .. } if base == "b1"));
+            let Transition::Continue(fixed) = fixing.step(Event::Fixed {
+                head: format!("f{n}"),
+            }) else {
+                panic!()
+            };
+            assert_eq!(
+                fixed.phase,
+                Phase::AwaitingChecks {
+                    head: format!("f{n}"),
+                    base: "b1".into()
+                }
+            );
+            job = fixed;
+        }
+        assert_eq!(
+            failed(job),
+            Transition::Ejected(EjectReason::ChecksFailed {
+                names: vec!["ci".into()],
+                fixes: 2
+            })
+        );
+    }
+
+    #[test]
+    fn a_fix_that_fails_ejects() {
+        let Transition::Continue(job) = failed(rebased(Job::start(7, 2))) else {
+            panic!()
+        };
+        assert_eq!(
+            job.step(Event::FixFailed("flaky".into())),
+            Transition::Ejected(EjectReason::FixFailed {
+                checks: vec!["ci".into()],
+                reason: "flaky".into()
+            })
+        );
+    }
+
+    #[test]
+    fn an_author_push_resets_the_fixes() {
+        let Transition::Continue(job) = failed(rebased(Job::start(7, 1))) else {
+            panic!()
+        };
+        let Transition::Continue(job) = job.step(Event::HeadMoved) else {
+            panic!()
+        };
+        assert_eq!(job.fixes, 0);
+        assert!(matches!(failed(rebased(job)), Transition::Continue(_)));
+    }
+
     #[test]
     fn dismissed_approval_holds() {
-        let job = rebased(Job::start(7));
+        let job = rebased(Job::start(7, 0));
         assert!(matches!(
             job.step(Event::NeedsApproval),
             Transition::Held(_)

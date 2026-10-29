@@ -1,6 +1,7 @@
 //! What crosses the sandbox boundary. The orchestrator writes a `JobSpec` to the job's stdin.
 //! The job writes `result.json`, and on success `result.bundle`, to its output directory.
 
+use mergepatrol_core::CheckFailure;
 use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
@@ -23,6 +24,18 @@ pub struct JobSpec {
     /// The repo's verify commands, from its config file.
     pub verify: Vec<String>,
     pub resolver: ResolverSpec,
+    #[serde(default)]
+    pub task: Task,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Task {
+    /// Rebase `head_sha` onto `trunk_sha`, and resolve the conflicts.
+    #[default]
+    Rebase,
+    /// Commit a fix for `failures` on top of `head_sha`, which already sits on `trunk_sha`.
+    FixChecks { failures: Vec<CheckFailure> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -44,8 +57,9 @@ pub struct JobResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum JobOutcome {
-    /// The rebased branch is in `result.bundle`, as `refs/heads/result`.
-    Rebased,
+    /// The rebased or fixed branch is in `result.bundle`, as `refs/heads/result`.
+    #[serde(alias = "rebased")]
+    Done,
     Failed {
         reason: String,
     },

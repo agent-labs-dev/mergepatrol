@@ -8,12 +8,20 @@ mod repo_config;
 pub use job::{EjectReason, Event, Job, Phase, Transition};
 pub use lane::{Bisect, Candidate, Entry, EntryState, Lane, LaneChange, Person, PrSummary, Review};
 pub use repo_config::{
-    EFFORTS, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
+    EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
 };
 
 use serde::{Deserialize, Serialize};
 
 pub type PrNumber = u64;
+
+/// A required check that failed, with what GitHub shows of why: the check's output, its
+/// annotations, and the end of its log. The fix agent reads it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckFailure {
+    pub name: String,
+    pub details: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct RepoName {

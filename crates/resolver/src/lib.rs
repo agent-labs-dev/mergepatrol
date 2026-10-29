@@ -1,5 +1,5 @@
-//! Resolves the conflicts of one commit in a stopped rebase. The agent edits files only:
-//! the caller checks the result, commits it, and goes on with the rebase.
+//! The agent: resolves the conflicts of one commit in a stopped rebase, or fixes the failed
+//! checks of a PR. It edits files only: the caller checks the result and commits it.
 
 mod claude;
 
@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use mergepatrol_core::CheckFailure;
 
 pub struct ResolveRequest<'a> {
     pub workdir: &'a Path,
@@ -23,13 +24,24 @@ pub struct ResolveRequest<'a> {
     pub transcript: &'a Path,
 }
 
+pub struct FixRequest<'a> {
+    pub workdir: &'a Path,
+    pub failures: &'a [CheckFailure],
+    pub pr_title: &'a str,
+    pub pr_body: &'a str,
+    pub trunk: &'a str,
+    pub verify_commands: &'a [String],
+    pub transcript: &'a Path,
+}
+
 #[derive(Debug)]
 pub enum Resolution {
     Resolved {
         turns: u32,
         cost_usd: Option<f64>,
     },
-    /// The agent was not sure, and said why. Mergepatrol ejects the PR rather than guess.
+    /// The agent was not sure, or the failure is not the PR's to fix, and said why. Mergepatrol
+    /// ejects the PR rather than guess.
     GaveUp(String),
 }
 
@@ -39,9 +51,24 @@ pub trait Resolver: Send + Sync {
     fn name(&self) -> String;
 
     async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution>;
+
+    async fn fix(&self, req: FixRequest<'_>) -> Result<Resolution>;
 }
 
 pub(crate) const GIVE_UP: &str = "MERGEPATROL_GIVE_UP:";
+
+/// The `verify` paragraph of a prompt.
+fn verify_section(commands: &[String], after: &str) -> String {
+    if commands.is_empty() {
+        return "This repo has no verify commands.".to_owned();
+    }
+    let cmds = commands
+        .iter()
+        .map(|c| format!("- `{c}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("After you {after}, run these commands. They must pass:\n{cmds}")
+}
 
 pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
     let files = req
@@ -50,17 +77,7 @@ pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
         .map(|f| format!("- {f}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let verify = if req.verify_commands.is_empty() {
-        "This repo has no verify commands.".to_owned()
-    } else {
-        let cmds = req
-            .verify_commands
-            .iter()
-            .map(|c| format!("- `{c}`"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("After you resolve, run these commands. They must pass:\n{cmds}")
-    };
+    let verify = verify_section(req.verify_commands, "resolve");
     format!(
         "You are resolving a rebase conflict for a merge queue.
 
@@ -94,5 +111,47 @@ If you cannot resolve the conflict with confidence, stop and reply with one line
         title = req.pr_title,
         body = req.pr_body,
         commit = req.commit_message,
+    )
+}
+
+pub(crate) fn fix_prompt(req: &FixRequest<'_>) -> String {
+    let failures = req
+        .failures
+        .iter()
+        .map(|f| format!("## {}\n\n{}", f.name, f.details.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let verify = verify_section(req.verify_commands, "fix");
+    format!(
+        "You are fixing the failed CI checks of a pull request for a merge queue.
+
+The pull request sits on top of `{trunk}`, and the checks that must pass before it merges failed.
+
+Pull request: {title}
+
+{body}
+
+What GitHub shows of the failures:
+
+{failures}
+
+Find out why they fail, and change the code so that they pass. Use `git log`, `git show` and \
+`git diff {trunk}...HEAD` to see what the pull request changes.
+
+Rules:
+- Make the smallest change that fixes the failure, in the spirit of the pull request.
+- Do not delete, skip or weaken tests or checks to make them pass.
+- Do not edit `.github/` or `.mergepatrol/`: Mergepatrol rejects the fix if you do.
+- Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
+- Do not refactor or improve unrelated code.
+
+{verify}
+
+Give up rather than guess when the failure is not the pull request's to fix: a flaky test, an \
+outage, a missing secret, a failure that the logs do not explain, or a fix that changes what the \
+pull request means. Then stop and reply with one line: `{GIVE_UP} <the reason>`.",
+        trunk = req.trunk,
+        title = req.pr_title,
+        body = req.pr_body,
     )
 }

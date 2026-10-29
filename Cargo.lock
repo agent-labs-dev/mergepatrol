@@ -1267,6 +1267,7 @@ dependencies = [
  "async-trait",
  "axum",
  "getrandom 0.4.3",
+ "mergepatrol-core",
  "reqwest",
  "serde",
  "serde_json",
@@ -1308,6 +1309,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "mergepatrol-core",
  "reqwest",
  "serde_json",
  "tempfile",

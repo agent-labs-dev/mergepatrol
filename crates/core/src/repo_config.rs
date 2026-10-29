@@ -16,14 +16,44 @@ pub struct RepoSettings {
     /// The most PRs tested together. 1 tests and merges one PR at a time.
     pub batch_size: usize,
     pub resolver: ResolverSettings,
-    /// Run after an agent resolution, before the publish.
+    /// Run after an agent resolution or fix, before the publish.
     pub verify: Vec<String>,
+    pub fix_ci: FixCiSettings,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolverSettings {
     pub model: String,
     pub effort: String,
+}
+
+/// When a PR's required checks fail, the agent commits a fix and the checks run again, up to
+/// `attempts` times, before the PR is ejected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixCiSettings {
+    pub enabled: bool,
+    pub attempts: u32,
+}
+
+/// On, with two fixes: most failures a fix can mend take one, and a second covers a first that
+/// went halfway.
+impl Default for FixCiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            attempts: 2,
+        }
+    }
+}
+
+impl FixCiSettings {
+    /// The most fix attempts that "within reason" allows.
+    pub const MAX_ATTEMPTS: u32 = 5;
+
+    /// How many fixes a PR gets: none when off.
+    pub fn allowed(&self) -> u32 {
+        if self.enabled { self.attempts } else { 0 }
+    }
 }
 
 pub struct Labels {
@@ -71,6 +101,8 @@ struct RepoConfig {
     #[serde(default)]
     resolver: ResolverConfig,
     verify: Option<Vec<String>>,
+    #[serde(default)]
+    fix_ci: FixCiConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -78,6 +110,13 @@ struct RepoConfig {
 struct ResolverConfig {
     model: Option<String>,
     effort: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FixCiConfig {
+    enabled: Option<bool>,
+    attempts: Option<u32>,
 }
 
 /// The file as Mergepatrol writes it: every setting spelled out.
@@ -116,6 +155,10 @@ impl RepoSettings {
                     .unwrap_or_else(|| defaults.resolver.effort.clone()),
             },
             verify: config.verify.unwrap_or_else(|| defaults.verify.clone()),
+            fix_ci: FixCiSettings {
+                enabled: config.fix_ci.enabled.unwrap_or(defaults.fix_ci.enabled),
+                attempts: config.fix_ci.attempts.unwrap_or(defaults.fix_ci.attempts),
+            },
         };
         settings
             .check()
@@ -146,6 +189,13 @@ impl RepoSettings {
         }
         if self.verify.iter().any(|c| c.trim().is_empty()) {
             return Err("verify: a command is empty".into());
+        }
+        if !(1..=FixCiSettings::MAX_ATTEMPTS).contains(&self.fix_ci.attempts) {
+            return Err(format!(
+                "fix_ci.attempts: {} is not between 1 and {}; turn it off with enabled: false",
+                self.fix_ci.attempts,
+                FixCiSettings::MAX_ATTEMPTS
+            ));
         }
         Ok(())
     }
@@ -184,6 +234,7 @@ mod tests {
                 effort: "medium".into(),
             },
             verify: vec![],
+            fix_ci: FixCiSettings::default(),
         }
     }
 
@@ -204,6 +255,19 @@ mod tests {
         assert_eq!(s.resolver.model, "claude-opus-5-5");
         assert_eq!(s.label, "mergepatrol");
         assert_eq!(s.verify, ["cargo check"]);
+        assert_eq!(s.fix_ci, defaults().fix_ci);
+    }
+
+    #[test]
+    fn fix_ci_is_on_unless_the_file_turns_it_off() {
+        let s =
+            RepoSettings::from_file(Some("version: 1\nfix_ci:\n  enabled: false\n"), &defaults())
+                .unwrap();
+        assert_eq!(s.fix_ci.allowed(), 0);
+        assert_eq!(s.fix_ci.attempts, 2);
+        let s = RepoSettings::from_file(Some("version: 1\nfix_ci: { attempts: 3 }\n"), &defaults())
+            .unwrap();
+        assert_eq!(s.fix_ci.allowed(), 3);
     }
 
     #[test]
@@ -211,6 +275,7 @@ mod tests {
         let mut s = defaults();
         s.label = "queue".into();
         s.verify = vec!["cargo check".into(), "pnpm test -- --run".into()];
+        s.fix_ci.enabled = false;
         assert_eq!(
             RepoSettings::from_file(Some(&s.to_yaml()), &defaults()),
             Ok(s)
@@ -225,6 +290,9 @@ mod tests {
             "version: 1\nbatch_size: 0\n",
             "version: 1\nresolver: { effort: extreme }\n",
             "version: 1\nlabel: ''\n",
+            "version: 1\nfix_ci: { attempts: 0 }\n",
+            "version: 1\nfix_ci: { attempts: 6 }\n",
+            "version: 1\nfix_ci: { retries: 1 }\n",
             "{",
         ] {
             assert!(

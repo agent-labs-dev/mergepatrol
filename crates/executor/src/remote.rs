@@ -392,6 +392,7 @@ mod tests {
                 max_turns: 1,
                 anthropic_api_key: None,
             },
+            task: Default::default(),
         }
     }
 
@@ -427,7 +428,7 @@ mod tests {
                 let dir = tempfile::tempdir()?;
                 tokio::fs::write(dir.path().join(BUNDLE_FILE), b"0123456789").await?;
                 let result = JobResult {
-                    outcome: JobOutcome::Rebased,
+                    outcome: JobOutcome::Done,
                     events: vec![],
                 };
                 tokio::fs::write(dir.path().join(RESULT_FILE), serde_json::to_vec(&result)?)
@@ -476,7 +477,7 @@ mod tests {
         let (ex, cancelled) = executor(Behave::Report).await;
         let out = tempfile::tempdir().unwrap();
         let result = ex.run("j", &spec(), out.path()).await.unwrap();
-        assert_eq!(result.outcome, JobOutcome::Rebased);
+        assert_eq!(result.outcome, JobOutcome::Done);
         assert_eq!(
             std::fs::read(out.path().join(BUNDLE_FILE)).unwrap(),
             b"0123456789"

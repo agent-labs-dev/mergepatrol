@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use mergepatrol_core::{LabelSpec, Labels, ResolverSettings};
+use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_github::{BranchMerge, Checks, RequiredChecks};
 use mergepatrol_store::{EventRecord, RepoState, SecretRecord, Session, Workspace};
@@ -214,6 +214,21 @@ impl GitHub for Fake {
         Ok(Checks { by_name })
     }
 
+    async fn check_failures(
+        &self,
+        _: &RepoName,
+        _: &str,
+        names: &[String],
+    ) -> Result<Vec<CheckFailure>> {
+        Ok(names
+            .iter()
+            .map(|name| CheckFailure {
+                name: name.clone(),
+                details: "it broke".into(),
+            })
+            .collect())
+    }
+
     async fn merge(
         &self,
         _: &RepoName,
@@ -331,11 +346,15 @@ impl GitHub for Fake {
     }
 }
 
-/// Publishes `<branch>-r<n>` onto the trunk, as a job would, or fails as told.
+/// Publishes `<branch>-r<n>` onto the trunk, as a job would, or fails as told. A fix publishes
+/// `<head>-f<n>`, whose checks pass if `fix_works`.
 struct Scripted {
     gh: Arc<Fake>,
     rebases: Mutex<u32>,
     fail: Option<String>,
+    fixes: Mutex<Vec<Vec<String>>>,
+    fix_works: bool,
+    fix_fails: Option<String>,
 }
 
 impl Scripted {
@@ -344,7 +363,15 @@ impl Scripted {
             gh: gh.clone(),
             rebases: Mutex::new(0),
             fail: None,
+            fixes: Mutex::new(Vec::new()),
+            fix_works: true,
+            fix_fails: None,
         }
+    }
+
+    /// The failed checks each fix was asked to fix.
+    fn fixed(&self) -> Vec<Vec<String>> {
+        self.fixes.lock().unwrap().clone()
     }
 
     fn count(&self) -> u32 {
@@ -353,7 +380,7 @@ impl Scripted {
 }
 
 #[async_trait]
-impl Rebase for Scripted {
+impl Sandbox for Scripted {
     async fn rebase(
         &self,
         _: &LaneKey,
@@ -381,6 +408,34 @@ impl Rebase for Scripted {
             head,
             base: s.trunk.clone(),
         })
+    }
+
+    async fn fix(
+        &self,
+        _: &LaneKey,
+        _: &RepoSnapshot,
+        pr: &PullRequest,
+        _: &RepoSettings,
+        head: &str,
+        _: &str,
+        failures: &[CheckFailure],
+    ) -> Result<Event> {
+        let n = {
+            let mut fixes = self.fixes.lock().unwrap();
+            fixes.push(failures.iter().map(|f| f.name.clone()).collect());
+            fixes.len()
+        };
+        if let Some(reason) = &self.fix_fails {
+            return Ok(Event::FixFailed(reason.clone()));
+        }
+        let mut s = self.gh.state.lock().unwrap();
+        let fixed = format!("{head}-f{n}");
+        s.push(pr.number, &fixed);
+        if self.fix_works {
+            let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+            s.checks_on.insert(fixed.clone(), passing);
+        }
+        Ok(Event::Fixed { head: fixed })
     }
 }
 
@@ -484,6 +539,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                     effort: "medium".into(),
                 },
                 verify: Vec::new(),
+                fix_ci: Default::default(),
             },
             data_dir: PathBuf::new(),
             poll: Duration::from_secs(60),
@@ -717,6 +773,7 @@ async fn the_trunk_moving_twice_outside_the_queue_ejects() {
 #[tokio::test(start_paused = true)]
 async fn a_failed_required_check_ejects() {
     let run = Run::new(Fake::new(|s| {
+        s.config = Some("version: 1\nfix_ci: { enabled: false }\n".into());
         s.add_pr(1);
         s.required = vec!["ci".into()];
         s.checks.insert("ci".into(), CheckState::Failed);
@@ -726,6 +783,70 @@ async fn a_failed_required_check_ejects() {
     assert_eq!(run.labels(1), [FAILED]);
     let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
     assert!(comment.contains("required checks failed: ci"), "{comment}");
+}
+
+fn failing_ci(s: &mut State) {
+    s.add_pr(1);
+    s.required = vec!["ci".into()];
+    s.checks.insert("ci".into(), CheckState::Failed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_required_check_is_fixed_then_merged() {
+    let run = Run::new(Fake::new(failing_ci));
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]]);
+    assert_eq!(
+        run.kinds(1),
+        [
+            "enqueued",
+            "rebasing",
+            "published",
+            "fixing",
+            "published",
+            "merged"
+        ]
+    );
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fixes_that_do_not_mend_the_checks_eject_after_the_attempts() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_works = false;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 2);
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(
+        comment.contains("required checks failed: ci, after 2 fixes"),
+        "{comment}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_config_file_sets_the_fix_attempts() {
+    let mut run = Run::new(Fake::new(|s| {
+        failing_ci(s);
+        s.config = Some("version: 1\nfix_ci: { attempts: 1 }\n".into());
+    }));
+    run.rebase.fix_works = false;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fix_the_agent_gives_up_on_ejects_with_its_reason() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_fails = Some("the agent gave up: a flaky test".into());
+    run.tick().await;
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(
+        comment.contains("the fix failed: the agent gave up: a flaky test"),
+        "{comment}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -845,7 +966,7 @@ async fn a_failed_batch_is_bisected_to_the_pr_that_broke_it() {
     run.drain().await;
     assert_eq!(run.merged(), [1, 2, 4]);
     assert_eq!(run.labels(3), [FAILED]);
-    // 1-2-3-4 failed, 1-2 passed, 3-4 failed, 3 alone failed, then 4 alone.
+    // 1-2-3-4 failed, 1-2 passed, 3-4 failed, 3 alone failed, its fixes too, then 4 alone.
     assert_eq!(run.gh.with(|s| s.drafts.len()), 3);
     assert_eq!(
         run.kinds(3),
@@ -856,6 +977,10 @@ async fn a_failed_batch_is_bisected_to_the_pr_that_broke_it() {
             "batch",
             "batch-failed",
             "rebasing",
+            "published",
+            "fixing",
+            "published",
+            "fixing",
             "published",
             "ejected"
         ]

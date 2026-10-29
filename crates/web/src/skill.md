@@ -17,9 +17,9 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 ## What the queue does
 
-Mergepatrol rebases the PR onto the default branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. The queue only serves PRs that target the default branch, from branches in this repo.
+Mergepatrol rebases the PR onto the default branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The queue only serves PRs that target the default branch, from branches in this repo.
 
-The rebase rewrites the PR branch. Before pushing more commits to a queued PR, fetch it and rebase your work onto the remote branch. A push to a queued PR makes Mergepatrol start the PR over.
+The rebase rewrites the PR branch, and a fix adds a commit to it. Before pushing more commits to a queued PR, fetch it and rebase your work onto the remote branch. A push to a queued PR makes Mergepatrol start the PR over.
 
 ## Reading its status
 
@@ -31,4 +31,4 @@ Mergepatrol keeps one comment on each queued PR up to date. It says one of:
 
 ## Settings
 
-`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver and the `verify` commands. Mergepatrol reads it from the default branch, so a change takes effect once its PR merges.
+`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver, the `verify` commands, and `fix_ci`. Mergepatrol reads it from the default branch, so a change takes effect once its PR merges.
