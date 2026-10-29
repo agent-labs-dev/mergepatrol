@@ -73,6 +73,23 @@ impl Git {
         Ok(())
     }
 
+    /// Deletes the refs that match `patterns`, as `for-each-ref` takes them: none is fine.
+    pub async fn delete_refs(&self, repo: &Path, patterns: &[&str]) -> Result<()> {
+        let mut args = vec!["for-each-ref", "--format=delete %(refname)"];
+        args.extend(patterns);
+        let deletes = self.run(repo, &args).await?;
+        if !deletes.is_empty() {
+            let mut cmd = self.git(repo, &["update-ref", "--stdin"]);
+            input(
+                cmd.stdin(Stdio::piped()),
+                deletes.as_bytes(),
+                "git update-ref",
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Fetches `refspecs`. The token goes in through the environment, not the arguments,
     /// so it does not show in `ps`. An empty token fetches without auth.
     pub async fn fetch(&self, repo: &Path, token: &str, refspecs: &[&str]) -> Result<()> {

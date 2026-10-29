@@ -102,7 +102,7 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
 | `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
-| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts |
+| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
 | `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
 | `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |

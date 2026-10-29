@@ -208,6 +208,8 @@ pub trait Store: Send + Sync {
     /// Only sessions that have not expired.
     async fn session(&self, token_hash: &str) -> Result<Option<Session>>;
     async fn delete_session(&self, token_hash: &str) -> Result<()>;
+    /// Deletes the sessions that expired by `now`, in Unix seconds: how many.
+    async fn delete_expired_sessions(&self, now: i64) -> Result<u64>;
 }
 
 /// Who a secret belongs to.
@@ -949,6 +951,14 @@ impl Store for PgStore {
             .await?;
         Ok(())
     }
+
+    async fn delete_expired_sessions(&self, now: i64) -> Result<u64> {
+        let done = sqlx::query("DELETE FROM sessions WHERE expires_at <= $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -973,6 +983,23 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(again.is_some(), "the lock was not let go");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn only_expired_sessions_are_deleted(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let session = |expires_at| Session {
+            kind: SessionKind::Setup,
+            expires_at,
+        };
+        store.create_session("old", &session(100)).await.unwrap();
+        store.create_session("live", &session(300)).await.unwrap();
+        assert_eq!(store.delete_expired_sessions(200).await.unwrap(), 1);
+        let left: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM sessions")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, ["live"]);
     }
 
     #[sqlx::test(migrations = false)]
