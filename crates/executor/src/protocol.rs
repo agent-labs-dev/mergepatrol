@@ -20,6 +20,8 @@ pub struct JobSpec {
     pub trunk_sha: String,
     pub pr_title: String,
     pub pr_body: String,
+    /// The repo's verify commands, from its config file.
+    pub verify: Vec<String>,
     pub resolver: ResolverSpec,
 }
 

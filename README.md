@@ -41,7 +41,7 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
    1. Enter the setup token from the logs.
    2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
    3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
-   4. In **Repos**, turn on the repos to queue.
+   4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file (below). Merge it, and the repo queues.
    5. In **Settings**, add your Anthropic API key. Mergepatrol checks it with Anthropic, then stores it encrypted.
 
 4. Add the `mergepatrol` label to a PR to queue it.
@@ -69,21 +69,36 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
 | `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64 |
 | `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
-| `MERGEPATROL_LABEL` | `mergepatrol` | The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
+| `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
 | `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
-| `MERGEPATROL_BATCH_SIZE` | `8` | The most PRs tested together. `1` merges one PR at a time |
+| `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
 | `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
-| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's model |
-| `MERGEPATROL_EFFORT` | `medium` | The resolver's effort |
+| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model |
+| `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
 
-A repo can set verify commands in `.mergepatrol/mergepatrol.yml`. They run after an agent resolution, before the publish. Mergepatrol reads this file from the base branch, so a PR cannot change its own checks.
+## Repo settings
+
+Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. Mergepatrol reads the file from there, so a PR cannot change its own settings. A setting the file leaves out takes the default from the table above.
 
 ```yaml
 version: 1
+label: mergepatrol
+batch_size: 8
+resolver:
+  model: claude-opus-5-5
+  effort: medium   # low, medium, high, xhigh or max
 verify:
   - cargo check
 ```
+
+The verify commands run after an agent resolution, before the publish.
+
+A repo queues once its default branch has the file. Mergepatrol looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Repos** override the file, until you choose **Follow the config file**.
+
+The dashboard edits the file through PRs. **Set up** opens a PR that adds the file with the defaults, and **Settings** opens one that changes it. Both come from the branch `mergepatrol/config`: a second change updates the open PR. The queue uses the new settings once the PR merges.
+
+When the file does not parse, the queue pauses, and **Repos** shows why, until the file is fixed.
 
 ## How jobs are isolated
 

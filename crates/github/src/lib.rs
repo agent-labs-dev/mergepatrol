@@ -2,10 +2,12 @@
 
 mod app;
 mod checks;
+mod files;
 mod repo;
 pub mod setup;
 
 pub use app::{App, Installation, InstallationInfo, RepoInfo};
 pub use checks::{CheckState, Checks, RequiredChecks};
+pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{BranchMerge, MergeOutcome, PrDetails, PullRequest, RepoSnapshot, TreeEntry};
 pub use setup::{AppCredentials, GithubUser};

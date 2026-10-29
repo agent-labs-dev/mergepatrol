@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use mergepatrol_core::ResolverSettings;
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_github::{BranchMerge, Checks, RequiredChecks};
-use mergepatrol_store::{EventRecord, RepoSetting, SecretRecord, Session, Workspace};
+use mergepatrol_store::{EventRecord, RepoState, SecretRecord, Session, Workspace};
 
 use super::*;
-use crate::config::{ExecutorConfig, Labels};
+use crate::config::ExecutorConfig;
 
 const TRIGGER: &str = "mergepatrol";
 const FAILED: &str = "mergepatrol:failed";
@@ -31,6 +32,8 @@ type Action = Box<dyn FnOnce(&mut State) + Send>;
 
 #[derive(Default)]
 struct State {
+    /// `.mergepatrol/mergepatrol.yml` on the trunk.
+    config: Option<String>,
     trunk: String,
     branches: HashMap<String, String>,
     prs: BTreeMap<PrNumber, PullRequest>,
@@ -138,6 +141,10 @@ impl Fake {
 impl GitHub for Fake {
     fn installation_id(&self) -> u64 {
         1
+    }
+
+    async fn config_file(&self, _: &RepoName) -> Result<Option<String>> {
+        Ok(self.state.lock().unwrap().config.clone())
     }
 
     async fn snapshot(&self, _: &RepoName, label: &str) -> Result<RepoSnapshot> {
@@ -332,7 +339,13 @@ impl Scripted {
 
 #[async_trait]
 impl Rebase for Scripted {
-    async fn rebase(&self, _: &LaneKey, _: &RepoSnapshot, pr: &PullRequest) -> Result<Event> {
+    async fn rebase(
+        &self,
+        _: &LaneKey,
+        _: &RepoSnapshot,
+        pr: &PullRequest,
+        _: &RepoSettings,
+    ) -> Result<Event> {
         let n = {
             let mut n = self.rebases.lock().unwrap();
             *n += 1;
@@ -361,6 +374,7 @@ impl Rebase for Scripted {
 struct Mem {
     lanes: Mutex<HashMap<LaneKey, Lane>>,
     events: Mutex<Vec<(PrNumber, String, String)>>,
+    config_error: Mutex<Option<String>>,
 }
 
 #[async_trait]
@@ -406,11 +420,21 @@ impl Store for Mem {
     async fn delete_secret(&self, _: Scope, _: &str) -> Result<()> {
         unreachable!()
     }
-    async fn repo_settings(&self) -> Result<Vec<RepoSetting>> {
+    async fn repos(&self) -> Result<Vec<RepoState>> {
         unreachable!()
     }
-    async fn set_repo_enabled(&self, _: u64, _: &RepoName, _: bool) -> Result<()> {
+    async fn set_repo_enabled(&self, _: u64, _: &RepoName, _: Option<bool>) -> Result<()> {
         unreachable!()
+    }
+    async fn set_has_config(&self, _: u64, _: &RepoName, _: bool) -> Result<()> {
+        unreachable!()
+    }
+    async fn replace_has_config(&self, _: u64, _: &[RepoName]) -> Result<()> {
+        unreachable!()
+    }
+    async fn set_config_error(&self, _: u64, _: &RepoName, error: Option<&str>) -> Result<()> {
+        *self.config_error.lock().unwrap() = error.map(str::to_owned);
+        Ok(())
     }
     async fn save_workspaces(&self, _: &[Workspace]) -> Result<()> {
         unreachable!()
@@ -436,19 +460,20 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             database_url: String::new(),
             hosted_app: None,
             public_url: "http://localhost:8080".into(),
-            labels: Labels {
-                trigger: TRIGGER.into(),
-                priority: format!("{TRIGGER}:priority"),
-                failed: FAILED.into(),
+            repo_defaults: RepoSettings {
+                label: TRIGGER.into(),
+                // One PR at a time, unless a test batches.
+                batch_size: 1,
+                resolver: ResolverSettings {
+                    model: "m".into(),
+                    effort: "medium".into(),
+                },
+                verify: Vec::new(),
             },
             data_dir: PathBuf::new(),
             poll: Duration::from_secs(60),
             bind: "127.0.0.1:0".parse().unwrap(),
-            model: String::new(),
-            effort: String::new(),
             max_jobs: 1,
-            // One PR at a time, unless a test batches.
-            batch_size: 1,
             executor: ExecutorConfig::Local,
         },
         hosted_app: None,
@@ -483,7 +508,7 @@ impl Run {
 
     fn batching(gh: Arc<Fake>) -> Self {
         let mut run = Self::new(gh);
-        run.ctx.config.batch_size = 8;
+        run.ctx.config.repo_defaults.batch_size = 8;
         run
     }
 
@@ -544,6 +569,35 @@ async fn a_labeled_pr_is_rebased_checked_and_merged() {
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
     assert!(run.lane().is_empty());
     assert!(matches!(run.tick().await, Ran::Idle));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_config_file_sets_the_label() {
+    let run = Run::new(Fake::new(|s| {
+        s.config = Some("version: 1\nlabel: ship\n".into());
+        s.add_pr(1);
+        s.add_pr(2);
+        s.prs.get_mut(&2).unwrap().labels = vec!["ship".into()];
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_config_file_that_does_not_parse_pauses_the_queue() {
+    let run = Run::new(Fake::new(|s| {
+        s.config = Some("version: 1\nbatchsize: 2\n".into());
+        s.add_pr(1);
+    }));
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert!(run.kinds(1).is_empty());
+    let error = run.store.config_error.lock().unwrap().clone();
+    assert!(error.is_some_and(|e| e.contains("batchsize")));
+
+    run.gh.state.lock().unwrap().config = Some("version: 1\n".into());
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(*run.store.config_error.lock().unwrap(), None);
 }
 
 #[tokio::test(start_paused = true)]

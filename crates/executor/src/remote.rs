@@ -384,6 +384,7 @@ mod tests {
             trunk_sha: "2".into(),
             pr_title: String::new(),
             pr_body: String::new(),
+            verify: Vec::new(),
             resolver: ResolverSpec {
                 model: String::new(),
                 effort: String::new(),

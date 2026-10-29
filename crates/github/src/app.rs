@@ -86,25 +86,29 @@ impl App {
     }
 
     pub async fn installations(&self) -> Result<Vec<InstallationInfo>> {
-        let list: Vec<Value> = self
-            .http
-            .get(format!("{API}/app/installations?per_page=100"))
-            .bearer_auth(self.jwt()?)
-            .headers(api_headers())
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(list
-            .iter()
-            .filter_map(|i| {
+        let mut all = Vec::new();
+        for page in 1.. {
+            let list: Vec<Value> = self
+                .http
+                .get(format!("{API}/app/installations?per_page=100&page={page}"))
+                .bearer_auth(self.jwt()?)
+                .headers(api_headers())
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            all.extend(list.iter().filter_map(|i| {
                 Some(InstallationInfo {
                     id: i["id"].as_u64()?,
                     account: i["account"]["login"].as_str()?.to_owned(),
                 })
-            })
-            .collect())
+            }));
+            if list.len() < 100 {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     pub fn installation(&self, id: u64) -> Installation {

@@ -58,13 +58,28 @@ pub trait Store: Send + Sync {
     async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>>;
     async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()>;
 
-    /// The repos that have a setting, in every workspace. Repos without one are off.
-    async fn repo_settings(&self) -> Result<Vec<RepoSetting>>;
+    /// The repos Mergepatrol knows of, in every workspace. Repos without a row are off.
+    async fn repos(&self) -> Result<Vec<RepoState>>;
+    /// `None` follows the config file.
     async fn set_repo_enabled(
         &self,
         installation_id: u64,
         repo: &RepoName,
-        enabled: bool,
+        enabled: Option<bool>,
+    ) -> Result<()>;
+    async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()>;
+    /// All the repos of an installation that have the config file. The rest have not.
+    async fn replace_has_config(
+        &self,
+        installation_id: u64,
+        with_config: &[RepoName],
+    ) -> Result<()>;
+    /// `None` clears it.
+    async fn set_config_error(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        error: Option<&str>,
     ) -> Result<()>;
 
     /// Remembers the account of each installation, as GitHub showed it at a sign-in.
@@ -107,10 +122,22 @@ pub struct Workspace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RepoSetting {
+pub struct RepoState {
     pub repo: RepoName,
     pub installation_id: u64,
-    pub enabled: bool,
+    /// Set in the dashboard. `None` follows `has_config`.
+    pub enabled: Option<bool>,
+    /// The default branch has the config file, as of the last look.
+    pub has_config: bool,
+    /// Why the queue is paused: the config file does not parse.
+    pub config_error: Option<String>,
+}
+
+impl RepoState {
+    /// Whether the repo's queue runs.
+    pub fn on(&self) -> bool {
+        self.enabled.unwrap_or(self.has_config)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -295,18 +322,21 @@ impl Store for PgStore {
         Ok(())
     }
 
-    async fn repo_settings(&self) -> Result<Vec<RepoSetting>> {
+    async fn repos(&self) -> Result<Vec<RepoState>> {
         let rows = sqlx::query(
-            "SELECT repo, installation_id, enabled FROM repos ORDER BY installation_id, repo",
+            "SELECT repo, installation_id, enabled, has_config, config_error FROM repos
+             ORDER BY installation_id, repo",
         )
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
             .map(|row| {
-                Ok(RepoSetting {
+                Ok(RepoState {
                     repo: RepoName::parse(row.get("repo")).context("bad repo in store")?,
                     installation_id: row.get::<i64, _>("installation_id") as u64,
                     enabled: row.get("enabled"),
+                    has_config: row.get("has_config"),
+                    config_error: row.get("config_error"),
                 })
             })
             .collect()
@@ -316,7 +346,7 @@ impl Store for PgStore {
         &self,
         installation_id: u64,
         repo: &RepoName,
-        enabled: bool,
+        enabled: Option<bool>,
     ) -> Result<()> {
         sqlx::query(
             "INSERT INTO repos (installation_id, repo, enabled) VALUES ($1, $2, $3)
@@ -325,6 +355,65 @@ impl Store for PgStore {
         .bind(installation_id as i64)
         .bind(repo.to_string())
         .bind(enabled)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO repos (installation_id, repo, has_config) VALUES ($1, $2, $3)
+             ON CONFLICT (installation_id, repo) DO UPDATE SET has_config = excluded.has_config",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(has)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn replace_has_config(
+        &self,
+        installation_id: u64,
+        with_config: &[RepoName],
+    ) -> Result<()> {
+        let names: Vec<String> = with_config.iter().map(|r| r.to_string()).collect();
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "UPDATE repos SET has_config = (repo = ANY($2))
+             WHERE installation_id = $1 AND has_config <> (repo = ANY($2))",
+        )
+        .bind(installation_id as i64)
+        .bind(&names)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO repos (installation_id, repo, has_config)
+             SELECT $1, unnest($2::TEXT[]), true
+             ON CONFLICT (installation_id, repo) DO NOTHING",
+        )
+        .bind(installation_id as i64)
+        .bind(&names)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn set_config_error(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        error: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE repos SET config_error = $3
+             WHERE installation_id = $1 AND repo = $2 AND config_error IS DISTINCT FROM $3",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(error)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -465,28 +554,50 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
-    async fn repo_settings_upsert(pool: PgPool) {
+    async fn a_repo_is_on_with_the_config_file_unless_overridden(pool: PgPool) {
         let store = PgStore::migrate(pool).await.unwrap();
-        let repo = RepoName::parse("o/r").unwrap();
-        store.set_repo_enabled(9, &repo, true).await.unwrap();
-        store.set_repo_enabled(9, &repo, false).await.unwrap();
-        // The same repo name under another installation is its own setting.
-        store.set_repo_enabled(10, &repo, true).await.unwrap();
+        let a = RepoName::parse("o/a").unwrap();
+        let b = RepoName::parse("o/b").unwrap();
+        let on = |states: &[RepoState]| -> Vec<(u64, String, bool)> {
+            states
+                .iter()
+                .map(|s| (s.installation_id, s.repo.to_string(), s.on()))
+                .collect()
+        };
+
+        store
+            .replace_has_config(9, &[a.clone(), b.clone()])
+            .await
+            .unwrap();
+        store.set_repo_enabled(9, &b, Some(false)).await.unwrap();
+        // The same repo name under another installation is its own row.
+        store.set_repo_enabled(10, &a, Some(true)).await.unwrap();
         assert_eq!(
-            store.repo_settings().await.unwrap(),
+            on(&store.repos().await.unwrap()),
             [
-                RepoSetting {
-                    repo: repo.clone(),
-                    installation_id: 9,
-                    enabled: false
-                },
-                RepoSetting {
-                    repo,
-                    installation_id: 10,
-                    enabled: true
-                },
+                (9, "o/a".into(), true),
+                (9, "o/b".into(), false),
+                (10, "o/a".into(), true),
             ]
         );
+
+        // `a` lost its file; `b` follows its file again.
+        store
+            .replace_has_config(9, std::slice::from_ref(&b))
+            .await
+            .unwrap();
+        store.set_repo_enabled(9, &b, None).await.unwrap();
+        store.set_config_error(9, &b, Some("bad")).await.unwrap();
+        let states = store.repos().await.unwrap();
+        assert_eq!(
+            on(&states),
+            [
+                (9, "o/a".into(), false),
+                (9, "o/b".into(), true),
+                (10, "o/a".into(), true),
+            ]
+        );
+        assert_eq!(states[1].config_error.as_deref(), Some("bad"));
     }
 
     #[sqlx::test(migrations = false)]
