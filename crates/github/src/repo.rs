@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use mergepatrol_core::{LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review};
 
 use crate::Installation;
+use crate::codeowners::{self, CodeOwners};
 
 /// Marks the one comment per PR that Mergepatrol keeps up to date.
 const STICKY_MARKER: &str = "<!-- mergepatrol:status -->";
@@ -40,6 +41,12 @@ pub struct PullRequest {
     pub head_ref_oid: String,
     #[serde(deserialize_with = "label_names")]
     pub labels: Vec<String>,
+    /// The changed files, up to 100: what the trunk's code owners are checked against.
+    #[serde(deserialize_with = "file_paths")]
+    pub files: Vec<String>,
+    /// Whether a code owner must still approve, which `reviewDecision` can leave out.
+    #[serde(skip)]
+    pub awaits_code_owner: bool,
     /// The stack the PR is a layer of. `None` outside a stack.
     #[serde(default)]
     pub stack: Option<StackRef>,
@@ -76,7 +83,8 @@ pub struct StackRef {
     pub base_ref_name: String,
 }
 
-/// What the dashboard shows of a PR, as GraphQL returns it. The queue never reads it.
+/// What the dashboard shows of a PR, as GraphQL returns it. The queue reads only its approvals,
+/// for the code owners.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrDetails {
@@ -126,12 +134,33 @@ impl PullRequest {
         self.labels.iter().any(|l| l == label)
     }
 
+    /// Notes whether the trunk's code owners, if its rules require their review, must still
+    /// approve.
+    fn check_code_owners(&mut self, owners: Option<&CodeOwners>) {
+        let approvers: Vec<&str> = self
+            .details
+            .latest_opinionated_reviews
+            .iter()
+            .filter(|r| r.state == "APPROVED")
+            .filter_map(|r| Some(r.author.as_ref()?.login.as_str()))
+            .collect();
+        self.awaits_code_owner = owners.is_some_and(|o| o.awaits_review(&self.files, &approvers));
+    }
+
+    /// `reviewDecision`, with the code owners' review it leaves out.
+    fn review_decision(&self) -> Option<&str> {
+        match self.review_decision.as_deref() {
+            None if self.awaits_code_owner => Some("REVIEW_REQUIRED"),
+            decision => decision,
+        }
+    }
+
     /// Why GitHub would not merge this PR yet, if it would not.
     pub fn hold_reason(&self) -> Option<String> {
         if self.is_draft {
             return Some("the PR is a draft".into());
         }
-        match self.review_decision.as_deref() {
+        match self.review_decision() {
             Some("REVIEW_REQUIRED") => Some("waiting for a required review".into()),
             Some("CHANGES_REQUESTED") => {
                 Some("a reviewer requested changes, and their approval is required".into())
@@ -152,7 +181,7 @@ impl PullRequest {
             additions: d.additions,
             deletions: d.deletions,
             changed_files: d.changed_files,
-            review_decision: self.review_decision.clone(),
+            review_decision: self.review_decision().map(str::to_owned),
             reviews: d
                 .latest_opinionated_reviews
                 .into_iter()
@@ -184,6 +213,14 @@ fn nodes<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<
         nodes: Vec<T>,
     }
     Ok(Conn::deserialize(d)?.nodes)
+}
+
+fn file_paths<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    struct File {
+        path: String,
+    }
+    Ok(nodes::<D, File>(d)?.into_iter().map(|f| f.path).collect())
 }
 
 fn label_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
@@ -238,6 +275,7 @@ fn rejection(body: &Value) -> String {
 }
 
 const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 50) { nodes { name } } stack { number baseRefName }
+  files(first: 100) { nodes { path } }
   maintainerCanModify headRepository { nameWithOwner owner { __typename } }
   url createdAt additions deletions changedFiles author { __typename login avatarUrl }
   latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
@@ -255,11 +293,13 @@ impl Installation {
                 failed: label(name: $failed) {{ name }}
                 viewerDefaultMergeMethod
                 defaultBranchRef {{ name target {{ oid }} }}
+                {code_owners}
                 pullRequests(states: OPEN, labels: [$label], first: 100, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
                   nodes {{ {PR_FIELDS} }}
                 }}
               }}
-            }}"
+            }}",
+            code_owners = codeowners::FIELDS,
         );
         let data: Value = self
             .graphql(
@@ -283,6 +323,12 @@ impl Installation {
         .filter(|(alias, _)| r[alias].is_null())
         .map(|(_, name)| name.clone())
         .collect();
+        let mut labeled: Vec<PullRequest> =
+            serde_json::from_value(r["pullRequests"]["nodes"].clone())?;
+        let owners = CodeOwners::from_repository(r);
+        for pr in &mut labeled {
+            pr.check_code_owners(owners.as_ref());
+        }
         Ok(RepoSnapshot {
             id: r["id"].as_str().context("repository.id")?.to_owned(),
             default_branch: r["defaultBranchRef"]["name"]
@@ -297,7 +343,7 @@ impl Installation {
                 .as_str()
                 .unwrap_or("MERGE")
                 .to_lowercase(),
-            labeled: serde_json::from_value(r["pullRequests"]["nodes"].clone())?,
+            labeled,
             missing_labels,
         })
     }
@@ -305,8 +351,12 @@ impl Installation {
     pub async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest> {
         let query = format!(
             "query($owner: String!, $name: String!, $number: Int!) {{
-              repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ {PR_FIELDS} }} }}
-            }}"
+              repository(owner: $owner, name: $name) {{
+                pullRequest(number: $number) {{ {PR_FIELDS} }}
+                {code_owners}
+              }}
+            }}",
+            code_owners = codeowners::FIELDS,
         );
         let data: Value = self
             .graphql(
@@ -314,9 +364,10 @@ impl Installation {
                 json!({ "owner": repo.owner, "name": repo.name, "number": number }),
             )
             .await?;
-        Ok(serde_json::from_value(
-            data["repository"]["pullRequest"].clone(),
-        )?)
+        let r = &data["repository"];
+        let mut pr: PullRequest = serde_json::from_value(r["pullRequest"].clone())?;
+        pr.check_code_owners(CodeOwners::from_repository(r).as_ref());
+        Ok(pr)
     }
 
     /// The open PRs of the stack, bottom to top. Its merged layers are left out.
@@ -846,12 +897,39 @@ mod tests {
         );
     }
 
+    /// nebula#11186 before its approval: `reviewDecision` is empty, though `main` requires a code
+    /// owner's review and the PR changes an owned file.
+    const UNREVIEWED: &str = r#"{"data":{"repository":{
+        "pullRequest":{"number":11186,"title":"ci","body":"","isDraft":false,"isCrossRepository":false,
+            "reviewDecision":null,"baseRefName":"main","headRefName":"ci","headRefOid":"abc",
+            "labels":{"nodes":[]},"files":{"nodes":[{"path":".github/dependabot.yml"}]},
+            "url":"","createdAt":"","additions":1,"deletions":0,"changedFiles":1,"author":null,
+            "latestOpinionatedReviews":{"nodes":[]},"reviewRequests":{"nodes":[]},"commits":{"nodes":[]}},
+        "defaultBranchRef":{"rules":{"nodes":[{"parameters":{"requireCodeOwnerReview":true}},{"parameters":null}]}},
+        "codeowners0":{"text":"/.github/ @joaquim-verges @jnsdls\n"},"codeowners1":null,"codeowners2":null}}}"#;
+
+    #[tokio::test]
+    async fn a_pr_that_awaits_a_code_owner_is_held_though_review_decision_is_empty() {
+        let (gh, _) = fake::serve(vec![(200, "", UNREVIEWED)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let pr = gh.pull_request(&repo, 11186).await.unwrap();
+        assert_eq!(
+            pr.hold_reason().as_deref(),
+            Some("waiting for a required review")
+        );
+        assert_eq!(
+            pr.summary().review_decision.as_deref(),
+            Some("REVIEW_REQUIRED")
+        );
+    }
+
     #[test]
     fn summary_reads_graphql() {
         let pr: PullRequest = serde_json::from_value(json!({
             "number": 7, "title": "Fix it", "body": "", "isDraft": false,
             "isCrossRepository": false, "reviewDecision": "APPROVED", "baseRefName": "main",
             "headRefName": "fix", "headRefOid": "abc", "labels": { "nodes": [{ "name": "mergepatrol" }] },
+            "files": { "nodes": [{ "path": "src/a.rs" }] },
             "url": "https://github.com/o/r/pull/7", "createdAt": "2026-10-01T00:00:00Z",
             "additions": 3, "deletions": 1, "changedFiles": 2,
             "author": { "__typename": "Bot", "login": "merge-patrol", "avatarUrl": "m" },

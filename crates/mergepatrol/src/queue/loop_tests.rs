@@ -111,6 +111,8 @@ impl State {
                 head_ref_name: branch,
                 head_ref_oid: head,
                 labels: vec![TRIGGER.into()],
+                files: Vec::new(),
+                awaits_code_owner: false,
                 stack: None,
                 maintainer_can_modify: false,
                 head_repository: None,
