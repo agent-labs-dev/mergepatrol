@@ -34,8 +34,8 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
         {rows.length === 0 && <p className="px-4 py-3 text-faint">{empty}</p>}
         {rows.map((r) => (
           <div key={r.repo}>
-            <div className="flex items-center justify-between gap-3 px-4 py-3">
-              <span className="min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+              <span className="min-w-0 break-words">
                 <span className="font-medium">{r.repo}</span>
                 {r.private && <span className="ml-2 text-xs text-faint">Private</span>}
                 <Status repo={r} />

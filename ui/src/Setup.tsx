@@ -13,7 +13,7 @@ function Card({ step, title, children }: { step?: number; title: string; childre
       <div className="mb-6 flex items-center gap-2 font-semibold">
         <Mark /> Mergepatrol
       </div>
-      <section className="w-full max-w-md rounded-xl border border-line bg-surface p-8 shadow-sm">
+      <section className="w-full max-w-md rounded-xl border border-line bg-surface p-6 shadow-sm sm:p-8">
         {step && (
           <ol className="mb-6 flex gap-1.5" aria-label={`Step ${step} of ${setupSteps}`}>
             {Array.from({ length: setupSteps }, (_, i) => (
