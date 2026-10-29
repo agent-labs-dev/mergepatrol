@@ -27,7 +27,8 @@ export function Queue({ workspace }: { workspace: number }) {
     queryKey: ["open", workspace, current?.repo],
     queryFn: () => fetchOpenPulls(workspace, current?.repo ?? ""),
     enabled: current !== undefined,
-    refetchInterval: 10_000,
+    // Read as the user, on their own rate limit. A label change shows sooner through the lane.
+    refetchInterval: 30_000,
   });
   const actions = useActions(workspace, current);
 
@@ -155,6 +156,11 @@ export function Queue({ workspace }: { workspace: number }) {
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
+        {open.isError && (
+          <p className="mt-6 border-y border-line bg-sunken px-4 py-2 text-xs text-bad">
+            Could not load the open PRs: {open.error.message}
+          </p>
+        )}
         {unqueued.length > 0 && (
           <>
             <p className="mt-6 flex items-center justify-between border-y border-line bg-sunken px-4 py-2 text-xs text-muted">

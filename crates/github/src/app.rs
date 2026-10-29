@@ -319,22 +319,198 @@ impl Installation {
 
     pub(crate) async fn graphql<T: DeserializeOwned>(
         &self,
+        name: &str,
         query: &str,
         variables: Value,
     ) -> Result<T> {
-        let res: Value = self
-            .rest(
-                Method::POST,
-                "/graphql",
-                Some(json!({ "query": query, "variables": variables })),
-            )
-            .await?;
-        if let Some(errors) = res.get("errors") {
-            bail!("GraphQL: {errors}");
-        }
-        Ok(serde_json::from_value(res["data"].clone())?)
+        let body = graphql_body(query, variables);
+        let build = || async {
+            Ok(self
+                .app
+                .http
+                .post(format!("{}/graphql", self.app.api))
+                .bearer_auth(self.token().await?)
+                .headers(api_headers())
+                .json(&body))
+        };
+        graphql_data(
+            name,
+            Some(self.id),
+            false,
+            send(build, "POST /graphql").await?,
+        )
+    }
+
+    /// A GraphQL query whose answer may lack what does not exist: GitHub reports a missing file
+    /// or repo as a `NOT_FOUND` error, beside the rest of the answer. Any other error fails it.
+    pub(crate) async fn graphql_missing_ok(
+        &self,
+        name: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value> {
+        let body = graphql_body(query, variables);
+        let build = || async {
+            Ok(self
+                .app
+                .http
+                .post(format!("{}/graphql", self.app.api))
+                .bearer_auth(self.token().await?)
+                .headers(api_headers())
+                .json(&body))
+        };
+        graphql_data(
+            name,
+            Some(self.id),
+            true,
+            send(build, "POST /graphql").await?,
+        )
     }
 }
+
+/// A client that acts as a signed-in user, on the user's own rate limit, not the installation's:
+/// for what the dashboard reads on the user's behalf.
+pub struct AsUser {
+    http: reqwest::Client,
+    api: String,
+    token: String,
+}
+
+impl AsUser {
+    pub fn new(token: String) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(60))
+            .build()?;
+        Ok(Self {
+            http,
+            api: API.into(),
+            token,
+        })
+    }
+
+    pub(crate) async fn graphql<T: DeserializeOwned>(
+        &self,
+        name: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<T> {
+        let body = graphql_body(query, variables);
+        let build = || async {
+            Ok(self
+                .http
+                .post(format!("{}/graphql", self.api))
+                .bearer_auth(&self.token)
+                .headers(api_headers())
+                .json(&body))
+        };
+        graphql_data(name, None, false, send(build, "POST /graphql").await?)
+    }
+
+    /// As [`Installation::graphql_missing_ok`].
+    pub(crate) async fn graphql_missing_ok(
+        &self,
+        name: &str,
+        query: &str,
+        variables: Value,
+    ) -> Result<Value> {
+        let body = graphql_body(query, variables);
+        let build = || async {
+            Ok(self
+                .http
+                .post(format!("{}/graphql", self.api))
+                .bearer_auth(&self.token)
+                .headers(api_headers())
+                .json(&body))
+        };
+        graphql_data(name, None, true, send(build, "POST /graphql").await?)
+    }
+}
+
+/// The request body of a query. A query asks for its own cost too, so the log shows what spends
+/// the rate limit. A mutation cannot ask.
+fn graphql_body(query: &str, variables: Value) -> Value {
+    let query = match query.find('{') {
+        Some(i) if !query.trim_start().starts_with("mutation") => format!(
+            "{} rateLimit {{ cost remaining resetAt }} {}",
+            &query[..=i],
+            &query[i + 1..]
+        ),
+        _ => query.to_owned(),
+    };
+    json!({ "query": query, "variables": variables })
+}
+
+/// The `data` of a GraphQL response, with its cost logged. `installation` is `None` for a user.
+/// `missing_ok` lets `NOT_FOUND` errors through, beside the data.
+fn graphql_data<T: DeserializeOwned>(
+    name: &str,
+    installation: Option<u64>,
+    missing_ok: bool,
+    (status, body): (StatusCode, String),
+) -> Result<T> {
+    if installation.is_none() && status == StatusCode::UNAUTHORIZED {
+        return Err(crate::setup::Revoked.into());
+    }
+    if !status.is_success() {
+        bail!("GraphQL {name}: {status} {body}");
+    }
+    let mut res: Value = serde_json::from_str(&body)?;
+    let missing = |errors: &Value| {
+        !res["data"].is_null()
+            && errors
+                .as_array()
+                .is_some_and(|e| e.iter().all(|e| e["type"] == "NOT_FOUND"))
+    };
+    if missing_ok && res["data"].is_null() {
+        bail!("GraphQL: {}", res["errors"]);
+    }
+    if let Some(errors) = res.get("errors")
+        && !(missing_ok && missing(errors))
+    {
+        bail!("GraphQL: {errors}");
+    }
+    let mut data = res["data"].take();
+    if let Some(limit) = data.as_object_mut().and_then(|d| d.remove("rateLimit")) {
+        tracing::info!(
+            query = name,
+            installation,
+            cost = limit["cost"].as_u64(),
+            remaining = limit["remaining"].as_u64(),
+            reset_at = limit["resetAt"].as_str(),
+            "GraphQL cost"
+        );
+    }
+    Ok(serde_json::from_value(data)?)
+}
+
+/// GitHub's rate limit is used up, past the longest wait for it. The caller should stop calling
+/// until `until`.
+#[derive(Debug)]
+pub struct RateLimited {
+    pub until: SystemTime,
+}
+
+impl RateLimited {
+    /// How long until the limit lifts.
+    pub fn remaining(&self) -> Duration {
+        self.until
+            .duration_since(SystemTime::now())
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for RateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mins = self.remaining().as_secs().div_ceil(60).max(1);
+        write!(
+            f,
+            "GitHub's API rate limit is used up for another {mins} min"
+        )
+    }
+}
+
+impl std::error::Error for RateLimited {}
 
 /// How many times a request goes out before its transient failure counts.
 const ATTEMPTS: u32 = 5;
@@ -343,7 +519,7 @@ const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(10 * 60);
 
 /// Sends the request `build` makes, and again after a transient failure: a network error, a 5xx,
 /// or a rate limit. Each attempt builds it anew, so its token is not one that expired while it
-/// waited. The status and body of the last response.
+/// waited. The status and body of the last response, or `RateLimited` once waiting is no use.
 async fn send<F: Future<Output = Result<RequestBuilder>>>(
     build: impl Fn() -> F,
     what: &str,
@@ -352,20 +528,27 @@ async fn send<F: Future<Output = Result<RequestBuilder>>>(
     let mut attempt = 1;
     let (status, _, body) = loop {
         let sent = send_once(build().await?).await;
-        let wait = match &sent {
+        let retry = match &sent {
             Ok((status, headers, body)) => retry_after(*status, headers, body, backoff, unix_now()),
-            Err(_) => Some(backoff),
+            Err(_) => Some(Retry::Backoff(backoff)),
         };
-        match wait {
-            Some(wait) if attempt < ATTEMPTS && wait <= MAX_RATE_LIMIT_WAIT => {
+        match retry {
+            Some(retry) if attempt < ATTEMPTS && retry.wait() <= MAX_RATE_LIMIT_WAIT => {
                 let failure = match &sent {
                     Ok((status, ..)) => status.to_string(),
                     Err(e) => e.to_string(),
                 };
+                let wait = retry.wait();
                 tracing::warn!(what, attempt, %failure, wait_secs = wait.as_secs(), "GitHub request failed, retrying");
                 tokio::time::sleep(wait).await;
                 attempt += 1;
                 backoff *= 2;
+            }
+            Some(Retry::RateLimit(wait)) => {
+                return Err(RateLimited {
+                    until: SystemTime::now() + wait,
+                }
+                .into());
             }
             _ => break sent?,
         }
@@ -379,6 +562,21 @@ async fn send_once(req: RequestBuilder) -> reqwest::Result<(StatusCode, HeaderMa
     Ok((status, headers, res.text().await?))
 }
 
+#[derive(Debug, PartialEq)]
+enum Retry {
+    /// A network error or a 5xx.
+    Backoff(Duration),
+    RateLimit(Duration),
+}
+
+impl Retry {
+    fn wait(&self) -> Duration {
+        match self {
+            Self::Backoff(d) | Self::RateLimit(d) => *d,
+        }
+    }
+}
+
 /// How long to wait before sending the request again, when its response is a transient failure.
 /// A rate limit takes as long as GitHub says, or a minute when it does not say.
 fn retry_after(
@@ -387,7 +585,7 @@ fn retry_after(
     body: &str,
     backoff: Duration,
     now: u64,
-) -> Option<Duration> {
+) -> Option<Retry> {
     let header = |name: &str| headers.get(name)?.to_str().ok()?.trim().parse::<u64>().ok();
     let exhausted = header("x-ratelimit-remaining") == Some(0);
     let limited = status == StatusCode::TOO_MANY_REQUESTS
@@ -397,14 +595,14 @@ fn retry_after(
                 || body.contains("secondary rate limit")))
         || (status.is_success() && graphql_rate_limited(body));
     if !limited {
-        return status.is_server_error().then_some(backoff);
+        return status.is_server_error().then_some(Retry::Backoff(backoff));
     }
     let secs = match (header("retry-after"), header("x-ratelimit-reset")) {
         (Some(secs), _) => secs,
         (None, Some(reset)) if exhausted => reset.saturating_sub(now).max(1),
         _ => 60,
     };
-    Some(Duration::from_secs(secs))
+    Some(Retry::RateLimit(Duration::from_secs(secs)))
 }
 
 /// GraphQL answers its rate limit with a 200 whose errors say so: `RATE_LIMITED`, or
@@ -568,7 +766,12 @@ mod tests {
                 backoff,
                 1000,
             )
+            .map(|r| r.wait())
         };
+        assert_eq!(
+            retry_after(StatusCode::BAD_GATEWAY, &none, "", backoff, 1000),
+            Some(Retry::Backoff(backoff))
+        );
         assert_eq!(wait(502, &none, ""), Some(backoff));
         assert_eq!(wait(404, &none, ""), None);
         assert_eq!(wait(422, &none, ""), None);
@@ -611,9 +814,75 @@ mod tests {
             (200, "", r#"{"data":{"ok":true}}"#),
         ])
         .await;
-        let v: Value = gh.graphql("{ ok }", json!({})).await.unwrap();
+        let v: Value = gh.graphql("ok", "{ ok }", json!({})).await.unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_past_the_longest_wait_fails_as_rate_limited() {
+        let (gh, requests) = fake::serve(vec![(
+            200,
+            "x-ratelimit-remaining: 0\r\nx-ratelimit-reset: 99999999999\r\n",
+            r#"{"errors":[{"type":"RATE_LIMIT"}]}"#,
+        )])
+        .await;
+        let e = gh
+            .graphql::<Value>("ok", "{ ok }", json!({}))
+            .await
+            .unwrap_err();
+        assert!(e.downcast_ref::<RateLimited>().unwrap().remaining() > MAX_RATE_LIMIT_WAIT);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_query_asks_for_its_cost_and_a_mutation_does_not() {
+        let q = graphql_body("query($a: Int!) { repository { id } }", json!({}));
+        assert_eq!(
+            q["query"],
+            "query($a: Int!) { rateLimit { cost remaining resetAt }  repository { id } }"
+        );
+        let m = graphql_body("mutation { updateRefs { id } }", json!({}));
+        assert_eq!(m["query"], "mutation { updateRefs { id } }");
+    }
+
+    #[tokio::test]
+    async fn a_missing_ok_query_lets_only_not_found_through() {
+        let (gh, _) = fake::serve(vec![
+            (
+                200,
+                "",
+                r#"{"data":{"repository":null},"errors":[{"type":"NOT_FOUND"}]}"#,
+            ),
+            (
+                200,
+                "",
+                r#"{"data":{"repository":null},"errors":[{"type":"FORBIDDEN"}]}"#,
+            ),
+        ])
+        .await;
+        let v = gh
+            .graphql_missing_ok("q", "{ ok }", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(v, json!({ "repository": null }));
+        assert!(
+            gh.graphql_missing_ok("q", "{ ok }", json!({}))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cost_is_taken_out_of_the_data() {
+        let (gh, _) = fake::serve(vec![(
+            200,
+            "",
+            r#"{"data":{"rateLimit":{"cost":1,"remaining":4999,"resetAt":"x"},"ok":true}}"#,
+        )])
+        .await;
+        let v: Value = gh.graphql("ok", "{ ok }", json!({})).await.unwrap();
+        assert_eq!(v, json!({ "ok": true }));
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@ use mergepatrol_core::{
 };
 
 use crate::Installation;
+use crate::app::AsUser;
 use crate::codeowners::{self, CodeOwners};
 
 /// Marks the one comment per PR that Mergepatrol keeps up to date.
@@ -45,8 +46,9 @@ pub struct PullRequest {
     pub head_ref_oid: String,
     #[serde(deserialize_with = "label_names")]
     pub labels: Vec<String>,
-    /// The changed files, up to 100: what the trunk's code owners are checked against.
-    #[serde(deserialize_with = "file_paths")]
+    /// The changed files, up to 100: what the trunk's code owners are checked against. Empty
+    /// when the query did not ask.
+    #[serde(default, deserialize_with = "file_paths")]
     pub files: Vec<String>,
     /// Whether a code owner must still approve, which `reviewDecision` can leave out.
     #[serde(skip)]
@@ -278,18 +280,62 @@ fn rejection(body: &Value) -> String {
         .to_owned()
 }
 
-const PR_FIELDS: &str = "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 100) { nodes { name } } stack { number baseRefName }
-  files(first: 100) { nodes { path } }
+/// What a PR shows on the dashboard. A macro, so `concat!` can build on it.
+macro_rules! summary_fields {
+    () => {
+        "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 100) { nodes { name } } stack { number baseRefName }
   maintainerCanModify headRepository { nameWithOwner owner { __typename } }
   url createdAt additions deletions changedFiles author { __typename login avatarUrl }
   latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login avatarUrl } } } }
-  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
+    };
+}
+
+/// A PR as the queue reads it: its files too, for the code owners.
+const PR_FIELDS: &str = concat!(summary_fields!(), " files(first: 100) { nodes { path } }");
+
+/// The labeled PRs a snapshot reads at a time. GraphQL charges a point per 100 requests its lists
+/// could take, one per list on each PR: a page of 25 PRs costs 1 point, of 100 5, on every tick.
+const SNAPSHOT_PAGE: u32 = 25;
+
+impl AsUser {
+    /// The open PRs into `base`, up to `limit`, updated last first. Their code owners are not
+    /// checked, nor their files read: `review_decision` leaves out a code owner's review it
+    /// requires.
+    pub async fn open_pull_requests(
+        &self,
+        repo: &RepoName,
+        base: &str,
+        limit: u32,
+    ) -> Result<Vec<PullRequest>> {
+        let query = format!(
+            "query($owner: String!, $name: String!, $base: String!, $limit: Int!) {{
+              repository(owner: $owner, name: $name) {{
+                pullRequests(states: OPEN, baseRefName: $base, first: $limit, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
+                  nodes {{ {} }}
+                }}
+              }}
+            }}",
+            summary_fields!()
+        );
+        let data: Value = self
+            .graphql(
+                "open pull requests",
+                &query,
+                json!({ "owner": repo.owner, "name": repo.name, "base": base, "limit": limit }),
+            )
+            .await?;
+        Ok(serde_json::from_value(
+            data["repository"]["pullRequests"]["nodes"].clone(),
+        )?)
+    }
+}
 
 impl Installation {
     pub async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
         let query = format!(
-            "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!, $after: String) {{
+            "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!, $page: Int!, $after: String) {{
               repository(owner: $owner, name: $name) {{
                 id
                 isPrivate
@@ -299,7 +345,7 @@ impl Installation {
                 viewerDefaultMergeMethod
                 defaultBranchRef {{ name target {{ oid }} }}
                 {code_owners}
-                pullRequests(states: OPEN, labels: [$label], first: 100, after: $after, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
+                pullRequests(states: OPEN, labels: [$label], first: $page, after: $after, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
                   nodes {{ {PR_FIELDS} }}
                   pageInfo {{ hasNextPage endCursor }}
                 }}
@@ -307,7 +353,7 @@ impl Installation {
             }}",
             code_owners = codeowners::FIELDS,
         );
-        // The labeled PRs come 100 a page. The rest of the repo is the same on every page: the
+        // The labeled PRs come a page at a time. The rest of the repo is the same on every page: the
         // first page's counts.
         let mut first: Option<Value> = None;
         let mut labeled: Vec<PullRequest> = Vec::new();
@@ -315,6 +361,7 @@ impl Installation {
         loop {
             let data: Value = self
                 .graphql(
+                    "snapshot",
                     &query,
                     json!({
                         "owner": repo.owner,
@@ -322,6 +369,7 @@ impl Installation {
                         "label": labels.trigger,
                         "priority": labels.priority,
                         "failed": labels.failed,
+                        "page": SNAPSHOT_PAGE,
                         "after": after,
                     }),
                 )
@@ -384,6 +432,7 @@ impl Installation {
         );
         let data: Value = self
             .graphql(
+                "pull request",
                 &query,
                 json!({ "owner": repo.owner, "name": repo.name, "number": number }),
             )
@@ -392,34 +441,6 @@ impl Installation {
         let mut pr: PullRequest = serde_json::from_value(r["pullRequest"].clone())?;
         pr.check_code_owners(CodeOwners::from_repository(r).as_ref());
         Ok(pr)
-    }
-
-    /// The open PRs into `base`, up to `limit`, updated last first. Their code owners are not
-    /// checked: `review_decision` leaves out a code owner's review it requires.
-    pub async fn open_pull_requests(
-        &self,
-        repo: &RepoName,
-        base: &str,
-        limit: u32,
-    ) -> Result<Vec<PullRequest>> {
-        let query = format!(
-            "query($owner: String!, $name: String!, $base: String!, $limit: Int!) {{
-              repository(owner: $owner, name: $name) {{
-                pullRequests(states: OPEN, baseRefName: $base, first: $limit, orderBy: {{ field: UPDATED_AT, direction: DESC }}) {{
-                  nodes {{ {PR_FIELDS} }}
-                }}
-              }}
-            }}"
-        );
-        let data: Value = self
-            .graphql(
-                &query,
-                json!({ "owner": repo.owner, "name": repo.name, "base": base, "limit": limit }),
-            )
-            .await?;
-        Ok(serde_json::from_value(
-            data["repository"]["pullRequests"]["nodes"].clone(),
-        )?)
     }
 
     /// The open PRs of the stack, bottom to top. Its merged layers are left out.
@@ -625,7 +646,11 @@ impl Installation {
             })
             .collect();
         let _: Value = self
-            .graphql(query, json!({ "repo": repo_id, "updates": updates }))
+            .graphql(
+                "update refs",
+                query,
+                json!({ "repo": repo_id, "updates": updates }),
+            )
             .await?;
         Ok(())
     }

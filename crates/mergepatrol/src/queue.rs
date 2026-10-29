@@ -25,7 +25,7 @@ use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
-    RepoSnapshot,
+    RateLimited, RepoSnapshot,
 };
 use mergepatrol_store::{GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
 use secrecy::ExposeSecret;
@@ -454,18 +454,33 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running, alive: &Alive) -> Resu
     Ok(())
 }
 
+/// The least time between two ticks that a webhook starts. Webhooks come in bursts, a CI run's
+/// checks most of all, and every tick spends the installation's rate limit: one tick takes in a
+/// burst.
+const TICK_GAP: Duration = Duration::from_secs(10);
+
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
     let sandbox = JobSandbox { ctx: &ctx, gh: &gh };
     loop {
+        let started = tokio::time::Instant::now();
         match tick(&ctx, &gh, &sandbox, &repo).await {
             // The lane may have a next PR: start it now, not a poll later.
             Ok(Ran::Job) => continue,
             Ok(Ran::Idle) => {}
-            Err(e) => {
-                tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "tick failed")
-            }
+            Err(e) => match e.downcast_ref::<RateLimited>() {
+                // A webhook would only fail the same way: wait for the limit to lift.
+                Some(limited) => {
+                    tracing::warn!(installation = gh.id, %repo, wait_secs = limited.remaining().as_secs(), "GitHub's rate limit is used up, waiting");
+                    tokio::time::sleep(limited.remaining()).await;
+                    continue;
+                }
+                None => {
+                    tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "tick failed")
+                }
+            },
         }
         ctx.wakers.wait(gh.id, &repo, ctx.config.poll).await;
+        tokio::time::sleep_until(started + TICK_GAP).await;
     }
 }
 

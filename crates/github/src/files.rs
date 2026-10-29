@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use mergepatrol_core::RepoName;
 
 use crate::Installation;
+use crate::app::AsUser;
 use crate::repo::TreeEntry;
 
 /// Repos per GraphQL query, when finding which have a file.
@@ -38,32 +39,53 @@ pub struct Proposal<'a> {
     pub body: &'a str,
 }
 
-impl Installation {
+const DEFAULT_BRANCH_FILE: &str = "query($owner: String!, $name: String!, $path: String!) {
+    repository(owner: $owner, name: $name) {
+      defaultBranchRef { name target { oid ... on Commit {
+        file(path: $path) { object { ... on Blob { text } } }
+      } } }
+    }
+  }";
+
+/// The default branch's file, from a `DEFAULT_BRANCH_FILE` answer.
+fn branch_file(data: &Value) -> Result<BranchFile> {
+    let r = &data["repository"]["defaultBranchRef"];
+    Ok(BranchFile {
+        branch: r["name"]
+            .as_str()
+            .context("the repo has no default branch")?
+            .to_owned(),
+        sha: r["target"]["oid"].as_str().context("trunk sha")?.to_owned(),
+        text: r["target"]["file"]["object"]["text"]
+            .as_str()
+            .map(str::to_owned),
+    })
+}
+
+impl AsUser {
+    /// As [`Installation::default_branch_file`], read as the user.
     pub async fn default_branch_file(&self, repo: &RepoName, path: &str) -> Result<BranchFile> {
-        let query = "query($owner: String!, $name: String!, $path: String!) {
-            repository(owner: $owner, name: $name) {
-              defaultBranchRef { name target { oid ... on Commit {
-                file(path: $path) { object { ... on Blob { text } } }
-              } } }
-            }
-          }";
         let data = self
             .graphql_missing_ok(
-                query,
+                "default branch file",
+                DEFAULT_BRANCH_FILE,
                 json!({ "owner": repo.owner, "name": repo.name, "path": path }),
             )
             .await?;
-        let r = &data["repository"]["defaultBranchRef"];
-        Ok(BranchFile {
-            branch: r["name"]
-                .as_str()
-                .context("the repo has no default branch")?
-                .to_owned(),
-            sha: r["target"]["oid"].as_str().context("trunk sha")?.to_owned(),
-            text: r["target"]["file"]["object"]["text"]
-                .as_str()
-                .map(str::to_owned),
-        })
+        branch_file(&data)
+    }
+}
+
+impl Installation {
+    pub async fn default_branch_file(&self, repo: &RepoName, path: &str) -> Result<BranchFile> {
+        let data = self
+            .graphql_missing_ok(
+                "default branch file",
+                DEFAULT_BRANCH_FILE,
+                json!({ "owner": repo.owner, "name": repo.name, "path": path }),
+            )
+            .await?;
+        branch_file(&data)
     }
 
     /// `path` on `branch`, or `None` when either is missing.
@@ -79,6 +101,7 @@ impl Installation {
         let expr = format!("refs/heads/{branch}:{path}");
         let data = self
             .graphql_missing_ok(
+                "branch file",
                 query,
                 json!({ "owner": repo.owner, "name": repo.name, "expr": expr }),
             )
@@ -106,7 +129,7 @@ impl Installation {
                 .collect();
             let query = format!("query($path: String!) {{ {} }}", fields.join("\n"));
             let data = self
-                .graphql_missing_ok(&query, json!({ "path": path }))
+                .graphql_missing_ok("have file", &query, json!({ "path": path }))
                 .await?;
             for i in 0..chunk.len() {
                 let file = &data[format!("r{i}")]["defaultBranchRef"]["target"]["file"];
@@ -114,23 +137,6 @@ impl Installation {
             }
         }
         Ok(found)
-    }
-
-    /// A GraphQL query whose answer may lack what does not exist: GitHub reports a missing file
-    /// or repo as a `NOT_FOUND` error, beside the rest of the answer. Any other error fails it.
-    async fn graphql_missing_ok(&self, query: &str, variables: Value) -> Result<Value> {
-        let res: Value = self
-            .rest(
-                Method::POST,
-                "/graphql",
-                Some(json!({ "query": query, "variables": variables })),
-            )
-            .await?;
-        let errors = res["errors"].as_array().cloned().unwrap_or_default();
-        if res["data"].is_null() || errors.iter().any(|e| e["type"] != "NOT_FOUND") {
-            anyhow::bail!("GraphQL: {}", res["errors"]);
-        }
-        Ok(res["data"].clone())
     }
 
     /// The open PR from `branch` in the same repo, if there is one.

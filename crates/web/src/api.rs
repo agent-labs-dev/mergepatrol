@@ -7,7 +7,7 @@ use mergepatrol_core::{
     EFFORTS, Entry, EntryState, FixCiSettings, Labels, Person, PrSummary, Provider,
     REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
-use mergepatrol_github::{App, Installation, Proposal, PullRef, setup};
+use mergepatrol_github::{App, AsUser, BranchFile, Installation, Proposal, PullRef, setup};
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
     CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
@@ -970,6 +970,8 @@ pub(crate) async fn set_repo(
 const OPEN_PULLS: u32 = 50;
 
 /// The repo's open PRs into its default branch that are not in its queue, updated last first.
+/// Read as the user: each viewer's polling spends their own rate limit, not the queue's. A
+/// revoked token means signing in again.
 pub(crate) async fn open_pulls(
     State(app): State<AppState>,
     user: SignedIn,
@@ -977,8 +979,9 @@ pub(crate) async fn open_pulls(
 ) -> Result<Json<Vec<OpenPullView>>, ApiError> {
     let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let gh = installation(&app, id).await?;
-    let (labels, trunk) = repo_labels(&app, &gh, &repo).await?;
+    let gh = AsUser::new(user.github_token(&app)?)?;
+    let file = as_user(gh.default_branch_file(&repo, REPO_CONFIG_PATH).await, &repo)?;
+    let (labels, trunk) = labels_of(&app, file)?;
     // A stack's layers are in the queue with it, though one layer alone may have the label.
     let queued: HashSet<u64> = app
         .store
@@ -989,7 +992,10 @@ pub(crate) async fn open_pulls(
         .flat_map(|(_, lane)| lane.entries)
         .flat_map(|e| std::iter::once(e.number).chain(e.layers))
         .collect();
-    let pulls = gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await?;
+    let pulls = as_user(
+        gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await,
+        &repo,
+    )?;
     Ok(Json(
         pulls
             .into_iter()
@@ -1074,7 +1080,11 @@ async fn repo_labels(
     gh: &Installation,
     repo: &RepoName,
 ) -> Result<(Labels, String), ApiError> {
-    let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
+    labels_of(app, gh.default_branch_file(repo, REPO_CONFIG_PATH).await?)
+}
+
+/// The labels the config file sets, and the branch it is on.
+fn labels_of(app: &AppState, file: BranchFile) -> Result<(Labels, String), ApiError> {
     let settings = RepoSettings::from_file(file.text.as_deref(), &app.repo_defaults)
         .map_err(|e| ApiError::Status(StatusCode::CONFLICT, e))?;
     Ok((settings.labels(), file.branch))
@@ -1088,8 +1098,8 @@ async fn layers(gh: &Installation, repo: &RepoName, number: u64) -> anyhow::Resu
     })
 }
 
-/// A change made as the user: GitHub's refusal is theirs to read.
-fn as_user(result: anyhow::Result<()>, repo: &RepoName) -> Result<(), ApiError> {
+/// A call made as the user: GitHub's refusal is theirs to read.
+fn as_user<T>(result: anyhow::Result<T>, repo: &RepoName) -> Result<T, ApiError> {
     result.map_err(|e| {
         if e.is::<setup::Refused>() {
             ApiError::Status(
