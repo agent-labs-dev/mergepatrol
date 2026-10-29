@@ -1232,7 +1232,8 @@ mod tests {
         };
         let dead = Session {
             kind: SessionKind::Setup,
-            expires_at: now - 1,
+            // Well past: the database's clock can trail this one by a second.
+            expires_at: now - 3600,
             checked_at: 0,
             github: None,
         };
