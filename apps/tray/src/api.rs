@@ -129,6 +129,20 @@ impl std::fmt::Display for ApiError {
     }
 }
 
+/// macOS's own TLS, trusting the system's roots.
+fn agent() -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
+    ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .http_status_as_error(false)
+        .tls_config(tls)
+        .build()
+        .into()
+}
+
 /// Trades the sign-in's one-time code, with the PKCE verifier only this app has, for a
 /// session token. Blocking.
 pub fn trade_code(server: &str, code: &str, verifier: &str) -> Result<String, String> {
@@ -136,12 +150,7 @@ pub fn trade_code(server: &str, code: &str, verifier: &str) -> Result<String, St
     struct Token {
         token: String,
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .http_status_as_error(false)
-        .build()
-        .into();
-    let mut res = agent
+    let mut res = agent()
         .post(&format!("{}/auth/tray/token", server.trim_end_matches('/')))
         .send_json(serde_json::json!({ "code": code, "verifier": verifier }))
         .map_err(|e| format!("could not reach the server: {e}"))?;
@@ -169,13 +178,8 @@ pub struct Client {
 
 impl Client {
     pub fn new(base: &str, token: &str) -> Self {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
-            .http_status_as_error(false)
-            .build()
-            .into();
         Self {
-            agent,
+            agent: agent(),
             base: base.trim_end_matches('/').to_owned(),
             token: token.to_owned(),
         }
