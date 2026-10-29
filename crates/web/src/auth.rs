@@ -299,12 +299,27 @@ pub(crate) async fn manifest_callback(
         let (Some(code), Some(token)) = (q.code, q.state) else {
             anyhow::bail!("GitHub did not create the App");
         };
+        // The cookie only ties the callback to the browser: whoever calls can set it. The setup
+        // session, which the setup token unlocked, is what lets the App be created.
+        let setup = current_session(&headers, &state).await?;
+        if !matches!(
+            setup,
+            Some(Session {
+                kind: SessionKind::Setup,
+                ..
+            })
+        ) {
+            anyhow::bail!("enter the setup token first");
+        }
         let started = read_cookie(&headers, MANIFEST_COOKIE);
         if !started.is_some_and(|s| constant_time_eq(s.as_bytes(), token.as_bytes())) {
             anyhow::bail!("this setup link expired, or started in another browser: start again");
         }
         if state.hosted_app.is_some() {
             anyhow::bail!("this Mergepatrol uses the hosted GitHub App");
+        }
+        if state.app_credentials().await?.is_some() {
+            anyhow::bail!("the GitHub App already exists");
         }
         let creds = setup::convert_manifest(&code).await?;
         state
