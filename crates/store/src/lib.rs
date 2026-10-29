@@ -122,6 +122,9 @@ pub trait Store: Send + Sync {
         detail: &str,
         summary: &PrSummary,
     ) -> Result<Option<StepTimes>>;
+    /// Whether the PR left the queue since it last joined: its exit is recorded. `false` for a
+    /// PR that never joined.
+    async fn has_left(&self, key: &LaneKey, pr: PrNumber) -> Result<bool>;
     async fn exits(&self, query: &ExitQuery<'_>) -> Result<Vec<ExitRecord>>;
     /// Each repo's, then every repo's together, from `from_days` ago to `to_days` ago.
     async fn exit_stats(
@@ -483,6 +486,26 @@ impl Store for PgStore {
         .execute(&self.pool)
         .await?;
         Ok(steps)
+    }
+
+    async fn has_left(&self, key: &LaneKey, pr: PrNumber) -> Result<bool> {
+        let left: Option<bool> = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1 FROM exits
+                WHERE installation_id = $1 AND repo = $2 AND pr = $3 AND at > joined.at
+             )
+             FROM (
+                SELECT max(at) AS at FROM events
+                WHERE installation_id = $1 AND repo = $2 AND pr = $3 AND kind = 'enqueued'
+             ) joined
+             WHERE joined.at IS NOT NULL",
+        )
+        .bind(key.installation_id as i64)
+        .bind(key.repo.to_string())
+        .bind(pr as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(left.unwrap_or(false))
     }
 
     async fn exits(&self, q: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
@@ -1000,6 +1023,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, ["live"]);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_pr_has_left_once_its_exit_follows_its_last_joining(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo: RepoName::parse("o/r").unwrap(),
+            trunk: "main".into(),
+        };
+        let summary = PrSummary::default();
+        // Never joined: an exit then is not a second one.
+        assert!(!store.has_left(&key, 7).await.unwrap());
+        store.record(&key, 7, "enqueued", "added").await.unwrap();
+        assert!(!store.has_left(&key, 7).await.unwrap());
+        store
+            .record_exit(&key, 7, "merged", "s", &summary)
+            .await
+            .unwrap();
+        assert!(store.has_left(&key, 7).await.unwrap());
+        // Queued again: a new stay, not left yet.
+        store.record(&key, 7, "enqueued", "added").await.unwrap();
+        assert!(!store.has_left(&key, 7).await.unwrap());
+        // Another PR is its own.
+        assert!(!store.has_left(&key, 8).await.unwrap());
     }
 
     #[sqlx::test(migrations = false)]
