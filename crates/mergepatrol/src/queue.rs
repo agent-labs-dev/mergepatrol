@@ -32,7 +32,8 @@ use crate::github::GitHub;
 use crate::publish::{Publish, publish};
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
-/// With no required checks, a commit that has no checks at all after this long counts as green.
+/// With no required checks, how long after a publish its checks may first count as green: a
+/// slow CI may not have created its checks yet, while a quick app's are already green.
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
 /// How soon a repo turned on in the dashboard starts its queue.
 const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
@@ -310,17 +311,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     if next.len() > 1 && !required.strict {
         let prs = batchable(gh, repo, &snap, &required.names, &next).await?;
         if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &prs).await? {
-            run_batch(
-                ctx,
-                &settings,
-                gh,
-                &key,
-                &snap,
-                &required.names,
-                &mut lane,
-                batch,
-            )
-            .await?;
+            run_batch(ctx, &settings, gh, &key, &snap, &mut lane, batch).await?;
             return Ok(Ran::Job);
         }
     }
@@ -329,18 +320,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     ctx.store.save_lane(&key, &lane).await?;
 
     let _slot = ctx.jobs.acquire().await?;
-    let outcome = match run_job(
-        ctx,
-        &settings,
-        gh,
-        sandbox,
-        &key,
-        &snap,
-        &required.names,
-        number,
-    )
-    .await
-    {
+    let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, number).await {
         Ok(o) => o,
         Err(e) => Outcome::Ejected(EjectReason::RebaseFailed(format!("{e:#}"))),
     };
@@ -489,7 +469,6 @@ async fn run_batch(
     gh: &dyn GitHub,
     key: &LaneKey,
     snap: &RepoSnapshot,
-    required: &[String],
     lane: &mut Lane,
     batch: Batch,
 ) -> Result<()> {
@@ -500,10 +479,7 @@ async fn run_batch(
     }
     ctx.store.save_lane(key, lane).await?;
 
-    let result = test_and_merge(
-        ctx, settings, gh, key, snap, required, lane, &batch, &members,
-    )
-    .await;
+    let result = test_and_merge(ctx, settings, gh, key, snap, lane, &batch, &members).await;
     // Deleting the branch closes the draft PR.
     gh.delete_branch(repo, &batch.branch).await?;
     lane.batch_branch = None;
@@ -519,7 +495,6 @@ async fn test_and_merge(
     gh: &dyn GitHub,
     key: &LaneKey,
     snap: &RepoSnapshot,
-    required: &[String],
     lane: &mut Lane,
     batch: &Batch,
     members: &[PrNumber],
@@ -579,13 +554,7 @@ async fn test_and_merge(
         if let Some(why) = stale(&now, snap, batch) {
             break Tested::Stale(why);
         }
-        let checks = gh.checks(repo, head).await?;
-        match checks.verdict(required) {
-            (CheckState::Passed, _) if required.is_empty() && checks.by_name.is_empty() => {
-                if opened.elapsed() >= NO_CHECKS_GRACE {
-                    break Tested::Passed;
-                }
-            }
+        match checks_verdict(gh, key, head, opened).await? {
             (CheckState::Passed, _) => break Tested::Passed,
             (CheckState::Failed, names) => break Tested::Failed(names),
             (CheckState::Pending, _) => {}
@@ -708,6 +677,25 @@ async fn merge_batch(
     Ok(())
 }
 
+/// The verdict on `head`'s checks, against the trunk's required checks as they are now, not as
+/// the job began: a ruleset may change while it waits. With none required, every check counts,
+/// and a pass only after `NO_CHECKS_GRACE` from `published`.
+async fn checks_verdict(
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    head: &str,
+    published: Instant,
+) -> Result<(CheckState, Vec<String>)> {
+    let required = gh.required_checks(&key.repo, &key.trunk).await?.names;
+    let verdict = gh.checks(&key.repo, head).await?.verdict(&required);
+    Ok(match verdict {
+        (CheckState::Passed, _) if required.is_empty() && published.elapsed() < NO_CHECKS_GRACE => {
+            (CheckState::Pending, vec![])
+        }
+        v => v,
+    })
+}
+
 /// GitHub rejects a merge right after the one before it, until it has worked out the PR's
 /// mergeability against the new trunk ("Base branch was modified"). It accepts it moments later.
 async fn merge_retrying(
@@ -776,7 +764,6 @@ async fn run_job(
     sandbox: &dyn Sandbox,
     key: &LaneKey,
     snap: &RepoSnapshot,
-    required: &[String],
     number: PrNumber,
 ) -> Result<Outcome> {
     let repo = &key.repo;
@@ -831,19 +818,7 @@ async fn run_job(
                     .await?;
                     Event::BaseMoved
                 } else {
-                    let checks = gh.checks(repo, head).await?;
-                    match checks.verdict(required) {
-                        (CheckState::Passed, _)
-                            if required.is_empty() && checks.by_name.is_empty() =>
-                        {
-                            if published_at.elapsed() < NO_CHECKS_GRACE {
-                                ctx.wakers
-                                    .wait(key.installation_id, repo, CHECKS_POLL)
-                                    .await;
-                                continue;
-                            }
-                            Event::ChecksPassed
-                        }
+                    match checks_verdict(gh, key, head, published_at).await? {
                         (CheckState::Passed, _) => Event::ChecksPassed,
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
                         (CheckState::Pending, _) => {

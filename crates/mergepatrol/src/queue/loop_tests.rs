@@ -104,6 +104,14 @@ impl State {
         self.branches[&self.prs[&number].head_ref_name].clone()
     }
 
+    fn checks_of(&self, sha: &str) -> BTreeMap<String, CheckState> {
+        let mut by_name = self.checks_on.get(sha).unwrap_or(&self.checks).clone();
+        if self.broken(sha) {
+            by_name.insert("ci".into(), CheckState::Failed);
+        }
+        by_name
+    }
+
     fn tree(&self, sha: &str) -> String {
         self.trees.get(sha).cloned().unwrap_or_else(|| "t".into())
     }
@@ -136,6 +144,10 @@ impl Fake {
 
     fn with<T>(&self, f: impl FnOnce(&State) -> T) -> T {
         f(&self.state.lock().unwrap())
+    }
+
+    fn with_mut<T>(&self, f: impl FnOnce(&mut State) -> T) -> T {
+        f(&mut self.state.lock().unwrap())
     }
 }
 
@@ -207,11 +219,9 @@ impl GitHub for Fake {
         if let Some(action) = action {
             action(&mut s);
         }
-        let mut by_name = s.checks_on.get(sha).unwrap_or(&s.checks).clone();
-        if s.broken(sha) {
-            by_name.insert("ci".into(), CheckState::Failed);
-        }
-        Ok(Checks { by_name })
+        Ok(Checks {
+            by_name: s.checks_of(sha),
+        })
     }
 
     async fn check_failures(
@@ -239,6 +249,17 @@ impl GitHub for Fake {
         let mut s = self.state.lock().unwrap();
         if s.head(number) != sha {
             return Ok(MergeOutcome::Rejected("head moved".into()));
+        }
+        // As a ruleset does: every required check must have passed on the commit.
+        let checks = s.checks_of(sha);
+        if let Some(missing) = s
+            .required
+            .iter()
+            .find(|r| checks.get(*r) != Some(&CheckState::Passed))
+        {
+            return Ok(MergeOutcome::Rejected(format!(
+                "Required status check \"{missing}\" is expected."
+            )));
         }
         if s.rejects.contains(&number) {
             return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
@@ -810,6 +831,27 @@ async fn a_failed_required_check_is_fixed_then_merged() {
     assert_eq!(run.merged(), [1]);
 }
 
+/// The commit has only a quick app's check at first. CI's `ci` turns up `after` polls later.
+fn quick_check_first(ci: CheckState, after: usize, run: &Run) {
+    run.gh
+        .with_mut(|s| s.checks = BTreeMap::from([("socket".into(), CheckState::Passed)]));
+    for _ in 0..after {
+        run.gh.then(|_| {});
+    }
+    run.gh.then(move |s| {
+        s.checks.insert("ci".into(), ci);
+    });
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ruleset_added_while_a_pr_waits_holds_its_merge() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    run.gh.then(|s| s.required = vec!["ci".into()]);
+    quick_check_first(CheckState::Passed, 10, &run);
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn fixes_that_do_not_mend_the_checks_eject_after_the_attempts() {
     let mut run = Run::new(Fake::new(failing_ci));
@@ -847,6 +889,18 @@ async fn a_fix_the_agent_gives_up_on_ejects_with_its_reason() {
         comment.contains("the fix failed: the agent gave up: a flaky test"),
         "{comment}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_required_checks_a_quick_green_check_waits_for_the_rest() {
+    let run = Run::new(Fake::new(|s| {
+        s.config = Some("version: 1\nfix_ci: { enabled: false }\n".into());
+        s.add_pr(1);
+    }));
+    quick_check_first(CheckState::Failed, 3, &run);
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.kinds(1).last().unwrap(), "ejected");
 }
 
 #[tokio::test(start_paused = true)]
