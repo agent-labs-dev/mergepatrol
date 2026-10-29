@@ -22,8 +22,8 @@ use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
     RepoSnapshot,
 };
-use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, Scope, Store, Vault};
-use tokio::sync::{Notify, Semaphore};
+use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
+use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -35,6 +35,9 @@ const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
 /// slow CI may not have created its checks yet, while a quick app's are already green.
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
+/// How often the instance running the queues checks that it still holds the queue lock, and
+/// how often the others try to take it.
+const LOCK_EVERY: Duration = Duration::from_secs(5);
 /// How soon a repo turned on in the dashboard starts its queue.
 const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 /// How often to look for the config file in every repo of every installation. A push webhook
@@ -136,12 +139,91 @@ impl mergepatrol_web::Wake for Wakers {
     }
 }
 
+/// Runs the queues while this instance holds the queue lock, and stops them if it loses it, or
+/// once `stop` is set. Every instance serves the dashboard and the webhooks, but only one runs
+/// the queues.
+pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<bool>) {
+    let mut waiting = false;
+    loop {
+        match store.try_queue_lock().await {
+            Ok(Some(mut lock)) => {
+                tracing::info!("holding the queue lock: running the queues");
+                waiting = false;
+                let (alive, mut stopped) = mpsc::channel::<()>(1);
+                let queues = (
+                    Spawned::spawn(supervise(ctx.clone(), alive.clone()), &alive),
+                    Spawned::spawn(discover(ctx.clone()), &alive),
+                );
+                let stopping = loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(LOCK_EVERY) => {}
+                        _ = stop.wait_for(|s| *s) => break true,
+                    }
+                    let checked = tokio::time::timeout(LOCK_EVERY, lock.check()).await;
+                    if let Err(e) = checked.map_err(anyhow::Error::from).and_then(|r| r) {
+                        let error = format!("{e:#}");
+                        tracing::error!(%error, "lost the queue lock: stopping the queues");
+                        break false;
+                    }
+                };
+                // The lock goes only once every queue task has stopped, so the queues never run
+                // in two instances at once.
+                drop((queues, alive));
+                let _ = stopped.recv().await;
+                drop(lock);
+                if stopping {
+                    return;
+                }
+            }
+            Ok(None) if !waiting => {
+                tracing::info!("another instance holds the queue lock: waiting for it");
+                waiting = true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(error = %format!("{e:#}"), "could not take the queue lock");
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(LOCK_EVERY) => {}
+            _ = stop.wait_for(|s| *s) => return,
+        }
+    }
+}
+
+/// Held by every queue task until it has stopped: the channel closes once all have.
+type Alive = mpsc::Sender<()>;
+
+/// A spawned queue task, which is stopped when it is dropped: stopping a task stops the ones it
+/// runs.
+struct Spawned(JoinHandle<()>);
+
+impl Spawned {
+    fn spawn(future: impl Future<Output = ()> + Send + 'static, alive: &Alive) -> Self {
+        let alive = alive.clone();
+        Self(tokio::spawn(async move {
+            let _alive = alive;
+            future.await
+        }))
+    }
+
+    fn is_finished(&self) -> bool {
+        self.0.is_finished()
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Runs a queue for each repo that is on, and stops the queues of repos that are turned off.
 /// Waits until the GitHub App exists.
-pub async fn supervise(ctx: Arc<Ctx>) {
+async fn supervise(ctx: Arc<Ctx>, alive: Alive) {
     let mut running = Running::new();
     loop {
-        if let Err(e) = reconcile(&ctx, &mut running).await {
+        if let Err(e) = reconcile(&ctx, &mut running, &alive).await {
             tracing::error!(error = %format!("{e:#}"), "could not update the running queues");
         }
         tokio::time::sleep(SUPERVISE_EVERY).await;
@@ -150,7 +232,7 @@ pub async fn supervise(ctx: Arc<Ctx>) {
 
 /// Keeps track of which repos have the config file on their default branch, so that a repo
 /// queues once it has one.
-pub async fn discover(ctx: Arc<Ctx>) {
+async fn discover(ctx: Arc<Ctx>) {
     loop {
         if let Err(e) = discover_once(&ctx).await {
             tracing::error!(error = %format!("{e:#}"), "could not look for config files");
@@ -208,9 +290,9 @@ async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
 }
 
 /// Keyed by (installation, repo). The value keeps the App ID the task started with.
-type Running = HashMap<(u64, RepoName), (u64, JoinHandle<()>)>;
+type Running = HashMap<(u64, RepoName), (u64, Spawned)>;
 
-async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
+async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running, alive: &Alive) -> Result<()> {
     let Some(creds) = app_credentials(ctx).await? else {
         return Ok(());
     };
@@ -228,7 +310,6 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
         let keep = wanted.contains(key) && *app_id == creds.id && !task.is_finished();
         if !keep {
             tracing::info!(installation = key.0, repo = %key.1, "stopping");
-            task.abort();
         }
         keep
     });
@@ -237,7 +318,10 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running) -> Result<()> {
             let (installation, repo) = slot.key().clone();
             tracing::info!(installation, %repo, "watching");
             let gh = App::from_credentials(&creds)?.installation(installation);
-            slot.insert((creds.id, tokio::spawn(run_repo(ctx.clone(), gh, repo))));
+            slot.insert((
+                creds.id,
+                Spawned::spawn(run_repo(ctx.clone(), gh, repo), alive),
+            ));
         }
     }
     Ok(())
@@ -1879,6 +1963,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("may not: .github/ci.yml"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_task_keeps_the_channel_open_until_it_ends() {
+        let (alive, mut stopped) = mpsc::channel::<()>(1);
+        let (end, ended) = tokio::sync::oneshot::channel::<()>();
+        let _task = Spawned::spawn(
+            async move {
+                let _ = ended.await;
+            },
+            &alive,
+        );
+        drop(alive);
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            stopped.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        end.send(()).unwrap();
+        assert!(stopped.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_task_stops_the_tasks_it_runs() {
+        let (alive, mut stopped) = mpsc::channel::<()>(1);
+        let child_alive = alive.clone();
+        let parent = Spawned::spawn(
+            async move {
+                let _child = Spawned::spawn(std::future::pending(), &child_alive);
+                std::future::pending::<()>().await;
+            },
+            &alive,
+        );
+        drop(alive);
+        tokio::task::yield_now().await;
+        drop(parent);
+        let ended = tokio::time::timeout(Duration::from_secs(1), stopped.recv()).await;
+        assert!(ended.is_ok(), "the child task still runs");
     }
 
     #[tokio::test(start_paused = true)]

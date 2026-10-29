@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{Lane, PrNumber, PrSummary, RepoName, Step, StepTimes, step_times};
 use serde::Serialize;
-use sqlx::PgPool;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{Connection, PgConnection, PgPool};
 
 /// One lane: the queue of one trunk in one repo of one installation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -269,6 +269,37 @@ impl PgStore {
             .await
             .context("migrate the database")?;
         Ok(Self { pool })
+    }
+
+    /// The queue lock, unless another instance holds it.
+    pub async fn try_queue_lock(&self) -> Result<Option<QueueLock>> {
+        let mut conn = PgConnection::connect_with(&self.pool.connect_options())
+            .await
+            .context("connect to Postgres for the queue lock")?;
+        let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(QUEUE_LOCK)
+            .fetch_one(&mut conn)
+            .await?;
+        Ok(locked.then_some(QueueLock { conn }))
+    }
+}
+
+/// The advisory lock that the instance running the queues holds: "mergepat".
+const QUEUE_LOCK: i64 = 0x6d65_7267_6570_6174;
+
+/// Lets one instance run the queues: two would race each other on every PR. Postgres holds it
+/// for as long as its connection lives, so a crashed instance lets it go.
+pub struct QueueLock {
+    conn: PgConnection,
+}
+
+impl QueueLock {
+    /// Errs when the connection is gone, and with it the lock.
+    pub async fn check(&mut self) -> Result<()> {
+        self.conn
+            .ping()
+            .await
+            .context("the queue lock's connection")
     }
 }
 
@@ -809,6 +840,25 @@ impl Store for PgStore {
 mod tests {
     use super::*;
     use mergepatrol_core::Candidate;
+
+    #[sqlx::test(migrations = false)]
+    async fn one_instance_at_a_time_holds_the_queue_lock(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let mut first = store.try_queue_lock().await.unwrap().expect("a free lock");
+        assert!(store.try_queue_lock().await.unwrap().is_none());
+        first.check().await.unwrap();
+        // As when the instance stops: its connection closes.
+        drop(first);
+        let mut again = None;
+        for _ in 0..50 {
+            again = store.try_queue_lock().await.unwrap();
+            if again.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(again.is_some(), "the lock was not let go");
+    }
 
     #[sqlx::test(migrations = false)]
     async fn sessions_expire(pool: PgPool) {

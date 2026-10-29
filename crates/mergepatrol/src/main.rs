@@ -59,7 +59,8 @@ async fn orchestrator() -> Result<()> {
     let config = Config::from_env()?;
     tokio::fs::create_dir_all(&config.data_dir).await?;
 
-    let store: Arc<dyn Store> = Arc::new(PgStore::connect(&config.database_url).await?);
+    let pg = Arc::new(PgStore::connect(&config.database_url).await?);
+    let store: Arc<dyn Store> = pg.clone();
     let vault = Arc::new(Vault::new(store.clone(), &config.secret_key)?);
 
     let hosted_app = match &config.hosted_app {
@@ -162,12 +163,41 @@ async fn orchestrator() -> Result<()> {
         repo_defaults: ctx.config.repo_defaults.clone(),
         analytics,
     };
-    tokio::spawn(queue::supervise(ctx.clone()));
-    tokio::spawn(queue::discover(ctx.clone()));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let queues = tokio::spawn(queue::lead(ctx.clone(), pg, stopped));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");
     let app = mergepatrol_web::router(store, vault, web).merge(mailbox.router());
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            stopping().await;
+            // Stops the queues and lets go of the queue lock first, so the instance that
+            // replaces this one takes over the queues while this one finishes its requests.
+            tracing::info!("stopping");
+            let _ = stop.send(true);
+            let _ = queues.await;
+        })
+        .await?;
     Ok(())
+}
+
+/// Resolves on SIGTERM, which a deploy sends, or on Ctrl-C. As PID 1 in a container, the
+/// process would otherwise ignore SIGTERM, until the platform kills it.
+async fn stopping() {
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "cannot listen for SIGTERM");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        _ = term => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
 }
