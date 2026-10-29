@@ -9,7 +9,7 @@ import { Repos } from "./Repos";
 import { Settings } from "./Settings";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { type ThemeProps, useTheme } from "./theme";
-import { Avatar, Mark, ThemeToggle } from "./ui";
+import { Avatar, feedbackUrl, Mark, ThemeToggle } from "./ui";
 
 /** Setup and sign-in errors come back from the server as `?error=`. */
 function useRedirectError() {
@@ -104,6 +104,15 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
             <option value="install">Add a workspace…</option>
           </select>
           <div className="ml-auto flex items-center gap-3">
+            <a
+              className="text-muted hover:text-fg"
+              href={feedbackUrl}
+              target="_blank"
+              rel="noreferrer"
+              title="Report a bug, request a feature, or tell us what you think"
+            >
+              Feedback
+            </a>
             <ThemeToggle theme={theme} onChange={setTheme} />
             {session.user && (
               <>

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { ThemeProps } from "./theme";
-import { Mark, primary, secondary, ThemeToggle } from "./ui";
+import { Mark, primary, repoUrl, StarButton, secondary, ThemeToggle } from "./ui";
 
 const steps: [string, ReactNode][] = [
   [
@@ -60,9 +60,10 @@ export function Landing({ theme, setTheme }: ThemeProps) {
     <div className="min-h-screen">
       <header className="mx-auto flex h-14 max-w-5xl items-center gap-2 px-6 font-semibold">
         <Mark /> Mergepatrol
-        <div className="ml-auto flex items-center gap-3 font-normal">
+        <div className="ml-auto flex items-center gap-2 font-normal sm:gap-3">
           <ThemeToggle theme={theme} onChange={setTheme} />
-          <a className={secondary} href="/auth/login">
+          <StarButton />
+          <a className={`${secondary} whitespace-nowrap`} href="/auth/login">
             Sign in
           </a>
         </div>
@@ -118,7 +119,10 @@ export function Landing({ theme, setTheme }: ThemeProps) {
       </main>
 
       <footer className="border-t border-line py-6 text-center text-xs text-muted">
-        Mergepatrol · Apache-2.0
+        Mergepatrol · Apache-2.0 ·{" "}
+        <a className="hover:text-fg" href={repoUrl}>
+          GitHub
+        </a>
       </footer>
     </div>
   );
