@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use mergepatrol_billing::StripeConfig;
 use mergepatrol_core::{Provider, RepoSettings, ResolverSettings};
 
 /// Settings from the environment. Everything else is set up in the dashboard, or in each repo's
@@ -31,6 +32,8 @@ pub struct Config {
     /// The PostHog project key. Product analytics are off without it, as when self-hosted.
     pub posthog_key: Option<String>,
     pub posthog_host: String,
+    /// Billing, hosted. Off without it, as when self-hosted: no plan limits.
+    pub stripe: Option<StripeConfig>,
 }
 
 /// Where rebase jobs run.
@@ -126,6 +129,7 @@ impl Config {
             },
             posthog_key: var("MERGEPATROL_POSTHOG_KEY"),
             posthog_host: opt("MERGEPATROL_POSTHOG_HOST", "https://us.i.posthog.com"),
+            stripe: stripe()?,
         })
     }
 }
@@ -152,6 +156,25 @@ fn hosted_app() -> Result<Option<HostedApp>> {
             "set all of {} for the hosted GitHub App, or none",
             names.join(", ")
         ),
+    }
+}
+
+/// The three variables, or none.
+fn stripe() -> Result<Option<StripeConfig>> {
+    let names = [
+        "MERGEPATROL_STRIPE_SECRET_KEY",
+        "MERGEPATROL_STRIPE_WEBHOOK_SECRET",
+        "MERGEPATROL_STRIPE_PRICE",
+    ];
+    let values: Vec<Option<String>> = names.iter().map(|n| var(n)).collect();
+    match values.as_slice() {
+        [None, None, None] => Ok(None),
+        [Some(secret_key), Some(webhook_secret), Some(price)] => Ok(Some(StripeConfig {
+            secret_key: secret_key.clone(),
+            webhook_secret: webhook_secret.clone(),
+            price: price.clone(),
+        })),
+        _ => bail!("set all of {} for billing, or none", names.join(", ")),
     }
 }
 

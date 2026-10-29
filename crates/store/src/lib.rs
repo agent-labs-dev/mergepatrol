@@ -1,7 +1,9 @@
 //! Persistence, in Postgres. Migrations are in `migrations/`, embedded, and run at startup.
 
+mod billing;
 mod vault;
 
+pub use billing::{BillingStore, FairUse, Subscription, Unsynced};
 pub use vault::{ANTHROPIC_API_KEY, GITHUB_APP, SecretStatus, Vault, api_key_secret};
 
 use anyhow::{Context, Result};

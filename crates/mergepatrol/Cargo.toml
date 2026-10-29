@@ -10,6 +10,7 @@ async-trait = "0.1"
 axum = "0.8.9"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 mergepatrol-analytics = { version = "0.1.0", path = "../analytics" }
+mergepatrol-billing = { version = "0.1.0", path = "../billing" }
 mergepatrol-core = { version = "0.1.0", path = "../core" }
 mergepatrol-executor = { version = "0.1.0", path = "../executor" }
 mergepatrol-git = { version = "0.1.0", path = "../git" }

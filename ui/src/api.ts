@@ -1,3 +1,4 @@
+import type { BillingView } from "./api/BillingView";
 import type { EventView } from "./api/EventView";
 import type { ExitsPage } from "./api/ExitsPage";
 import type { FixView } from "./api/FixView";
@@ -7,6 +8,7 @@ import type { ManifestForm } from "./api/ManifestForm";
 import type { ManifestRequest } from "./api/ManifestRequest";
 import type { OutcomeView } from "./api/OutcomeView";
 import type { PullRequestRef } from "./api/PullRequestRef";
+import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
 import type { RepoView } from "./api/RepoView";
@@ -92,3 +94,16 @@ export const setApiKey = (id: number, provider: string, value: string) =>
 
 export const deleteApiKey = (id: number, provider: string) =>
   send<SettingsView>("DELETE", w(id, `/settings/api-keys/${provider}`));
+
+/** `null` without billing, as when self-hosted. */
+export const fetchBilling = (id: number) => get<BillingView | null>(w(id, "/billing"));
+
+/** A Stripe Checkout page that subscribes the workspace. */
+export const startCheckout = (id: number) => send<RedirectView>("POST", w(id, "/billing/checkout"));
+
+/** Stripe's customer portal: the card, invoices, and cancelling. */
+export const openPortal = (id: number) => send<RedirectView>("POST", w(id, "/billing/portal"));
+
+/** Frees a developer's seat: they take one again with their next PR on a private repo. */
+export const freeSeat = (id: number, login: string) =>
+  send<BillingView>("DELETE", w(id, `/billing/seats/${encodeURIComponent(login)}`));

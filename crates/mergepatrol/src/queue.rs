@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
+use mergepatrol_billing::{Billing, Hold};
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Job, Lane,
     LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName,
@@ -66,6 +67,8 @@ const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflo
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
+/// How often each subscription's seats are brought in line with Stripe.
+const SYNC_SEATS_EVERY: Duration = Duration::from_secs(60);
 
 pub struct Ctx {
     pub config: Config,
@@ -84,6 +87,8 @@ pub struct Ctx {
     pub job_errors: JobErrors,
     /// When the queue first saw each fork PR it has no pin for yet.
     pub unpinned: Unpinned,
+    /// Hosted: holds PRs over the plan's limits, and bills private repos. `None` self-hosted.
+    pub billing: Option<Arc<Billing>>,
 }
 
 /// Fork PRs waiting for their pin: the `labeled` webhook, or for their pull ref to show it.
@@ -201,6 +206,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                     Spawned::spawn(supervise(ctx.clone(), alive.clone()), &alive),
                     Spawned::spawn(discover(ctx.clone()), &alive),
                     Spawned::spawn(prune(ctx.clone()), &alive),
+                    Spawned::spawn(sync_seats(ctx.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -243,9 +249,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
 /// older than `JOB_OUTPUTS_FOR`.
 async fn prune(ctx: Arc<Ctx>) {
     loop {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+        let now = unix_now();
         match ctx.store.delete_expired_sessions(now).await {
             Ok(n) => tracing::info!(sessions = n, "deleted expired sessions"),
             Err(e) => {
@@ -257,8 +261,36 @@ async fn prune(ctx: Arc<Ctx>) {
             Ok(n) => tracing::info!(jobs = n, "deleted old job outputs"),
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not delete old job outputs"),
         }
+        if let Some(billing) = &ctx.billing {
+            match billing.prune(now).await {
+                Ok(n) => tracing::info!(rows = n, "deleted old fair-use counts"),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "could not delete fair-use counts")
+                }
+            }
+        }
         tokio::time::sleep(PRUNE_EVERY).await;
     }
+}
+
+/// Bills each subscription for its seats, every `SYNC_SEATS_EVERY`. One that fails goes again
+/// next time.
+async fn sync_seats(ctx: Arc<Ctx>) {
+    let Some(billing) = &ctx.billing else {
+        return;
+    };
+    loop {
+        if let Err(e) = billing.sync().await {
+            tracing::warn!(error = %format!("{e:#}"), "could not bill seats in Stripe");
+        }
+        tokio::time::sleep(SYNC_SEATS_EVERY).await;
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// Deletes each job's output under `jobs` that has not changed for `age`: how many.
@@ -486,6 +518,13 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     let mut units = units(gh, repo, &snap.labeled).await?;
     let layers: Vec<PullRequest> = units.iter().flat_map(|u| u.layers.clone()).collect();
     ctx.prs.update(&key, &lane, &layers);
+    let gate = match &ctx.billing {
+        Some(b) => {
+            b.gate(installation, &repo.owner, snap.private, unix_now())
+                .await?
+        }
+        None => None,
+    };
     if let Some(merge) = lane.merging.clone() {
         let method = &snap.merge_method;
         let number = merge.number;
@@ -516,7 +555,9 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
                 }
             }
         }
-        let hold = if unit.base != snap.default_branch {
+        let hold = if let Some(gate) = &gate {
+            Some(gate.reason.clone())
+        } else if unit.base != snap.default_branch {
             Some(format!(
                 "targets `{}`; only `{}` has a queue for now",
                 unit.base, snap.default_branch
@@ -552,13 +593,24 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
     prs_of.extend(units.iter().map(|u| (u.number, u.prs())));
     for change in lane.sync(&candidates) {
         let (number, kind, message, comment) = match change {
-            LaneChange::Enqueued(n) => (n, "enqueued", "added to the queue".to_owned(), None),
+            LaneChange::Enqueued(n) => {
+                if let Some(b) = &ctx.billing {
+                    let unit = units.iter().find(|u| u.number == n);
+                    let authors = unit.map(Unit::authors).unwrap_or_default();
+                    b.queued(installation, snap.private, &authors, unix_now())
+                        .await?;
+                }
+                (n, "enqueued", "added to the queue".to_owned(), None)
+            }
             LaneChange::Dequeued { number, .. } => {
                 ctx.job_errors.clear(&key, number);
                 (number, "dequeued", "left the queue".to_owned(), None)
             }
             LaneChange::Held { number, reason } => {
-                let comment = on_hold(&reason);
+                let comment = match &gate {
+                    Some(Hold { reason: r, comment }) if *r == reason => comment.clone(),
+                    _ => on_hold(&reason),
+                };
                 (number, "held", reason, Some(comment))
             }
             LaneChange::Released(n) => (
@@ -671,6 +723,20 @@ impl Unit {
 
     fn has_label(&self, label: &str) -> bool {
         self.layers.iter().any(|pr| pr.has_label(label))
+    }
+
+    /// The people who opened its PRs: no App, nor a deleted account.
+    fn authors(&self) -> Vec<String> {
+        let mut authors: Vec<String> = self
+            .layers
+            .iter()
+            .filter_map(|pr| pr.summary().author)
+            .filter(|a| !a.bot)
+            .map(|a| a.login)
+            .collect();
+        authors.sort();
+        authors.dedup();
+        authors
     }
 
     /// Why GitHub would not merge it yet: a stack waits for every layer.
@@ -2001,9 +2067,13 @@ async fn run_sandboxed(
     job_id: &str,
     spec: &JobSpec,
     out: &Path,
+    private: bool,
 ) -> Result<()> {
     let _ = tokio::fs::remove_dir_all(out).await;
     record(ctx, key, number, "job", job_id).await?;
+    if let Some(b) = &ctx.billing {
+        b.job(key.installation_id, private, unix_now()).await?;
+    }
     let _slot = ctx.jobs.acquire().await?;
     let result = ctx
         .executor
@@ -2093,7 +2163,7 @@ async fn fix_and_publish(
     });
     let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
-        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
+        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
         publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await
     };
@@ -2299,7 +2369,7 @@ async fn rebase_layers(
         let out = ctx.config.data_dir.join("jobs").join(&job_id);
         let (spec, _granted) =
             job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
-        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out).await?;
+        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         let local_head = check_job_output(
             git,
             cache,

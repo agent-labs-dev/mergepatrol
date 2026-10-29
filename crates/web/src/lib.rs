@@ -3,6 +3,7 @@
 
 mod api;
 mod auth;
+mod billing;
 mod ui;
 mod webhook;
 
@@ -14,6 +15,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use mergepatrol_analytics::Analytics;
+use mergepatrol_billing::Billing;
 use mergepatrol_core::RepoSettings;
 use mergepatrol_github::AppCredentials;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
@@ -24,6 +26,7 @@ pub use auth::{
     AnalyticsView, AppView, ManifestForm, ManifestRequest, SessionStatus, SessionView, Unlock,
     UserView,
 };
+pub use billing::{AccessView, BillingView, PricingView, RedirectView};
 pub use webhook::Wake;
 
 pub struct WebConfig {
@@ -40,6 +43,8 @@ pub struct WebConfig {
     pub repo_defaults: RepoSettings,
     /// Product analytics: off self-hosted.
     pub analytics: Analytics,
+    /// Hosted billing: off self-hosted.
+    pub billing: Option<Arc<Billing>>,
 }
 
 #[derive(Clone)]
@@ -52,6 +57,7 @@ struct AppState {
     wake: Arc<dyn Wake>,
     repo_defaults: Arc<RepoSettings>,
     analytics: Analytics,
+    billing: Option<Arc<Billing>>,
 }
 
 impl AppState {
@@ -80,6 +86,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         wake: config.wake,
         repo_defaults: Arc::new(config.repo_defaults),
         analytics: config.analytics,
+        billing: config.billing,
     };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -96,6 +103,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
             "/webhooks/github",
             post(webhook::receive).layer(DefaultBodyLimit::max(webhook::MAX_BODY_BYTES)),
         )
+        .route("/webhooks/stripe", post(billing::webhook))
         // A workspace is one installation of the App: `{id}` is its installation ID.
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
@@ -112,6 +120,13 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route(
             "/api/w/{id}/settings/api-keys/{provider}",
             put(api::set_api_key).delete(api::delete_api_key),
+        )
+        .route("/api/w/{id}/billing", get(billing::billing))
+        .route("/api/w/{id}/billing/checkout", post(billing::checkout))
+        .route("/api/w/{id}/billing/portal", post(billing::portal))
+        .route(
+            "/api/w/{id}/billing/seats/{login}",
+            axum::routing::delete(billing::free_seat),
         )
         .fallback(ui::serve)
         .with_state(state)
@@ -232,6 +247,7 @@ mod tests {
                 fix_ci: Default::default(),
             },
             analytics: Analytics::default(),
+            billing: None,
         }
     }
 
@@ -560,6 +576,58 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    /// Another process on the same database, with billing on.
+    async fn billed(pool: PgPool) -> Router {
+        let pg = Arc::new(PgStore::migrate(pool).await.unwrap());
+        let store: Arc<dyn Store> = pg.clone();
+        let vault = Arc::new(Vault::new(store.clone(), KEY).unwrap());
+        let stripe = mergepatrol_billing::StripeConfig {
+            secret_key: "sk_test".into(),
+            webhook_secret: "whsec".into(),
+            price: "price".into(),
+        };
+        let mut config = web_config(None, Arc::default());
+        config.billing = Some(Arc::new(Billing::new(pg, stripe, "http://localhost:8080")));
+        router(store, vault, config)
+    }
+
+    async fn body(router: &Router, path: &str, cookie: &str) -> String {
+        let req = Request::get(path).header("cookie", cookie);
+        let res = send(router, req.body(Body::empty()).unwrap()).await;
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await;
+        String::from_utf8(bytes.unwrap().to_vec()).unwrap()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn billing_shows_only_when_on(pool: PgPool) {
+        let (off, cookie) = signed_in(pool.clone()).await;
+        assert_eq!(body(&off, "/api/w/1/billing", &cookie).await, "null");
+        let on = billed(pool).await;
+        let view: serde_json::Value =
+            serde_json::from_str(&body(&on, "/api/w/1/billing", &cookie).await).unwrap();
+        assert_eq!(view["access"], "new");
+        assert_eq!(view["pricing"]["price_usd"], 15);
+        assert_eq!(
+            get(&on, "/api/w/2/billing", Some(&cookie)).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_stripe_webhook_needs_billing_and_its_signature(pool: PgPool) {
+        let stripe = |router: Router, signature: &'static str| async move {
+            let req = Request::post("/webhooks/stripe")
+                .header("stripe-signature", signature)
+                .body(Body::from("{}"))
+                .unwrap();
+            send(&router, req).await.status()
+        };
+        let off = restarted(pool.clone(), None).await;
+        assert_eq!(stripe(off, "t=1,v1=00").await, StatusCode::NOT_FOUND);
+        let on = billed(pool).await;
+        assert_eq!(stripe(on, "t=1,v1=00").await, StatusCode::UNAUTHORIZED);
     }
 
     #[sqlx::test(migrations = false)]

@@ -1,10 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { capture } from "./analytics";
-import { deleteApiKey, fetchSettings, setApiKey } from "./api";
+import {
+  deleteApiKey,
+  fetchBilling,
+  fetchSettings,
+  freeSeat,
+  openPortal,
+  setApiKey,
+  startCheckout,
+} from "./api";
 import type { ApiKeyView } from "./api/ApiKeyView";
+import type { BillingView } from "./api/BillingView";
 import type { SettingsView } from "./api/SettingsView";
-import { danger, ErrorText, field, Narrow, primary, timeAgo } from "./ui";
+import { danger, ErrorText, field, Narrow, primary, secondary, timeAgo } from "./ui";
 
 /** What a key looks like, for the empty field. */
 const PLACEHOLDERS: Record<string, string> = {
@@ -18,15 +27,122 @@ export function Settings({ workspace }: { workspace: number }) {
     queryKey: ["settings", workspace],
     queryFn: () => fetchSettings(workspace),
   });
+  const billing = useQuery({
+    queryKey: ["billing", workspace],
+    queryFn: () => fetchBilling(workspace),
+  });
   if (!settings.data) return null;
   return (
     <Narrow title="Settings" sub="For this workspace only.">
       <div className="flex flex-col gap-4">
+        {billing.data && <Billing workspace={workspace} billing={billing.data} />}
         {settings.data.api_keys.map((k) => (
           <KeyForm key={k.provider.id} workspace={workspace} apiKey={k} />
         ))}
       </div>
     </Narrow>
+  );
+}
+
+/** What each state of the plan says about private repos. */
+function planText(b: BillingView) {
+  const price = `$${b.pricing.price_usd} a month per seat. A developer takes a seat when their PR first joins a private repo's queue`;
+  switch (b.access) {
+    case "new":
+      return `Private repos need a subscription, which starts with a free trial of ${b.pricing.trial_days} days, no card needed. Then ${price}.`;
+    case "trial": {
+      const left = b.trial_days_left ?? 0;
+      return `On the free trial: ${left} ${left === 1 ? "day" : "days"} left. Add a card in Manage billing to keep going after it. ${price}.`;
+    }
+    case "subscribed":
+      return `Subscribed: ${price}.`;
+    case "ended":
+      return `The subscription has ended: PRs on private repos wait on hold until you subscribe again. ${price}.`;
+  }
+}
+
+function Billing({ workspace, billing }: { workspace: number; billing: BillingView }) {
+  const queryClient = useQueryClient();
+  const go = (url: string) => window.location.assign(url);
+  const checkout = useMutation({
+    mutationFn: () => startCheckout(workspace),
+    onSuccess: ({ url }) => {
+      capture("checkout started", { trial: billing.access === "new" });
+      go(url);
+    },
+  });
+  const portal = useMutation({
+    mutationFn: () => openPortal(workspace),
+    onSuccess: ({ url }) => go(url),
+  });
+  const free = useMutation({
+    mutationFn: (login: string) => freeSeat(workspace, login),
+    onSuccess: (data) => {
+      capture("seat freed");
+      queryClient.setQueryData(["billing", workspace], data);
+    },
+  });
+  const live = billing.access === "trial" || billing.access === "subscribed";
+  const n = billing.seats.length;
+
+  return (
+    <section className="rounded-lg border border-line bg-surface">
+      <div className="p-4 sm:p-5">
+        <h2 className="font-semibold">Plan</h2>
+        <p className="mt-1 text-muted">
+          Public repos are free, up to {billing.pricing.fair_use_prs} queued PRs and{" "}
+          {billing.pricing.fair_use_jobs} jobs an hour across the workspace. Every repo uses your
+          own model API key, below.
+        </p>
+        <p className="mt-1 text-muted">{planText(billing)}</p>
+        {n > 0 && (
+          <div className="mt-3">
+            <p>
+              {n} {n === 1 ? "seat" : "seats"}
+              {live && <span className="text-muted">. A freed seat drops off the next bill.</span>}
+            </p>
+            <ul className="mt-2 flex flex-col divide-y divide-line rounded-md border border-line">
+              {billing.seats.map((login) => (
+                <li key={login} className="flex items-center justify-between px-3 py-1.5">
+                  <span className="font-mono">{login}</span>
+                  <button
+                    type="button"
+                    onClick={() => free.mutate(login)}
+                    disabled={free.isPending}
+                    className="text-muted hover:text-fg"
+                  >
+                    Free
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <ErrorText error={checkout.error ?? portal.error ?? free.error} />
+      </div>
+      <div className="flex flex-wrap items-center justify-end gap-2 rounded-b-lg border-t border-line bg-page px-4 py-3 sm:px-5">
+        {billing.manageable && (
+          <button
+            type="button"
+            onClick={() => portal.mutate()}
+            disabled={portal.isPending}
+            className={secondary}
+          >
+            Manage billing
+          </button>
+        )}
+        {!live && (
+          <button
+            type="button"
+            onClick={() => checkout.mutate()}
+            disabled={checkout.isPending}
+            className={primary}
+          >
+            {billing.access === "new" ? "Start free trial" : "Subscribe"}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
