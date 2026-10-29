@@ -33,6 +33,9 @@ const root = createRootRoute({
 // The dashboard redirects from here to the workspace it remembers.
 const home = createRoute({ getParentRoute: () => root, path: "/" });
 
+// The menu bar app's sign-in lands here. `App` shows it whatever the session is.
+const tray = createRoute({ getParentRoute: () => root, path: "tray" });
+
 /** A workspace, by its GitHub account. */
 const workspace = createRoute({ getParentRoute: () => root, path: "$account" });
 
@@ -85,6 +88,7 @@ const settings = createRoute({
 export const router = createRouter({
   routeTree: root.addChildren([
     home,
+    tray,
     workspace.addChildren([workspaceHome, queue, history, repos, settings]),
   ]),
 });
