@@ -17,6 +17,7 @@ mergepatrol-resolver = { version = "0.1.0", path = "../resolver" }
 mergepatrol-store = { version = "0.1.0", path = "../store" }
 mime_guess = "2.0.5"
 rust-embed = "8.13.0"
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"

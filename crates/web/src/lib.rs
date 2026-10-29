@@ -17,6 +17,7 @@ use mergepatrol_analytics::Analytics;
 use mergepatrol_core::RepoSettings;
 use mergepatrol_github::AppCredentials;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
+use secrecy::ExposeSecret;
 
 pub use api::*;
 pub use auth::{
@@ -61,7 +62,7 @@ impl AppState {
             return Ok(Some((**app).clone()));
         }
         match self.vault.get(Scope::Instance, GITHUB_APP).await? {
-            Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+            Some(json) => Ok(Some(serde_json::from_str(json.expose_secret())?)),
             None => Ok(None),
         }
     }
