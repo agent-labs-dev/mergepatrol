@@ -5,7 +5,7 @@ services:
     # The dashboard has its own sign-in, but this is a spike: keep it on this machine.
     ports:
       - "127.0.0.1:8080:8080"
-      # The Anthropic proxy, for the jobs. On the sandbox network, only its gateway reaches
+      # The model API proxy, for the jobs. On the sandbox network, only its gateway reaches
       # the host: deploy/sandbox-host.sh says what to set.
       - "${MERGEPATROL_JOB_PROXY_PUBLISH:-8081}:8081"
     secrets: [secret_key]

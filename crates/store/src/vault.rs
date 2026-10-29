@@ -8,9 +8,20 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use mergepatrol_core::Provider;
+
 use crate::{Scope, SecretRecord, Store};
 
 pub const ANTHROPIC_API_KEY: &str = "anthropic-api-key";
+
+/// Where a workspace's key for `provider` is kept.
+pub fn api_key_secret(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => ANTHROPIC_API_KEY,
+        Provider::OpenAi => "openai-api-key",
+        Provider::OpenRouter => "openrouter-api-key",
+    }
+}
 /// The GitHub App, as JSON: `mergepatrol_github::AppCredentials`.
 pub const GITHUB_APP: &str = "github-app";
 

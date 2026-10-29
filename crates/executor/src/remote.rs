@@ -446,11 +446,12 @@ mod tests {
             pr_body: String::new(),
             verify: Vec::new(),
             resolver: ResolverSpec {
+                provider: Default::default(),
                 model: String::new(),
                 effort: String::new(),
                 timeout_secs: 1,
                 max_turns: 1,
-                anthropic: None,
+                api: None,
             },
             task: Default::default(),
         }

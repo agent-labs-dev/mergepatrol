@@ -89,6 +89,20 @@ function Form({
             className={`${field} w-full`}
           />
         </Field>
+        <Field id={`${id}-provider`} label="Resolver provider" hint="Its key is in Settings">
+          <select
+            id={`${id}-provider`}
+            value={draft.provider}
+            onChange={(e) => set({ provider: e.target.value as RepoSettingsView["provider"] })}
+            className={`${field} w-full`}
+          >
+            {config.providers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field id={`${id}-model`} label="Resolver model">
           <input
             id={`${id}-model`}

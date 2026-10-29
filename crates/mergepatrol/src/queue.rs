@@ -13,12 +13,12 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Job, Lane,
-    LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, Provider, REPO_CONFIG_PATH,
-    RepoName, RepoSettings, Transition,
+    LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName,
+    RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
-    AnthropicAccess, BUNDLE_FILE, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
+    ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
 };
 use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
@@ -26,7 +26,7 @@ use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
     RepoSnapshot,
 };
-use mergepatrol_store::{ANTHROPIC_API_KEY, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
+use mergepatrol_store::{GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault, api_key_secret};
 use secrecy::ExposeSecret;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -1864,14 +1864,18 @@ async fn job_spec(
     below: Option<Below<'_>>,
     task: Task,
 ) -> Result<(JobSpec, Option<Granted>)> {
+    let resolver = &settings.resolver;
     // A fork PR's job gets no agent: without access, a conflict fails the job.
     let granted = match pr.is_cross_repository {
         true => None,
         false => ctx
             .vault
-            .get(Scope::Installation(key.installation_id), ANTHROPIC_API_KEY)
+            .get(
+                Scope::Installation(key.installation_id),
+                api_key_secret(resolver.provider),
+            )
             .await?
-            .map(|k| ctx.proxy.grant(Provider::Anthropic, k, REQUESTS_PER_JOB)),
+            .map(|k| ctx.proxy.grant(resolver.provider, k, REQUESTS_PER_JOB)),
     };
     let spec = JobSpec {
         repo: key.repo.to_string(),
@@ -1887,16 +1891,14 @@ async fn job_spec(
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
         resolver: ResolverSpec {
-            model: settings.resolver.model.clone(),
-            effort: settings.resolver.effort.clone(),
+            provider: resolver.provider,
+            model: resolver.model.clone(),
+            effort: resolver.effort.clone(),
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
-            anthropic: granted.as_ref().map(|g| AnthropicAccess {
-                base_url: format!(
-                    "{}{}",
-                    ctx.config.job_proxy_url.trim_end_matches('/'),
-                    Api::Messages.prefix()
-                ),
+            api: granted.as_ref().map(|g| ApiAccess {
+                base_url: Api::of(resolver.provider, &resolver.model)
+                    .base_url(&ctx.config.job_proxy_url),
                 token: g.token.clone(),
             }),
         },

@@ -4,12 +4,12 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    EFFORTS, Entry, EntryState, FixCiSettings, Person, REPO_CONFIG_PATH, RepoName, RepoSettings,
-    ResolverSettings, Step,
+    EFFORTS, Entry, EntryState, FixCiSettings, Person, Provider, REPO_CONFIG_PATH, RepoName,
+    RepoSettings, ResolverSettings, Step,
 };
 use mergepatrol_github::{App, Installation, Proposal, PullRef};
-use mergepatrol_resolver::{KeyCheck, check_anthropic_key};
-use mergepatrol_store::{ANTHROPIC_API_KEY, ExitQuery, ExitRecord, ExitStats, RepoState, Scope};
+use mergepatrol_resolver::{KeyCheck, check_api_key};
+use mergepatrol_store::{ExitQuery, ExitRecord, ExitStats, RepoState, Scope, api_key_secret};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -309,6 +309,8 @@ pub struct SetRepo {
 pub struct RepoSettingsView {
     pub label: String,
     pub batch_size: u32,
+    #[ts(type = "\"anthropic\" | \"openai\" | \"openrouter\"")]
+    pub provider: Provider,
     pub model: String,
     pub effort: String,
     pub verify: Vec<String>,
@@ -323,6 +325,7 @@ impl From<RepoSettings> for RepoSettingsView {
         RepoSettingsView {
             label: s.label,
             batch_size: s.batch_size as u32,
+            provider: s.resolver.provider,
             model: s.resolver.model,
             effort: s.resolver.effort,
             verify: s.verify,
@@ -338,6 +341,7 @@ impl From<RepoSettingsView> for RepoSettings {
             label: v.label.trim().to_owned(),
             batch_size: v.batch_size as usize,
             resolver: ResolverSettings {
+                provider: v.provider,
                 model: v.model.trim().to_owned(),
                 effort: v.effort,
             },
@@ -364,6 +368,8 @@ pub struct RepoConfigView {
     /// What a repo without the file runs with.
     pub defaults: RepoSettingsView,
     pub efforts: Vec<String>,
+    /// The providers a repo can choose.
+    pub providers: Vec<ProviderView>,
     pub path: String,
     pub default_branch: String,
     pub has_file: bool,
@@ -391,8 +397,33 @@ impl From<PullRef> for PullRequestRef {
 
 #[derive(Serialize, TS)]
 #[ts(export)]
+pub struct ProviderView {
+    /// As in the config file, and in the key's URL.
+    pub id: String,
+    pub name: String,
+}
+
+impl From<Provider> for ProviderView {
+    fn from(p: Provider) -> Self {
+        ProviderView {
+            id: p.as_str().into(),
+            name: p.name().into(),
+        }
+    }
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub struct SettingsView {
-    pub anthropic_api_key: Option<SecretView>,
+    /// One per provider a repo can choose.
+    pub api_keys: Vec<ApiKeyView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ApiKeyView {
+    pub provider: ProviderView,
+    pub key: Option<SecretView>,
 }
 
 /// A stored secret. The API never returns the value.
@@ -712,6 +743,7 @@ pub(crate) async fn repo_config(
         settings: settings.into(),
         defaults: defaults.clone().into(),
         efforts: EFFORTS.map(str::to_owned).into(),
+        providers: Provider::SUPPORTED.map(ProviderView::from).into(),
         path: REPO_CONFIG_PATH.into(),
         has_file: file.text.is_some(),
         default_branch: file.branch,
@@ -800,8 +832,12 @@ fn config_pr(
         n => format!("on, up to {n} attempts"),
     };
     let list = format!(
-        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: `{}`, effort `{}`\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}",
-        settings.label, settings.batch_size, settings.resolver.model, settings.resolver.effort
+        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: {} `{}`, effort `{}`\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}",
+        settings.label,
+        settings.batch_size,
+        settings.resolver.provider.name(),
+        settings.resolver.model,
+        settings.resolver.effort
     );
     let skills = if skills.is_empty() {
         String::new()
@@ -839,57 +875,79 @@ pub(crate) async fn settings(
 }
 
 async fn settings_view(app: &AppState, id: u64) -> Result<Json<SettingsView>, ApiError> {
-    let key = app
-        .vault
-        .status(Scope::Installation(id), ANTHROPIC_API_KEY)
-        .await?;
-    Ok(Json(SettingsView {
-        anthropic_api_key: key.map(|k| SecretView {
-            hint: k.hint,
-            updated_at: k.updated_at,
-        }),
-    }))
+    let mut api_keys = Vec::new();
+    for provider in Provider::SUPPORTED {
+        let key = app
+            .vault
+            .status(Scope::Installation(id), api_key_secret(provider))
+            .await?;
+        api_keys.push(ApiKeyView {
+            provider: provider.into(),
+            key: key.map(|k| SecretView {
+                hint: k.hint,
+                updated_at: k.updated_at,
+            }),
+        });
+    }
+    Ok(Json(SettingsView { api_keys }))
 }
 
-/// Checks the key with Anthropic before it stores it, so a typo fails here and not in a rebase.
-pub(crate) async fn set_anthropic_key(
+fn provider(id: &str) -> Result<Provider, ApiError> {
+    Provider::parse(id)
+        .filter(|p| Provider::SUPPORTED.contains(p))
+        .ok_or_else(|| ApiError::Status(StatusCode::NOT_FOUND, format!("no provider {id:?}")))
+}
+
+/// Checks the key with its provider before it stores it, so a typo fails here and not in a
+/// rebase.
+pub(crate) async fn set_api_key(
     State(app): State<AppState>,
     user: SignedIn,
-    Path(id): Path<u64>,
+    Path((id, provider_id)): Path<(u64, String)>,
     Json(body): Json<SetSecret>,
 ) -> Result<Json<SettingsView>, ApiError> {
     let id = user.workspace(id)?;
+    let provider = provider(&provider_id)?;
     let key = body.value.expose_secret().trim();
     if key.is_empty() {
         return Err(ApiError::bad_request("the key is empty"));
     }
-    match check_anthropic_key(key).await {
+    match check_api_key(provider, key).await {
         Ok(KeyCheck::Valid) => {}
         Ok(KeyCheck::Invalid(why)) => {
             return Err(ApiError::Status(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Anthropic rejected the key: {why}"),
+                format!("{} rejected the key: {why}", provider.name()),
             ));
         }
         Err(e) => return Err(ApiError::Status(StatusCode::BAD_GATEWAY, format!("{e:#}"))),
     }
     app.vault
-        .set(Scope::Installation(id), ANTHROPIC_API_KEY, key)
+        .set(Scope::Installation(id), api_key_secret(provider), key)
         .await?;
-    tracing::info!(installation = id, "the Anthropic API key was changed");
+    tracing::info!(
+        installation = id,
+        provider = provider.as_str(),
+        "an API key was changed"
+    );
     settings_view(&app, id).await
 }
 
-pub(crate) async fn delete_anthropic_key(
+pub(crate) async fn delete_api_key(
     State(app): State<AppState>,
     user: SignedIn,
-    Path(id): Path<u64>,
+    Path((id, provider_id)): Path<(u64, String)>,
 ) -> Result<Json<SettingsView>, ApiError> {
     let id = user.workspace(id)?;
+    let provider = provider(&provider_id)?;
     app.vault
-        .delete(Scope::Installation(id), ANTHROPIC_API_KEY)
+        .delete(Scope::Installation(id), api_key_secret(provider))
         .await?;
-    tracing::info!(installation = id, "the Anthropic API key was removed");
+    tracing::info!(
+        installation = id,
+        provider = provider.as_str(),
+        "an API key was removed"
+    );
     settings_view(&app, id).await
 }
 

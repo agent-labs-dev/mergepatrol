@@ -80,8 +80,10 @@ export const proposeRepoConfig = (id: number, repo: string, body: RepoSettingsVi
 
 export const fetchSettings = (id: number) => get<SettingsView>(w(id, "/settings"));
 
-export const setAnthropicKey = (id: number, value: string) =>
-  send<SettingsView>("PUT", w(id, "/settings/anthropic-api-key"), { value } satisfies SetSecret);
+export const setApiKey = (id: number, provider: string, value: string) =>
+  send<SettingsView>("PUT", w(id, `/settings/api-keys/${provider}`), {
+    value,
+  } satisfies SetSecret);
 
-export const deleteAnthropicKey = (id: number) =>
-  send<SettingsView>("DELETE", w(id, "/settings/anthropic-api-key"));
+export const deleteApiKey = (id: number, provider: string) =>
+  send<SettingsView>("DELETE", w(id, `/settings/api-keys/${provider}`));

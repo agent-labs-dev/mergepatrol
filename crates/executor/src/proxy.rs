@@ -44,6 +44,29 @@ impl Api {
     }
 }
 
+impl Api {
+    /// The API a job's agent uses for `model` from `provider`: the Claude CLI for Anthropic's
+    /// models, Codex for the rest.
+    pub fn of(provider: Provider, model: &str) -> Api {
+        match provider {
+            Provider::Anthropic => Api::Messages,
+            Provider::OpenAi => Api::Responses,
+            Provider::OpenRouter if model.starts_with("anthropic/") => Api::Messages,
+            Provider::OpenRouter => Api::Responses,
+        }
+    }
+
+    /// The base URL the agent's CLI takes, for the proxy at `proxy_url`: the Claude CLI adds
+    /// `/v1/messages`, Codex only `/responses`.
+    pub fn base_url(self, proxy_url: &str) -> String {
+        let root = format!("{}{}", proxy_url.trim_end_matches('/'), self.prefix());
+        match self {
+            Api::Messages => root,
+            Api::Responses => format!("{root}/v1"),
+        }
+    }
+}
+
 /// Where each provider's APIs are. Others in tests.
 #[derive(Clone)]
 pub struct Upstreams {

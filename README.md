@@ -51,7 +51,7 @@ Status: early. Not ready for use yet.
 
 The spike has one queue per repo, on the default branch. GitHub webhooks wake a queue as soon as something changes, but GitHub only delivers them to a public https URL. On localhost, Mergepatrol polls.
 
-1. Generate the secret key. It encrypts the GitHub App and the Anthropic API key in the database. Keep it: without it, you must set Mergepatrol up again.
+1. Generate the secret key. It encrypts the GitHub App and the model API keys in the database. Keep it: without it, you must set Mergepatrol up again.
 
    ```bash
    export MERGEPATROL_SECRET_KEY=$(openssl rand -base64 32)
@@ -71,11 +71,11 @@ The spike has one queue per repo, on the default branch. GitHub webhooks wake a 
    2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
    3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
    4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file (below). Merge it, and the repo queues.
-   5. In **Settings**, add your Anthropic API key. Mergepatrol checks it with Anthropic, then stores it encrypted. Create a key for Mergepatrol alone, in an Anthropic workspace with a spend limit, so a leaked key costs at most the limit.
+   5. In **Settings**, add your Anthropic or OpenAI API key. Mergepatrol checks it with the provider, then stores it encrypted. Create a key for Mergepatrol alone, with a spend limit (for Anthropic, in a workspace with one), so a leaked key costs at most the limit.
 
 4. Add the `mergepatrol` label to a PR to queue it. Mergepatrol creates the queue labels on each repo it queues.
 
-Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own Anthropic API key. A user sees the workspaces that GitHub lets them access, as of their sign-in. Sign in again after you install the App somewhere new.
+Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own model API keys. A user sees the workspaces that GitHub lets them access, as of their sign-in. Sign in again after you install the App somewhere new.
 
 ## Hosted
 
@@ -104,7 +104,8 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
 | `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
-| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model |
+| `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
+| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
 | `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
 
 ### Rotate the secret key
@@ -127,14 +128,17 @@ version: 1
 label: mergepatrol
 batch_size: 8
 resolver:
+  provider: anthropic   # or openai
   model: claude-opus-5-5
-  effort: medium   # low, medium, high, xhigh or max
+  effort: medium        # low, medium, high, xhigh or max
 verify:
   - cargo check
 fix_ci:
   enabled: true    # an agent fixes failed required checks
   attempts: 2      # 1 to 5 fixes, before the PR is ejected
 ```
+
+The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A file that sets another provider than the default must set its model too.
 
 The verify commands run after an agent resolution or fix, before the publish.
 
@@ -152,7 +156,7 @@ A rebase job runs the repo's code (the verify commands) and an agent with a shel
 
 - The **orchestrator** holds the GitHub App key and the queue. It never runs repo code.
 - Each **job** runs `mergepatrol job` in its own container, from the job image. It gets a GitHub token that can only read the one repo, and revokes it once it has fetched the repo. It returns a git bundle.
-- The workspace's Anthropic key stays in the orchestrator. A job calls the Anthropic API through the orchestrator's proxy at `/anthropic`, with a token that works only while the job runs, and for a set number of requests.
+- The workspace's model API keys stay in the orchestrator. A job calls its provider's API through the orchestrator's proxy, at `/anthropic` for Claude Code or `/openai` for Codex, with a token that works only while the job runs, and for a set number of requests.
 - The orchestrator checks the bundle before it publishes: the result must sit on the base branch, and change no file that the PR did not change.
 
 In production the job containers use gVisor (`runsc`) on a network that cannot reach the cloud metadata server, private ranges, or the host. `deploy/sandbox-host.sh` sets that up on a Linux VM. Then set:
@@ -164,18 +168,18 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 | `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
 | `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
 | `MERGEPATROL_JOB_RESOLV_CONF` | Docker's default | A file on the Docker host, mounted as the jobs' `/etc/resolv.conf`. `/etc/mergepatrol/job-resolv.conf` on the sandbox network |
-| `MERGEPATROL_JOB_PROXY_URL` | `MERGEPATROL_PUBLIC_URL` | Where jobs reach the orchestrator's Anthropic proxy. `http://10.213.0.1:8081` on the sandbox network |
+| `MERGEPATROL_JOB_PROXY_URL` | `MERGEPATROL_PUBLIC_URL` | Where jobs reach the orchestrator's model API proxy. `http://10.213.0.1:8081` on the sandbox network |
 | `MERGEPATROL_JOB_PROXY_BIND` | None | A second listener that serves only the proxy, for jobs that cannot reach the dashboard's. `0.0.0.0:8081` in `compose.yml` |
 | `MERGEPATROL_JOB_MEMORY` | `4g` | Memory limit per job |
 | `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
 
-The job image has git, the Claude CLI, Rust, Go, Python, and Node with pnpm, for the verify commands.
+The job image has git, the Claude and Codex CLIs, Rust, Go, Python, and Node with pnpm, for the verify commands.
 
 ## On GCP
 
 `deploy/gcp/bootstrap.sh` sets up one environment in a GCP project with billing linked, and deploys it with `deploy/gcp/cloudbuild.yaml`. The orchestrator runs as the Cloud Run service `mergepatrol`, as one instance that is always on, with Cloud SQL Postgres. Only the instance that holds a lock in Postgres runs the queues, so the new instance of a deploy waits until the old one has stopped. On SIGTERM, an instance lets go of the lock at once. Each job runs as an execution of the Cloud Run Job `mergepatrol-job`, which Cloud Run sandboxes with gVisor. The job's service account has no roles, and the job has no way into the orchestrator but its link: `<MERGEPATROL_PUBLIC_URL>/jobs/<token>`. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done. The token is in the execution's arguments, so anyone who can read the project's Cloud Run executions can see it.
 
-This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public App `Mergepatrol`, which any account can install; each workspace brings its own Anthropic API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
+This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public App `Mergepatrol`, which any account can install; each workspace brings its own Anthropic or OpenAI API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
 
 | Variable | What it is |
 | --- | --- |
@@ -191,7 +195,7 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 - A `workspace` group is an installation of the App, keyed by its installation ID, with the account's name. The dashboard groups what the user does under the workspace in view.
 - Each queue event goes to its PR's author and workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number. When a PR leaves the queue, the event also has `queue_seconds`, the seconds in each step (`waiting_seconds`, `held_seconds`, `rebasing_seconds`, `checks_seconds`, `fixing_seconds`), and, for `pr ejected`, the `reason`: `fork`, `rebase-failed`, `checks-failed`, `fix-failed`, `base-moved`, `merge-rejected` or `checks-timed-out`.
 - Installing the App sends `app installed`, for the person who installed it, and uninstalling it `app uninstalled`.
-- The dashboard sends `api key set`, `api key removed` and `repo config proposed`.
+- The dashboard sends `api key set` and `api key removed`, with the `provider`, and `repo config proposed`.
 
 ## Crates
 

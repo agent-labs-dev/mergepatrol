@@ -2,8 +2,13 @@
 //! checks of a PR. It edits files only: the caller checks the result and commits it.
 
 mod claude;
+mod cli;
+mod codex;
+mod keys;
 
-pub use claude::{ClaudeResolver, KeyCheck, check_anthropic_key};
+pub use claude::ClaudeResolver;
+pub use codex::CodexResolver;
+pub use keys::{KeyCheck, check_api_key};
 
 use std::path::Path;
 
@@ -56,6 +61,13 @@ pub trait Resolver: Send + Sync {
 }
 
 pub(crate) const GIVE_UP: &str = "MERGEPATROL_GIVE_UP:";
+
+/// The reason the agent gave up, if its last message says it did.
+pub(crate) fn gave_up(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(GIVE_UP))
+        .map(|r| r.trim().to_owned())
+}
 
 /// The `verify` paragraph of a prompt.
 fn verify_section(commands: &[String], after: &str) -> String {
