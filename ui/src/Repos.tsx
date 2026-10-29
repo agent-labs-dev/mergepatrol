@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { fetchRepoConfig, fetchRepos, proposeRepoConfig, setRepo } from "./api";
 import type { AppView } from "./api/AppView";
@@ -10,7 +11,8 @@ import { field, Narrow, primary, secondary } from "./ui";
 export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState("");
-  const [open, setOpen] = useState<string | null>(null);
+  const { repo: open } = useSearch({ from: "/$account/repos" });
+  const navigate = useNavigate({ from: "/$account/repos" });
   const repos = useQuery({
     queryKey: ["repos", workspace],
     queryFn: () => fetchRepos(workspace),
@@ -42,7 +44,7 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
                 {!r.has_config && <SetUp workspace={workspace} repo={r.repo} />}
                 <button
                   type="button"
-                  onClick={() => setOpen(open === r.repo ? null : r.repo)}
+                  onClick={() => navigate({ search: open === r.repo ? {} : { repo: r.repo } })}
                   className={secondary}
                 >
                   Settings

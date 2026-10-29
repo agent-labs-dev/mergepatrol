@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { fetchEvents, fetchLanes } from "./api";
 import type { ChecksView } from "./api/ChecksView";
@@ -10,8 +11,9 @@ const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 
 /** Three panes: the lanes, the selected lane's PRs in merge order, the selected PR. */
 export function Queue({ workspace }: { workspace: number }) {
-  const [laneId, setLaneId] = useState<string | null>(null);
-  const [pr, setPr] = useState<number | null>(null);
+  const { lane: laneId, pr } = useSearch({ from: "/$account/queue" });
+  const navigate = useNavigate({ from: "/$account/queue" });
+  const setPr = (pr: number) => navigate({ search: (s) => ({ ...s, pr }) });
   const lanes = useQuery({
     queryKey: ["lanes", workspace],
     queryFn: () => fetchLanes(workspace),
@@ -54,10 +56,7 @@ export function Queue({ workspace }: { workspace: number }) {
           <button
             key={laneKey(l)}
             type="button"
-            onClick={() => {
-              setLaneId(laneKey(l));
-              setPr(null);
-            }}
+            onClick={() => navigate({ search: { lane: laneKey(l) } })}
             className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left ${
               l === lane ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
             }`}
