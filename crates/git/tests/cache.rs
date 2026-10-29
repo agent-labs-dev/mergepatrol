@@ -71,6 +71,7 @@ async fn a_lock_left_by_a_killed_git_is_cleared() {
     let lock = cache.join("refs/remotes/origin/main.lock");
     std::fs::write(&lock, "").unwrap();
     std::fs::write(cache.join("packed-refs.lock"), "").unwrap();
+    std::fs::write(cache.join("config.lock"), "").unwrap();
     let err = git.fetch(&cache, "", &[MAIN]).await.unwrap_err();
     assert!(format!("{err:#}").contains("lock"), "{err:#}");
 
@@ -78,4 +79,5 @@ async fn a_lock_left_by_a_killed_git_is_cleared() {
     git.fetch(&cache, "", &[MAIN]).await.unwrap();
     assert_eq!(sh(&cache, &["rev-parse", "refs/remotes/origin/main"]), head);
     assert!(!cache.join("packed-refs.lock").exists());
+    assert!(!cache.join("config.lock").exists());
 }

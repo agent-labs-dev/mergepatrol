@@ -57,9 +57,10 @@ impl Git {
     /// queue uses its cache, one git at a time, so a lock file here is stale.
     pub async fn ensure_cache(&self, path: &Path, url: &str) -> Result<()> {
         tokio::fs::create_dir_all(path).await?;
+        // First: a stale `config.lock` would fail `init` too.
+        remove_locks(path).await?;
         // On an existing repo, `init` only fills in what is missing.
         self.run(path, &["init", "--bare", "-q"]).await?;
-        remove_locks(path).await?;
         match self.run(path, &["remote", "get-url", "origin"]).await {
             Ok(current) if current.trim() == url => {}
             Ok(_) => {
@@ -463,7 +464,7 @@ async fn input(cmd: &mut tokio::process::Command, stdin: &[u8], what: &str) -> R
 }
 
 /// Removes the lock files that a git killed mid-write left: under `refs/`, and at the top of the
-/// repo, such as `packed-refs.lock` and `shallow.lock`.
+/// repo, such as `config.lock`, `packed-refs.lock` and `shallow.lock`.
 async fn remove_locks(repo: &Path) -> Result<()> {
     fn walk(dir: &Path, deep: bool) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
