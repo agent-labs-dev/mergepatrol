@@ -190,8 +190,25 @@ impl Git {
         self.rebase_step(wt, ok).await
     }
 
-    pub async fn rebase_continue(&self, wt: &Path) -> Result<RebaseStep> {
-        let mut cmd = self.git(wt, &["rebase", "--continue"]);
+    /// Commits the resolved conflict as the commit that did not apply, with its author and
+    /// message, plus `trailer`, and goes on with the next commit. A resolution that leaves
+    /// nothing to commit, as when the trunk has the change already, drops the commit, as git
+    /// does for a commit that applies empty.
+    pub async fn continue_resolution(&self, wt: &Path, trailer: &str) -> Result<RebaseStep> {
+        self.run(wt, &["add", "-A"]).await?;
+        let staged = !self
+            .git(wt, &["diff", "--cached", "--quiet", "HEAD"])
+            .status()
+            .await?
+            .success();
+        let next = match staged {
+            true => {
+                self.commit_resolution(wt, trailer).await?;
+                "--continue"
+            }
+            false => "--skip",
+        };
+        let mut cmd = self.git(wt, &["rebase", next]);
         cmd.env("GIT_EDITOR", "true");
         let ok = cmd.output().await?.status.success();
         self.rebase_step(wt, ok).await
@@ -224,9 +241,7 @@ impl Git {
         ))
     }
 
-    /// Commits the resolved conflict as the commit that did not apply, with its author and
-    /// message, plus `trailer`. `rebase_continue` then goes on with the next commit.
-    pub async fn commit_resolution(&self, wt: &Path, trailer: &str) -> Result<()> {
+    async fn commit_resolution(&self, wt: &Path, trailer: &str) -> Result<()> {
         let author = self
             .run(wt, &["log", "-1", "--format=%an <%ae>", "REBASE_HEAD"])
             .await?;
@@ -234,19 +249,7 @@ impl Git {
             .run(wt, &["log", "-1", "--format=%B", "REBASE_HEAD"])
             .await?;
         let message = self.add_trailer(wt, &message, trailer).await?;
-        self.run(wt, &["add", "-A"]).await?;
-        let mut cmd = self.git(
-            wt,
-            &[
-                "commit",
-                "-q",
-                "--allow-empty",
-                "--author",
-                author.trim(),
-                "-F",
-                "-",
-            ],
-        );
+        let mut cmd = self.git(wt, &["commit", "-q", "--author", author.trim(), "-F", "-"]);
         input(cmd.stdin(Stdio::piped()), message.as_bytes(), "git commit").await?;
         Ok(())
     }

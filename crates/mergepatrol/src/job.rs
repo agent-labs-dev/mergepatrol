@@ -175,13 +175,13 @@ async fn rebase(
                 bail!("conflict markers are left in {f}");
             }
         }
-        git.commit_resolution(
-            dir,
-            &format!("Resolved-by: mergepatrol, {}", resolver.name()),
-        )
-        .await?;
         resolved_any = true;
-        step = git.rebase_continue(dir).await?;
+        step = git
+            .continue_resolution(
+                dir,
+                &format!("Resolved-by: mergepatrol, {}", resolver.name()),
+            )
+            .await?;
     }
 
     if resolved_any {
