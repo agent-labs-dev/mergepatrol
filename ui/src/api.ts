@@ -1,4 +1,5 @@
 import type { BillingView } from "./api/BillingView";
+import type { EntryView } from "./api/EntryView";
 import type { EventView } from "./api/EventView";
 import type { ExitsPage } from "./api/ExitsPage";
 import type { FixView } from "./api/FixView";
@@ -122,3 +123,18 @@ export const pollChatGptLogin = (id: number) =>
 /** Signs out, or cancels a sign-in. */
 export const deleteChatGptLogin = (id: number) =>
   send<SettingsView>("DELETE", w(id, "/settings/chatgpt"));
+
+// PROTOTYPE, throw away: endpoints only `prototype/mock-api.ts` serves. See `QueuePrototype.tsx`.
+
+/** A repo's open PRs that are not in its queue. */
+export const fetchOpenPulls = (id: number, repo: string) =>
+  get<OpenPull[]>(w(id, `/open?repo=${encodeURIComponent(repo)}`));
+
+export type OpenPull = Omit<EntryView, "priority" | "state" | "detail"> & { draft: boolean };
+
+/** Queues the PR, or changes its priority when it is queued already. */
+export const queuePull = (id: number, repo: string, pr: number, priority: boolean) =>
+  call("POST", w(id, `/queue?repo=${encodeURIComponent(repo)}&pr=${pr}&priority=${priority}`));
+
+export const dequeuePull = (id: number, repo: string, pr: number) =>
+  call("DELETE", w(id, `/queue?repo=${encodeURIComponent(repo)}&pr=${pr}`));

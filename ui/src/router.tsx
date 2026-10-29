@@ -9,6 +9,7 @@ import { App } from "./App";
 import type { OutcomeView } from "./api/OutcomeView";
 import { History, LISTS, type List, OUTCOMES, WINDOWS, type Window } from "./History";
 import { Queue } from "./Queue";
+import { type Variant, variantOf } from "./QueuePrototype";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
 import { useWorkspace } from "./workspace";
@@ -51,9 +52,11 @@ const queue = createRoute({
   getParentRoute: () => workspace,
   path: "queue",
   /** The lane in view, as `owner/repo:trunk`, and the PR in it. Both default to the first. */
-  validateSearch: (search): { lane?: string; pr?: number } => ({
+  validateSearch: (search): { lane?: string; pr?: number; variant?: Variant } => ({
     lane: optional(search.lane, "string"),
     pr: optional(search.pr, "number"),
+    // PROTOTYPE, throw away: see `QueuePrototype.tsx`.
+    variant: variantOf(search.variant),
   }),
   component: () => <Queue workspace={useWorkspace().workspace} />,
 });

@@ -2,10 +2,20 @@ import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { Activity } from "./Activity";
-import { fetchEvents, fetchLanes } from "./api";
+import { fetchEvents, fetchLanes, fetchOpenPulls } from "./api";
 import type { ChecksView } from "./api/ChecksView";
 import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
+import {
+  type Actions,
+  asItem,
+  BulkBar,
+  DetailActions,
+  type Item,
+  PrototypeSwitcher,
+  RowActions,
+  useActions,
+} from "./QueuePrototype";
 import { Avatar, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
@@ -13,7 +23,7 @@ const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 /** Three panes: the lanes, the selected lane's PRs in merge order, the selected PR. A narrow
  * screen shows the lanes and the PRs until a PR is picked, then the PR alone. */
 export function Queue({ workspace }: { workspace: number }) {
-  const { lane: laneId, pr } = useSearch({ from: "/$account/queue" });
+  const { lane: laneId, pr, variant = "A" } = useSearch({ from: "/$account/queue" });
   const navigate = useNavigate({ from: "/$account/queue" });
   const setPr = (pr?: number) => navigate({ search: (s) => ({ ...s, pr }) });
   const lanes = useQuery({
@@ -21,6 +31,16 @@ export function Queue({ workspace }: { workspace: number }) {
     queryFn: () => fetchLanes(workspace),
     refetchInterval: 3000,
   });
+  // PROTOTYPE: the lane's open PRs, the actions on them, and variant C's checked rows.
+  const current = lanes.data?.find((l) => laneKey(l) === laneId) ?? lanes.data?.[0];
+  const openPulls = useQuery({
+    queryKey: ["open", workspace, current?.repo],
+    queryFn: () => fetchOpenPulls(workspace, current?.repo ?? ""),
+    enabled: current !== undefined,
+    refetchInterval: 3000,
+  });
+  const actions = useActions(workspace, current?.repo ?? "");
+  const [checked, setChecked] = useState(new Set<number>());
 
   if (lanes.isError) return <p className="p-6 text-bad">Could not load the queue.</p>;
   if (lanes.data?.length === 0)
@@ -38,18 +58,42 @@ export function Queue({ workspace }: { workspace: number }) {
   if (!lanes.data) return null;
 
   const lane = lanes.data.find((l) => laneKey(l) === laneId) ?? lanes.data[0];
-  const entry = lane.entries.find((e) => e.number === pr) ?? lane.entries[0];
+  const open = (openPulls.data ?? []).map(asItem);
+  const items: Item[] = [...lane.entries, ...open];
+  const entry = items.find((e) => e.number === pr) ?? items[0];
   // The queue lists the active PRs first, so the batch is the head of the lane.
   const batched = lane.batch === null ? [] : lane.entries.filter((e) => e.state === "active");
   const rest = lane.entries.slice(batched.length);
   const picked = entry !== undefined && entry.number === pr;
-  const row = (e: EntryView) => (
-    <Row
-      entry={e}
-      place={e.state === "held" ? null : lane.entries.indexOf(e) + 1}
-      selected={e === entry}
-      onClick={() => setPr(e.number)}
-    />
+  const toggle = (n: number) => {
+    const next = new Set(checked);
+    if (!next.delete(n)) next.add(n);
+    setChecked(next);
+  };
+  const row = (e: Item) => (
+    <div
+      className={`group flex items-stretch border-b border-line-soft hover:bg-page ${e === entry ? "lg:bg-page" : ""}`}
+    >
+      {variant === "C" && (
+        <label className="flex shrink-0 cursor-pointer items-start py-3.5 pl-4">
+          <input
+            type="checkbox"
+            checked={checked.has(e.number)}
+            onChange={() => toggle(e.number)}
+            className="size-3.5 accent-fg"
+          />
+        </label>
+      )}
+      <Row
+        entry={e}
+        place={
+          e.state === "held" || e.state === "open" ? null : lane.entries.indexOf(e as EntryView) + 1
+        }
+        selected={e === entry}
+        onClick={() => setPr(e.number)}
+      />
+      {variant === "A" && <RowActions item={e} actions={actions} />}
+    </div>
   );
   return (
     <div className="flex h-full flex-col lg:grid lg:grid-cols-[220px_minmax(360px,1fr)_minmax(400px,1.1fr)]">
@@ -61,7 +105,7 @@ export function Queue({ workspace }: { workspace: number }) {
           <button
             key={laneKey(l)}
             type="button"
-            onClick={() => navigate({ search: { lane: laneKey(l) } })}
+            onClick={() => navigate({ search: (s) => ({ variant: s.variant, lane: laneKey(l) }) })}
             className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left max-lg:w-auto max-lg:shrink-0 ${
               l === lane ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
             }`}
@@ -86,7 +130,7 @@ export function Queue({ workspace }: { workspace: number }) {
           <p className="font-medium">{lane.repo}</p>
           <p className="text-xs text-muted">Merge order into {lane.trunk}</p>
         </div>
-        {lane.entries.length === 0 && <p className="p-4 text-faint">Empty</p>}
+        {lane.entries.length === 0 && <p className="p-4 text-faint">Nothing queued</p>}
         <ol>
           {lane.batch !== null && (
             <li className="border-b border-line-soft">
@@ -113,6 +157,24 @@ export function Queue({ workspace }: { workspace: number }) {
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
+        {open.length > 0 && (
+          <>
+            <p className="mt-6 flex items-center justify-between border-y border-line bg-sunken px-4 py-2 text-xs text-muted">
+              <span>
+                <span className="font-medium text-fg-2">Open</span> · not queued
+              </span>
+              <span className="tabular-nums">{open.length}</span>
+            </p>
+            <ol className={variant === "B" ? "opacity-75 hover:opacity-100" : ""}>
+              {open.map((e) => (
+                <li key={e.number}>{row(e)}</li>
+              ))}
+            </ol>
+          </>
+        )}
+        {variant === "C" && (
+          <BulkBar items={items} checked={checked} setChecked={setChecked} actions={actions} />
+        )}
       </div>
       <div className={`min-h-0 flex-1 overflow-y-auto ${picked ? "" : "max-lg:hidden"}`}>
         {entry && (
@@ -122,14 +184,17 @@ export function Queue({ workspace }: { workspace: number }) {
             entry={entry}
             onSelect={setPr}
             onBack={() => setPr()}
+            actions={variant === "B" ? actions : undefined}
           />
         )}
       </div>
+      <PrototypeSwitcher current={variant} />
     </div>
   );
 }
 
-const stateBadge: Record<EntryView["state"], [string, string]> = {
+const stateBadge: Record<Item["state"], [string, string]> = {
+  open: ["Not queued", "bg-surface text-muted ring-line-strong"],
   active: [
     "Testing",
     "bg-blue-50 text-blue-700 ring-blue-600/20 dark:bg-blue-400/10 dark:text-blue-300 dark:ring-blue-400/30",
@@ -141,7 +206,7 @@ const stateBadge: Record<EntryView["state"], [string, string]> = {
   ],
 };
 
-function State({ entry }: { entry: EntryView }) {
+function State({ entry }: { entry: Item }) {
   const [label, style] = stateBadge[entry.state];
   return (
     <span className={`rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}>
@@ -151,10 +216,10 @@ function State({ entry }: { entry: EntryView }) {
 }
 
 /** A PR saved before the queue kept its details has no title until the next tick. */
-const titleOf = (e: EntryView) => e.title || `Pull request #${prOf(e)}`;
+const titleOf = (e: Item) => e.title || `Pull request #${prOf(e)}`;
 /** A PR's own number, or a stack's top layer: the queue records a stack's events on each layer. */
-const prOf = (e: EntryView) => e.layers.at(-1) ?? e.number;
-const refsOf = (e: EntryView) =>
+const prOf = (e: Item) => e.layers.at(-1) ?? e.number;
+const refsOf = (e: Item) =>
   e.layers.length ? `Stack ${e.layers.map((n) => `#${n}`).join(" ")}` : `#${e.number}`;
 
 function Row({
@@ -163,7 +228,7 @@ function Row({
   selected,
   onClick,
 }: {
-  entry: EntryView;
+  entry: Item;
   /** `null` for a held PR: it has no place until it is released. */
   place: number | null;
   selected: boolean;
@@ -174,7 +239,7 @@ function Row({
       type="button"
       onClick={onClick}
       // A narrow screen lists the PRs only while none is open, so none shows as selected there.
-      className={`flex w-full gap-3 border-b border-line-soft px-4 py-3 text-left hover:bg-page ${
+      className={`flex min-w-0 flex-1 gap-3 px-4 py-3 text-left hover:bg-page ${
         selected ? "lg:bg-page lg:shadow-[inset_2px_0_0_0_var(--color-fg)]" : ""
       }`}
     >
@@ -222,7 +287,7 @@ function Checks({ checks, label }: { checks: ChecksView | null; label?: boolean 
   );
 }
 
-function Diff({ entry: e }: { entry: EntryView }) {
+function Diff({ entry: e }: { entry: Item }) {
   if (!e.url) return null;
   return (
     <span className="font-mono tabular-nums">
@@ -238,13 +303,15 @@ function Detail({
   entry: e,
   onSelect,
   onBack,
+  actions,
 }: {
   workspace: number;
   lane: LaneView;
-  entry: EntryView;
+  entry: Item;
   onSelect: (pr: number) => void;
   /** Back to the PRs, on a screen too narrow to show them beside it. */
   onBack: () => void;
+  actions?: Actions;
 }) {
   const events = useQuery({
     queryKey: ["events", workspace, lane.repo, prOf(e)],
@@ -274,6 +341,11 @@ function Detail({
           Open on GitHub
         </a>
       </div>
+      {actions && (
+        <div className="mt-4 flex flex-wrap gap-2 rounded-lg border border-line bg-surface p-2">
+          <DetailActions item={e} actions={actions} />
+        </div>
+      )}
       {e.state === "held" && (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">
           <p className="font-medium">Held</p>
@@ -421,7 +493,7 @@ const decision: Record<NonNullable<EntryView["review_decision"]>, [string, strin
   changes_requested: ["Changes requested", "text-bad"],
 };
 
-function Reviews({ entry: e }: { entry: EntryView }) {
+function Reviews({ entry: e }: { entry: Item }) {
   const [text, color] = e.review_decision
     ? decision[e.review_decision]
     : ["Not required", "text-muted"];
