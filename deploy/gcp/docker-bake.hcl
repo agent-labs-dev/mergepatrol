@@ -14,6 +14,9 @@ group "default" {
 target "_common" {
   context    = "."
   dockerfile = "Dockerfile"
+  # A plain image, not an index with an attestation: one registry version per deploy, which the
+  # cleanup policy counts.
+  attest     = ["type=provenance,disabled=true"]
   cache-from = [
     "type=registry,ref=${REPO}/cache:orchestrator",
     "type=registry,ref=${REPO}/cache:job",

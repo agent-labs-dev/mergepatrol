@@ -31,6 +31,10 @@ g services enable container.googleapis.com compute.googleapis.com certificateman
 
 g artifacts repositories describe mergepatrol --location="$REGION" >/dev/null 2>&1 \
   || g artifacts repositories create mergepatrol --location="$REGION" --repository-format=docker
+# Each deploy pushes both images and the build's layer cache. Older than a week goes, but every
+# image keeps its last 10 versions, which also keeps the current cache.
+g artifacts repositories set-cleanup-policies mergepatrol --location="$REGION" \
+  --policy="$(dirname "$0")/cleanup-policy.json" --no-dry-run
 
 # The orchestrator holds the GitHub App key and starts jobs. The cluster's nodes run as an
 # account that can only pull images and write logs, not as the default compute account, which

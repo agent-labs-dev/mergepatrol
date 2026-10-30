@@ -1,0 +1,12 @@
+[
+  {
+    "name": "delete-older-than-a-week",
+    "action": {"type": "Delete"},
+    "condition": {"tagState": "any", "olderThan": "7d"}
+  },
+  {
+    "name": "keep-last-10-deploys",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {"keepCount": 10}
+  }
+]
