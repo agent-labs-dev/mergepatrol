@@ -1,6 +1,7 @@
 ---
 title: The agent reviews each queued PR, and asks you only what it isn't sure of
 kind: new
+pr: 142
 image: /changelog/automatic-review/answer.png
 ---
 
