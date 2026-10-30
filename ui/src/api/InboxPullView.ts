@@ -30,7 +30,12 @@ queue: QueueSpotView | null,
  * Comments and reviews by others since the user last opened it here, or last said
  * something on it.
  */
-unread: number, title: string, url: string, 
+unread: number, 
+/**
+ * Until when the user snoozed it, RFC 3339. A snooze is over once someone else says
+ * something on the PR.
+ */
+snoozed_until: string | null, title: string, url: string, 
 /**
  * `None` for a deleted account.
  */

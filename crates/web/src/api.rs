@@ -226,6 +226,9 @@ pub struct InboxPullView {
     /// Comments and reviews by others since the user last opened it here, or last said
     /// something on it.
     pub unread: u32,
+    /// Until when the user snoozed it, RFC 3339. A snooze is over once someone else says
+    /// something on the PR.
+    pub snoozed_until: Option<String>,
     #[serde(flatten)]
     pub pull: PullView,
 }
@@ -242,6 +245,14 @@ pub struct QueueSpotView {
     pub priority: bool,
     /// Why it is held.
     pub detail: Option<String>,
+}
+
+/// Puts a PR out of the user's inbox for a while.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct SnoozePull {
+    /// From 1 to a year's.
+    pub minutes: u32,
 }
 
 /// Asks the reviewers who have not answered to review, in a comment that mentions them.
@@ -1498,6 +1509,7 @@ pub(crate) async fn close_pull(
         setup::close_pull_as(&token, &repo.to_string(), number).await,
         &repo,
     )?;
+    app.store.inbox_closed(id, &repo, number).await?;
     tracing::info!(installation = id, %repo, number, "closed from the dashboard");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1540,6 +1552,10 @@ pub(crate) async fn you(
                     queues: on.contains(&(row.installation_id, p.repo.clone())),
                     queue: spots.get(&(p.repo.clone(), p.pr.number)).cloned(),
                     unread: unread(&p.activity, user.login(), row.seen_at.as_deref()),
+                    snoozed_until: row
+                        .snoozed
+                        .filter(|(at, _)| unread(&p.activity, user.login(), Some(at)) == 0)
+                        .map(|(_, until)| until),
                     pull: p.pr.summary().into(),
                     updated_at: p.updated_at,
                     repo: p.repo.to_string(),
@@ -1579,6 +1595,39 @@ pub(crate) async fn seen_pull(
     let repo = repo_name(owner, name)?;
     app.store
         .inbox_seen(caller.user()?.login(), id, &repo, number)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Puts the PR out of the user's inbox for `minutes`.
+pub(crate) async fn snooze_pull(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+    Json(body): Json<SnoozePull>,
+) -> Result<StatusCode, ApiError> {
+    let id = caller.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    if !(1..=366 * 24 * 60).contains(&body.minutes) {
+        return Err(ApiError::bad_request("minutes must be from 1 to a year's"));
+    }
+    let snooze = std::time::Duration::from_secs(u64::from(body.minutes) * 60);
+    app.store
+        .inbox_snooze(caller.user()?.login(), id, &repo, number, Some(snooze))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Puts a snoozed PR back in the user's inbox.
+pub(crate) async fn unsnooze_pull(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let id = caller.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    app.store
+        .inbox_snooze(caller.user()?.login(), id, &repo, number, None)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

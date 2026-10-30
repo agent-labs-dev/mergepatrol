@@ -220,6 +220,8 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `close_pull` | Closes a PR | |
 | `review_pull` | Approves a PR, asks for changes, or comments, then queues it if asked | |
 | `mark_pull_seen` | Marks a PR read in your inbox | Yes |
+| `snooze_pull` | Puts a PR out of your inbox for a while | Yes |
+| `unsnooze_pull` | Puts a snoozed PR back in your inbox | Yes |
 | `nudge_reviewers` | Mentions reviewers in a comment, asking them to review | |
 | `get_repo_config` | A repo's queue settings | |
 | `propose_repo_config` | Opens a PR that changes a repo's queue settings | Yes |

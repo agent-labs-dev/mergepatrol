@@ -52,6 +52,8 @@ pub struct InboxRow {
     pub node: Value,
     /// When the user last opened it, RFC 3339.
     pub seen_at: Option<String>,
+    /// When the user snoozed it, and until when, RFC 3339. Only a snooze not yet over.
+    pub snoozed: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -82,6 +84,10 @@ pub trait InboxStore: Send + Sync {
         pr: PrNumber,
         login: &str,
     ) -> Result<()>;
+    /// The PR was closed from the dashboard: out of every inbox now, before GitHub's reads show
+    /// it.
+    async fn inbox_closed(&self, installation_id: u64, repo: &RepoName, pr: PrNumber)
+    -> Result<()>;
     /// PRs that changed since they were read, oldest change first. A PR read since its last
     /// change waits for the change to settle.
     async fn inbox_stale(&self, settle: Duration, limit: u32) -> Result<Vec<InboxStale>>;
@@ -137,7 +143,17 @@ pub trait InboxStore: Send + Sync {
         repo: &RepoName,
         pr: PrNumber,
     ) -> Result<()>;
-    /// Deletes PRs closed or merged `age` ago, and what users saw of them: how many.
+    /// Puts the PR out of `login`'s inbox for `snooze`, or back in with `None`.
+    async fn inbox_snooze(
+        &self,
+        login: &str,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        snooze: Option<Duration>,
+    ) -> Result<()>;
+    /// Deletes PRs closed or merged `age` ago, what users saw of them, and snoozes over: how
+    /// many PRs.
     async fn prune_inbox(&self, age: Duration) -> Result<u64>;
 }
 
@@ -193,6 +209,25 @@ impl InboxStore for PgStore {
         .bind(repo.to_string())
         .bind(pr as i64)
         .bind(login)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn inbox_closed(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE inbox_pulls SET state = 'closed', closed_at = now(),
+                 changes = changes + 1, changed_at = now()
+             WHERE installation_id = $1 AND repo = $2 AND number = $3 AND state = 'open'",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(pr as i64)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -397,6 +432,8 @@ impl InboxStore for PgStore {
             "SELECT * FROM (
                  SELECT p.installation_id, p.node, p.node->>'updatedAt' AS updated,
                      to_char(s.at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS seen_at,
+                     to_char(z.at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS snoozed_at,
+                     to_char(z.until AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS snoozed_until,
                      CASE
                          WHEN p.state = 'open' AND p.author = $1 THEN 'authored'
                          WHEN p.state = 'merged' AND p.author = $1
@@ -412,6 +449,8 @@ impl InboxStore for PgStore {
                  FROM inbox_pulls p
                  LEFT JOIN inbox_seen s ON s.login = $1 AND s.installation_id = p.installation_id
                      AND s.repo = p.repo AND s.number = p.number
+                 LEFT JOIN inbox_snoozed z ON z.login = $1 AND z.installation_id = p.installation_id
+                     AND z.repo = p.repo AND z.number = p.number AND z.until > now()
                  WHERE p.installation_id = ANY($2) AND p.node IS NOT NULL
              ) rows WHERE kind IS NOT NULL ORDER BY updated DESC",
         )
@@ -426,6 +465,9 @@ impl InboxStore for PgStore {
                 installation_id: r.get::<i64, _>("installation_id") as u64,
                 node: r.get("node"),
                 seen_at: r.get("seen_at"),
+                snoozed: r
+                    .get::<Option<String>, _>("snoozed_at")
+                    .zip(r.get::<Option<String>, _>("snoozed_until")),
             };
             match r.get::<&str, _>("kind") {
                 "authored" => inbox.authored.push(row),
@@ -457,6 +499,39 @@ impl InboxStore for PgStore {
         Ok(())
     }
 
+    async fn inbox_snooze(
+        &self,
+        login: &str,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        snooze: Option<Duration>,
+    ) -> Result<()> {
+        let q = match snooze {
+            Some(d) => sqlx::query(
+                "INSERT INTO inbox_snoozed (login, installation_id, repo, number, at, until)
+                 VALUES ($1, $2, $3, $4, now(), now() + make_interval(secs => $5))
+                 ON CONFLICT (login, installation_id, repo, number)
+                 DO UPDATE SET at = now(), until = EXCLUDED.until",
+            )
+            .bind(login.to_lowercase())
+            .bind(installation_id as i64)
+            .bind(repo.to_string())
+            .bind(pr as i64)
+            .bind(secs(d)),
+            None => sqlx::query(
+                "DELETE FROM inbox_snoozed
+                 WHERE login = $1 AND installation_id = $2 AND repo = $3 AND number = $4",
+            )
+            .bind(login.to_lowercase())
+            .bind(installation_id as i64)
+            .bind(repo.to_string())
+            .bind(pr as i64),
+        };
+        q.execute(&self.pool).await?;
+        Ok(())
+    }
+
     async fn prune_inbox(&self, age: Duration) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
         let gone = sqlx::query(
@@ -471,6 +546,13 @@ impl InboxStore for PgStore {
             "DELETE FROM inbox_seen s WHERE NOT EXISTS (SELECT 1 FROM inbox_pulls p
                  WHERE p.installation_id = s.installation_id AND p.repo = s.repo
                    AND p.number = s.number)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM inbox_snoozed z WHERE z.until < now() OR NOT EXISTS (
+                 SELECT 1 FROM inbox_pulls p WHERE p.installation_id = z.installation_id
+                     AND p.repo = z.repo AND p.number = z.number)",
         )
         .execute(&mut *tx)
         .await?;
@@ -607,6 +689,13 @@ mod tests {
             .await
             .unwrap();
         assert!(inbox.requested.is_empty());
+        // Closed here: out of every inbox at once.
+        store.inbox_closed(1, &repo(), 1).await.unwrap();
+        let inbox = store
+            .inbox("me", &[1], Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert!(inbox.authored.is_empty());
         // Asked again: back in.
         store
             .save_inbox_reads(
@@ -764,6 +853,50 @@ mod tests {
         store.set_inbox_member(1, "core", "me", true).await.unwrap();
         store.delete_inbox_team(1, "core").await.unwrap();
         assert_eq!(requested(&store).await, 0);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_snooze_holds_until_it_is_over_or_taken_back(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        store
+            .save_inbox_index(
+                1,
+                &repo(),
+                &[write(1, 0, read("open", "ann", &["me"], &[]))],
+            )
+            .await
+            .unwrap();
+        async fn snoozed(store: &PgStore) -> Option<(String, String)> {
+            let inbox = store.inbox("me", &[1], Duration::from_secs(60)).await;
+            inbox.unwrap().requested[0].snoozed.clone()
+        }
+        let day = Some(Duration::from_secs(86400));
+        store.inbox_snooze("Me", 1, &repo(), 1, day).await.unwrap();
+        let (at, until) = snoozed(&store).await.unwrap();
+        assert!(at < until);
+        // Someone else's snooze is not mine.
+        assert!(
+            store
+                .inbox("ann", &[1], Duration::from_secs(60))
+                .await
+                .unwrap()
+                .requested
+                .is_empty()
+        );
+        store.inbox_snooze("me", 1, &repo(), 1, None).await.unwrap();
+        assert_eq!(snoozed(&store).await, None);
+        // Over: as if never snoozed, and pruned.
+        store
+            .inbox_snooze("me", 1, &repo(), 1, Some(Duration::ZERO))
+            .await
+            .unwrap();
+        assert_eq!(snoozed(&store).await, None);
+        store.prune_inbox(Duration::from_secs(86400)).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM inbox_snoozed")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[sqlx::test(migrations = false)]
