@@ -4,9 +4,12 @@
 //! The index is a timeline: one section a day, newest first. New features and improvements are
 //! cards with their picture; fixes fold into one list at the end of the day.
 
+use axum::Json;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use pulldown_cmark::{Options, Parser};
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::blog::{Analytics, escape, page};
 
@@ -17,7 +20,9 @@ struct Entries;
 
 const REPO: &str = "https://github.com/agent-labs-dev/mergepatrol";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, rename = "ChangelogKind")]
 pub enum Kind {
     New,
     Improved,
@@ -70,6 +75,30 @@ pub fn serve(path: &str, public_url: &str, analytics: Analytics) -> Option<Respo
         Some(e) => Some(html(entry_page(&e, public_url, analytics))),
         None => Some(StatusCode::NOT_FOUND.into_response()),
     }
+}
+
+/// An entry as the dashboard's update notice lists it.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ChangelogEntryView {
+    pub slug: String,
+    pub title: String,
+    pub kind: Kind,
+}
+
+/// The newest entries, for the dashboard to tell what a reload brings: those it didn't have.
+pub async fn latest() -> Json<Vec<ChangelogEntryView>> {
+    Json(
+        entries()
+            .into_iter()
+            .take(20)
+            .map(|e| ChangelogEntryView {
+                slug: e.slug,
+                title: e.title,
+                kind: e.kind,
+            })
+            .collect(),
+    )
 }
 
 fn html(body: String) -> Response {

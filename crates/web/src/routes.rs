@@ -13,7 +13,7 @@ use axum::http::Method;
 use axum::routing::{MethodFilter, MethodRouter, on};
 use serde_json::{Map, Value, json};
 
-use crate::{AppState, api, auth, billing, mcp, oauth, v1, webhook};
+use crate::{AppState, api, auth, billing, changelog, mcp, oauth, v1, webhook};
 
 pub(crate) struct Route {
     pub method: Method,
@@ -134,6 +134,8 @@ macro_rules! tool {
 
 pub(crate) static ROUTES: &[Route] = &[
     route!(GET "/api/health", || async { "ok" }, Agent::Exempt("A liveness probe.")),
+    route!(GET "/api/changelog", changelog::latest, tool!("get_changelog", Reads,
+        "Mergepatrol's newest changelog entries, newest first: what changed for its users, each as a slug, a title, and new, improved or fixed. Each entry's page is /changelog/<slug>.")),
     route!(GET "/api/session", auth::session, tool!("get_session", Reads,
         "Who you are signed in to Mergepatrol as, and your workspaces: the installations of its GitHub App you can reach. A GitHub token is signed in as no one, and has no workspaces: it reaches single repos.")),
     route!(POST "/api/setup/unlock", auth::unlock, Agent::Exempt(SETUP)),
