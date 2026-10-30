@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { trackCta, useLandingViewed } from "./analytics";
+import type { AnalyticsView } from "./api/AnalyticsView";
 import type { PricingView } from "./api/PricingView";
 import type { ThemeProps } from "./theme";
 import { Mark, primary, repoUrl, StarButton, secondary, ThemeToggle } from "./ui";
@@ -47,9 +49,21 @@ function Code({ children }: { children: ReactNode }) {
   return <code className="rounded bg-sunken px-1 font-mono text-[0.9em]">{children}</code>;
 }
 
-function SignInButton({ className = "" }: { className?: string }) {
+function SignInButton({
+  className = "",
+  analytics,
+  place,
+}: {
+  className?: string;
+  analytics: AnalyticsView | null;
+  place: "nav" | "hero" | "footer";
+}) {
   return (
-    <a className={`${primary} ${className}`} href="/auth/login">
+    <a
+      className={`${primary} ${className}`}
+      href="/auth/login"
+      onClick={() => trackCta(analytics, "sign_in_github", place)}
+    >
       Sign in with GitHub
     </a>
   );
@@ -127,7 +141,9 @@ export function Landing({
   theme,
   setTheme,
   pricing,
-}: ThemeProps & { pricing: PricingView | null }) {
+  analytics,
+}: ThemeProps & { pricing: PricingView | null; analytics: AnalyticsView | null }) {
+  useLandingViewed(analytics);
   return (
     <div className="min-h-screen">
       <header className="mx-auto flex h-14 max-w-5xl items-center gap-2 px-6 font-semibold">
@@ -135,12 +151,23 @@ export function Landing({
         <div className="ml-auto flex items-center gap-2 font-normal sm:gap-3">
           <ThemeToggle theme={theme} onChange={setTheme} />
           {pricing && (
-            <a className="hidden text-fg-2 hover:text-fg sm:inline" href="#pricing">
+            <button
+              type="button"
+              className="hidden text-fg-2 hover:text-fg sm:inline"
+              onClick={() => {
+                trackCta(analytics, "see_pricing", "pricing");
+                document.getElementById("pricing")?.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
               Pricing
-            </a>
+            </button>
           )}
           <StarButton />
-          <a className={`${secondary} whitespace-nowrap`} href="/auth/login">
+          <a
+            className={`${secondary} whitespace-nowrap`}
+            href="/auth/login"
+            onClick={() => trackCta(analytics, "sign_in_github", "nav")}
+          >
             Sign in
           </a>
         </div>
@@ -156,7 +183,7 @@ export function Landing({
             Label a pull request. Mergepatrol rebases it, tests it with the PRs around it, and
             merges it. When a rebase conflicts, an LLM resolves it.
           </p>
-          <SignInButton className="mt-8 h-10 px-5" />
+          <SignInButton className="mt-8 h-10 px-5" analytics={analytics} place="hero" />
         </section>
 
         <section className="border-t border-line py-16">
@@ -193,7 +220,7 @@ export function Landing({
           <p className="mt-2 text-fg-2">
             Sign in, install the App on your repos, and bring your own Anthropic or OpenAI API key.
           </p>
-          <SignInButton className="mt-6" />
+          <SignInButton className="mt-6" analytics={analytics} place="footer" />
         </section>
       </main>
 

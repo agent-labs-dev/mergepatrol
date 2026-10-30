@@ -32,10 +32,11 @@ impl Article {
 }
 
 /// Answers `/blog` and `/blog/<slug>`. `None` for any other path, so the caller serves the app.
-pub fn serve(path: &str, public_url: &str) -> Option<Response> {
+/// `analytics` is the PostHog project key and host, `None` when analytics are off (self-hosted).
+pub fn serve(path: &str, public_url: &str, analytics: Option<(&str, &str)>) -> Option<Response> {
     let rest = path.strip_prefix("blog")?;
     let slug = match rest.trim_end_matches('/') {
-        "" => return Some(Html(index_page(&articles(), public_url)).into_response()),
+        "" => return Some(Html(index_page(&articles(), public_url, analytics)).into_response()),
         s => s.strip_prefix('/')?,
     };
     if slug.contains('/') {
@@ -47,7 +48,7 @@ pub fn serve(path: &str, public_url: &str) -> Option<Response> {
     Some(
         (
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            article_page(&article, public_url),
+            article_page(&article, public_url, analytics),
         )
             .into_response(),
     )
@@ -160,7 +161,7 @@ pub fn sitemap_entries(public_url: &str) -> String {
     out
 }
 
-fn article_page(a: &Article, public_url: &str) -> String {
+fn article_page(a: &Article, public_url: &str, analytics: Option<(&str, &str)>) -> String {
     let mut body = String::new();
     pulldown_cmark::html::push_html(&mut body, Parser::new_ext(&a.body, Options::all()));
     let url = format!("{public_url}/blog/{}", a.slug);
@@ -188,10 +189,20 @@ fn article_page(a: &Article, public_url: &str) -> String {
         a.date,
         a.date,
     );
-    page(&a.title, &a.description, &url, &head, &main, public_url)
+    page(
+        &a.title,
+        &a.description,
+        &url,
+        &head,
+        &main,
+        public_url,
+        analytics,
+        "article",
+        Some(&a.slug),
+    )
 }
 
-fn index_page(all: &[Article], public_url: &str) -> String {
+fn index_page(all: &[Article], public_url: &str, analytics: Option<(&str, &str)>) -> String {
     let mut list = String::from("<h1>Blog</h1><ul class=\"posts\">");
     for a in all {
         list.push_str(&format!(
@@ -211,9 +222,26 @@ fn index_page(all: &[Article], public_url: &str) -> String {
         "<meta property=\"og:type\" content=\"website\" />",
         &list,
         public_url,
+        analytics,
+        "index",
+        None,
     )
 }
 
+/// The `window.__mp` config and the script that sends `blog_viewed` and `cta_clicked`, or nothing
+/// when analytics are off. blog-analytics.js loads posthog-js and holds the click listener.
+fn analytics_scripts(analytics: Option<(&str, &str)>, surface: &str, slug: Option<&str>) -> String {
+    let Some((key, host)) = analytics else {
+        return String::new();
+    };
+    let config = serde_json::json!({ "key": key, "host": host, "surface": surface, "slug": slug });
+    let config = config.to_string().replace("</", "<\\/");
+    format!(
+        "<script>window.__mp={config};</script>\n<script src=\"/blog-analytics.js\" defer></script>"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn page(
     title: &str,
     description: &str,
@@ -221,12 +249,16 @@ fn page(
     head: &str,
     main: &str,
     public_url: &str,
+    analytics: Option<(&str, &str)>,
+    surface: &str,
+    slug: Option<&str>,
 ) -> String {
     let (title, description) = (
         escape(&format!("{title} | Mergepatrol")),
         escape(description),
     );
     let image = format!("{public_url}/og/mergepatrol-og-1200x630.png");
+    let scripts = analytics_scripts(analytics, surface, slug);
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -255,6 +287,7 @@ fn page(
 <header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><a href="/blog">Blog</a></header>
 <main>{main}</main>
 <footer><a href="/">Mergepatrol</a>: a merge queue for GitHub, with an agent on conflicts. <a href="/auth/login">Sign in with GitHub</a></footer>
+{scripts}
 </body>
 </html>
 "#
@@ -334,8 +367,38 @@ mod tests {
             "---\ntitle: <b>\"T\"\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        let html = article_page(&a, "https://mergepatrol.ai");
+        let html = article_page(&a, "https://mergepatrol.ai", None);
         assert!(html.contains("<title>&lt;b&gt;&quot;T&quot; | Mergepatrol</title>"));
         assert!(html.contains("<link rel=\"canonical\" href=\"https://mergepatrol.ai/blog/x\" />"));
+        // Analytics off: no PostHog config, no script, nothing that could send an event.
+        assert!(!html.contains("window.__mp"));
+        assert!(!html.contains("blog-analytics.js"));
+    }
+
+    #[test]
+    fn article_page_carries_the_visitor_analytics() {
+        let a = parse(
+            "x",
+            "---\ntitle: T\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
+        )
+        .unwrap();
+        let html = article_page(
+            &a,
+            "https://mergepatrol.ai",
+            Some(("phc_test", "https://us.i.posthog.com")),
+        );
+        assert!(html.contains(r#"<script>window.__mp={"host":"https://us.i.posthog.com","key":"phc_test","slug":"x","surface":"article"};</script>"#), "{html}");
+        assert!(html.contains(r#"<script src="/blog-analytics.js" defer></script>"#));
+    }
+
+    #[test]
+    fn index_page_is_a_blog_surface_without_a_slug() {
+        let html = index_page(
+            &articles(),
+            "https://mergepatrol.ai",
+            Some(("phc_test", "https://us.i.posthog.com")),
+        );
+        assert!(html.contains(r#""slug":null"#), "{html}");
+        assert!(html.contains(r#""surface":"index""#));
     }
 }

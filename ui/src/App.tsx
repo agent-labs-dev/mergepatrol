@@ -10,6 +10,7 @@ import {
 import { useEffect, useState } from "react";
 import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
 import { fetchSession, fetchSettings, logout } from "./api";
+import type { AnalyticsView } from "./api/AnalyticsView";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
@@ -58,10 +59,11 @@ function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
   if (session.status === "needs_setup") {
     return session.setup_unlocked ? <CreateApp /> : <UnlockSetup />;
   }
-  if (session.status === "signed_out") return <Landing {...theme} pricing={session.pricing} />;
+  if (session.status === "signed_out")
+    return <Landing {...theme} pricing={session.pricing} analytics={session.analytics} />;
   if (session.status === "signed_in" && session.app) {
     return session.workspaces.length === 0 ? (
-      <Install app={session.app} />
+      <Install app={session.app} analytics={session.analytics} />
     ) : (
       <Dashboard session={session} {...theme} />
     );

@@ -1,6 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
+import { trackCta } from "./analytics";
 import { startManifest, unlock } from "./api";
+import type { AnalyticsView } from "./api/AnalyticsView";
 import type { AppView } from "./api/AppView";
 import { ErrorText, field, Mark, primary } from "./ui";
 
@@ -140,7 +142,7 @@ export function CreateApp() {
 }
 
 /** Signed in, but the App is on no account the user can access. */
-export function Install({ app }: { app: AppView }) {
+export function Install({ app, analytics }: { app: AppView; analytics: AnalyticsView | null }) {
   return (
     <Card title="Install the App">
       <Body>
@@ -148,7 +150,11 @@ export function Install({ app }: { app: AppView }) {
         organization or on your account, and choose its repos. Each installation is a workspace.
         GitHub sends you back here.
       </Body>
-      <a className={`${primary} mt-5 w-full`} href={app.install_url}>
+      <a
+        className={`${primary} mt-5 w-full`}
+        href={app.install_url}
+        onClick={() => trackCta(analytics, "install_app", "install")}
+      >
         Install on GitHub
       </a>
     </Card>
