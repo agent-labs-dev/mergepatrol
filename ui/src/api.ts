@@ -146,3 +146,7 @@ export const queuePull = (id: number, repo: string, pr: number, priority: boolea
 /** Takes the PR, and its stack, out of the queue, as the user. */
 export const dequeuePull = (id: number, repo: string, pr: number) =>
   call("DELETE", w(id, `/repos/${repo}/pulls/${pr}/queue`));
+
+/** Closes the PR on GitHub, as the user. */
+export const closePull = (id: number, repo: string, pr: number) =>
+  call("POST", w(id, `/repos/${repo}/pulls/${pr}/close`));

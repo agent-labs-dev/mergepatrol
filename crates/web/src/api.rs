@@ -1303,6 +1303,24 @@ pub(crate) async fn dequeue_pull(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Closes an open PR, as the user. The queue lists only the open PRs it does not have, so
+/// none of its own.
+pub(crate) async fn close_pull(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let token = user.github_token(&app)?;
+    as_user(
+        setup::close_pull_as(&token, &repo.to_string(), number).await,
+        &repo,
+    )?;
+    tracing::info!(installation = id, %repo, number, "closed from the dashboard");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The repo's queue labels, and its default branch, as the config file there sets them.
 async fn repo_labels(
     app: &AppState,
@@ -1333,7 +1351,7 @@ fn as_user<T>(result: anyhow::Result<T>, repo: &RepoName) -> Result<T, ApiError>
         if e.is::<setup::Refused>() {
             ApiError::Status(
                 StatusCode::FORBIDDEN,
-                format!("You need triage access to {repo} to change its queue."),
+                format!("You need triage access to {repo} for that."),
             )
         } else if e.is::<setup::Revoked>() {
             ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into())
