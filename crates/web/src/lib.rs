@@ -122,6 +122,14 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
             get(api::open_pulls),
         )
         .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}",
+            get(api::pull_detail),
+        )
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/diff",
+            get(api::pull_diff),
+        )
+        .route(
             "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/queue",
             put(api::queue_pull).delete(api::dequeue_pull),
         )

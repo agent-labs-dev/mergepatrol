@@ -7,7 +7,10 @@ use mergepatrol_core::{
     EFFORTS, Entry, EntryState, FixCiSettings, Labels, Person, PrSummary, Provider,
     REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
-use mergepatrol_github::{App, AsUser, BranchFile, Installation, Proposal, PullRef, setup};
+use mergepatrol_github::{
+    App, AsUser, BranchFile, CheckRunState, Installation, Proposal, PullDetail, PullRef,
+    TimelineEvent, setup,
+};
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
     CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
@@ -1016,6 +1019,223 @@ pub(crate) async fn open_pulls(
             })
             .collect(),
     ))
+}
+
+/// What the detail pane shows of an open PR beyond its [`OpenPullView`].
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct PullDetailView {
+    /// The description as GitHub renders it, sanitized by GitHub.
+    pub body_html: String,
+    pub labels: Vec<LabelView>,
+    /// The head commit's check runs and commit statuses.
+    pub checks: Vec<CheckRunView>,
+    /// Oldest first, up to the last 100 events.
+    pub timeline: Vec<TimelineItemView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct LabelView {
+    pub name: String,
+    /// Hex, without `#`.
+    pub color: String,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct CheckRunView {
+    /// `workflow / job` for an Actions job.
+    pub name: String,
+    pub state: CheckRunStateView,
+    pub url: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum CheckRunStateView {
+    Passed,
+    Failed,
+    Pending,
+    Skipped,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct TimelineItemView {
+    pub at: String,
+    /// `None` for a deleted account.
+    pub actor: Option<PersonView>,
+    pub event: TimelineEventView,
+}
+
+#[derive(Serialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum TimelineEventView {
+    Commit {
+        sha: String,
+        headline: String,
+    },
+    Review {
+        approval: ReviewStateView,
+        body_html: String,
+    },
+    Comment {
+        body_html: String,
+    },
+    /// A user's login, or a team's name.
+    ReviewRequested {
+        reviewer: String,
+    },
+    Labeled {
+        label: LabelView,
+        added: bool,
+    },
+    ForcePushed {
+        before: String,
+        after: String,
+    },
+    ReadyForReview,
+    ConvertedToDraft,
+}
+
+#[derive(Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ReviewStateView {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+}
+
+impl From<mergepatrol_github::Label> for LabelView {
+    fn from(l: mergepatrol_github::Label) -> Self {
+        LabelView {
+            name: l.name,
+            color: l.color,
+        }
+    }
+}
+
+impl From<PullDetail> for PullDetailView {
+    fn from(d: PullDetail) -> Self {
+        PullDetailView {
+            body_html: d.body_html,
+            labels: d.labels.into_iter().map(LabelView::from).collect(),
+            checks: d
+                .checks
+                .into_iter()
+                .map(|c| CheckRunView {
+                    name: c.name,
+                    state: match c.state {
+                        CheckRunState::Passed => CheckRunStateView::Passed,
+                        CheckRunState::Failed => CheckRunStateView::Failed,
+                        CheckRunState::Pending => CheckRunStateView::Pending,
+                        CheckRunState::Skipped => CheckRunStateView::Skipped,
+                    },
+                    url: c.url,
+                    started_at: c.started_at,
+                    completed_at: c.completed_at,
+                })
+                .collect(),
+            timeline: d
+                .timeline
+                .into_iter()
+                .map(|t| TimelineItemView {
+                    at: t.at,
+                    actor: t.actor.map(PersonView::from),
+                    event: match t.event {
+                        TimelineEvent::Commit { sha, headline } => {
+                            TimelineEventView::Commit { sha, headline }
+                        }
+                        TimelineEvent::Review { state, body_html } => TimelineEventView::Review {
+                            approval: match state.as_str() {
+                                "APPROVED" => ReviewStateView::Approved,
+                                "CHANGES_REQUESTED" => ReviewStateView::ChangesRequested,
+                                "DISMISSED" => ReviewStateView::Dismissed,
+                                _ => ReviewStateView::Commented,
+                            },
+                            body_html,
+                        },
+                        TimelineEvent::Comment { body_html } => {
+                            TimelineEventView::Comment { body_html }
+                        }
+                        TimelineEvent::ReviewRequested { reviewer } => {
+                            TimelineEventView::ReviewRequested { reviewer }
+                        }
+                        TimelineEvent::Labeled { label, added } => TimelineEventView::Labeled {
+                            label: label.into(),
+                            added,
+                        },
+                        TimelineEvent::ForcePushed { before, after } => {
+                            TimelineEventView::ForcePushed { before, after }
+                        }
+                        TimelineEvent::ReadyForReview => TimelineEventView::ReadyForReview,
+                        TimelineEvent::ConvertedToDraft => TimelineEventView::ConvertedToDraft,
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+/// An open PR's description, labels, checks and timeline, read as the user like the open PRs.
+pub(crate) async fn pull_detail(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<Json<PullDetailView>, ApiError> {
+    user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let gh = AsUser::new(user.github_token(&app)?)?;
+    let detail = as_user(gh.pull_detail(&repo, number).await, &repo)?;
+    Ok(Json(detail.into()))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PullDiffQuery {
+    /// One of the PR's commits. The whole PR without one.
+    commit: Option<String>,
+}
+
+/// A PR's changes, or one commit's, as `git diff` prints them.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct PullDiffView {
+    pub patch: String,
+}
+
+/// An open PR's diff, or one of its commits', read as the user.
+pub(crate) async fn pull_diff(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+    Query(q): Query<PullDiffQuery>,
+) -> Result<Json<PullDiffView>, ApiError> {
+    user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    if let Some(sha) = &q.commit
+        && (sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(ApiError::bad_request("commit must be a commit SHA"));
+    }
+    let gh = AsUser::new(user.github_token(&app)?)?;
+    let patch = as_user(
+        gh.pull_diff(&repo, number, q.commit.as_deref()).await,
+        &repo,
+    )?
+    .ok_or_else(|| {
+        ApiError::Status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This diff is too large to show here.".into(),
+        )
+    })?;
+    Ok(Json(PullDiffView { patch }))
 }
 
 #[derive(Deserialize, TS)]

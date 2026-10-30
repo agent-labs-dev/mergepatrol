@@ -482,6 +482,20 @@ impl AsUser {
         graphql_data(name, None, false, send(build, "POST /graphql").await?)
     }
 
+    /// A GET whose body is not JSON, such as a diff, by its `accept`.
+    pub(crate) async fn get_text(&self, path: &str, accept: &str) -> Result<(StatusCode, String)> {
+        let build = || async move {
+            let mut headers = api_headers();
+            headers.insert("accept", accept.parse()?);
+            Ok(self
+                .http
+                .get(format!("{}{path}", self.api))
+                .bearer_auth(&self.token)
+                .headers(headers))
+        };
+        send(build, &format!("GET {path}")).await
+    }
+
     /// As [`Installation::graphql_missing_ok`].
     pub(crate) async fn graphql_missing_ok(
         &self,
