@@ -13,12 +13,14 @@ const tabs = ["summary", "timeline", "code"] as const;
 type Tab = (typeof tabs)[number];
 
 /** An open PR as a reviewer looks at it: its summary, timeline and code, read from GitHub as
- * the user. The caller's `actions` sit by its title, and its `footer` under it all. */
+ * the user. The caller's `actions` sit by its title, and its `footer` under it all. With
+ * `version`, it reads GitHub again only when that changes, rather than every 30s. */
 export function PullDetail({
   workspace,
   repo,
   trunk,
   pull: p,
+  version,
   actions,
   footer,
   onBack,
@@ -27,6 +29,8 @@ export function PullDetail({
   repo: string;
   trunk: string;
   pull: OpenPullView;
+  /** What the caller knows of the PR from webhooks, which changes when the PR does. */
+  version?: string;
   actions?: ReactNode;
   footer?: ReactNode;
   /** Back to the PRs, on a screen too narrow to show them beside it. */
@@ -34,10 +38,13 @@ export function PullDetail({
 }) {
   const [tab, setTab] = useState<Tab>("summary");
   const detail = useQuery({
-    queryKey: ["pull", workspace, repo, p.number],
+    queryKey: ["pull", workspace, repo, p.number, version],
     queryFn: () => fetchPullDetail(workspace, repo, p.number),
     // As the open PRs: read as the user, on their own rate limit.
-    refetchInterval: 30_000,
+    refetchInterval: version === undefined ? 30_000 : false,
+    refetchOnWindowFocus: version === undefined,
+    // A new version is a new key: the last one shows until it comes.
+    placeholderData: (previous) => previous,
   });
   const d = detail.data;
   const commits = (d?.timeline ?? []).flatMap((t) =>

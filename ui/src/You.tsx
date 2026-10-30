@@ -96,9 +96,8 @@ export function You() {
     });
 
   /** Sends a held review now. Its PR stays out of Needs you until the inbox has the review. */
-  const send = async (key: string) => {
-    const h = held.current.get(key);
-    if (!h || h.sending) return;
+  const send = async (key: string, h: Held) => {
+    if (h.sending) return;
     h.sending = true;
     clearTimeout(h.timer);
     render();
@@ -112,14 +111,19 @@ export function You() {
       setError((e as Error).message);
       setDraft(key, h.review.body);
     } finally {
-      held.current.delete(key);
+      // A review held for the PR since is not this one's to drop.
+      if (held.current.get(key) === h) held.current.delete(key);
       render();
     }
   };
   const hold = (p: InboxPullView, review: ReviewPull) => {
     const key = keyOf(p);
-    const timer = window.setTimeout(() => send(key), HOLD_MS);
-    held.current.set(key, { p, review, until: Date.now() + HOLD_MS, timer });
+    // A review already waiting on the PR, a comment say, goes now.
+    const waiting = held.current.get(key);
+    if (waiting) send(key, waiting);
+    const h: Held = { p, review, until: Date.now() + HOLD_MS, timer: 0 };
+    h.timer = window.setTimeout(() => send(key, h), HOLD_MS);
+    held.current.set(key, h);
     setDraft(key, "");
     render();
   };
@@ -385,6 +389,8 @@ export function You() {
         {pull && (
           <PullDetail
             key={keyOf(pull)}
+            // Read again from GitHub only when a webhook said the PR changed.
+            version={`${pull.updated_at} ${pull.checks} ${pull.review_decision}`}
             workspace={pull.workspace}
             repo={pull.repo}
             trunk={pull.base}
@@ -436,7 +442,7 @@ export function You() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => send(key)}
+                  onClick={() => send(key, h)}
                   className="opacity-60 hover:opacity-100"
                   title="Send it now"
                 >
