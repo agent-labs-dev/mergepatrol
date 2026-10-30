@@ -802,6 +802,10 @@ mod tests {
         if !page.contains("not built") {
             assert!(page.contains(r#"<link rel="canonical" href="http://localhost:8080/""#));
             assert!(!page.contains("__PUBLIC_URL__"));
+            // A link preview fetches og:image by its absolute URL; a 404 there is a blank card.
+            let card = "/og/mergepatrol-og-1200x630.png";
+            assert!(page.contains(&format!(r#"content="http://localhost:8080{card}""#)));
+            assert_eq!(get(&router, card, None).await, StatusCode::OK);
         }
     }
 
