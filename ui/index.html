@@ -3,7 +3,38 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Mergepatrol</title>
+    <title>Mergepatrol: a merge queue for GitHub, with an agent on conflicts</title>
+    <meta
+      name="description"
+      content="Label a pull request. Mergepatrol rebases it, tests it with the PRs around it in one CI run, and merges it. When a rebase conflicts, an LLM resolves it. Free for open source."
+    />
+    <!-- __PUBLIC_URL__ is the server's own address, filled in by crates/web/src/ui.rs. -->
+    <link rel="canonical" href="__PUBLIC_URL__/" />
+    <meta name="theme-color" content="#fafafa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Mergepatrol" />
+    <meta property="og:url" content="__PUBLIC_URL__/" />
+    <meta property="og:title" content="Mergepatrol: a merge queue for GitHub, with an agent on conflicts" />
+    <meta
+      property="og:description"
+      content="Label a pull request. Mergepatrol rebases it, tests it with the PRs around it, and merges it. When a rebase conflicts, an LLM resolves it."
+    />
+    <meta name="twitter:card" content="summary" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Mergepatrol",
+        "url": "__PUBLIC_URL__/",
+        "description": "A merge queue for GitHub, with an agent on conflicts.",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Web",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "sameAs": "https://github.com/agent-labs-dev/mergepatrol",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "Free for public repos" }
+      }
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
@@ -17,6 +48,14 @@
   </head>
   <body class="bg-page text-sm text-fg antialiased">
     <div id="root"></div>
+    <noscript>
+      <h1>Mergepatrol: a merge queue for GitHub, with an agent on conflicts</h1>
+      <p>
+        Label a pull request. Mergepatrol rebases it, tests it with the PRs around it, and merges it.
+        When a rebase conflicts, an LLM resolves it.
+      </p>
+      <p><a href="/auth/login">Sign in with GitHub</a></p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
