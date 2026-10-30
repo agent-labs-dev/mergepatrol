@@ -418,7 +418,9 @@ const stateBadge: Record<Item["state"], [string, string]> = {
 function State({ entry }: { entry: Item }) {
   const [label, style] = stateBadge[entry.state];
   return (
-    <span className={`rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}>
+    <span
+      className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}
+    >
       {label}
     </span>
   );
