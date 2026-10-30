@@ -201,6 +201,7 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 <!-- tools: the order of `ROUTES` in crates/web/src/routes.rs -->
 | Tool | Does | Sign-in |
 | --- | --- | --- |
+| `get_changelog` | Mergepatrol's newest changelog entries | |
 | `get_session` | Who you are signed in as, and your workspaces | |
 | `get_inbox` | Your PRs, and the PRs that ask for your review, across workspaces | Yes |
 | `list_queue` | The queues, in the order they take PRs: a repo's, or the workspace's | Without `repo` |

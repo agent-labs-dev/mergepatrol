@@ -699,12 +699,13 @@ mod tests {
         assert_eq!(text(json_of(res).await), "No GitHub App yet.");
     }
 
-    /// No tool's route answers anyone it does not know: the session status alone is public.
+    /// No tool's route answers anyone it does not know: the session status and the changelog
+    /// alone are public.
     #[sqlx::test(migrations = false)]
     async fn every_tool_route_needs_a_caller(pool: PgPool) {
         let (router, _) = signed_in(pool).await;
         for (route, tool) in routes::tools() {
-            if route.path == "/api/session" {
+            if ["/api/session", "/api/changelog"].contains(&route.path) {
                 continue;
             }
             let path = route
