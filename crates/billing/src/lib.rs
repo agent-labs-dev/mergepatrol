@@ -261,8 +261,9 @@ impl Billing {
             return Ok(());
         };
         let (s, installation_id) = self.stripe.subscription(id).await?;
+        // The Stripe account is shared with other products, whose subscriptions name no installation.
         let Some(installation_id) = installation_id else {
-            tracing::warn!(subscription = %s.id, "a subscription without an installation");
+            tracing::debug!(subscription = %s.id, "a subscription without an installation");
             return Ok(());
         };
         self.store.set_subscription(installation_id, &s).await?;
