@@ -7,8 +7,16 @@ use serde_json::Value;
 
 use crate::cli::{self, Ended};
 use crate::{
-    FixRequest, Outcome, Resolution, ResolveRequest, Resolver, fix_prompt, gave_up, prompt,
+    FixRequest, Outcome, QuestionRequest, Resolution, ResolveRequest, Resolver, ReviewRequest,
+    fix_prompt, gave_up, prompt, question_prompt, review_prompt,
 };
+
+/// What the agent may use: to edit and verify, or only to read.
+#[derive(Clone, Copy, PartialEq)]
+enum Access {
+    Edit,
+    Read,
+}
 
 /// Runs Claude Code headless (`claude -p`) in the job's worktree.
 pub struct ClaudeResolver {
@@ -24,10 +32,11 @@ pub struct ClaudeResolver {
 }
 
 impl ClaudeResolver {
-    fn allowed_tools(verify: &[String]) -> String {
-        let mut tools: Vec<String> = ["Read", "Edit", "Write", "Glob", "Grep"]
-            .map(String::from)
-            .into();
+    fn allowed_tools(access: Access, verify: &[String]) -> String {
+        let mut tools: Vec<String> = ["Read", "Glob", "Grep"].map(String::from).into();
+        if access == Access::Edit {
+            tools.extend(["Edit", "Write"].map(String::from));
+        }
         for git in ["status", "diff", "log", "show"] {
             tools.push(format!("Bash(git {git}:*)"));
         }
@@ -39,6 +48,7 @@ impl ClaudeResolver {
         &self,
         workdir: &Path,
         prompt: String,
+        access: Access,
         verify: &[String],
     ) -> Result<tokio::process::Command> {
         let key = self
@@ -66,7 +76,7 @@ impl ClaudeResolver {
             // Anything not in the allowlist is denied, never prompted.
             .args(["--permission-mode", "dontAsk"])
             .arg("--allowedTools")
-            .arg(Self::allowed_tools(verify));
+            .arg(Self::allowed_tools(access, verify));
         Ok(cmd)
     }
 
@@ -74,10 +84,11 @@ impl ClaudeResolver {
         &self,
         workdir: &Path,
         prompt: String,
+        access: Access,
         verify: &[String],
         transcript_path: &Path,
     ) -> Result<Resolution> {
-        let cmd = self.command(workdir, prompt, verify)?;
+        let cmd = self.command(workdir, prompt, access, verify)?;
         let mut turns = 0;
         let mut result = None;
         let ended = cli::stream(cmd, "claude", self.timeout, transcript_path, |event| {
@@ -97,6 +108,11 @@ impl ClaudeResolver {
         Ok(Resolution {
             turns,
             cost_usd: result.as_ref().and_then(|r| r["total_cost_usd"].as_f64()),
+            text: result
+                .as_ref()
+                .and_then(|r| r["result"].as_str())
+                .unwrap_or_default()
+                .to_owned(),
             outcome: outcome(ended, result.as_ref()),
         })
     }
@@ -139,6 +155,7 @@ impl Resolver for ClaudeResolver {
         self.run(
             req.workdir,
             prompt(&req),
+            Access::Edit,
             req.verify_commands,
             req.transcript,
         )
@@ -149,10 +166,23 @@ impl Resolver for ClaudeResolver {
         self.run(
             req.workdir,
             fix_prompt(&req),
+            Access::Edit,
             req.verify_commands,
             req.transcript,
         )
         .await
+    }
+
+    async fn review(&self, req: ReviewRequest<'_>) -> Result<Resolution> {
+        let prompt = review_prompt(&req);
+        self.run(req.workdir, prompt, Access::Read, &[], req.transcript)
+            .await
+    }
+
+    async fn question(&self, req: QuestionRequest<'_>) -> Result<Resolution> {
+        let prompt = question_prompt(&req);
+        self.run(req.workdir, prompt, Access::Read, &[], req.transcript)
+            .await
     }
 }
 
@@ -208,7 +238,12 @@ mod tests {
             max_turns: 1,
         };
         let cmd = resolver
-            .command(Path::new("."), "p".into(), &["cargo check".into()])
+            .command(
+                Path::new("."),
+                "p".into(),
+                Access::Edit,
+                &["cargo check".into()],
+            )
             .unwrap();
         assert_eq!(env(&cmd, "ANTHROPIC_API_KEY").as_deref(), Some("job-token"));
         assert_eq!(
@@ -217,5 +252,14 @@ mod tests {
         );
         assert_eq!(env(&cmd, "NO_PROXY").as_deref(), Some("orchestrator"));
         assert_eq!(env(&cmd, "no_proxy").as_deref(), Some("orchestrator"));
+    }
+
+    #[test]
+    fn a_review_may_read_but_not_edit() {
+        let read = ClaudeResolver::allowed_tools(Access::Read, &[]);
+        assert!(read.contains("Read") && read.contains("Bash(git diff:*)"));
+        assert!(!read.contains("Edit") && !read.contains("Write"));
+        let edit = ClaudeResolver::allowed_tools(Access::Edit, &["cargo check".into()]);
+        assert!(edit.contains("Edit") && edit.contains("Bash(cargo check)"));
     }
 }

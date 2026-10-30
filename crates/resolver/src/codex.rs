@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::cli::{self, Ended};
 use crate::{
-    FixRequest, Outcome, Resolution, ResolveRequest, Resolver, fix_prompt, gave_up, prompt,
+    FixRequest, Outcome, QuestionRequest, Resolution, ResolveRequest, Resolver, ReviewRequest,
+    fix_prompt, gave_up, prompt, question_prompt, review_prompt,
 };
 
 /// The environment variable Codex reads the API key from.
@@ -127,6 +128,7 @@ impl Run {
             // Codex reports tokens, not what they cost.
             cost_usd: None,
             outcome: self.outcome(ended),
+            text: self.last_message,
         }
     }
 
@@ -163,6 +165,16 @@ impl Resolver for CodexResolver {
 
     async fn fix(&self, req: FixRequest<'_>) -> Result<Resolution> {
         self.run(req.workdir, fix_prompt(&req), req.transcript)
+            .await
+    }
+
+    async fn review(&self, req: ReviewRequest<'_>) -> Result<Resolution> {
+        self.run(req.workdir, review_prompt(&req), req.transcript)
+            .await
+    }
+
+    async fn question(&self, req: QuestionRequest<'_>) -> Result<Resolution> {
+        self.run(req.workdir, question_prompt(&req), req.transcript)
             .await
     }
 }

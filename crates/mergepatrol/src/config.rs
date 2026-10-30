@@ -95,6 +95,7 @@ impl Config {
             verify: Vec::new(),
             fix_ci: Default::default(),
             branches: Vec::new(),
+            review: Default::default(),
         };
         repo_defaults.check().map_err(|e| {
             anyhow::anyhow!("MERGEPATROL_LABEL, _BATCH_SIZE, _PROVIDER, _MODEL or _EFFORT: {e}")

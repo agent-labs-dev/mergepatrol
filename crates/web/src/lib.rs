@@ -8,6 +8,7 @@ mod blog;
 mod changelog;
 mod mcp;
 mod oauth;
+mod review;
 mod routes;
 mod ui;
 mod v1;
@@ -32,6 +33,7 @@ pub use auth::{
     UserView,
 };
 pub use billing::{AccessView, BillingView, PricingView, RedirectView};
+pub use review::*;
 pub use webhook::Wake;
 
 pub struct WebConfig {
@@ -241,6 +243,7 @@ mod tests {
                 verify: Vec::new(),
                 fix_ci: Default::default(),
                 branches: Vec::new(),
+                review: Default::default(),
             },
             analytics: Analytics::default(),
             billing: None,
@@ -1124,6 +1127,161 @@ mod tests {
             get(&router, "/api/w/2/repos/o/r/config", Some(&cookie)).await,
             StatusCode::NOT_FOUND
         );
+    }
+
+    /// A request with a JSON body, as the user: its status and its JSON.
+    async fn json(
+        router: &Router,
+        method: &str,
+        path: &str,
+        cookie: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", cookie)
+            .header("content-type", "application/json")
+            .body(match body {
+                Some(b) => Body::from(b.to_string()),
+                None => Body::empty(),
+            })
+            .unwrap();
+        let res = send(router, req).await;
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_agents_review_shows_and_takes_questions_and_its_settings_save(pool: PgPool) {
+        use mergepatrol_core::{Bar, Finding, Judged, Kind, Lean, ReviewStatus};
+        use mergepatrol_store::{ReviewDone, ReviewStore};
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let (router, cookie) = signed_in(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let path = "/api/w/1/repos/o/r/pulls/7/agent-review";
+
+        let (status, body) = json(&router, "GET", path, &cookie, None).await;
+        assert_eq!((status, body), (StatusCode::OK, serde_json::Value::Null));
+
+        let r = store.start_review(1, &repo, 7, "head").await.unwrap();
+        store
+            .claim_review(std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        let finding = |id: &str, confidence| Finding {
+            id: id.into(),
+            kind: Kind::Security,
+            title: format!("about {id}"),
+            file: Some("a.rs".into()),
+            line: Some(3),
+            confidence,
+            lean: Lean::Fine,
+            finding: String::new(),
+            unsure: String::new(),
+            checked: Vec::new(),
+            would_clear: String::new(),
+            suggestion: String::new(),
+            code: Vec::new(),
+            related: Vec::new(),
+        };
+        let done = ReviewDone {
+            status: ReviewStatus::Asks,
+            error: None,
+            summary: "s".into(),
+            findings: vec![
+                Judged {
+                    finding: finding("f1", 97),
+                    asked: false,
+                    bar: Bar::From(90),
+                },
+                Judged {
+                    finding: finding("f2", 52),
+                    asked: true,
+                    bar: Bar::From(90),
+                },
+            ],
+            asked: vec!["mona".into()],
+        };
+        store.finish_review(r.id, &done).await.unwrap();
+        let (status, body) = json(&router, "GET", path, &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "asks");
+        // What it asks comes first.
+        assert_eq!(body["findings"][0]["id"], "f2");
+        assert_eq!(body["findings"][0]["bar"], 90);
+
+        let ask = |head: &str| serde_json::json!({ "head_sha": head, "finding": "f2", "question": "Why?" });
+        let questions = format!("{path}/questions");
+        let (status, _) = json(&router, "POST", &questions, &cookie, Some(ask("old"))).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a question about another head"
+        );
+        // Asking spends the workspace's model, and answering resolves the gate: GitHub must say
+        // the caller may write to the repo, which takes their GitHub token.
+        let (status, _) = json(&router, "POST", &questions, &cookie, Some(ask("head"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let answers = serde_json::json!({
+            "head_sha": "head",
+            "answers": [{ "finding": "f2", "call": "fine" }],
+        });
+        let answer_path = format!("{path}/answers");
+        let (status, _) = json(&router, "POST", &answer_path, &cookie, Some(answers)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (_, body) = json(&router, "GET", path, &cookie, None).await;
+        assert_eq!(body["status"], "asks", "unanswered");
+
+        // Settings: the defaults, then saved.
+        let (status, s) = json(&router, "GET", "/api/w/1/settings/review", &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(s["enabled"], false);
+        assert!(
+            s["bars"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({ "kind": "migrations", "bar": "always_ask" }))
+        );
+        let security = &s["history"][0];
+        assert_eq!(security["kind"], "security");
+        assert_eq!(security["bands"][9]["findings"], 1);
+        let set = serde_json::json!({ "enabled": true, "bars": [{ "kind": "other", "bar": 70 }] });
+        let (status, s) = json(
+            &router,
+            "PUT",
+            "/api/w/1/settings/review",
+            &cookie,
+            Some(set),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(s["enabled"], true);
+        assert!(
+            s["bars"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!({ "kind": "other", "bar": 70 }))
+        );
+        let bad = serde_json::json!({ "enabled": true, "bars": [{ "kind": "other", "bar": 20 }] });
+        let (status, _) = json(
+            &router,
+            "PUT",
+            "/api/w/1/settings/review",
+            &cookie,
+            Some(bad),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "under 50% is a guess"
+        );
+        let (status, _) = json(&router, "GET", "/api/w/2/settings/review", &cookie, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "another workspace's");
     }
 
     #[sqlx::test(migrations = false)]

@@ -34,9 +34,10 @@ The rebase rewrites the PR branch, and a fix adds a commit to it. Before pushing
 Mergepatrol keeps one comment on each queued PR up to date. It says one of:
 
 - **On hold**: the PR is a draft, waits for a required review, or has changes requested. Mergepatrol comments the reason on the PR. It keeps its place, and runs once GitHub shows it ready.
+- **Under review**: with automatic review on, an agent reviews the PR before it takes its place in line. It clears what it is sure of, and asks a human about the rest, in a comment on the PR. The PR waits for their answers: all fine, and it goes on; a change asked for, and it waits for a push, then is reviewed again. `get_agent_review` over MCP reads the review. Don't answer it yourself unless the user asks you to: its questions are for a human.
 - **Ejected**: the rebase, the checks or the merge failed, and the comment says which. The trigger label is gone and `<label>:failed` is on. Fix the cause, push, then add `<label>` again.
 - **Merged**: done. The queue labels are removed.
 
 ## Settings
 
-`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver, the `verify` commands, and `fix_ci`. Mergepatrol reads it from the default branch, so a change takes effect once its PR merges.
+`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver, the `verify` commands, `fix_ci`, and `review`. Mergepatrol reads it from the default branch, so a change takes effect once its PR merges.

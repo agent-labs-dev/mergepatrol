@@ -1,5 +1,6 @@
 //! What one agent run spent, as its job event tells it: `resolved` for a rebase's conflict,
-//! `fix` for failed checks, and `unresolved` or `unfixed` when the run did not do its task. The
+//! `fix` for failed checks, `reviewed` for a review or a question about one, and `unresolved`,
+//! `unfixed` or `unreviewed` when the run did not do its task. The
 //! job writes the message, the dashboard reads it back.
 
 /// Why the agent ran.
@@ -9,6 +10,8 @@ pub enum SpendTask {
     Rebase,
     /// It fixed failed checks.
     Fix,
+    /// It reviewed a PR, or answered a question about its review.
+    Review,
 }
 
 impl SpendTask {
@@ -19,17 +22,19 @@ impl SpendTask {
             (SpendTask::Rebase, false) => "unresolved",
             (SpendTask::Fix, true) => "fix",
             (SpendTask::Fix, false) => "unfixed",
+            (SpendTask::Review, true) => "reviewed",
+            (SpendTask::Review, false) => "unreviewed",
         }
     }
 
+    pub const ALL: [SpendTask; 3] = [SpendTask::Rebase, SpendTask::Fix, SpendTask::Review];
+
     /// Every event that tells of a run.
-    pub fn event_kinds() -> [&'static str; 4] {
-        [
-            SpendTask::Rebase.event_kind(true),
-            SpendTask::Rebase.event_kind(false),
-            SpendTask::Fix.event_kind(true),
-            SpendTask::Fix.event_kind(false),
-        ]
+    pub fn event_kinds() -> Vec<&'static str> {
+        Self::ALL
+            .into_iter()
+            .flat_map(|t| [t.event_kind(true), t.event_kind(false)])
+            .collect()
     }
 }
 
@@ -72,7 +77,7 @@ impl Spend {
 
     /// The run an event tells of, if it tells of one.
     pub fn parse(kind: &str, message: &str) -> Option<Spend> {
-        let (task, done) = [SpendTask::Rebase, SpendTask::Fix]
+        let (task, done) = SpendTask::ALL
             .into_iter()
             .flat_map(|t| [(t, true), (t, false)])
             .find(|(t, done)| t.event_kind(*done) == kind)?;

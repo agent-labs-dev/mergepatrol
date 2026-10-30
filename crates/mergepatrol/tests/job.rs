@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use mergepatrol_core::{CheckFailure, Provider};
 use mergepatrol_executor::protocol::{
-    ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, ResolverSpec, Task,
+    ANSWER_FILE, ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, REVIEW_FILE, ResolverSpec,
+    ReviewOutput, Task,
 };
 use mergepatrol_executor::{Executor, LocalExecutor};
 
@@ -299,6 +300,109 @@ async fn a_fix_that_fails_still_tells_what_it_spent() {
             "1 turns, $0.12, by claude-opus-5-5 at medium effort"
         );
     }
+}
+
+#[tokio::test]
+async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    let trunk = commit(&origin, "app.rs", &lines);
+    git(&origin, &["checkout", "-q", "-b", "pr"]);
+    let changed = lines.replace("line 10\n", "line 10 changed\n");
+    let head = commit(&origin, "app.rs", &changed);
+
+    let answer = serde_json::json!({
+        "summary": "It changes a line.",
+        "findings": [{
+            "kind": "security", "title": "Line 10 changed", "file": "app.rs", "line": 10,
+            "confidence": 64, "lean": "fine", "finding": "f", "unsure": "u",
+            "checked": ["c"], "would_clear": "w", "suggestion": "s",
+            "related": [{ "file": "app.rs", "line": 2, "why": "context" }]
+        }]
+    })
+    .to_string();
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::Review {
+        answered: Vec::new(),
+    };
+    let out = tmp.path().join("out");
+    // The fake CLI echoes its answer, so one line: `echo` would break a `\n`.
+    let result = with_fake_claude(tmp.path(), &format!("Here it is: {answer}"))
+        .run("t6", &spec, &out)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    assert!(!out.join(BUNDLE_FILE).exists(), "a review returns no code");
+    let spent = result.events.last().unwrap();
+    assert_eq!(spent.kind, "reviewed", "{result:?}");
+
+    let review: ReviewOutput =
+        serde_json::from_slice(&std::fs::read(out.join(REVIEW_FILE)).unwrap()).unwrap();
+    let f = &review.findings[0];
+    assert_eq!(f.id, "f1");
+    let hot: Vec<&str> = f
+        .code
+        .iter()
+        .filter(|c| c.hot)
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(hot, ["line 10 changed"]);
+    assert!(
+        f.code.iter().any(|c| c.text == "line 10"),
+        "the removed line shows"
+    );
+    let related: Vec<&str> = f.related[0].code.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(related, ["line 1", "line 2", "line 3", "line 4", "line 5"]);
+
+    // A question about it, answered in plain text.
+    spec.task = Task::Question {
+        finding: Box::new(f.clone()),
+        question: "Why?".into(),
+    };
+    let tmp2 = tempfile::tempdir().unwrap();
+    let out = tmp2.path().join("out");
+    let result = with_fake_claude(tmp2.path(), "Because it is.")
+        .run("t7", &spec, &out)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    assert_eq!(
+        std::fs::read_to_string(out.join(ANSWER_FILE)).unwrap(),
+        "Because it is."
+    );
+}
+
+#[tokio::test]
+async fn a_review_the_agent_cannot_give_fails_and_says_why() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::Review {
+        answered: Vec::new(),
+    };
+    let out = tmp.path().join("out");
+    let result = with_fake_claude(tmp.path(), "Looks good to me!")
+        .run("t8", &spec, &out)
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = &result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(reason.contains("not JSON"), "{reason}");
+    assert_eq!(result.events.last().unwrap().kind, "unreviewed");
 }
 
 /// The same clean rebase, in a container from the job image, through `DockerExecutor`.

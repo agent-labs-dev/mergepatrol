@@ -745,7 +745,7 @@ function Steps({ steps }: { steps: StepStatsView[] }) {
 }
 
 /** What the agents cost over the window, by model and effort, split into resolving rebase
- * conflicts and fixing failed checks. */
+ * conflicts, fixing failed checks, and reviewing PRs. */
 function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
   if (llms.length === 0) return null;
   const sum = (runs: (l: LlmStatsView) => LlmRunsView): LlmRunsView => ({
@@ -757,12 +757,14 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
   });
   const rebase = sum((l) => l.rebase);
   const fix = sum((l) => l.fix);
+  const review = sum((l) => l.review);
   return (
     <div className="mt-5">
       <div className="mb-2 flex items-baseline justify-between">
         <p className="text-xs font-medium text-muted">LLM spend</p>
         <p className="text-xs text-faint">
-          {cost(both(rebase, fix))} over {rebase.runs + fix.runs} runs in the last {days} days
+          {cost(all(rebase, fix, review))} over {rebase.runs + fix.runs + review.runs} runs in the
+          last {days} days
         </p>
       </div>
       <table className="w-full text-xs">
@@ -771,6 +773,7 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
             <th className="py-1 text-left font-normal">Model</th>
             <th className="py-1 text-right font-normal">Rebasing</th>
             <th className="py-1 text-right font-normal">Fixing</th>
+            <th className="py-1 text-right font-normal">Reviewing</th>
             <th className="py-1 text-right font-normal">Total</th>
           </tr>
         </thead>
@@ -780,7 +783,10 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
               <td className="py-1 font-mono">{llmName(l)}</td>
               <LlmRuns runs={l.rebase} />
               <LlmRuns runs={l.fix} />
-              <td className="py-1 text-right font-medium">{cost(both(l.rebase, l.fix))}</td>
+              <LlmRuns runs={l.review} />
+              <td className="py-1 text-right font-medium">
+                {cost(all(l.rebase, l.fix, l.review))}
+              </td>
             </tr>
           ))}
           {llms.length > 1 && (
@@ -788,7 +794,8 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
               <td className="py-1">All models</td>
               <LlmRuns runs={rebase} />
               <LlmRuns runs={fix} />
-              <td className="py-1 text-right">{cost(both(rebase, fix))}</td>
+              <LlmRuns runs={review} />
+              <td className="py-1 text-right">{cost(all(rebase, fix, review))}</td>
             </tr>
           )}
         </tbody>
@@ -797,12 +804,12 @@ function Llms({ llms, days }: { llms: LlmStatsView[]; days: number }) {
   );
 }
 
-const both = (a: LlmRunsView, b: LlmRunsView): LlmRunsView => ({
-  runs: a.runs + b.runs,
-  failed: a.failed + b.failed,
-  turns: a.turns + b.turns,
-  cost_usd: a.cost_usd + b.cost_usd,
-  unpriced: a.unpriced + b.unpriced,
+const all = (...rs: LlmRunsView[]): LlmRunsView => ({
+  runs: rs.reduce((t, r) => t + r.runs, 0),
+  failed: rs.reduce((t, r) => t + r.failed, 0),
+  turns: rs.reduce((t, r) => t + r.turns, 0),
+  cost_usd: rs.reduce((t, r) => t + r.cost_usd, 0),
+  unpriced: rs.reduce((t, r) => t + r.unpriced, 0),
 });
 
 /** The known cost: "–" when no run told it, "$1.20+" when only some did, such as Codex's. */

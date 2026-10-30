@@ -1,7 +1,8 @@
 //! `mergepatrol job`: the part that runs inside the sandbox. It reads a `JobSpec` from stdin (or
 //! from its link, with `--remote`), and fetches the repo with a read-only token. Then it rebases
 //! and resolves conflicts with the agent, or has the agent fix the PR's failed checks. It runs
-//! the verify commands after the agent, and writes the result as a git bundle. It holds no
+//! the verify commands after the agent, and writes the result as a git bundle. Or it has the
+//! agent review the PR, or answer a question about its review, and writes what the agent said. It holds no
 //! credential that can write to GitHub: the orchestrator checks the bundle and publishes it.
 //! Nor does it hold the Anthropic key: it calls the API through the orchestrator's proxy.
 
@@ -9,15 +10,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use mergepatrol_core::{CheckFailure, FIXED_BY, Spend, SpendTask};
+use mergepatrol_core::{
+    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, Spend, SpendTask,
+};
 use mergepatrol_executor::protocol::{
-    BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, ResolverSpec, Task,
+    ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
+    ResolverSpec, ReviewOutput, Task,
 };
 use mergepatrol_executor::proxy::Api;
 use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
-    ClaudeResolver, CodexResolver, FixRequest, Outcome, Resolution, ResolveRequest, Resolver,
+    ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
+    ResolveRequest, Resolver, ReviewRequest,
 };
 use tokio::io::AsyncReadExt;
 
@@ -147,6 +152,13 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
         Task::FixChecks { failures } => {
             fix(spec, &git, resolver, failures, dir, out, events).await?;
             (&spec.head_sha, "fixed")
+        }
+        // These return what the agent said, not code.
+        Task::Review { answered } => {
+            return review(spec, &git, resolver, answered, dir, out, events).await;
+        }
+        Task::Question { finding, question } => {
+            return answer(spec, &git, resolver, finding, question, dir, out, events).await;
         }
     };
 
@@ -338,6 +350,247 @@ async fn commit_fix(
     .await
 }
 
+/// How many lines of context a finding's code shows around what it is about.
+const CODE_CONTEXT: u32 = 3;
+/// The most lines of code a finding carries: a hunk can be long.
+const CODE_LINES: usize = 24;
+
+/// Has the agent review the PR, and writes what it found, each finding with its code.
+async fn review(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &dyn Resolver,
+    answered: &[Answered],
+    dir: &Path,
+    out: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
+    event(
+        events,
+        "reviewing",
+        format!("{}..{}", &base[..12], &spec.head_sha[..12]),
+    );
+    let transcript = out
+        .join("transcripts")
+        .join(format!("review-{}.jsonl", &spec.head_sha[..12]));
+    let run = resolver
+        .review(ReviewRequest {
+            workdir: dir,
+            base: &base,
+            pr_title: &spec.pr_title,
+            pr_body: &spec.pr_body,
+            trunk: &spec.trunk,
+            answered,
+            transcript: &transcript,
+        })
+        .await
+        .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
+    let parsed = match &run.outcome {
+        Outcome::Failed(why) => Err(anyhow!("the agent failed: {why}")),
+        Outcome::GaveUp(why) => Err(anyhow!("the agent gave up: {why}")),
+        Outcome::Resolved => parse_review(&run.text),
+    };
+    spent(
+        events,
+        &spec.resolver,
+        SpendTask::Review,
+        parsed.is_ok(),
+        String::new(),
+        &run,
+    );
+    let mut output = parsed?;
+    for (i, f) in output.findings.iter_mut().enumerate() {
+        f.id = format!("f{}", i + 1);
+        f.confidence = f.confidence.clamp(0, 100);
+        if let Some(file) = f.file.clone() {
+            f.code = diff_lines(git, dir, &base, &spec.head_sha, &file, f.line).await?;
+        }
+        for r in &mut f.related {
+            r.code = file_lines(git, dir, &spec.head_sha, &r.file, r.line).await?;
+        }
+    }
+    tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
+    Ok(())
+}
+
+/// Has the agent answer a human's question about a finding, and writes the answer.
+#[allow(clippy::too_many_arguments)]
+async fn answer(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &dyn Resolver,
+    finding: &Finding,
+    question: &str,
+    dir: &Path,
+    out: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
+    let transcript = out
+        .join("transcripts")
+        .join(format!("question-{}.jsonl", &spec.head_sha[..12]));
+    let run = resolver
+        .question(QuestionRequest {
+            workdir: dir,
+            base: &base,
+            pr_title: &spec.pr_title,
+            finding,
+            question,
+            transcript: &transcript,
+        })
+        .await
+        .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
+    let done = run.outcome == Outcome::Resolved && !run.text.trim().is_empty();
+    spent(
+        events,
+        &spec.resolver,
+        SpendTask::Review,
+        done,
+        String::new(),
+        &run,
+    );
+    match &run.outcome {
+        Outcome::Failed(why) => bail!("the agent failed: {why}"),
+        Outcome::GaveUp(why) => bail!("the agent gave up: {why}"),
+        Outcome::Resolved if !done => bail!("the agent answered nothing"),
+        Outcome::Resolved => {}
+    }
+    tokio::fs::write(out.join(ANSWER_FILE), run.text.trim()).await?;
+    Ok(())
+}
+
+/// The review in the agent's answer: its JSON, alone or in a code block.
+fn parse_review(text: &str) -> Result<ReviewOutput> {
+    let json = match (text.find('{'), text.rfind('}')) {
+        (Some(start), Some(end)) if start < end => &text[start..=end],
+        _ => bail!("the agent's review is not JSON"),
+    };
+    let mut output: ReviewOutput =
+        serde_json::from_str(json).context("the agent's review does not parse")?;
+    output.findings.retain(|f| !f.title.trim().is_empty());
+    output.findings.truncate(25);
+    Ok(output)
+}
+
+/// The PR's changes to `file` around `line`: the hunk that holds it, or the first hunk.
+async fn diff_lines(
+    git: &Git,
+    dir: &Path,
+    base: &str,
+    head: &str,
+    file: &str,
+    line: Option<u32>,
+) -> Result<Vec<CodeLine>> {
+    let diff = git.diff_file(dir, base, head, file, CODE_CONTEXT).await?;
+    let hunks = hunks(&diff);
+    let at = |h: &&Vec<CodeLine>| {
+        line.is_some_and(|l| {
+            h.iter()
+                .any(|c| c.kind != LineKind::Removed && c.number == Some(l))
+        })
+    };
+    let Some(hunk) = hunks.iter().find(at).or(hunks.first()) else {
+        // Not changed by the PR: the lines as they are.
+        return file_lines(git, dir, head, file, line).await;
+    };
+    let mut lines = hunk.clone();
+    if let Some(l) = line {
+        // The lines next to the one it is about, when the hunk is long.
+        if lines.len() > CODE_LINES {
+            let i = lines
+                .iter()
+                .position(|c| c.kind != LineKind::Removed && c.number == Some(l))
+                .unwrap_or(0);
+            let start = i
+                .saturating_sub(CODE_LINES / 2)
+                .min(lines.len() - CODE_LINES);
+            lines = lines[start..start + CODE_LINES].to_vec();
+        }
+        let near = |n: u32| n.abs_diff(l) <= 2;
+        for c in &mut lines {
+            c.hot = c.kind == LineKind::Added && c.number.is_some_and(near);
+        }
+    } else {
+        lines.truncate(CODE_LINES);
+    }
+    Ok(lines)
+}
+
+/// A unified diff's hunks, each line numbered on its own side: an added or kept line by the
+/// new file, a removed one by the old.
+fn hunks(diff: &str) -> Vec<Vec<CodeLine>> {
+    let mut hunks: Vec<Vec<CodeLine>> = Vec::new();
+    let (mut old, mut new) = (0u32, 0u32);
+    for text in diff.lines() {
+        if let Some(header) = text.strip_prefix("@@ ") {
+            let mut parts = header.split_whitespace();
+            let start = |p: Option<&str>, sign: char| {
+                p.and_then(|p| p.strip_prefix(sign))
+                    .and_then(|p| p.split(',').next())
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0)
+            };
+            old = start(parts.next(), '-');
+            new = start(parts.next(), '+');
+            hunks.push(Vec::new());
+            continue;
+        }
+        let Some(hunk) = hunks.last_mut() else {
+            continue;
+        };
+        let (kind, number, rest) = match text.chars().next() {
+            Some('+') => {
+                new += 1;
+                (LineKind::Added, new - 1, &text[1..])
+            }
+            Some('-') => {
+                old += 1;
+                (LineKind::Removed, old - 1, &text[1..])
+            }
+            Some(' ') => {
+                old += 1;
+                new += 1;
+                (LineKind::Context, new - 1, &text[1..])
+            }
+            // `\ No newline at end of file`
+            _ => continue,
+        };
+        hunk.push(CodeLine {
+            number: Some(number),
+            kind,
+            text: rest.to_owned(),
+            hot: false,
+        });
+    }
+    hunks
+}
+
+/// A file's lines around `line` at `rev`, or its first lines.
+async fn file_lines(
+    git: &Git,
+    dir: &Path,
+    rev: &str,
+    file: &str,
+    line: Option<u32>,
+) -> Result<Vec<CodeLine>> {
+    let Some(text) = git.show_file(dir, rev, file).await? else {
+        return Ok(Vec::new());
+    };
+    let all: Vec<&str> = text.lines().collect();
+    let at = line.unwrap_or(1).max(1) as usize;
+    let start = at.saturating_sub(CODE_CONTEXT as usize + 1);
+    let end = (at + CODE_CONTEXT as usize).min(all.len());
+    Ok((start..end)
+        .map(|i| CodeLine {
+            number: Some(i as u32 + 1),
+            kind: LineKind::Context,
+            text: all[i].to_owned(),
+            hot: line == Some(i as u32 + 1),
+        })
+        .collect())
+}
+
 /// The event of an agent run, which says what it spent however it ended.
 fn spent(
     events: &mut Vec<JobEvent>,
@@ -382,6 +635,38 @@ async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_reads_from_the_agents_json_in_or_out_of_a_code_block() {
+        let text = "Here it is:\n```json\n{\"summary\": \"s\", \"findings\": [{\"kind\": \"security\", \"title\": \"t\", \"file\": \"a.rs\", \"line\": 3, \"confidence\": 70, \"lean\": \"fine\", \"finding\": \"f\"}, {\"kind\": \"other\", \"title\": \" \", \"confidence\": 90, \"lean\": \"fine\", \"finding\": \"\"}]}\n```";
+        let r = parse_review(text).unwrap();
+        assert_eq!(r.summary, "s");
+        assert_eq!(r.findings.len(), 1, "a finding without a title is dropped");
+        assert_eq!(r.findings[0].kind, mergepatrol_core::Kind::Security);
+        assert_eq!(r.findings[0].line, Some(3));
+        assert!(parse_review("I could not review it.").is_err());
+    }
+
+    #[test]
+    fn hunks_number_each_line_on_its_side() {
+        let diff = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -10,3 +10,4 @@ fn x\n keep\n-old\n+new\n+more\n keep2\n\\ No newline at end of file\n";
+        let h = hunks(diff);
+        assert_eq!(h.len(), 1);
+        let got: Vec<(LineKind, Option<u32>, &str)> = h[0]
+            .iter()
+            .map(|c| (c.kind, c.number, c.text.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (LineKind::Context, Some(10), "keep"),
+                (LineKind::Removed, Some(11), "old"),
+                (LineKind::Added, Some(11), "new"),
+                (LineKind::Added, Some(12), "more"),
+                (LineKind::Context, Some(13), "keep2"),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn a_warm_sandbox_takes_the_first_link_and_stops_listening() {

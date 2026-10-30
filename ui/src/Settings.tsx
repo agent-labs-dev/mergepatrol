@@ -17,6 +17,7 @@ import type { ApiKeyView } from "./api/ApiKeyView";
 import type { BillingView } from "./api/BillingView";
 import type { ChatGptView } from "./api/ChatGptView";
 import type { SettingsView } from "./api/SettingsView";
+import { ReviewSettings } from "./ReviewSettings";
 import { danger, ErrorText, field, Narrow, primary, secondary, timeAgo } from "./ui";
 
 const link =
@@ -51,6 +52,7 @@ export function Settings({ workspace }: { workspace: number }) {
             )}
           </div>
         ))}
+        <ReviewSettings workspace={workspace} />
       </div>
     </Narrow>
   );

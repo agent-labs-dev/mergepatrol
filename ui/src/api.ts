@@ -1,3 +1,7 @@
+import type { AgentReviewView } from "./api/AgentReviewView";
+import type { AnswerAgentReview } from "./api/AnswerAgentReview";
+import type { AskAgent } from "./api/AskAgent";
+import type { AskReviewers } from "./api/AskReviewers";
 import type { BillingView } from "./api/BillingView";
 import type { ChangelogEntryView } from "./api/ChangelogEntryView";
 import type { EventView } from "./api/EventView";
@@ -14,14 +18,17 @@ import type { PullDetailView } from "./api/PullDetailView";
 import type { PullDiffView } from "./api/PullDiffView";
 import type { PullRequestRef } from "./api/PullRequestRef";
 import type { PullStateView } from "./api/PullStateView";
+import type { QuestionView } from "./api/QuestionView";
 import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
 import type { RepoView } from "./api/RepoView";
 import type { ReviewPull } from "./api/ReviewPull";
+import type { ReviewSettingsView } from "./api/ReviewSettingsView";
 import type { SessionView } from "./api/SessionView";
 import type { SetRepo } from "./api/SetRepo";
+import type { SetReviewSettings } from "./api/SetReviewSettings";
 import type { SetSecret } from "./api/SetSecret";
 import type { SettingsView } from "./api/SettingsView";
 import type { SnoozePull } from "./api/SnoozePull";
@@ -199,3 +206,30 @@ export const unsnoozePull = (id: number, repo: string, pr: number) =>
 /** Mentions the reviewers in a comment, as the user. */
 export const nudgePull = (id: number, repo: string, pr: number, reviewers: string[]) =>
   call("POST", w(id, `/repos/${repo}/pulls/${pr}/nudge`), { reviewers } satisfies NudgePull);
+
+const agentReview = (id: number, repo: string, pr: number, path = "") =>
+  w(id, `/repos/${repo}/pulls/${pr}/agent-review${path}`);
+
+/** The agent's newest review of the PR, or `null` before its first. */
+export const fetchAgentReview = (id: number, repo: string, pr: number) =>
+  get<AgentReviewView | null>(agentReview(id, repo, pr));
+
+/** Answers what the agent's review asks, as the user's review on GitHub. */
+export const answerAgentReview = (id: number, repo: string, pr: number, body: AnswerAgentReview) =>
+  send<AgentReviewView>("POST", agentReview(id, repo, pr, "/answers"), body);
+
+/** Asks the agent about one of its findings. Its answer comes on the review later. */
+export const askAgent = (id: number, repo: string, pr: number, body: AskAgent) =>
+  send<QuestionView>("POST", agentReview(id, repo, pr, "/questions"), body);
+
+/** Asks others to answer the review, as the user. */
+export const askReviewers = (id: number, repo: string, pr: number, reviewers: string[]) =>
+  send<AgentReviewView>("POST", agentReview(id, repo, pr, "/reviewers"), {
+    reviewers,
+  } satisfies AskReviewers);
+
+export const fetchReviewSettings = (id: number) =>
+  get<ReviewSettingsView>(w(id, "/settings/review"));
+
+export const setReviewSettings = (id: number, body: SetReviewSettings) =>
+  send<ReviewSettingsView>("PUT", w(id, "/settings/review"), body);

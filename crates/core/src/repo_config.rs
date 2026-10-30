@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Provider;
+use crate::{Provider, ReviewOverrides};
 
 pub const REPO_CONFIG_PATH: &str = ".mergepatrol/mergepatrol.yml";
 
@@ -25,6 +25,9 @@ pub struct RepoSettings {
     /// any other branch is held.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<String>,
+    /// The agent's review, over the workspace's settings.
+    #[serde(default, skip_serializing_if = "ReviewOverrides::is_empty")]
+    pub review: ReviewOverrides,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +116,7 @@ struct RepoConfig {
     #[serde(default)]
     fix_ci: FixCiConfig,
     branches: Option<Vec<String>>,
+    review: Option<ReviewOverrides>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -183,6 +187,7 @@ impl RepoSettings {
                 attempts: config.fix_ci.attempts.unwrap_or(defaults.fix_ci.attempts),
             },
             branches: config.branches.unwrap_or_else(|| defaults.branches.clone()),
+            review: config.review.unwrap_or_else(|| defaults.review.clone()),
         };
         settings
             .check()
@@ -280,6 +285,7 @@ mod tests {
             verify: vec![],
             fix_ci: FixCiSettings::default(),
             branches: vec![],
+            review: ReviewOverrides::default(),
         }
     }
 
@@ -361,6 +367,10 @@ resolver: { provider: openai }
         s.resolver.provider = Provider::OpenAi;
         s.resolver.model = "gpt-6.1-sol".into();
         s.branches = vec!["release".into(), "release/2026-10".into()];
+        s.review = ReviewOverrides {
+            enabled: Some(true),
+            bars: [(crate::Kind::Security, crate::Bar::Always)].into(),
+        };
         assert_eq!(
             RepoSettings::from_file(Some(&s.to_yaml()), &defaults()),
             Ok(s)
@@ -383,6 +393,8 @@ resolver: { provider: openai }
             "version: 1\nbranches: ['release/*']\n",
             "version: 1\nbranches: ['']\n",
             "version: 1\nbranches: release\n",
+            "version: 1\nreview: { bars: { other: 30 } }\n",
+            "version: 1\nreview: { level: high }\n",
             "{",
         ] {
             assert!(

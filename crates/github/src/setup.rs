@@ -410,6 +410,24 @@ pub async fn close_pull_as(token: &str, repo: &str, number: u64) -> Result<()> {
     Ok(())
 }
 
+/// Asks these users to review a PR, as the user. `Rejected` for a login GitHub will not ask, as
+/// one without access.
+pub async fn request_reviewers_as(
+    token: &str,
+    repo: &str,
+    number: u64,
+    logins: &[String],
+) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/pulls/{number}/requested_reviewers");
+    let req = client()?.post(url).json(&json!({ "reviewers": logins }));
+    let res = user_write(token, req).await?;
+    if res.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        return Err(Rejected(rejection(&res.json().await.unwrap_or_default())).into());
+    }
+    res.error_for_status()?;
+    Ok(())
+}
+
 /// What a review says of a PR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -464,6 +482,61 @@ pub async fn review_as(
     Ok(())
 }
 
+/// A comment on a line of the PR, in a review.
+pub struct LineComment<'a> {
+    pub path: &'a str,
+    pub line: u32,
+    pub body: String,
+}
+
+/// Reviews a PR as the user at `head`, with comments on its lines. A comment on a line the PR
+/// did not change goes in the body instead: GitHub takes line comments only on the diff.
+pub async fn review_lines_as(
+    token: &str,
+    repo: &str,
+    number: u64,
+    head: &str,
+    verdict: Verdict,
+    body: &str,
+    comments: &[LineComment<'_>],
+) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/pulls/{number}/reviews");
+    let event = match verdict {
+        Verdict::Approve => "APPROVE",
+        Verdict::RequestChanges => "REQUEST_CHANGES",
+        Verdict::Comment => "COMMENT",
+    };
+    let lines: Vec<Value> = comments
+        .iter()
+        .map(|c| json!({ "path": c.path, "line": c.line, "side": "RIGHT", "body": c.body }))
+        .collect();
+    let send = |lines: &[Value], body: &str| {
+        Ok::<_, anyhow::Error>(client()?.post(&url).json(&json!({
+            "commit_id": head, "event": event, "body": body, "comments": lines,
+        })))
+    };
+    let res = user_write(token, send(&lines, body)?).await?;
+    if res.status() != reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        res.error_for_status()?;
+        return Ok(());
+    }
+    let why = rejection(&res.json().await.unwrap_or_default());
+    if comments.is_empty() {
+        return Err(Rejected(why).into());
+    }
+    // A line outside the diff: the comments go in the body.
+    let mut all = body.to_owned();
+    for c in comments {
+        all.push_str(&format!("\n\n**`{}:{}`**\n{}", c.path, c.line, c.body));
+    }
+    let res = user_write(token, send(&[], all.trim())?).await?;
+    if res.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        return Err(Rejected(rejection(&res.json().await.unwrap_or_default())).into());
+    }
+    res.error_for_status()?;
+    Ok(())
+}
+
 /// GitHub's reason in a 422: its first error, which is a string for reviews, or its message.
 fn rejection(body: &Value) -> String {
     let first = &body["errors"][0];
@@ -497,6 +570,17 @@ pub async fn can_read(token: &str, repo: &str) -> Result<bool> {
     }
     res.error_for_status()?;
     Ok(true)
+}
+
+/// Whether the token's user may push to the repo. An App's installation token, as a workflow's
+/// `GITHUB_TOKEN` is, names no user: no.
+pub async fn can_write(token: &str, repo: &str) -> Result<bool> {
+    let res = user_get(token, &format!("/repos/{repo}")).await?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    let repo: Value = res.error_for_status()?.json().await?;
+    Ok(repo["permissions"]["push"] == true)
 }
 
 /// A 401 is `Revoked`, a 403 `Refused`.

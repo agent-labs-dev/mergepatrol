@@ -30,6 +30,12 @@ pub enum Hold {
     NoSubscription,
     /// The public repos of the account queued too much in the last hour.
     FairUseLimit,
+    /// The agent is reviewing it, the queue's first gate.
+    Reviewing,
+    /// The agent's review asks a human about what it was not sure of.
+    ReviewAsks,
+    /// A human answering the agent's review asked for changes: it waits for a push.
+    ReviewChanges,
     /// A layer of the stack is not ready.
     Layer {
         number: PrNumber,
@@ -80,6 +86,13 @@ impl fmt::Display for Hold {
             }
             Hold::NoSubscription => f.write_str("private repos need a Mergepatrol subscription"),
             Hold::FairUseLimit => f.write_str("over the fair-use limit of public repos"),
+            Hold::Reviewing => f.write_str("the agent is reviewing it"),
+            Hold::ReviewAsks => {
+                f.write_str("the agent's review asks a human about what it was not sure of")
+            }
+            Hold::ReviewChanges => {
+                f.write_str("its review asked for changes: it is reviewed again on the next push")
+            }
             Hold::Layer { number, hold } => write!(f, "#{number} is not ready: {hold}"),
         }
     }

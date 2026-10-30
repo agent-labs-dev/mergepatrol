@@ -1185,6 +1185,52 @@ impl Installation {
         Ok(())
     }
 
+    /// Reviews the PR at `head` as the App: `APPROVE` or `COMMENT`, with `body`.
+    pub async fn review(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        head: &str,
+        event: &str,
+        body: &str,
+    ) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/pulls/{number}/reviews"),
+                Some(json!({ "commit_id": head, "event": event, "body": body })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Asks these users, and teams as `org/team`, to review the PR. GitHub skips the PR's
+    /// author.
+    pub async fn request_reviewers(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        asked: &[String],
+    ) -> Result<()> {
+        if asked.is_empty() {
+            return Ok(());
+        }
+        let (teams, users): (Vec<&String>, Vec<&String>) =
+            asked.iter().partition(|a| a.contains('/'));
+        let teams: Vec<&str> = teams
+            .iter()
+            .filter_map(|t| t.split_once('/').map(|(_, slug)| slug))
+            .collect();
+        let _: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/pulls/{number}/requested_reviewers"),
+                Some(json!({ "reviewers": users, "team_reviewers": teams })),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Writes the status comment: edits the one Mergepatrol posted before, or posts it.
     pub async fn sticky_comment(
         &self,
