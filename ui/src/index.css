@@ -165,3 +165,91 @@ select {
     border-color: var(--line);
   }
 }
+
+/* Base UI's toasts, stacked: behind the frontmost, each peeks out a little, smaller and at its
+ * height. Hovering the stack fans it out. */
+.toast {
+  --gap: 0.75rem;
+  --peek: 0.625rem;
+  --scale: max(0, 1 - var(--toast-index) * 0.05);
+  --height: var(--toast-frontmost-height, var(--toast-height));
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: var(--height);
+  z-index: calc(100 - var(--toast-index));
+  transform-origin: bottom center;
+  transform: translateX(var(--toast-swipe-movement-x))
+    translateY(
+      calc(
+        var(--toast-swipe-movement-y) -
+        var(--toast-index) *
+        var(--peek) -
+        (1 - var(--scale)) *
+        var(--height)
+      )
+    )
+    scale(var(--scale));
+  transition:
+    transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.4s,
+    height 0.15s;
+  /* Bridges the gap to the next toast, so the fanned stack stays hovered. */
+  &::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 0;
+    width: 100%;
+    height: calc(var(--gap) + 1px);
+  }
+  &[data-expanded] {
+    height: var(--toast-height);
+    transform: translateX(var(--toast-swipe-movement-x))
+      translateY(
+        calc(
+          var(--toast-swipe-movement-y) -
+          var(--toast-offset-y) -
+          var(--toast-index) *
+          var(--gap)
+        )
+      );
+  }
+  &[data-starting-style] {
+    transform: translateY(150%);
+  }
+  &[data-ending-style] {
+    opacity: 0;
+    &[data-swipe-direction="down"] {
+      transform: translateY(calc(var(--toast-swipe-movement-y) + 150%));
+    }
+    &[data-swipe-direction="right"] {
+      transform: translateX(calc(var(--toast-swipe-movement-x) + 150%));
+    }
+  }
+  &[data-limited] {
+    opacity: 0;
+  }
+  &[data-swiping] {
+    transition: none;
+  }
+}
+
+/* A toast behind the frontmost shows only its edge until the stack fans out. */
+.toast-content {
+  transition: opacity 0.25s;
+  &[data-behind]:not([data-expanded]) {
+    opacity: 0;
+  }
+}
+
+.toast-countdown {
+  animation: toast-countdown linear forwards;
+}
+
+@keyframes toast-countdown {
+  to {
+    stroke-dashoffset: 1;
+  }
+}
