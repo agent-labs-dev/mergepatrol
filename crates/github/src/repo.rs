@@ -652,12 +652,17 @@ impl Installation {
         Ok(r["sha"].as_str().context("blob sha")?.to_owned())
     }
 
+    /// `base_tree` with `entries` applied. No entries, as for an empty commit, is `base_tree`:
+    /// GitHub answers a tree with none "Invalid tree info".
     pub async fn create_tree(
         &self,
         repo: &RepoName,
         base_tree: &str,
         entries: &[TreeEntry],
     ) -> Result<String> {
+        if entries.is_empty() {
+            return Ok(base_tree.to_owned());
+        }
         let r: Value = self
             .rest(
                 Method::POST,
@@ -1115,6 +1120,17 @@ mod tests {
                 "PATCH /repos/o/r/issues/comments/4242 HTTP/1.1",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_tree_with_no_changes_is_its_base() {
+        // What GitHub answers a tree with no entries, as for an empty commit.
+        let invalid = r#"{"message":"Invalid tree info","status":"422"}"#;
+        let (gh, requests) = fake::serve(vec![(422, "", invalid)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let tree = gh.create_tree(&repo, "base", &[]).await.unwrap();
+        assert_eq!(tree, "base");
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     async fn merge_answered(pr: &'static str) -> (MergeOutcome, Vec<String>) {
