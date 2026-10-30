@@ -1,0 +1,242 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - link "Mergepatrol" [ref=e3] [cursor=pointer]:
+      - /url: /
+    - generic [ref=e4]:
+      - link "Blog" [ref=e5] [cursor=pointer]:
+        - /url: /blog
+      - link "Changelog" [ref=e6] [cursor=pointer]:
+        - /url: /changelog?v=a
+  - main [ref=e7]:
+    - generic [ref=e8]:
+      - heading "Changelog" [level=1] [ref=e9]
+      - paragraph [ref=e10]: What changed in Mergepatrol, written by the agents that built it.
+      - heading "October 30, 2026" [level=2] [ref=e11]
+      - article [ref=e12]:
+        - generic [ref=e13]:
+          - generic [ref=e14]: New
+          - link "#119" [ref=e15] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/119
+        - heading [level=3] [ref=e16]:
+          - link "Read a PR's summary, timeline and code before you queue it" [ref=e17] [cursor=pointer]:
+            - /url: /changelog/open-pr-detail
+        - paragraph [ref=e18]:
+          - text: "Pick a PR that isn’t queued yet and the side pane now shows what you need to decide: its description, checks, reviewers and comments, the full timeline, and the diff."
+          - strong [ref=e19]: Queue
+          - text: and
+          - strong [ref=e20]: Priority
+          - text: sit in the pane’s header.
+        - paragraph [ref=e21]:
+          - img "The Code tab, with a file tree and Viewed checkboxes" [ref=e22]
+      - article [ref=e23]:
+        - generic [ref=e24]:
+          - generic [ref=e25]: New
+          - link "#132" [ref=e26] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/132
+        - heading [level=3] [ref=e27]:
+          - link "A You tab for your PRs and the reviews waiting on you" [ref=e28] [cursor=pointer]:
+            - /url: /changelog/you-tab
+        - paragraph [ref=e29]:
+          - strong [ref=e30]: You
+          - text: "gathers your open PRs from every repo, and the PRs that ask for your review or your team’s, in one place. Your PRs are sorted by whose move it is: your turn, in the queue, waiting on others, drafts, and what merged this week."
+        - paragraph [ref=e31]:
+          - text: Approve, request changes or comment without leaving the tab. Each review waits five seconds with
+          - strong [ref=e32]: Undo
+          - text: before it goes to GitHub, since GitHub can’t take one back.
+        - paragraph [ref=e33]:
+          - img "A PR held in the queue until it gets a review" [ref=e34]
+        - paragraph [ref=e35]:
+          - text: When a PR waits on reviewers who haven’t answered,
+          - strong [ref=e36]: Nudge
+          - text: comments with an @mention of each.
+        - paragraph [ref=e37]:
+          - img "The Nudge button on a PR waiting on others" [ref=e38]
+      - article [ref=e39]:
+        - generic [ref=e40]:
+          - generic [ref=e41]: New
+          - link "#130" [ref=e42] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/130
+        - heading [level=3] [ref=e43]:
+          - link "Coding agents can queue PRs over MCP" [ref=e44] [cursor=pointer]:
+            - /url: /changelog/mcp
+        - paragraph [ref=e45]:
+          - text: Connect Claude Code, Codex or any MCP client to
+          - code [ref=e46]: https://mergepatrol.ai/mcp
+          - text: and your agent can queue a PR, take it out, and ask where it is, without adding labels and reading Mergepatrol’s comment. It signs in with your GitHub account.
+        - code [ref=e48]: claude mcp add --transport http mergepatrol https://mergepatrol.ai/mcp
+      - article [ref=e49]:
+        - generic [ref=e50]:
+          - generic [ref=e51]: New
+          - link "#102" [ref=e52] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/102
+        - heading [level=3] [ref=e53]:
+          - link "One queue per base branch" [ref=e54] [cursor=pointer]:
+            - /url: /changelog/queue-per-base
+        - paragraph [ref=e55]:
+          - text: PRs into
+          - code [ref=e56]: release/*
+          - text: or any other branch get their own queue, so they don’t wait behind, or batch with, PRs into
+          - code [ref=e57]: main
+          - text: .
+      - article [ref=e58]:
+        - generic [ref=e59]:
+          - generic [ref=e60]: Improved
+          - link "#125" [ref=e61] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/125
+        - heading [level=3] [ref=e62]:
+          - link "Close a PR from the queue page" [ref=e63] [cursor=pointer]:
+            - /url: /changelog/close-pr
+        - paragraph [ref=e64]:
+          - text: PRs in the
+          - strong [ref=e65]: Open · not queued
+          - text: "list have a close button. It asks first, then closes the PR as you, so GitHub decides who may: anyone with triage access, or the PR’s author."
+      - article [ref=e66]:
+        - generic [ref=e67]:
+          - generic [ref=e68]: Improved
+          - link "#129" [ref=e69] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/129
+        - heading [level=3] [ref=e70]:
+          - link "Queue, priority and remove clicks show at once" [ref=e71] [cursor=pointer]:
+            - /url: /changelog/fast-clicks
+        - paragraph [ref=e72]: A click on the Queue page moves the PR right away, instead of after GitHub’s webhook arrives. A PR you remove no longer vanishes for a moment before it reappears in the open list.
+      - article [ref=e73]:
+        - generic [ref=e74]:
+          - generic [ref=e75]: Improved
+          - link "#126" [ref=e76] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/126
+        - heading [level=3] [ref=e77]:
+          - link "Download the menu bar app from the dashboard" [ref=e78] [cursor=pointer]:
+            - /url: /changelog/tray-download
+        - paragraph [ref=e79]:
+          - text: "The dashboard header links to the latest macOS menu bar app, built on every change. It isn’t notarized yet: the first time, open it from"
+          - strong [ref=e80]: System Settings › Privacy & Security › Open Anyway
+          - text: .
+      - article [ref=e81]:
+        - generic [ref=e82]:
+          - generic [ref=e83]: Fixed
+          - link "#114" [ref=e84] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/114
+        - heading [level=3] [ref=e85]:
+          - link "PRs with an empty commit get through the queue" [ref=e86] [cursor=pointer]:
+            - /url: /changelog/empty-commit
+        - paragraph [ref=e87]:
+          - text: A PR with a
+          - code [ref=e88]: git commit --allow-empty
+          - text: in it, often pushed to rerun CI, was ejected on every try. It now lands, with the empty commit kept.
+      - article [ref=e89]:
+        - generic [ref=e90]:
+          - generic [ref=e91]: Fixed
+          - link "#117" [ref=e92] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/117
+        - heading [level=3] [ref=e93]:
+          - link "The History page no longer blanks when you switch repos" [ref=e94] [cursor=pointer]:
+            - /url: /changelog/history-switch
+        - paragraph [ref=e95]: The last repo’s numbers stay on screen, dimmed, until the new ones load.
+      - article [ref=e96]:
+        - generic [ref=e97]:
+          - generic [ref=e98]: Fixed
+          - link "#133" [ref=e99] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/133
+        - heading [level=3] [ref=e100]:
+          - link "A PR merged by hand mid-job leaves the queue cleanly" [ref=e101] [cursor=pointer]:
+            - /url: /changelog/merged-by-hand
+        - paragraph [ref=e102]: If you merge or close a queued PR yourself while its checks run, the queue now lets it go instead of trying to rebase a branch that’s gone. Hosted jobs also start warm about 95% of the time, up from about 60%.
+      - article [ref=e103]:
+        - generic [ref=e104]:
+          - generic [ref=e105]: Fixed
+          - link "#116" [ref=e106] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/116
+        - heading [level=3] [ref=e107]:
+          - link "Queue rows keep their state badge on one line" [ref=e108] [cursor=pointer]:
+            - /url: /changelog/state-badge
+        - paragraph [ref=e109]: A long PR title no longer wraps “Not queued” onto two lines.
+        - table [ref=e110]:
+          - rowgroup [ref=e111]:
+            - row [ref=e112]:
+              - columnheader "Before" [ref=e113]
+              - columnheader "After" [ref=e114]
+          - rowgroup [ref=e115]:
+            - row [ref=e116]:
+              - cell [ref=e117]:
+                - img "Badge wrapped" [ref=e118]
+              - cell [ref=e119]:
+                - img "Badge on one line" [ref=e120]
+      - heading "October 29, 2026" [level=2] [ref=e121]
+      - article [ref=e122]:
+        - generic [ref=e123]:
+          - generic [ref=e124]: New
+          - link "#99" [ref=e125] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/99
+        - heading [level=3] [ref=e126]:
+          - link "Run Codex on your ChatGPT plan" [ref=e127] [cursor=pointer]:
+            - /url: /changelog/codex-plan
+        - paragraph [ref=e128]: Sign in with ChatGPT in Settings and the agent runs on your plan, with no OpenAI API key.
+      - article [ref=e129]:
+        - generic [ref=e130]:
+          - generic [ref=e131]: New
+          - link "#100" [ref=e132] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/100
+        - heading [level=3] [ref=e133]:
+          - link "Each developer's merges, ejects and queue time on History" [ref=e134] [cursor=pointer]:
+            - /url: /changelog/developers
+        - paragraph [ref=e135]: Switch History from repos to developers to see how each person’s PRs move through the queue.
+      - article [ref=e136]:
+        - generic [ref=e137]:
+          - generic [ref=e138]: New
+          - link "#62" [ref=e139] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/62
+        - heading [level=3] [ref=e140]:
+          - link "Queue PRs from forks" [ref=e141] [cursor=pointer]:
+            - /url: /changelog/forks
+        - paragraph [ref=e142]: PRs from forks can go through the queue. Their code never runs where it could reach the repo’s secrets.
+      - article [ref=e143]:
+        - generic [ref=e144]:
+          - generic [ref=e145]: New
+          - link "#83" [ref=e146] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/83
+        - heading [level=3] [ref=e147]:
+          - link "See which model ran each rebase and fix, and what it cost" [ref=e148] [cursor=pointer]:
+            - /url: /changelog/run-cost
+        - paragraph [ref=e149]: Activity and History show the model behind every agent run and what it spent, including runs that didn’t work out.
+      - article [ref=e150]:
+        - generic [ref=e151]:
+          - generic [ref=e152]: New
+          - link "#85" [ref=e153] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/85
+        - heading [level=3] [ref=e154]:
+          - link "Watch your merge queues from the macOS menu bar" [ref=e155] [cursor=pointer]:
+            - /url: /changelog/tray
+        - paragraph [ref=e156]: A menu bar app shows each of your queues at a glance. Sign-ins now last 30 days.
+      - article [ref=e157]:
+        - generic [ref=e158]:
+          - generic [ref=e159]: Improved
+          - link "#82" [ref=e160] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/82
+        - heading [level=3] [ref=e161]:
+          - link "The dashboard works on a phone" [ref=e162] [cursor=pointer]:
+            - /url: /changelog/phone
+        - paragraph [ref=e163]: "Every page fits a phone screen: the queue, a PR’s detail, Activity and History."
+      - article [ref=e164]:
+        - generic [ref=e165]:
+          - generic [ref=e166]: Improved
+          - link "#96" [ref=e167] [cursor=pointer]:
+            - /url: https://github.com/agent-labs-dev/mergepatrol/pull/96
+        - heading [level=3] [ref=e168]:
+          - link "$15 a seat for private repos, public repos stay free" [ref=e169] [cursor=pointer]:
+            - /url: /changelog/pricing
+        - paragraph [ref=e170]: Private repos cost $15 a seat. Open source stays free.
+  - contentinfo [ref=e171]:
+    - link "Mergepatrol" [ref=e172] [cursor=pointer]:
+      - /url: /
+    - text: ": a merge queue for GitHub, with an agent on conflicts."
+  - navigation [ref=e173]:
+    - generic [ref=e174]: PROTOTYPE
+    - link "A · Feed" [ref=e175] [cursor=pointer]:
+      - /url: /changelog?v=a
+    - link "B · Timeline" [ref=e176] [cursor=pointer]:
+      - /url: /changelog?v=b
+    - link "C · Daily release" [ref=e177] [cursor=pointer]:
+      - /url: /changelog?v=c
+    - link "Agent source" [ref=e178] [cursor=pointer]:
+      - /url: /changelog?v=a&src=1
+    - generic [ref=e179]: 18 entries · 10 with a picture · ← → to switch

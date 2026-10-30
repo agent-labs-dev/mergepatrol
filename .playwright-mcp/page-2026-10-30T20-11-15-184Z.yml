@@ -1,0 +1,141 @@
+- generic [active] [ref=f2e1]:
+  - banner [ref=f2e2]:
+    - link "Mergepatrol" [ref=f2e3] [cursor=pointer]:
+      - /url: /
+    - generic [ref=f2e4]:
+      - link "Blog" [ref=f2e5] [cursor=pointer]:
+        - /url: /blog
+      - link "Changelog" [ref=f2e6] [cursor=pointer]:
+        - /url: /changelog?v=c
+  - main [ref=f2e7]:
+    - generic [ref=f2e8]:
+      - heading "Changelog" [level=1] [ref=f2e9]
+      - generic [ref=f2e10]:
+        - heading "October 30, 2026" [level=2] [ref=f2e11]
+        - paragraph [ref=f2e12]: 11 changes
+        - generic [ref=f2e13]:
+          - link [ref=f2e14] [cursor=pointer]:
+            - /url: /changelog/open-pr-detail
+            - generic [ref=f2e15]:
+              - text: New
+              - strong [ref=f2e16]: Read a PR's summary, timeline and code before you queue it
+              - paragraph [ref=f2e17]: "Pick a PR that isn't queued yet and the side pane now shows what you need to decide: its description, checks, reviewers and comments, the full timeline, and the diff. Queue and Priority sit in the pane's header."
+          - link [ref=f2e18] [cursor=pointer]:
+            - /url: /changelog/you-tab
+            - generic [ref=f2e19]:
+              - text: New
+              - strong [ref=f2e20]: A You tab for your PRs and the reviews waiting on you
+              - paragraph [ref=f2e21]: "You gathers your open PRs from every repo, and the PRs that ask for your review or your team's, in one place. Your PRs are sorted by whose move it is: your turn, in the queue, waiting on others, drafts, and what merged this week."
+          - link [ref=f2e22] [cursor=pointer]:
+            - /url: /changelog/close-pr
+            - generic [ref=f2e23]:
+              - text: Improved
+              - strong [ref=f2e24]: Close a PR from the queue page
+              - paragraph [ref=f2e25]: "PRs in the Open · not queued list have a close button. It asks first, then closes the PR as you, so GitHub decides who may: anyone with triage access, or the PR's author."
+          - link [ref=f2e26] [cursor=pointer]:
+            - /url: /changelog/fast-clicks
+            - generic [ref=f2e27]:
+              - text: Improved
+              - strong [ref=f2e28]: Queue, priority and remove clicks show at once
+              - paragraph [ref=f2e29]: A click on the Queue page moves the PR right away, instead of after GitHub's webhook arrives. A PR you remove no longer vanishes for a moment before it reappears in the open list.
+        - heading "New and improved" [level=4] [ref=f2e30]
+        - list [ref=f2e31]:
+          - listitem [ref=f2e32]:
+            - link "Coding agents can queue PRs over MCP" [ref=f2e33] [cursor=pointer]:
+              - /url: /changelog/mcp
+            - link "#130" [ref=f2e34] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/130
+          - listitem [ref=f2e35]:
+            - link "One queue per base branch" [ref=f2e36] [cursor=pointer]:
+              - /url: /changelog/queue-per-base
+            - link "#102" [ref=f2e37] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/102
+          - listitem [ref=f2e38]:
+            - link "Download the menu bar app from the dashboard" [ref=f2e39] [cursor=pointer]:
+              - /url: /changelog/tray-download
+            - link "#126" [ref=f2e40] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/126
+        - heading "Fixed" [level=4] [ref=f2e41]
+        - list [ref=f2e42]:
+          - listitem [ref=f2e43]:
+            - link "PRs with an empty commit get through the queue" [ref=f2e44] [cursor=pointer]:
+              - /url: /changelog/empty-commit
+            - link "#114" [ref=f2e45] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/114
+          - listitem [ref=f2e46]:
+            - link "The History page no longer blanks when you switch repos" [ref=f2e47] [cursor=pointer]:
+              - /url: /changelog/history-switch
+            - link "#117" [ref=f2e48] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/117
+          - listitem [ref=f2e49]:
+            - link "A PR merged by hand mid-job leaves the queue cleanly" [ref=f2e50] [cursor=pointer]:
+              - /url: /changelog/merged-by-hand
+            - link "#133" [ref=f2e51] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/133
+          - listitem [ref=f2e52]:
+            - link "Queue rows keep their state badge on one line" [ref=f2e53] [cursor=pointer]:
+              - /url: /changelog/state-badge
+            - link "#116" [ref=f2e54] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/116
+      - generic [ref=f2e55]:
+        - heading "October 29, 2026" [level=2] [ref=f2e56]
+        - paragraph [ref=f2e57]: 7 changes
+        - generic [ref=f2e58]:
+          - link [ref=f2e59] [cursor=pointer]:
+            - /url: /changelog/codex-plan
+            - generic [ref=f2e60]:
+              - text: New
+              - strong [ref=f2e61]: Run Codex on your ChatGPT plan
+              - paragraph [ref=f2e62]: Sign in with ChatGPT in Settings and the agent runs on your plan, with no OpenAI API key.
+          - link [ref=f2e63] [cursor=pointer]:
+            - /url: /changelog/developers
+            - generic [ref=f2e64]:
+              - text: New
+              - strong [ref=f2e65]: Each developer's merges, ejects and queue time on History
+              - paragraph [ref=f2e66]: Switch History from repos to developers to see how each person's PRs move through the queue.
+          - link [ref=f2e67] [cursor=pointer]:
+            - /url: /changelog/forks
+            - generic [ref=f2e68]:
+              - text: New
+              - strong [ref=f2e69]: Queue PRs from forks
+              - paragraph [ref=f2e70]: PRs from forks can go through the queue. Their code never runs where it could reach the repo's secrets.
+          - link [ref=f2e71] [cursor=pointer]:
+            - /url: /changelog/run-cost
+            - generic [ref=f2e72]:
+              - text: New
+              - strong [ref=f2e73]: See which model ran each rebase and fix, and what it cost
+              - paragraph [ref=f2e74]: Activity and History show the model behind every agent run and what it spent, including runs that didn't work out.
+          - link [ref=f2e75] [cursor=pointer]:
+            - /url: /changelog/tray
+            - generic [ref=f2e76]:
+              - text: New
+              - strong [ref=f2e77]: Watch your merge queues from the macOS menu bar
+              - paragraph [ref=f2e78]: A menu bar app shows each of your queues at a glance. Sign-ins now last 30 days.
+          - link [ref=f2e79] [cursor=pointer]:
+            - /url: /changelog/phone
+            - generic [ref=f2e80]:
+              - text: Improved
+              - strong [ref=f2e81]: The dashboard works on a phone
+              - paragraph [ref=f2e82]: "Every page fits a phone screen: the queue, a PR's detail, Activity and History."
+        - heading "New and improved" [level=4] [ref=f2e83]
+        - list [ref=f2e84]:
+          - listitem [ref=f2e85]:
+            - link "$15 a seat for private repos, public repos stay free" [ref=f2e86] [cursor=pointer]:
+              - /url: /changelog/pricing
+            - link "#96" [ref=f2e87] [cursor=pointer]:
+              - /url: https://github.com/agent-labs-dev/mergepatrol/pull/96
+  - contentinfo [ref=f2e88]:
+    - link "Mergepatrol" [ref=f2e89] [cursor=pointer]:
+      - /url: /
+    - text: ": a merge queue for GitHub, with an agent on conflicts."
+  - navigation [ref=f2e90]:
+    - generic [ref=f2e91]: PROTOTYPE
+    - link "A · Feed" [ref=f2e92] [cursor=pointer]:
+      - /url: /changelog?v=a
+    - link "B · Timeline" [ref=f2e93] [cursor=pointer]:
+      - /url: /changelog?v=b
+    - link "C · Daily release" [ref=f2e94] [cursor=pointer]:
+      - /url: /changelog?v=c
+    - link "Agent source" [ref=f2e95] [cursor=pointer]:
+      - /url: /changelog?v=c&src=1
+    - generic [ref=f2e96]: 18 entries · 10 with a picture · ← → to switch

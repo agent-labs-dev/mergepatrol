@@ -1,0 +1,213 @@
+- generic [active] [ref=f1e1]:
+  - banner [ref=f1e2]:
+    - link "Mergepatrol" [ref=f1e3] [cursor=pointer]:
+      - /url: /
+    - generic [ref=f1e4]:
+      - link "Blog" [ref=f1e5] [cursor=pointer]:
+        - /url: /blog
+      - link "Changelog" [ref=f1e6] [cursor=pointer]:
+        - /url: /changelog?v=b
+  - main [ref=f1e7]:
+    - generic [ref=f1e8]:
+      - heading "Changelog" [level=1] [ref=f1e9]
+      - generic [ref=f1e10]:
+        - time [ref=f1e11]: October 30, 2026
+        - generic [ref=f1e12]:
+          - article [ref=f1e13]:
+            - generic [ref=f1e14]:
+              - generic [ref=f1e15]: New
+              - link "#119" [ref=f1e16] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/119
+            - heading [level=3] [ref=f1e17]:
+              - link "Read a PR's summary, timeline and code before you queue it" [ref=f1e18] [cursor=pointer]:
+                - /url: /changelog/open-pr-detail
+            - paragraph [ref=f1e19]:
+              - text: "Pick a PR that isn’t queued yet and the side pane now shows what you need to decide: its description, checks, reviewers and comments, the full timeline, and the diff."
+              - strong [ref=f1e20]: Queue
+              - text: and
+              - strong [ref=f1e21]: Priority
+              - text: sit in the pane’s header.
+            - group [ref=f1e22]:
+              - generic "More" [ref=f1e23] [cursor=pointer]
+          - article [ref=f1e24]:
+            - generic [ref=f1e25]:
+              - generic [ref=f1e26]: New
+              - link "#132" [ref=f1e27] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/132
+            - heading [level=3] [ref=f1e28]:
+              - link "A You tab for your PRs and the reviews waiting on you" [ref=f1e29] [cursor=pointer]:
+                - /url: /changelog/you-tab
+            - paragraph [ref=f1e30]:
+              - strong [ref=f1e31]: You
+              - text: "gathers your open PRs from every repo, and the PRs that ask for your review or your team’s, in one place. Your PRs are sorted by whose move it is: your turn, in the queue, waiting on others, drafts, and what merged this week."
+            - group [ref=f1e32]:
+              - generic "More" [ref=f1e33] [cursor=pointer]
+          - article [ref=f1e34]:
+            - generic [ref=f1e35]:
+              - generic [ref=f1e36]: New
+              - link "#130" [ref=f1e37] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/130
+            - heading [level=3] [ref=f1e38]:
+              - link "Coding agents can queue PRs over MCP" [ref=f1e39] [cursor=pointer]:
+                - /url: /changelog/mcp
+            - paragraph [ref=f1e40]:
+              - text: Connect Claude Code, Codex or any MCP client to
+              - code [ref=f1e41]: https://mergepatrol.ai/mcp
+              - text: and your agent can queue a PR, take it out, and ask where it is, without adding labels and reading Mergepatrol’s comment. It signs in with your GitHub account.
+            - group [ref=f1e42]:
+              - generic "More" [ref=f1e43] [cursor=pointer]
+          - article [ref=f1e44]:
+            - generic [ref=f1e45]:
+              - generic [ref=f1e46]: New
+              - link "#102" [ref=f1e47] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/102
+            - heading [level=3] [ref=f1e48]:
+              - link "One queue per base branch" [ref=f1e49] [cursor=pointer]:
+                - /url: /changelog/queue-per-base
+            - paragraph [ref=f1e50]:
+              - text: PRs into
+              - code [ref=f1e51]: release/*
+              - text: or any other branch get their own queue, so they don’t wait behind, or batch with, PRs into
+              - code [ref=f1e52]: main
+              - text: .
+          - article [ref=f1e53]:
+            - generic [ref=f1e54]:
+              - generic [ref=f1e55]: Improved
+              - link "#125" [ref=f1e56] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/125
+            - heading [level=3] [ref=f1e57]:
+              - link "Close a PR from the queue page" [ref=f1e58] [cursor=pointer]:
+                - /url: /changelog/close-pr
+            - paragraph [ref=f1e59]:
+              - text: PRs in the
+              - strong [ref=f1e60]: Open · not queued
+              - text: "list have a close button. It asks first, then closes the PR as you, so GitHub decides who may: anyone with triage access, or the PR’s author."
+          - article [ref=f1e61]:
+            - generic [ref=f1e62]:
+              - generic [ref=f1e63]: Improved
+              - link "#129" [ref=f1e64] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/129
+            - heading [level=3] [ref=f1e65]:
+              - link "Queue, priority and remove clicks show at once" [ref=f1e66] [cursor=pointer]:
+                - /url: /changelog/fast-clicks
+            - paragraph [ref=f1e67]: A click on the Queue page moves the PR right away, instead of after GitHub’s webhook arrives. A PR you remove no longer vanishes for a moment before it reappears in the open list.
+          - article [ref=f1e68]:
+            - generic [ref=f1e69]:
+              - generic [ref=f1e70]: Improved
+              - link "#126" [ref=f1e71] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/126
+            - heading [level=3] [ref=f1e72]:
+              - link "Download the menu bar app from the dashboard" [ref=f1e73] [cursor=pointer]:
+                - /url: /changelog/tray-download
+            - paragraph [ref=f1e74]:
+              - text: "The dashboard header links to the latest macOS menu bar app, built on every change. It isn’t notarized yet: the first time, open it from"
+              - strong [ref=f1e75]: System Settings › Privacy & Security › Open Anyway
+              - text: .
+          - generic [ref=f1e76]:
+            - heading "Fixes" [level=4] [ref=f1e77]
+            - list [ref=f1e78]:
+              - listitem [ref=f1e79]:
+                - group [ref=f1e80]:
+                  - generic [ref=f1e81] [cursor=pointer]:
+                    - text: PRs with an empty commit get through the queue
+                    - link "#114" [ref=f1e82]:
+                      - /url: https://github.com/agent-labs-dev/mergepatrol/pull/114
+              - listitem [ref=f1e83]:
+                - group [ref=f1e84]:
+                  - generic [ref=f1e85] [cursor=pointer]:
+                    - text: The History page no longer blanks when you switch repos
+                    - link "#117" [ref=f1e86]:
+                      - /url: https://github.com/agent-labs-dev/mergepatrol/pull/117
+              - listitem [ref=f1e87]:
+                - group [ref=f1e88]:
+                  - generic [ref=f1e89] [cursor=pointer]:
+                    - text: A PR merged by hand mid-job leaves the queue cleanly
+                    - link "#133" [ref=f1e90]:
+                      - /url: https://github.com/agent-labs-dev/mergepatrol/pull/133
+              - listitem [ref=f1e91]:
+                - group [ref=f1e92]:
+                  - generic [ref=f1e93] [cursor=pointer]:
+                    - text: Queue rows keep their state badge on one line
+                    - link "#116" [ref=f1e94]:
+                      - /url: https://github.com/agent-labs-dev/mergepatrol/pull/116
+      - generic [ref=f1e95]:
+        - time [ref=f1e96]: October 29, 2026
+        - generic [ref=f1e97]:
+          - article [ref=f1e98]:
+            - generic [ref=f1e99]:
+              - generic [ref=f1e100]: New
+              - link "#99" [ref=f1e101] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/99
+            - heading [level=3] [ref=f1e102]:
+              - link "Run Codex on your ChatGPT plan" [ref=f1e103] [cursor=pointer]:
+                - /url: /changelog/codex-plan
+            - paragraph [ref=f1e104]: Sign in with ChatGPT in Settings and the agent runs on your plan, with no OpenAI API key.
+          - article [ref=f1e105]:
+            - generic [ref=f1e106]:
+              - generic [ref=f1e107]: New
+              - link "#100" [ref=f1e108] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/100
+            - heading [level=3] [ref=f1e109]:
+              - link "Each developer's merges, ejects and queue time on History" [ref=f1e110] [cursor=pointer]:
+                - /url: /changelog/developers
+            - paragraph [ref=f1e111]: Switch History from repos to developers to see how each person’s PRs move through the queue.
+          - article [ref=f1e112]:
+            - generic [ref=f1e113]:
+              - generic [ref=f1e114]: New
+              - link "#62" [ref=f1e115] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/62
+            - heading [level=3] [ref=f1e116]:
+              - link "Queue PRs from forks" [ref=f1e117] [cursor=pointer]:
+                - /url: /changelog/forks
+            - paragraph [ref=f1e118]: PRs from forks can go through the queue. Their code never runs where it could reach the repo’s secrets.
+          - article [ref=f1e119]:
+            - generic [ref=f1e120]:
+              - generic [ref=f1e121]: New
+              - link "#83" [ref=f1e122] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/83
+            - heading [level=3] [ref=f1e123]:
+              - link "See which model ran each rebase and fix, and what it cost" [ref=f1e124] [cursor=pointer]:
+                - /url: /changelog/run-cost
+            - paragraph [ref=f1e125]: Activity and History show the model behind every agent run and what it spent, including runs that didn’t work out.
+          - article [ref=f1e126]:
+            - generic [ref=f1e127]:
+              - generic [ref=f1e128]: New
+              - link "#85" [ref=f1e129] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/85
+            - heading [level=3] [ref=f1e130]:
+              - link "Watch your merge queues from the macOS menu bar" [ref=f1e131] [cursor=pointer]:
+                - /url: /changelog/tray
+            - paragraph [ref=f1e132]: A menu bar app shows each of your queues at a glance. Sign-ins now last 30 days.
+          - article [ref=f1e133]:
+            - generic [ref=f1e134]:
+              - generic [ref=f1e135]: Improved
+              - link "#82" [ref=f1e136] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/82
+            - heading [level=3] [ref=f1e137]:
+              - link "The dashboard works on a phone" [ref=f1e138] [cursor=pointer]:
+                - /url: /changelog/phone
+            - paragraph [ref=f1e139]: "Every page fits a phone screen: the queue, a PR’s detail, Activity and History."
+          - article [ref=f1e140]:
+            - generic [ref=f1e141]:
+              - generic [ref=f1e142]: Improved
+              - link "#96" [ref=f1e143] [cursor=pointer]:
+                - /url: https://github.com/agent-labs-dev/mergepatrol/pull/96
+            - heading [level=3] [ref=f1e144]:
+              - link "$15 a seat for private repos, public repos stay free" [ref=f1e145] [cursor=pointer]:
+                - /url: /changelog/pricing
+            - paragraph [ref=f1e146]: Private repos cost $15 a seat. Open source stays free.
+  - contentinfo [ref=f1e147]:
+    - link "Mergepatrol" [ref=f1e148] [cursor=pointer]:
+      - /url: /
+    - text: ": a merge queue for GitHub, with an agent on conflicts."
+  - navigation [ref=f1e149]:
+    - generic [ref=f1e150]: PROTOTYPE
+    - link "A · Feed" [ref=f1e151] [cursor=pointer]:
+      - /url: /changelog?v=a
+    - link "B · Timeline" [ref=f1e152] [cursor=pointer]:
+      - /url: /changelog?v=b
+    - link "C · Daily release" [ref=f1e153] [cursor=pointer]:
+      - /url: /changelog?v=c
+    - link "Agent source" [ref=f1e154] [cursor=pointer]:
+      - /url: /changelog?v=b&src=1
+    - generic [ref=f1e155]: 18 entries · 10 with a picture · ← → to switch
