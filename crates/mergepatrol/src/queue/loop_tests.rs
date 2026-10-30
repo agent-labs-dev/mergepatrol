@@ -508,7 +508,7 @@ impl GitHub for Fake {
         _: &str,
     ) -> Result<PrNumber> {
         let mut s = self.state.lock().unwrap();
-        assert!(s.branches.contains_key(head) && base == "main");
+        assert!(s.branches.contains_key(head) && (base == "main" || s.branches.contains_key(base)));
         s.drafts.push(title.into());
         Ok(1000 + s.drafts.len() as PrNumber)
     }
@@ -2755,4 +2755,19 @@ async fn the_prs_of_a_branch_taken_off_the_list_are_held() {
         run.kinds(1),
         ["enqueued", "held", "dequeued", "enqueued", "held"]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn prs_into_another_branch_are_tested_together() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.retarget(1, "release");
+        s.retarget(2, "release");
+    }));
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "trunk-0");
 }

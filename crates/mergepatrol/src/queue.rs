@@ -1637,7 +1637,11 @@ async fn test_and_merge(
     let tested = loop {
         let now = gh.snapshot(repo, &settings.labels()).await?;
         let now_units = units(gh, repo, &now.labeled).await?;
-        if let Some(why) = stale(&now.trunk_sha, &now_units, batch) {
+        let trunk_sha = match key.trunk == now.default_branch {
+            true => now.trunk_sha,
+            false => gh.branch_sha(repo, &key.trunk).await?,
+        };
+        if let Some(why) = stale(&trunk_sha, &now_units, batch) {
             break Tested::Stale(why);
         }
         match checks_verdict(gh, key, head, opened).await? {
