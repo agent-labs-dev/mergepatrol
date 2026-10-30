@@ -1,5 +1,6 @@
 # Checks the menu bar app, which builds on macOS only: Apple silicon, on Blacksmith. Its own
-# workflow, so a change to the server alone does not pay for a GPUI build.
+# workflow, so a change to the server alone does not pay for a GPUI build. Each push to main
+# also publishes the app to the tray-latest prerelease, which the dashboard links to.
 name: tray
 
 on:
@@ -8,6 +9,7 @@ on:
   push:
     branches: [main]
     paths: ["apps/tray/**", ".github/workflows/tray.yml"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,3 +36,35 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+
+  # Ad-hoc signed until there is a Developer ID, so Gatekeeper asks before the first launch.
+  package:
+    if: github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: blacksmith-6vcpu-macos-26
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: tray-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/tray
+      - run: ./package.sh
+      # ditto keeps the bundle's signature, which zip does not.
+      - run: ditto -c -k --keepParent dist/Mergepatrol.app dist/Mergepatrol.zip
+      # One rolling prerelease, so the download URL never changes and a v* release stays Latest.
+      - run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true
+          else
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
+              --title "Menu bar app (latest)" \
+              --notes "The menu bar app, built from main. Apple silicon, macOS 13 or later. Ad-hoc signed for now: after the first launch is blocked, open System Settings › Privacy & Security and click Open Anyway."
+          fi
+          gh release upload "$TAG" dist/Mergepatrol.zip --clobber

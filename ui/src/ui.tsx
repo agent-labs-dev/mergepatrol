@@ -14,6 +14,8 @@ export const field =
 const repo = "agent-labs-dev/mergepatrol";
 export const repoUrl = `https://github.com/${repo}`;
 export const feedbackUrl = `${repoUrl}/issues/new?template=feedback.yml`;
+/** The menu bar app, rebuilt from main by tray.yml. */
+export const trayDownloadUrl = `${repoUrl}/releases/download/tray-latest/Mergepatrol.zip`;
 
 export function GitHubIcon({ className = "size-4" }: { className?: string }) {
   return (

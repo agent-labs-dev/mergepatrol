@@ -16,7 +16,7 @@ import { Landing } from "./Landing";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { TraySignedIn } from "./TraySignedIn";
 import { type ThemeProps, useTheme } from "./theme";
-import { Avatar, feedbackUrl, Mark, ThemeToggle } from "./ui";
+import { Avatar, feedbackUrl, Mark, ThemeToggle, trayDownloadUrl } from "./ui";
 import { WorkspaceContext } from "./workspace";
 
 /** Setup and sign-in errors come back from the server as `?error=`, read before the router starts. */
@@ -136,6 +136,13 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
             <option value="install">Add a workspace…</option>
           </select>
           <div className="ml-auto flex items-center gap-3">
+            <a
+              className="text-muted hover:text-fg max-sm:hidden"
+              href={trayDownloadUrl}
+              title="Your merge queues in the macOS menu bar. Apple silicon, macOS 13 or later. Not notarized yet: if macOS blocks it, click Open Anyway in System Settings › Privacy & Security."
+            >
+              Menu bar app
+            </a>
             <a
               className="text-muted hover:text-fg"
               href={feedbackUrl}
