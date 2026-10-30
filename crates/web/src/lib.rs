@@ -4,6 +4,7 @@
 mod api;
 mod auth;
 mod billing;
+mod blog;
 mod ui;
 mod webhook;
 
