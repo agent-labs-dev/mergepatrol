@@ -16,6 +16,13 @@ import { Landing } from "./Landing";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { TraySignedIn } from "./TraySignedIn";
 import { type ThemeProps, useTheme } from "./theme";
+import {
+  Banner,
+  HeaderPill,
+  PrototypeSwitcher,
+  Toast,
+  useVariant,
+} from "./UpdateAvailable.prototype";
 import { Avatar, feedbackUrl, Mark, ThemeToggle, trayDownloadUrl } from "./ui";
 import { WorkspaceContext } from "./workspace";
 
@@ -99,6 +106,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
     },
   });
   useWorkspaceAnalytics(session, current);
+  const [variant, setVariant] = useVariant(); // PROTOTYPE
   const app = session.app;
   if (!app) return null;
   if (!current)
@@ -137,6 +145,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
             <option value="install">Add a workspace…</option>
           </select>
           <div className="ml-auto flex items-center gap-3">
+            {variant === "A" && <HeaderPill />}
             <a
               className="text-muted hover:text-fg max-sm:hidden"
               href={trayDownloadUrl}
@@ -196,6 +205,9 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
           ))}
         </nav>
       </header>
+      {variant === "B" && <Banner />}
+      {variant === "C" && <Toast />}
+      <PrototypeSwitcher current={variant} onChange={setVariant} />
       <main className="min-h-0 flex-1">
         <WorkspaceContext value={{ workspace: current.installation_id, app }}>
           <Outlet />

@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "biome check ."
+    "check": "biome check .",
+    "prototype": "vite --config vite.prototype.config.ts"
   },
   "dependencies": {
     "@pierre/diffs": "^1.6.2",
