@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
 import { fetchExits, fetchHistoryStats } from "./api";
@@ -40,9 +40,11 @@ export function History({ workspace }: { workspace: number }) {
     queryFn: () => fetchHistoryStats(workspace, { days }),
     refetchInterval: 10_000,
   });
+  // A new scope keeps the last one on screen until its own data loads, instead of blanking the page.
   const stats = useQuery({
     queryKey: ["history-stats", workspace, repo, author, days],
     queryFn: () => fetchHistoryStats(workspace, { repo, author, days }),
+    placeholderData: keepPreviousData,
     refetchInterval: 10_000,
   });
   const exits = useInfiniteQuery({
@@ -51,6 +53,7 @@ export function History({ workspace }: { workspace: number }) {
       fetchExits(workspace, { repo, author, days, outcome, before: pageParam ?? undefined }),
     initialPageParam: null as number | null,
     getNextPageParam: (page) => page.next,
+    placeholderData: keepPreviousData,
     refetchInterval: 10_000,
   });
 
@@ -130,7 +133,9 @@ export function History({ workspace }: { workspace: number }) {
           </>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto bg-surface">
+      <div
+        className={`min-h-0 flex-1 overflow-y-auto bg-surface transition-opacity ${stats.isPlaceholderData ? "opacity-60" : ""}`}
+      >
         <div className="border-b border-line px-4 py-4 sm:px-6">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <p className="flex min-w-0 flex-wrap items-baseline gap-x-2 font-medium">
