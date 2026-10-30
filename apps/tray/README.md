@@ -9,6 +9,13 @@ on the shell from [slopify](https://github.com/jnsdls/slopify).
 
 It is its own Cargo workspace, so the server's CI, on Linux, never builds GPUI.
 
+## Install it
+
+Download [Mergepatrol.zip](https://github.com/agent-labs-dev/mergepatrol/releases/download/tray-latest/Mergepatrol.zip),
+also linked from the dashboard's header. CI rebuilds it from each push to main that touches the
+app. It is ad-hoc signed, not notarized, so macOS blocks the first launch: open System Settings ›
+Privacy & Security and click **Open Anyway**.
+
 ## Run it
 
 ```bash
