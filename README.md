@@ -13,6 +13,7 @@ The hosted Mergepatrol at https://mergepatrol.ai runs the public GitHub App `Mer
 3. In **Repos**, **Set up** a repo. Mergepatrol opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
 4. In **Settings**, add an Anthropic or OpenAI API key. Create one for Mergepatrol alone, with a spend limit.
 5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue. The dashboard puts the label on as you, so it takes triage access to the repo.
+6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review, those the queue holds first. Approve, request changes or comment there, as you.
 
 Public repos are free. Private repos cost $15 a seat a month, after a free trial: see [Pricing](#pricing). To run your own, see [Run it](#run-it).
 
