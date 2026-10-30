@@ -20,10 +20,18 @@ manifest() {
 }
 
 manifest jobs | kubectl apply -f -
-# The warm pool replaces its sandbox with one on the new image, which also pulls the image onto
-# a node before the first job needs it.
-kubectl -n mergepatrol-jobs wait sandboxwarmpool/mergepatrol-job \
-  --for=jsonpath='{.status.readyReplicas}'=1 --timeout=10m
+# The warm pool replaces its sandbox with one on the new image: once it is ready, the new job
+# image starts, and sits on a node before the first job needs it.
+ready_on_new_image() {
+  kubectl -n mergepatrol-jobs get pods \
+    -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==true)]}{.spec.containers[0].image}{"\n"}{end}' \
+    | grep -qxF "$JOB_IMAGE"
+}
+for i in $(seq 120); do
+  ready_on_new_image && break
+  [ "$i" = 120 ] && { echo "no sandbox on $JOB_IMAGE got ready in 10 minutes" >&2; exit 1; }
+  sleep 5
+done
 
 manifest orchestrator | kubectl apply -f -
 kubectl -n mergepatrol rollout status deployment/mergepatrol --timeout=15m
