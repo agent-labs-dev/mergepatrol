@@ -162,6 +162,11 @@ impl SignedIn {
         }
     }
 
+    /// The workspaces the user can access, by installation ID.
+    pub(crate) fn installations(&self) -> &[u64] {
+        &self.installations
+    }
+
     /// The user's GitHub token, to act as them, so GitHub checks what they may do.
     pub(crate) fn github_token(&self, state: &AppState) -> Result<String, ApiError> {
         let sign_in = || ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into());

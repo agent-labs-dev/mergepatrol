@@ -16,11 +16,13 @@ import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
 import type { RepoView } from "./api/RepoView";
+import type { ReviewPull } from "./api/ReviewPull";
 import type { SessionView } from "./api/SessionView";
 import type { SetRepo } from "./api/SetRepo";
 import type { SetSecret } from "./api/SetSecret";
 import type { SettingsView } from "./api/SettingsView";
 import type { Unlock } from "./api/Unlock";
+import type { YouView } from "./api/YouView";
 
 async function request(method: string, path: string, body?: unknown): Promise<Response> {
   const res = await fetch(path, {
@@ -49,6 +51,9 @@ export const startManifest = (body: ManifestRequest) =>
   send<ManifestForm>("POST", "/api/setup/manifest", body);
 
 export const logout = () => call("POST", "/auth/logout");
+
+/** The user's open PRs, and those that ask for their review, across their workspaces. */
+export const fetchYou = () => get<YouView>("/api/you");
 
 /** Workspace endpoints: `id` is the installation ID. */
 const w = (id: number, path: string) => `/api/w/${id}${path}`;
@@ -150,3 +155,7 @@ export const dequeuePull = (id: number, repo: string, pr: number) =>
 /** Closes the PR on GitHub, as the user. */
 export const closePull = (id: number, repo: string, pr: number) =>
   call("POST", w(id, `/repos/${repo}/pulls/${pr}/close`));
+
+/** Reviews the PR as the user, and queues it with `queue`. */
+export const reviewPull = (id: number, repo: string, pr: number, body: ReviewPull) =>
+  call("POST", w(id, `/repos/${repo}/pulls/${pr}/review`), body);

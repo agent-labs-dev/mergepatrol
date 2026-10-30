@@ -133,6 +133,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/oauth/authorize", get(oauth::authorize))
         .route("/oauth/token", post(oauth::token))
         // A workspace is one installation of the App: `{id}` is its installation ID.
+        .route("/api/you", get(api::you))
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
         .route("/api/w/{id}/fix", get(api::fix))
@@ -159,6 +160,10 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route(
             "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/close",
             post(api::close_pull),
+        )
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/review",
+            post(api::review_pull),
         )
         .route(
             "/api/w/{id}/repos/{owner}/{name}/config",

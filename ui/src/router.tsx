@@ -13,6 +13,7 @@ import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
 import { useWorkspace } from "./workspace";
+import { FOLDERS, type Folder, You } from "./You";
 
 /*
  * The dashboard's pages, one path each, so a reload lands where you were and PostHog sees each
@@ -46,6 +47,17 @@ const workspaceHome = createRoute({
   beforeLoad: ({ params }) => {
     throw redirect({ to: "/$account/queue", params, replace: true });
   },
+});
+
+const you = createRoute({
+  getParentRoute: () => workspace,
+  path: "you",
+  /** The folder in view, Needs you by default, and the PR in it as `owner/repo#n`. */
+  validateSearch: (search): { folder?: Folder; pr?: string } => ({
+    folder: oneOf(FOLDERS, search.folder),
+    pr: optional(search.pr, "string"),
+  }),
+  component: () => <You workspace={useWorkspace().workspace} />,
 });
 
 const queue = createRoute({
@@ -106,7 +118,7 @@ export const router = createRouter({
   routeTree: root.addChildren([
     home,
     tray,
-    workspace.addChildren([workspaceHome, queue, history, repos, settings]),
+    workspace.addChildren([workspaceHome, you, queue, history, repos, settings]),
   ]),
 });
 

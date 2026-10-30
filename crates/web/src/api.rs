@@ -4,16 +4,16 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    EFFORTS, Entry, EntryState, FixCiSettings, Labels, Person, PrSummary, Provider,
+    EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, Person, PrSummary, Provider,
     REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
 use mergepatrol_github::{
-    App, AsUser, BranchFile, CheckRunState, Installation, Proposal, PullDetail, PullRef,
+    App, AsUser, BranchFile, CheckRunState, InboxPull, Installation, Proposal, PullDetail, PullRef,
     TimelineEvent, setup,
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
-    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
+    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats, LaneKey,
     RepoState, Scope, Slice, Store, api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -185,13 +185,74 @@ impl From<PrSummary> for PullView {
     }
 }
 
-#[derive(Serialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
 pub enum EntryStateView {
     Waiting,
     Held,
     Active,
+}
+
+/// The signed-in user's PRs, and the PRs that ask for their review, across their workspaces.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct YouView {
+    /// Theirs, updated last first.
+    pub authored: Vec<InboxPullView>,
+    /// Asked of them, or of a team of theirs, updated last first.
+    pub review_requested: Vec<InboxPullView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct InboxPullView {
+    pub repo: String,
+    pub number: u32,
+    /// The branch it merges into.
+    pub base: String,
+    pub draft: bool,
+    pub updated_at: String,
+    /// The workspace the repo is in, to act on the PR in. `None` outside the user's.
+    pub workspace: Option<u32>,
+    /// Whether Mergepatrol runs on the repo, so the PR can be queued.
+    pub queues: bool,
+    /// Where the queue has it. `None` when it is not queued.
+    pub queue: Option<QueueSpotView>,
+    #[serde(flatten)]
+    pub pull: PullView,
+}
+
+/// A PR's place in its lane, in merge order.
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export)]
+pub struct QueueSpotView {
+    pub state: EntryStateView,
+    /// From 1. A held PR has one too: last, after those waiting.
+    pub place: u32,
+    /// The PRs in the lane.
+    pub of: u32,
+    pub priority: bool,
+    /// Why it is held.
+    pub detail: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct ReviewPull {
+    pub verdict: VerdictView,
+    pub body: String,
+    /// Then queue it, as the Queue button would.
+    pub queue: bool,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum VerdictView {
+    Approve,
+    RequestChanges,
+    Comment,
 }
 
 #[derive(Serialize, TS)]
@@ -1370,6 +1431,125 @@ pub(crate) async fn close_pull(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The user's inbox, read as them, with where the queue has each PR.
+pub(crate) async fn you(
+    State(app): State<AppState>,
+    user: SignedIn,
+) -> Result<Json<YouView>, ApiError> {
+    let gh = AsUser::new(user.github_token(&app)?)?;
+    let inbox = gh.inbox().await.map_err(|e| {
+        if e.is::<setup::Revoked>() {
+            ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into())
+        } else {
+            e.into()
+        }
+    })?;
+    let ids = user.installations();
+    let workspaces = app.store.workspaces(ids).await?;
+    let on: HashSet<RepoName> = app
+        .store
+        .repos()
+        .await?
+        .into_iter()
+        .filter(|r| ids.contains(&r.installation_id) && r.on())
+        .map(|r| r.repo)
+        .collect();
+    let mut spots = HashMap::new();
+    for &id in ids {
+        spots.extend(queue_spots(app.store.lanes(id).await?));
+    }
+    let mut view = |p: InboxPull| InboxPullView {
+        number: p.pr.number as u32,
+        base: p.pr.merges_into().to_owned(),
+        draft: p.pr.is_draft,
+        updated_at: p.updated_at,
+        workspace: workspaces
+            .iter()
+            .find(|w| w.account.eq_ignore_ascii_case(&p.repo.owner))
+            .map(|w| w.installation_id as u32),
+        queues: on.contains(&p.repo),
+        queue: spots.remove(&(p.repo.clone(), p.pr.number)),
+        pull: p.pr.summary().into(),
+        repo: p.repo.to_string(),
+    };
+    let authored = inbox.authored.into_iter().map(&mut view).collect();
+    let review_requested = inbox.review_requested.into_iter().map(&mut view).collect();
+    Ok(Json(YouView {
+        authored,
+        review_requested,
+    }))
+}
+
+/// Where the queue has each PR of these lanes. A stack's layers each take the stack's spot.
+fn queue_spots(lanes: Vec<(LaneKey, Lane)>) -> HashMap<(RepoName, u64), QueueSpotView> {
+    let mut spots = HashMap::new();
+    for (key, lane) in lanes {
+        let entries = in_merge_order(lane.entries);
+        let of = entries.len() as u32;
+        for (i, e) in entries.into_iter().enumerate() {
+            let (state, detail) = match e.state {
+                EntryState::Waiting => (EntryStateView::Waiting, None),
+                EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
+                EntryState::Active => (EntryStateView::Active, None),
+            };
+            let spot = QueueSpotView {
+                state,
+                place: i as u32 + 1,
+                of,
+                priority: e.priority,
+                detail,
+            };
+            for n in std::iter::once(e.number).chain(e.layers) {
+                spots.insert((key.repo.clone(), n), spot.clone());
+            }
+        }
+    }
+    spots
+}
+
+/// Reviews the PR as the user, then queues it if they asked. The queue reads the PR again now:
+/// a review may be what held it.
+pub(crate) async fn review_pull(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+    Json(body): Json<ReviewPull>,
+) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let token = user.github_token(&app)?;
+    let verdict = match body.verdict {
+        VerdictView::Approve => setup::Verdict::Approve,
+        VerdictView::RequestChanges => setup::Verdict::RequestChanges,
+        VerdictView::Comment => setup::Verdict::Comment,
+    };
+    setup::review_as(&token, &repo.to_string(), number, verdict, body.body.trim())
+        .await
+        .map_err(|e| {
+            if let Some(setup::Rejected(why)) = e.downcast_ref() {
+                ApiError::Status(StatusCode::UNPROCESSABLE_ENTITY, why.clone())
+            } else if e.is::<setup::Refused>() {
+                ApiError::Status(
+                    StatusCode::FORBIDDEN,
+                    format!("GitHub won't let you review PRs in {repo}."),
+                )
+            } else if e.is::<setup::Revoked>() {
+                ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into())
+            } else {
+                e.into()
+            }
+        })?;
+    tracing::info!(installation = id, %repo, number, verdict = ?verdict, "reviewed from the dashboard");
+    let gh = installation(&app, id).await?;
+    if body.queue {
+        queue(&app, &gh, &token, &repo, number, false).await?;
+        tracing::info!(installation = id, %repo, number, "queued from the dashboard");
+    } else {
+        relabeled(&*app.store, &*app.wake, id, repo, &[number]).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// The repo's queue labels, and its default branch, as the config file there sets them.
 async fn repo_labels(
     app: &AppState,
@@ -1838,6 +2018,38 @@ mod tests {
         assert_eq!(json["number"], 1);
         assert_eq!(json["title"], "");
         assert!(json.get("pull").is_none());
+    }
+
+    #[test]
+    fn each_queued_pr_and_stack_layer_has_its_spot_in_merge_order() {
+        let repo = RepoName::parse("o/r").unwrap();
+        let mut stack = entry(9, false, EntryState::Waiting);
+        stack.layers = vec![7, 8, 9];
+        let lane = Lane {
+            entries: vec![
+                entry(1, false, EntryState::Held("waiting for a required review".into())),
+                stack,
+                entry(3, true, EntryState::Waiting),
+                entry(4, false, EntryState::Active),
+            ],
+            ..Lane::default()
+        };
+        let key = LaneKey {
+            installation_id: 1,
+            repo: repo.clone(),
+            trunk: "main".into(),
+        };
+        let spots = queue_spots(vec![(key, lane)]);
+        let spot = |n| &spots[&(repo.clone(), n)];
+        let places: Vec<u32> = [4, 3, 9, 1].into_iter().map(|n| spot(n).place).collect();
+        assert_eq!(places, [1, 2, 3, 4]);
+        assert!(spot(3).priority);
+        assert_eq!(spot(7).place, 3);
+        assert_eq!(spot(8).state, EntryStateView::Waiting);
+        assert_eq!(spot(1).state, EntryStateView::Held);
+        assert_eq!(spot(1).detail.as_deref(), Some("waiting for a required review"));
+        assert!(spots.values().all(|s| s.of == 4));
+        assert!(!spots.contains_key(&(repo, 2)));
     }
 
     #[test]

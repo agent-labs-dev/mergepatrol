@@ -5,31 +5,30 @@ import type { CheckRunStateView } from "./api/CheckRunStateView";
 import type { CheckRunView } from "./api/CheckRunView";
 import type { OpenPullView } from "./api/OpenPullView";
 import type { TimelineItemView } from "./api/TimelineItemView";
-import { Avatar, primary, secondary, timeAgo } from "./ui";
+import { Avatar, timeAgo } from "./ui";
 
 const PullCode = lazy(() => import("./PullCode"));
 
 const tabs = ["summary", "timeline", "code"] as const;
 type Tab = (typeof tabs)[number];
 
-/** An open PR that is not queued yet, as a reviewer looks at it before queueing: its summary,
- * timeline and code, read from GitHub as the user. */
+/** An open PR as a reviewer looks at it: its summary, timeline and code, read from GitHub as
+ * the user. The caller's `actions` sit by its title, and its `footer` under it all. */
 export function PullDetail({
   workspace,
   repo,
   trunk,
   pull: p,
-  busy,
-  onQueue,
+  actions,
+  footer,
   onBack,
 }: {
   workspace: number;
   repo: string;
   trunk: string;
   pull: OpenPullView;
-  /** A click on Queue or Priority the queue has not caught up with. */
-  busy: boolean;
-  onQueue: (priority: boolean) => void;
+  actions?: ReactNode;
+  footer?: ReactNode;
   /** Back to the PRs, on a screen too narrow to show them beside it. */
   onBack: () => void;
 }) {
@@ -59,25 +58,7 @@ export function PullDetail({
           >
             {repo} <span className="text-ok">#{p.number}</span> ↗
           </a>
-          <span className="flex shrink-0 gap-2">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onQueue(false)}
-              className={`${primary} h-8 px-3`}
-            >
-              Queue
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => onQueue(true)}
-              title="Queue at the front"
-              className={`${secondary} h-8 px-3 text-hot!`}
-            >
-              ↑ Priority
-            </button>
-          </span>
+          {actions && <span className="flex shrink-0 gap-2">{actions}</span>}
         </div>
         <h2 className="mt-2 text-lg font-semibold tracking-tight">
           {p.title}
@@ -193,6 +174,7 @@ export function PullDetail({
           {d && tab === "timeline" && <Timeline items={d.timeline} />}
         </div>
       )}
+      {footer}
     </div>
   );
 }

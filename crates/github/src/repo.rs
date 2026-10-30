@@ -341,6 +341,79 @@ impl AsUser {
     }
 }
 
+/// How many PRs each of the inbox's searches reads.
+const INBOX_PULLS: u32 = 50;
+
+/// The open PRs a user wrote, and those that ask for their review, in every repo both they and
+/// the App can read: GitHub's search for a user's App token covers only those.
+#[derive(Debug, Clone)]
+pub struct Inbox {
+    pub authored: Vec<InboxPull>,
+    /// Asked of them, or of a team of theirs.
+    pub review_requested: Vec<InboxPull>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InboxPull {
+    pub repo: RepoName,
+    pub updated_at: String,
+    pub pr: PullRequest,
+}
+
+impl AsUser {
+    /// The user's inbox, each list updated last first, up to [`INBOX_PULLS`].
+    pub async fn inbox(&self) -> Result<Inbox> {
+        let query = format!(
+            "query($authored: String!, $requested: String!, $limit: Int!) {{
+              authored: search(query: $authored, type: ISSUE, first: $limit) {{
+                nodes {{ ... on PullRequest {{ {fields} }} }}
+              }}
+              requested: search(query: $requested, type: ISSUE, first: $limit) {{
+                nodes {{ ... on PullRequest {{ {fields} }} }}
+              }}
+            }}",
+            fields = concat!(summary_fields!(), " updatedAt repository { nameWithOwner }")
+        );
+        let search = |q: &str| format!("is:pr is:open archived:false {q} sort:updated-desc");
+        let data: Value = self
+            .graphql(
+                "inbox",
+                &query,
+                json!({
+                    "authored": search("author:@me"),
+                    "requested": search("review-requested:@me"),
+                    "limit": INBOX_PULLS,
+                }),
+            )
+            .await?;
+        Ok(Inbox {
+            authored: inbox_pulls(&data["authored"])?,
+            review_requested: inbox_pulls(&data["requested"])?,
+        })
+    }
+}
+
+/// The PRs of a `search` node. An issue comes back as `{}`, and is left out.
+fn inbox_pulls(search: &Value) -> Result<Vec<InboxPull>> {
+    search["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|n| n.get("number").is_some())
+        .map(|n| {
+            let repo = n["repository"]["nameWithOwner"]
+                .as_str()
+                .and_then(RepoName::parse)
+                .context("a searched PR without its repo")?;
+            Ok(InboxPull {
+                repo,
+                updated_at: n["updatedAt"].as_str().unwrap_or_default().to_owned(),
+                pr: serde_json::from_value(n.clone())?,
+            })
+        })
+        .collect()
+}
+
 /// A snapshot as GraphQL returns it, before it is read: what the queue keeps between reads.
 #[derive(Debug, Clone)]
 pub struct SnapshotParts {
@@ -1072,6 +1145,20 @@ mod tests {
         format!(
             r#"{{"number":{number},"state":"OPEN","title":"t","body":"","isDraft":false,"isCrossRepository":false,"reviewDecision":null,"baseRefName":"main","headRefName":"b{number}","headRefOid":"h{number}","labels":{{"nodes":[{{"name":"mp"}}]}},"files":{{"nodes":[]}},"stack":null,"url":"u","createdAt":"2026-10-01T00:00:00Z","additions":0,"deletions":0,"changedFiles":0,"author":null,"latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[]}}}}"#
         )
+    }
+
+    #[test]
+    fn the_inbox_reads_each_searched_pr_with_its_repo_and_leaves_out_issues() {
+        let mut pr: Value = serde_json::from_str(&pr_node(7)).unwrap();
+        pr["updatedAt"] = json!("2026-10-30T00:00:00Z");
+        pr["repository"] = json!({ "nameWithOwner": "o/r" });
+        let search = json!({ "nodes": [pr, {}] });
+        let pulls = inbox_pulls(&search).unwrap();
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(pulls[0].repo.to_string(), "o/r");
+        assert_eq!(pulls[0].pr.number, 7);
+        assert_eq!(pulls[0].updated_at, "2026-10-30T00:00:00Z");
+        assert!(inbox_pulls(&json!({ "nodes": null })).unwrap().is_empty());
     }
 
     fn snapshot_page(numbers: std::ops::Range<u64>, next: Option<&str>) -> &'static str {
