@@ -201,28 +201,28 @@ impl App {
         }
     }
 
-    /// The installation of this App on `repo`.
-    pub async fn installation_for(&self, repo: &RepoName) -> Result<Installation> {
+    /// The installation of this App on `repo`. `None` when it is not installed there.
+    pub async fn installation_for(&self, repo: &RepoName) -> Result<Option<Installation>> {
         #[derive(Deserialize)]
         struct Inst {
             id: u64,
         }
-        let inst: Inst = self
+        let res = self
             .http
             .get(format!("{}/repos/{repo}/installation", self.api))
             .bearer_auth(self.jwt()?)
             .headers(api_headers())
             .send()
-            .await?
-            .error_for_status()
-            .with_context(|| format!("the App is not installed on {repo}"))?
-            .json()
             .await?;
-        Ok(Installation {
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let inst: Inst = res.error_for_status()?.json().await?;
+        Ok(Some(Installation {
             id: inst.id,
             app: self.clone(),
             token: Arc::new(Mutex::new(None)),
-        })
+        }))
     }
 }
 

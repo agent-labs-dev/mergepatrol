@@ -5,6 +5,8 @@ mod api;
 mod auth;
 mod billing;
 mod blog;
+mod mcp;
+mod oauth;
 mod ui;
 mod webhook;
 
@@ -63,6 +65,8 @@ struct AppState {
     analytics: Analytics,
     billing: Option<Arc<Billing>>,
     chatgpt: ChatGptAuth,
+    /// What GitHub said lately of the tokens MCP calls come with.
+    seen: Arc<mcp::Seen>,
 }
 
 impl AppState {
@@ -93,6 +97,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         analytics: config.analytics,
         billing: config.billing,
         chatgpt: config.chatgpt,
+        seen: Arc::default(),
     };
     Router::new()
         .route("/api/health", get(|| async { "ok" }))
@@ -110,6 +115,23 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
             post(webhook::receive).layer(DefaultBodyLimit::max(webhook::MAX_BODY_BYTES)),
         )
         .route("/webhooks/stripe", post(billing::webhook))
+        // For coding agents, with the caller's GitHub token, or a session from the OAuth below.
+        .route("/mcp", post(mcp::post).get(mcp::get))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(oauth::resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::server),
+        )
+        .route("/oauth/register", post(oauth::register))
+        .route("/oauth/authorize", get(oauth::authorize))
+        .route("/oauth/token", post(oauth::token))
         // A workspace is one installation of the App: `{id}` is its installation ID.
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
@@ -598,6 +620,309 @@ mod tests {
             send(&router, req("Bearer nope")).await.status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    /// Posts one JSON-RPC message to `/mcp`.
+    async fn mcp(router: &Router, auth: Option<&str>, message: serde_json::Value) -> Response {
+        let mut req = Request::post("/mcp").header("content-type", "application/json");
+        if let Some(auth) = auth {
+            req = req.header("authorization", auth);
+        }
+        send(router, req.body(Body::from(message.to_string())).unwrap()).await
+    }
+
+    async fn json_of(res: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await;
+        serde_json::from_slice(&bytes.unwrap()).unwrap()
+    }
+
+    /// A router, with the session "old" holding a live GitHub token: a bearer for `/mcp` that
+    /// GitHub need not check.
+    async fn mcp_router(pool: PgPool) -> Router {
+        let (router, _) = signed_in(pool.clone()).await;
+        let (store, vault) = store_and_vault(pool).await;
+        let live = UserToken {
+            expires_at: Some(now() + 3600),
+            ..expired_token()
+        };
+        old_session(&*store, &vault, now() - 60, Some(live)).await;
+        router
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn mcp_takes_a_github_token_or_a_session_that_holds_one(pool: PgPool) {
+        let router = mcp_router(pool).await;
+        let ping = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
+        let res = mcp(&router, None, ping.clone()).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        // Where an MCP client finds the sign-in.
+        assert_eq!(
+            res.headers()["www-authenticate"],
+            r#"Bearer resource_metadata="http://localhost:8080/.well-known/oauth-protected-resource/mcp""#
+        );
+        // The dashboard's cookie is not enough.
+        let req = Request::post("/mcp")
+            .header("content-type", "application/json")
+            .header("cookie", "mp_session=old")
+            .body(Body::from(ping.to_string()))
+            .unwrap();
+        assert_eq!(send(&router, req).await.status(), StatusCode::UNAUTHORIZED);
+        // A session without a GitHub token cannot act: the client signs in again.
+        let res = mcp(&router, Some("Bearer tok"), ping.clone()).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let res = mcp(&router, Some("Bearer old"), ping).await;
+        assert_eq!(json_of(res).await["result"], serde_json::json!({}));
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn mcp_speaks_the_protocol(pool: PgPool) {
+        let router = mcp_router(pool).await;
+        let auth = Some("Bearer old");
+        let init = |version: &str| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": "a", "method": "initialize",
+                "params": { "protocolVersion": version, "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } },
+            })
+        };
+        let res = json_of(mcp(&router, auth, init("2025-03-26")).await).await;
+        assert_eq!(res["id"], "a");
+        assert_eq!(res["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(res["result"]["serverInfo"]["name"], "mergepatrol");
+        // A version it does not know gets the newest it does.
+        let res = json_of(mcp(&router, auth, init("1999-01-01")).await).await;
+        assert_eq!(res["result"]["protocolVersion"], "2025-06-18");
+
+        let initialized =
+            serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+        assert_eq!(
+            mcp(&router, auth, initialized).await.status(),
+            StatusCode::ACCEPTED
+        );
+
+        let list = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        let res = json_of(mcp(&router, auth, list).await).await;
+        let names: Vec<&str> = res["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["queue_pull", "dequeue_pull", "pull_status", "list_queue"]
+        );
+
+        let unknown = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" });
+        let res = json_of(mcp(&router, auth, unknown).await).await;
+        assert_eq!(res["error"]["code"], -32601);
+
+        let req = Request::get("/mcp").body(Body::empty()).unwrap();
+        assert_eq!(
+            send(&router, req).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_mcp_tool_tells_the_agent_what_went_wrong(pool: PgPool) {
+        let router = mcp_router(pool).await;
+        let call = |name: &str, arguments: serde_json::Value| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments },
+            })
+        };
+        let text = |res: serde_json::Value| {
+            assert_eq!(res["result"]["isError"], true);
+            res["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let auth = Some("Bearer old");
+        let res = mcp(&router, auth, call("merge_now", serde_json::json!({}))).await;
+        assert_eq!(text(json_of(res).await), "No tool merge_now.");
+        let res = mcp(
+            &router,
+            auth,
+            call("queue_pull", serde_json::json!({ "repo": "acme/app" })),
+        )
+        .await;
+        assert!(text(json_of(res).await).starts_with("Bad arguments: missing field `number`"));
+        let args = serde_json::json!({ "repo": "acme", "number": 7 });
+        let res = mcp(&router, auth, call("queue_pull", args)).await;
+        assert_eq!(text(json_of(res).await), "`repo` must be owner/name.");
+        // Before it asks GitHub anything.
+        let args = serde_json::json!({ "repo": "acme/app", "number": 7 });
+        let res = mcp(&router, auth, call("pull_status", args)).await;
+        assert_eq!(text(json_of(res).await), "No GitHub App yet.");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_mcp_client_finds_how_to_sign_in(pool: PgPool) {
+        let (router, _) = signed_in(pool).await;
+        let get = |path: &str| {
+            let req = Request::get(path).body(Body::empty()).unwrap();
+            let router = router.clone();
+            async move { json_of(send(&router, req).await).await }
+        };
+        let resource = get("/.well-known/oauth-protected-resource/mcp").await;
+        assert_eq!(resource["resource"], "http://localhost:8080/mcp");
+        assert_eq!(
+            resource["authorization_servers"],
+            serde_json::json!(["http://localhost:8080"])
+        );
+        let server = get("/.well-known/oauth-authorization-server").await;
+        assert_eq!(server["issuer"], "http://localhost:8080");
+        assert_eq!(
+            server["authorization_endpoint"],
+            "http://localhost:8080/oauth/authorize"
+        );
+        assert_eq!(
+            server["code_challenge_methods_supported"],
+            serde_json::json!(["S256"])
+        );
+
+        let register = |uris: serde_json::Value| {
+            let body = serde_json::json!({ "client_name": "Claude Code", "redirect_uris": uris });
+            let req = Request::post("/oauth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let router = router.clone();
+            async move { send(&router, req).await }
+        };
+        let res = register(serde_json::json!(["http://localhost:9999/callback"])).await;
+        assert_eq!(res.status(), StatusCode::CREATED);
+        assert!(json_of(res).await["client_id"].is_string());
+        // A redirect off this machine could carry the code anywhere.
+        let res = register(serde_json::json!(["https://evil.example/callback"])).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_of(res).await["error"], "invalid_redirect_uri");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_mcp_sign_in_returns_to_the_client(pool: PgPool) {
+        let (router, _) = with_app(pool, Some(app(None)), Arc::default()).await;
+        let challenge = Pkce::new().challenge;
+        let authorize = |query: String| {
+            let req = Request::get(format!("/oauth/authorize?{query}"))
+                .body(Body::empty())
+                .unwrap();
+            let router = router.clone();
+            async move { send(&router, req).await }
+        };
+        let redirect_uri = "http%3A%2F%2F127.0.0.1%3A9999%2Fcallback";
+        let res = authorize(format!(
+            "response_type=code&client_id=c&redirect_uri={redirect_uri}&state=s%20t&code_challenge={challenge}&code_challenge_method=S256"
+        ))
+        .await;
+        let (to_github, cookies) = redirect(&res);
+        assert!(to_github.starts_with("https://github.com/"), "{to_github}");
+        let state = query_param(&to_github, "state");
+        assert!(
+            cookies
+                .iter()
+                .any(|c| c.starts_with("mp_mcp=") && c.len() > 7)
+        );
+        assert!(cookies.contains(&"mp_tray=".to_owned()), "{cookies:?}");
+
+        // Up to GitHub's exchange of the code, which fails here: the error goes to the client.
+        let callback = Request::get(format!("/auth/callback?code=c&state={state}"))
+            .header("cookie", cookies.join("; "))
+            .body(Body::empty())
+            .unwrap();
+        let (back, cookies) = redirect(&send(&router, callback).await);
+        assert!(
+            back.starts_with(
+                "http://127.0.0.1:9999/callback?error=access_denied&error_description="
+            ),
+            "{back}"
+        );
+        assert!(back.ends_with("&state=s%20t"), "{back}");
+        assert!(cookies.contains(&"mp_mcp=".to_owned()), "{cookies:?}");
+
+        // A cookie planted to send the code off this machine is not followed.
+        use base64::Engine;
+        let planted = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::json!({ "redirect_uri": "https://evil.example/cb", "state": null, "challenge": challenge })
+                .to_string(),
+        );
+        let res = authorize(format!(
+            "response_type=code&client_id=c&redirect_uri={redirect_uri}&code_challenge={challenge}&code_challenge_method=S256"
+        ))
+        .await;
+        let (to_github, cookies) = redirect(&res);
+        let oauth = cookies.iter().find(|c| c.starts_with("mp_oauth=")).unwrap();
+        let callback = Request::get(format!(
+            "/auth/callback?code=c&state={}",
+            query_param(&to_github, "state")
+        ))
+        .header("cookie", format!("{oauth}; mp_mcp={planted}"))
+        .body(Body::empty())
+        .unwrap();
+        let (back, _) = redirect(&send(&router, callback).await);
+        assert!(back.starts_with("/?error="), "{back}");
+
+        // Without PKCE, back to the client before GitHub.
+        let res = authorize(format!(
+            "response_type=code&client_id=c&redirect_uri={redirect_uri}&state=x"
+        ))
+        .await;
+        let (back, _) = redirect(&res);
+        assert!(
+            back.starts_with("http://127.0.0.1:9999/callback?error=invalid_request"),
+            "{back}"
+        );
+        assert!(back.ends_with("&state=x"), "{back}");
+        // Without a loopback redirect, nowhere.
+        let res = authorize(format!(
+            "response_type=code&client_id=c&redirect_uri=https%3A%2F%2Fevil.example%2Fcb&code_challenge={challenge}&code_challenge_method=S256"
+        ))
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_mcp_client_trades_its_code_for_a_session(pool: PgPool) {
+        let (router, _) = signed_in(pool.clone()).await;
+        let (store, vault) = store_and_vault(pool).await;
+        let pkce = Pkce::new();
+        let code = LoginCode {
+            token_hash: auth::hash("tok"),
+            challenge: pkce.challenge.clone(),
+            token: vault
+                .seal(&format!("login-code/{}", auth::hash("c")), "tok")
+                .unwrap(),
+            expires_at: now() + 60,
+        };
+        store
+            .create_login_code(&auth::hash("c"), &code)
+            .await
+            .unwrap();
+        let trade = |form: String| {
+            let req = Request::post("/oauth/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap();
+            let router = router.clone();
+            async move { send(&router, req).await }
+        };
+        let form = format!(
+            "grant_type=authorization_code&code=c&code_verifier={}&client_id=x&redirect_uri=http%3A%2F%2F127.0.0.1%3A9999%2Fcallback",
+            pkce.verifier
+        );
+        let res = trade(form.clone()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["cache-control"], "no-store");
+        let body = json_of(res).await;
+        assert_eq!(body["access_token"], "tok");
+        assert_eq!(body["token_type"], "Bearer");
+        // Once only.
+        let res = trade(form).await;
+        assert_eq!(json_of(res).await["error"], "invalid_grant");
+        let res = trade("grant_type=refresh_token&refresh_token=r".into()).await;
+        assert_eq!(json_of(res).await["error"], "unsupported_grant_type");
     }
 
     #[sqlx::test(migrations = false)]
