@@ -32,13 +32,18 @@ impl AppCredentials {
 }
 
 /// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves.
-pub const WEBHOOK_EVENTS: [&str; 6] = [
+pub const WEBHOOK_EVENTS: [&str; 9] = [
     "pull_request",
     "pull_request_review",
     "push",
     "check_suite",
     "check_run",
     "status",
+    // Whether a fork PR's workflow runs wait for a maintainer's approval.
+    "workflow_run",
+    // The checks a branch requires.
+    "branch_protection_rule",
+    "repository_ruleset",
 ];
 
 /// The App that Mergepatrol needs. GitHub only delivers webhooks to a public URL, so on

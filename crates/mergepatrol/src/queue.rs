@@ -27,12 +27,13 @@ use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
     RateLimited, RepoSnapshot,
 };
-use mergepatrol_store::{GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
+use mergepatrol_store::{Change, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
 use secrecy::ExposeSecret;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::cached::{Cached, Reader};
 use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
@@ -68,6 +69,9 @@ const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflo
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
+/// How long the reads of GitHub that the queue no longer makes stay: a repo turned off, a commit
+/// long merged.
+const GITHUB_READS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often each subscription's seats are brought in line with Stripe.
 const SYNC_SEATS_EVERY: Duration = Duration::from_secs(60);
 
@@ -209,6 +213,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                     Spawned::spawn(discover(ctx.clone()), &alive),
                     Spawned::spawn(prune(ctx.clone()), &alive),
                     Spawned::spawn(sync_seats(ctx.clone()), &alive),
+                    Spawned::spawn(crate::redeliver::redeliver(ctx.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -256,6 +261,12 @@ async fn prune(ctx: Arc<Ctx>) {
             Ok(n) => tracing::info!(sessions = n, "deleted expired sessions"),
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "could not delete expired sessions")
+            }
+        }
+        match ctx.store.prune_github_reads(GITHUB_READS_FOR).await {
+            Ok(n) => tracing::info!(rows = n, "deleted old GitHub reads"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not delete old GitHub reads")
             }
         }
         let jobs = ctx.config.data_dir.join("jobs");
@@ -406,7 +417,7 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
 }
 
 /// The GitHub App: the hosted one from the environment, or the self-hosted one from the vault.
-async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
+pub(crate) async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
     if let Some(app) = &ctx.hosted_app {
         return Ok(Some(app.clone()));
     }
@@ -461,9 +472,29 @@ const TICK_GAP: Duration = Duration::from_secs(10);
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
     let sandbox = JobSandbox { ctx: &ctx, gh: &gh };
+    let cached = Cached {
+        gh: &gh,
+        reader: Reader {
+            installation: gh.id,
+            reads: &gh,
+            store: ctx.store.as_ref(),
+        },
+    };
     loop {
         let started = tokio::time::Instant::now();
-        match tick(&ctx, &gh, &sandbox, &repo).await {
+        // Without webhooks, only a read tells what changed.
+        let webhooks = webhooks(&ctx).await.unwrap_or(false);
+        let github: &dyn GitHub = if webhooks { &cached } else { &gh };
+        let ran = tick(&ctx, github, &sandbox, &repo).await;
+        // A failed tick may have written part of its work.
+        if webhooks && !matches!(ran, Ok(Ran::Idle)) {
+            for change in [Change::Repo, Change::ValuesUnder(String::new())] {
+                if let Err(e) = cached.reader.changed(&repo, change).await {
+                    tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "could not mark the repo changed");
+                }
+            }
+        }
+        match ran {
             // The lane may have a next PR: start it now, not a poll later.
             Ok(Ran::Job) => continue,
             Ok(Ran::Idle) => {}
@@ -874,7 +905,7 @@ async fn fork_pin(
 }
 
 /// Whether GitHub delivers webhooks to this Mergepatrol: it does only with a secret, and to https.
-async fn webhooks(ctx: &Ctx) -> Result<bool> {
+pub(crate) async fn webhooks(ctx: &Ctx) -> Result<bool> {
     let secret = app_credentials(ctx)
         .await?
         .is_some_and(|app| app.webhook_secret.is_some());
@@ -1932,19 +1963,21 @@ struct JobSandbox<'a> {
     gh: &'a Installation,
 }
 
-#[async_trait]
-impl Sandbox for JobSandbox<'_> {
-    async fn rebase(
-        &self,
-        key: &LaneKey,
-        snap: &RepoSnapshot,
-        unit: &Unit,
-        settings: &RepoSettings,
-    ) -> Result<Event> {
-        rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await
+impl JobSandbox<'_> {
+    /// A job publishes past the cache: the branches and pull refs it may have moved read again.
+    async fn published(&self, key: &LaneKey, event: Result<Event>) -> Result<Event> {
+        for prefix in ["ref:", "pull:"] {
+            let change = Change::ValuesUnder(prefix.into());
+            self.ctx
+                .store
+                .github_changed(key.installation_id, &key.repo, &change)
+                .await?;
+        }
+        event
     }
 
-    async fn fix(
+    #[allow(clippy::too_many_arguments)]
+    async fn fix_and_restack(
         &self,
         key: &LaneKey,
         snap: &RepoSnapshot,
@@ -1972,6 +2005,37 @@ impl Sandbox for JobSandbox<'_> {
                 event => event,
             },
         )
+    }
+}
+
+#[async_trait]
+impl Sandbox for JobSandbox<'_> {
+    async fn rebase(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        settings: &RepoSettings,
+    ) -> Result<Event> {
+        let event = rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await;
+        self.published(key, event).await
+    }
+
+    async fn fix(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        head: &str,
+        base: &str,
+        failures: &[CheckFailure],
+    ) -> Result<Event> {
+        let event = self
+            .fix_and_restack(key, snap, unit, layer, settings, head, base, failures)
+            .await;
+        self.published(key, event).await
     }
 }
 

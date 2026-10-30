@@ -283,7 +283,7 @@ fn rejection(body: &Value) -> String {
 /// What a PR shows on the dashboard. A macro, so `concat!` can build on it.
 macro_rules! summary_fields {
     () => {
-        "number title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 100) { nodes { name } } stack { number baseRefName }
+        "number state title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 100) { nodes { name } } stack { number baseRefName }
   maintainerCanModify headRepository { nameWithOwner owner { __typename } }
   url createdAt additions deletions changedFiles author { __typename login avatarUrl }
   latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
@@ -332,8 +332,84 @@ impl AsUser {
     }
 }
 
+/// A snapshot as GraphQL returns it, before it is read: what the queue keeps between reads.
+#[derive(Debug, Clone)]
+pub struct SnapshotParts {
+    /// The repository, without its PRs.
+    pub repository: Value,
+    /// PR nodes. The snapshot keeps those open and labeled.
+    pub prs: Vec<Value>,
+}
+
+impl RepoSnapshot {
+    /// The snapshot of a repository and PR nodes, as `snapshot_parts` and `pull_request_node`
+    /// return them.
+    pub fn from_parts(repository: &Value, prs: &[Value], labels: &Labels) -> Result<Self> {
+        let r = repository;
+        let mut kept: Vec<&Value> = prs
+            .iter()
+            .filter(|pr| queued(pr, &labels.trigger))
+            .collect();
+        kept.sort_by_key(|pr| (pr["createdAt"].as_str(), pr["number"].as_u64()));
+        let labeled: Vec<PullRequest> = kept
+            .into_iter()
+            .map(|pr| PullRequest::from_node(pr, r))
+            .collect::<Result<_>>()?;
+        let missing_labels = [
+            ("trigger", &labels.trigger),
+            ("priority", &labels.priority),
+            ("failed", &labels.failed),
+        ]
+        .into_iter()
+        .filter(|(alias, _)| r[alias].is_null())
+        .map(|(_, name)| name.clone())
+        .collect();
+        Ok(RepoSnapshot {
+            id: r["id"].as_str().context("repository.id")?.to_owned(),
+            default_branch: r["defaultBranchRef"]["name"]
+                .as_str()
+                .context("default branch")?
+                .to_owned(),
+            trunk_sha: r["defaultBranchRef"]["target"]["oid"]
+                .as_str()
+                .context("trunk sha")?
+                .to_owned(),
+            private: r["isPrivate"].as_bool().unwrap_or(true),
+            merge_method: r["viewerDefaultMergeMethod"]
+                .as_str()
+                .unwrap_or("MERGE")
+                .to_lowercase(),
+            labeled,
+            missing_labels,
+        })
+    }
+}
+
+impl PullRequest {
+    /// A PR node, as `pull_request_node` returns it, with the code owners of the repository, as
+    /// `snapshot_parts` returns it.
+    pub fn from_node(node: &Value, repository: &Value) -> Result<Self> {
+        let mut pr: PullRequest = serde_json::from_value(node.clone())?;
+        pr.check_code_owners(CodeOwners::from_repository(repository).as_ref());
+        Ok(pr)
+    }
+}
+
+/// Whether a PR node is open with the trigger label: in the snapshot.
+pub fn queued(pr: &Value, trigger: &str) -> bool {
+    pr["state"] == "OPEN"
+        && pr["labels"]["nodes"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|l| l["name"] == trigger))
+}
+
 impl Installation {
     pub async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
+        let parts = self.snapshot_parts(repo, labels).await?;
+        RepoSnapshot::from_parts(&parts.repository, &parts.prs, labels)
+    }
+
+    pub async fn snapshot_parts(&self, repo: &RepoName, labels: &Labels) -> Result<SnapshotParts> {
         let query = format!(
             "query($owner: String!, $name: String!, $label: String!, $priority: String!, $failed: String!, $page: Int!, $after: String) {{
               repository(owner: $owner, name: $name) {{
@@ -353,13 +429,13 @@ impl Installation {
             }}",
             code_owners = codeowners::FIELDS,
         );
-        // The labeled PRs come a page at a time. The rest of the repo is the same on every page: the
-        // first page's counts.
-        let mut first: Option<Value> = None;
-        let mut labeled: Vec<PullRequest> = Vec::new();
+        // The labeled PRs come a page at a time. The rest of the repo is the same on every page:
+        // the first page's.
+        let mut repository: Option<Value> = None;
+        let mut prs: Vec<Value> = Vec::new();
         let mut after = Value::Null;
         loop {
-            let data: Value = self
+            let mut data: Value = self
                 .graphql(
                     "snapshot",
                     &query,
@@ -374,50 +450,43 @@ impl Installation {
                     }),
                 )
                 .await?;
-            let prs = &data["repository"]["pullRequests"];
-            let page: Vec<PullRequest> = serde_json::from_value(prs["nodes"].clone())?;
-            labeled.extend(page);
-            let next = &prs["pageInfo"];
+            let mut r = data["repository"].take();
+            let page = r
+                .as_object_mut()
+                .and_then(|r| r.remove("pullRequests"))
+                .context("repository.pullRequests")?;
+            prs.extend(page["nodes"].as_array().cloned().unwrap_or_default());
+            let next = &page["pageInfo"];
             let more = next["hasNextPage"] == true;
             after = next["endCursor"].clone();
-            first.get_or_insert(data);
+            repository.get_or_insert(r);
             if !more || after.is_null() {
                 break;
             }
         }
-        let data = first.expect("one page at least");
-        let r = &data["repository"];
-        let missing_labels = [
-            ("trigger", &labels.trigger),
-            ("priority", &labels.priority),
-            ("failed", &labels.failed),
-        ]
-        .into_iter()
-        .filter(|(alias, _)| r[alias].is_null())
-        .map(|(_, name)| name.clone())
-        .collect();
-        let owners = CodeOwners::from_repository(r);
-        for pr in &mut labeled {
-            pr.check_code_owners(owners.as_ref());
-        }
-        Ok(RepoSnapshot {
-            id: r["id"].as_str().context("repository.id")?.to_owned(),
-            default_branch: r["defaultBranchRef"]["name"]
-                .as_str()
-                .context("default branch")?
-                .to_owned(),
-            trunk_sha: r["defaultBranchRef"]["target"]["oid"]
-                .as_str()
-                .context("trunk sha")?
-                .to_owned(),
-            private: r["isPrivate"].as_bool().unwrap_or(true),
-            merge_method: r["viewerDefaultMergeMethod"]
-                .as_str()
-                .unwrap_or("MERGE")
-                .to_lowercase(),
-            labeled,
-            missing_labels,
+        Ok(SnapshotParts {
+            repository: repository.expect("one page at least"),
+            prs,
         })
+    }
+
+    /// A PR, as the snapshot reads it, whatever its state and labels.
+    pub async fn pull_request_node(&self, repo: &RepoName, number: PrNumber) -> Result<Value> {
+        let query = format!(
+            "query($owner: String!, $name: String!, $number: Int!) {{
+              repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ {PR_FIELDS} }} }}
+            }}"
+        );
+        let mut data: Value = self
+            .graphql(
+                "pull request node",
+                &query,
+                json!({ "owner": repo.owner, "name": repo.name, "number": number }),
+            )
+            .await?;
+        let pr = data["repository"]["pullRequest"].take();
+        anyhow::ensure!(pr.is_object(), "no PR #{number} in {repo}");
+        Ok(pr)
     }
 
     pub async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest> {
@@ -987,7 +1056,7 @@ mod tests {
     /// A labeled PR as the snapshot query returns it.
     fn pr_node(number: u64) -> String {
         format!(
-            r#"{{"number":{number},"title":"t","body":"","isDraft":false,"isCrossRepository":false,"reviewDecision":null,"baseRefName":"main","headRefName":"b{number}","headRefOid":"h{number}","labels":{{"nodes":[{{"name":"mp"}}]}},"files":{{"nodes":[]}},"stack":null,"url":"u","createdAt":"2026-10-01T00:00:00Z","additions":0,"deletions":0,"changedFiles":0,"author":null,"latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[]}}}}"#
+            r#"{{"number":{number},"state":"OPEN","title":"t","body":"","isDraft":false,"isCrossRepository":false,"reviewDecision":null,"baseRefName":"main","headRefName":"b{number}","headRefOid":"h{number}","labels":{{"nodes":[{{"name":"mp"}}]}},"files":{{"nodes":[]}},"stack":null,"url":"u","createdAt":"2026-10-01T00:00:00Z","additions":0,"deletions":0,"changedFiles":0,"author":null,"latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[]}}}}"#
         )
     }
 

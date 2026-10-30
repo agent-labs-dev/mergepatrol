@@ -1,5 +1,6 @@
-//! GitHub webhooks. A delivery only wakes the queue of the repo it names: the queue then reads
-//! what changed from GitHub, as it does when it polls. A lost delivery costs time, not state.
+//! GitHub webhooks. A delivery marks what it changed of what the queue reads, and wakes the
+//! queue of its repo, which reads that again from GitHub. A lost delivery costs time, not state:
+//! the queue reads the whole repo again now and then.
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -7,6 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use mergepatrol_analytics::{Analytics, WorkspaceInfo};
 use mergepatrol_core::{REPO_CONFIG_PATH, RepoName};
+use mergepatrol_store::Change;
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -72,6 +74,14 @@ pub(crate) async fn receive(
                 .set_label_head(installation, &repo, pr, label, head)
                 .await;
         }
+        for change in changed(event, &payload) {
+            if stored.is_ok() {
+                stored = state
+                    .store
+                    .github_changed(installation, &repo, &change)
+                    .await;
+            }
+        }
         // The queue reads the rest from GitHub, so it wakes even when the write failed. The
         // error still goes back, so the delivery shows as failed on GitHub, to send again.
         state.wake.wake(installation, repo);
@@ -105,6 +115,58 @@ fn installation(analytics: &Analytics, payload: &Value) {
             account_type: i["account"]["type"].as_str().unwrap_or_default(),
         },
     );
+}
+
+/// What the delivery changed of what the queue reads from GitHub.
+fn changed(event: Option<&str>, payload: &Value) -> Vec<Change> {
+    let value = |kind: &str, of: &Value| of.as_str().map(|v| Change::Value(format!("{kind}:{v}")));
+    let pr = &payload["pull_request"];
+    let changes = match event {
+        Some("push") => {
+            let branch = payload["ref"]
+                .as_str()
+                .and_then(|r| r.strip_prefix("refs/heads/"));
+            let default = payload["repository"]["default_branch"].as_str();
+            let trunk = branch.is_some() && branch == default;
+            vec![
+                branch.map(|b| Change::Value(format!("ref:{b}"))),
+                trunk.then_some(Change::Repo),
+            ]
+        }
+        // A PR that joins or leaves a stack changes the stack, of whichever PR.
+        Some("pull_request") => {
+            let number = pr["number"].as_u64();
+            vec![
+                number.map(Change::Pr),
+                number.map(|n| Change::Value(format!("pull:{n}"))),
+                Some(Change::ValuesUnder("stack:".into())),
+            ]
+        }
+        Some("pull_request_review") => vec![pr["number"].as_u64().map(Change::Pr)],
+        Some("check_run") => vec![value("checks", &payload["check_run"]["head_sha"])],
+        Some("status") => vec![value("checks", &payload["sha"])],
+        Some("check_suite") => {
+            let suite = &payload["check_suite"];
+            let mut changes = vec![
+                value("checks", &suite["head_sha"]),
+                value("approval", &suite["head_sha"]),
+            ];
+            // The checks of a PR, for the dashboard, once a suite of them completes.
+            if payload["action"] == "completed" {
+                let prs = suite["pull_requests"].as_array().into_iter().flatten();
+                changes.extend(prs.map(|p| p["number"].as_u64().map(Change::Pr)));
+            }
+            changes
+        }
+        Some("workflow_run") => vec![value("approval", &payload["workflow_run"]["head_sha"])],
+        // The checks a branch requires, and the reviews.
+        Some("branch_protection_rule" | "repository_ruleset") => vec![
+            Some(Change::ValuesUnder("required:".into())),
+            Some(Change::Repo),
+        ],
+        _ => vec![],
+    };
+    changes.into_iter().flatten().collect()
 }
 
 /// Whether a push to the default branch leaves it with the config file, if the push touched the

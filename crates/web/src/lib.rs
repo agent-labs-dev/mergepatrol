@@ -883,6 +883,74 @@ mod tests {
         assert_eq!(head(2).await, None);
     }
 
+    #[sqlx::test(migrations = false)]
+    async fn a_webhook_marks_what_it_changed_for_the_queue_to_read_again(pool: PgPool) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;
+        let repo = mergepatrol_core::RepoName::parse("o/r").unwrap();
+        // The queue reads the repo.
+        store.github_reads(7, &repo).await.unwrap();
+
+        let edited = r#"{"action":"edited","installation":{"id":7},"repository":{"full_name":"o/r"},"pull_request":{"number":3,"head":{"sha":"s","repo":{"full_name":"o/r"}}}}"#;
+        let signature = webhook::sign("hush", edited.as_bytes());
+        deliver(&router, edited, &signature).await;
+        deliver_push(&router, &push("refs/heads/topic", "")).await;
+        let reads = store.github_reads(7, &repo).await.unwrap();
+        assert_eq!(reads.changes, 0);
+        assert_eq!(
+            reads
+                .prs
+                .iter()
+                .map(|p| (p.number, p.changes))
+                .collect::<Vec<_>>(),
+            [(3, 1)]
+        );
+
+        deliver_push(&router, &push("refs/heads/main", "")).await;
+        assert_eq!(store.github_reads(7, &repo).await.unwrap().changes, 1);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_webhook_marks_the_reads_it_changed(pool: PgPool) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;
+        let repo = mergepatrol_core::RepoName::parse("o/r").unwrap();
+        let keys = ["checks:abc", "checks:def", "ref:topic", "stack:4", "pull:3"];
+        for key in keys {
+            store.github_value(7, &repo, key).await.unwrap();
+        }
+        let send = async |event: &str, body: &str| {
+            let req = Request::post("/webhooks/github")
+                .header("x-github-event", event)
+                .header(
+                    "x-hub-signature-256",
+                    webhook::sign("hush", body.as_bytes()),
+                )
+                .body(Body::from(body.to_owned()))
+                .unwrap();
+            router.clone().oneshot(req).await.unwrap().status()
+        };
+        let base =
+            r#""installation":{"id":7},"repository":{"full_name":"o/r","default_branch":"main"}"#;
+        let check = format!(r#"{{"action":"completed",{base},"check_run":{{"head_sha":"abc"}}}}"#);
+        assert_eq!(send("check_run", &check).await, StatusCode::NO_CONTENT);
+        send(
+            "push",
+            &format!(r#"{{"ref":"refs/heads/topic",{base},"commits":[]}}"#),
+        )
+        .await;
+        let pr = format!(
+            r#"{{"action":"synchronize",{base},"pull_request":{{"number":3,"head":{{"sha":"s","repo":{{"full_name":"o/r"}}}}}}}}"#
+        );
+        send("pull_request", &pr).await;
+
+        let mut changes = Vec::new();
+        for key in keys {
+            changes.push(store.github_value(7, &repo, key).await.unwrap().changes);
+        }
+        assert_eq!(changes, [1, 0, 1, 1, 1]);
+    }
+
     async fn deliver_push(router: &Router, body: &str) -> StatusCode {
         let req = Request::post("/webhooks/github")
             .header("x-github-event", "push")

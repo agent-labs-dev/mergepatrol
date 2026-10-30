@@ -17,5 +17,9 @@ sha2 = "0.11.1"
 tokio = { version = "1.54.1", features = ["sync", "time"] }
 tracing = "0.1.44"
 
+[features]
+# A scripted GitHub on localhost, for the tests of the crates that use this one.
+testing = ["tokio/io-util", "tokio/net"]
+
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt"] }

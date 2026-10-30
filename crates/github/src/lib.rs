@@ -7,12 +7,16 @@ mod files;
 mod repo;
 pub mod setup;
 
-pub use app::{App, AsUser, Installation, InstallationInfo, RateLimited, RepoInfo, revoke_token};
+#[cfg(any(test, feature = "testing"))]
+pub use app::fake;
+pub use app::{
+    App, AsUser, HookDelivery, Installation, InstallationInfo, RateLimited, RepoInfo, revoke_token,
+};
 pub use checks::{CheckState, Checks, RequiredChecks};
 pub use codeowners::CodeOwners;
 pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{
     BranchMerge, HeadRepository, MergeOutcome, PrDetails, PullRequest, RepoOwner, RepoSnapshot,
-    StackRef, TreeEntry,
+    SnapshotParts, StackRef, TreeEntry, queued,
 };
 pub use setup::{AppCredentials, GithubUser};
