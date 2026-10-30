@@ -8,6 +8,7 @@ license.workspace = true
 anyhow = "1.0.104"
 hex = "0.4.3"
 hmac = "0.13"
+mergepatrol-core = { version = "0.1.0", path = "../core" }
 mergepatrol-store = { version = "0.1.0", path = "../store" }
 reqwest = { version = "0.13.5", features = ["form", "json"] }
 serde_json = "1.0.154"

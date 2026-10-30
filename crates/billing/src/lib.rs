@@ -65,7 +65,7 @@ impl Access {
 /// Why a repo's waiting PRs are on hold: `reason` for the dashboard, `comment` for the PR.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hold {
-    pub reason: String,
+    pub reason: mergepatrol_core::Hold,
     pub comment: String,
 }
 
@@ -133,7 +133,7 @@ impl Billing {
             ),
         };
         Hold {
-            reason: "private repos need a Mergepatrol subscription".into(),
+            reason: mergepatrol_core::Hold::NoSubscription,
             comment: format!(
                 "On hold: {what}. Public repos stay free, and private ones cost ${PRICE_USD} a month per seat: a developer whose PRs Mergepatrol queues. It keeps its place in the queue, and goes on once subscribed."
             ),
@@ -274,7 +274,7 @@ impl Billing {
 
 fn fair_use_hold(account: &str, prs: u64, jobs: u64) -> Option<Hold> {
     (prs >= FAIR_USE_PRS || jobs >= FAIR_USE_JOBS).then(|| Hold {
-        reason: "over the fair-use limit of public repos".into(),
+        reason: mergepatrol_core::Hold::FairUseLimit,
         comment: format!(
             "On hold: `{account}`'s public repos queued {FAIR_USE_PRS} PRs, or ran {FAIR_USE_JOBS} jobs, in the last hour: Mergepatrol's fair-use limit. It keeps its place in the queue, and goes on once the last hour is under the limit."
         ),

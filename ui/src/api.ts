@@ -12,6 +12,7 @@ import type { OutcomeView } from "./api/OutcomeView";
 import type { PullDetailView } from "./api/PullDetailView";
 import type { PullDiffView } from "./api/PullDiffView";
 import type { PullRequestRef } from "./api/PullRequestRef";
+import type { PullStateView } from "./api/PullStateView";
 import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
@@ -44,6 +45,10 @@ const call = async (method: string, path: string, body?: unknown): Promise<void>
 };
 
 export const fetchSession = () => get<SessionView>("/api/session");
+
+/** Where PR `number` of `repo` is, read with the session's GitHub token. */
+export const fetchPullStatus = (repo: string, number: number) =>
+  get<PullStateView>(`/api/v1/repos/${repo}/pulls/${number}`);
 
 export const unlock = (token: string) =>
   call("POST", "/api/setup/unlock", { token } satisfies Unlock);
@@ -78,7 +83,14 @@ const query = (params: Record<string, string | number | undefined>) =>
  * outcome's. */
 export const fetchExits = (
   id: number,
-  q: { repo?: string; author?: string; days: number; outcome?: OutcomeView; before?: number },
+  q: {
+    repo?: string;
+    author?: string;
+    days: number;
+    outcome?: OutcomeView;
+    before?: number;
+    pr?: number;
+  },
 ) => get<ExitsPage>(w(id, `/history?${query(q)}`));
 
 export const fetchHistoryStats = (

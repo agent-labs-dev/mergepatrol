@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::PrNumber;
+use crate::{Hold, PrNumber};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
@@ -117,7 +117,7 @@ pub enum Event {
     /// The trunk is no longer the SHA we rebased onto.
     BaseMoved,
     /// GitHub would not merge the PR yet, for this reason: a draft, or a review is missing.
-    OnHold(String),
+    OnHold(Hold),
     Merged,
     MergeRejected(String),
 }
@@ -128,7 +128,7 @@ pub enum Transition {
     Merged,
     Ejected(EjectReason),
     /// Stop, keep the place in the lane, and wait until GitHub says the PR is eligible again.
-    Held(String),
+    Held(Hold),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,8 +368,8 @@ mod tests {
     fn dismissed_approval_holds() {
         let job = rebased(Job::start(7, 0));
         assert!(matches!(
-            job.step(Event::OnHold("waiting for a required review".into())),
-            Transition::Held(r) if r == "waiting for a required review"
+            job.step(Event::OnHold(Hold::ReviewRequired)),
+            Transition::Held(Hold::ReviewRequired)
         ));
     }
 }

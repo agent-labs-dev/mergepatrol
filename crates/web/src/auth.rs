@@ -24,9 +24,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use mergepatrol_analytics::WorkspaceInfo;
 use mergepatrol_core::RepoName;
-use mergepatrol_github::App;
 use mergepatrol_github::setup::{self, Pkce, random_token};
 use mergepatrol_github::setup::{Revoked, UserInstallation, UserToken};
+use mergepatrol_github::{App, AppCredentials};
 use mergepatrol_store::{GITHUB_APP, LoginCode, Scope, Sealed, Session, SessionKind, Workspace};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -279,8 +279,25 @@ impl Caller {
         state: &AppState,
         repo: &RepoName,
     ) -> Result<u64, ApiError> {
+        self.installation_on(state, repo).await?.ok_or_else(|| {
+            ApiError::Status(
+                StatusCode::NOT_FOUND,
+                format!("Mergepatrol is not installed on {repo}."),
+            )
+        })
+    }
+
+    /// The App's installation on a repo the caller can read: `None` without one.
+    pub(crate) async fn installation_on(
+        &self,
+        state: &AppState,
+        repo: &RepoName,
+    ) -> Result<Option<u64>, ApiError> {
         // Without the App, before GitHub hears of the token.
-        let app = crate::api::github_app(state).await?;
+        let creds = state
+            .app_credentials()
+            .await?
+            .ok_or_else(|| ApiError::Status(StatusCode::CONFLICT, "No GitHub App yet.".into()))?;
         let token = self.github_token(state)?;
         let key = (hash(&token), repo.clone());
         if state.seen.reads.get(&key).is_none() {
@@ -291,7 +308,7 @@ impl Caller {
                 Err(e) => return Err(e.into()),
             }
         }
-        installation_of(state, app, repo).await
+        installation_of(state, &creds, repo).await
     }
 
     /// The GitHub token to act with, so GitHub checks what the caller may do.
@@ -376,19 +393,19 @@ fn token_refused() -> ApiError {
     )
 }
 
-/// The installation of the App on the repo: its workspace.
-async fn installation_of(state: &AppState, app: App, repo: &RepoName) -> Result<u64, ApiError> {
+/// The installation of the App on the repo, its workspace, if it has one.
+async fn installation_of(
+    state: &AppState,
+    creds: &AppCredentials,
+    repo: &RepoName,
+) -> Result<Option<u64>, ApiError> {
     if let Some(id) = state.seen.installations.get(repo) {
         return Ok(id);
     }
-    let gh = app.installation_for(repo).await?.ok_or_else(|| {
-        ApiError::Status(
-            StatusCode::NOT_FOUND,
-            format!("Mergepatrol is not installed on {repo}."),
-        )
-    })?;
-    state.seen.installations.put(repo.clone(), gh.id);
-    Ok(gh.id)
+    let app = App::from_credentials(creds)?;
+    let id = app.installation_for(repo).await?.map(|gh| gh.id);
+    state.seen.installations.put(repo.clone(), id);
+    Ok(id)
 }
 
 /// How long what GitHub said of a token holds. A token revoked meanwhile still reads the queue
@@ -403,8 +420,18 @@ pub(crate) struct Seen {
     tokens: Recent<String, ()>,
     /// The repos each token can read.
     reads: Recent<(String, RepoName), ()>,
-    /// The App's installation on each repo.
-    installations: Recent<RepoName, u64>,
+    /// The App's installation on each repo, or none.
+    installations: Recent<RepoName, Option<u64>>,
+}
+
+#[cfg(test)]
+impl Seen {
+    /// As if GitHub had said `token` works and reads `repo`, which has `installation`.
+    pub(crate) fn assume(&self, token: &str, repo: &RepoName, installation: Option<u64>) {
+        self.tokens.put(hash(token), ());
+        self.reads.put((hash(token), repo.clone()), ());
+        self.installations.put(repo.clone(), installation);
+    }
 }
 
 struct Recent<K, V>(Mutex<HashMap<K, (Instant, V)>>);
@@ -1096,7 +1123,7 @@ fn unix_now() -> i64 {
 }
 
 /// The browser's cookie, or the menu bar app's `Authorization: Bearer` header.
-fn session_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn session_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

@@ -837,6 +837,9 @@ impl Store for Mem {
     async fn exits(&self, _: &ExitQuery<'_>) -> Result<Vec<ExitRecord>> {
         unreachable!()
     }
+    async fn last_exits(&self, _: u64, _: &RepoName, _: &[PrNumber]) -> Result<Vec<ExitRecord>> {
+        unreachable!()
+    }
     async fn exit_stats(&self, _: u64, _: Slice<'_>, _: u32, _: u32) -> Result<Vec<ExitStats>> {
         unreachable!()
     }
@@ -876,6 +879,9 @@ impl Store for Mem {
         unreachable!()
     }
     async fn repos(&self) -> Result<Vec<RepoState>> {
+        unreachable!()
+    }
+    async fn repo_state(&self, _: u64, _: &RepoName) -> Result<Option<RepoState>> {
         unreachable!()
     }
     async fn set_repo_enabled(&self, _: u64, _: &RepoName, _: Option<bool>) -> Result<()> {
@@ -1613,10 +1619,7 @@ async fn a_dismissed_approval_holds_the_pr_in_its_place() {
     // The held PR keeps its place, and the next one runs.
     assert!(matches!(run.tick().await, Ran::Job));
     assert_eq!(run.kinds(2).last().unwrap(), "merged");
-    assert_eq!(
-        run.lane(),
-        [(1, "Held(\"waiting for a required review\")".to_owned())]
-    );
+    assert_eq!(run.lane(), [(1, "Held(ReviewRequired)".to_owned())]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -2064,10 +2067,7 @@ async fn a_stack_waits_while_any_layer_is_not_ready() {
     assert!(matches!(run.tick().await, Ran::Idle));
     assert_eq!(
         run.lane(),
-        [(
-            10,
-            "Held(\"#1 is not ready: the PR is a draft\")".to_owned()
-        )]
+        [(10, "Held(Layer { number: 1, hold: Draft })".to_owned())]
     );
     let held = run.gh.with(|s| {
         s.comments
@@ -2487,8 +2487,8 @@ async fn a_fork_pr_whose_ci_waits_for_approval_is_held_until_a_maintainer_approv
         s.checks_on.insert("pr-1-r1".into(), failed);
     }));
     assert!(matches!(run.tick().await, Ran::Job));
-    assert_eq!(run.lane(), [(1, format!("Held({AWAITING_APPROVAL:?})"))]);
-    assert!(last_comment(&run).contains(AWAITING_APPROVAL));
+    assert_eq!(run.lane(), [(1, "Held(WorkflowApproval)".to_owned())]);
+    assert!(last_comment(&run).contains(&Hold::WorkflowApproval.to_string()));
     // It stays held, without a word more.
     let comments = run.gh.with(|s| s.comments.len());
     assert!(matches!(run.tick().await, Ran::Idle));

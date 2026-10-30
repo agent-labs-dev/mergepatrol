@@ -9,6 +9,7 @@ import { App } from "./App";
 import type { OutcomeView } from "./api/OutcomeView";
 import { History, LISTS, type List, OUTCOMES, WINDOWS, type Window } from "./History";
 import { type OpenFilter, REVIEWS, STATUSES } from "./OpenFilters";
+import { Permalink } from "./Permalink";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
@@ -81,7 +82,8 @@ const history = createRoute({
   getParentRoute: () => workspace,
   path: "history",
   /** What the side lists, the repo and the developer in view, the window in days, and the
-   * outcome listed. Repos, every repo and developer, 30 days, and every outcome by default. */
+   * outcome listed. Repos, every repo and developer, 30 days, and every outcome by default.
+   * `pr` lists only that PR of `repo`, from any time. */
   validateSearch: (
     search,
   ): {
@@ -90,12 +92,14 @@ const history = createRoute({
     author?: string;
     days?: Window;
     outcome?: OutcomeView;
+    pr?: number;
   } => ({
     list: oneOf(LISTS, search.list),
     repo: optional(search.repo, "string"),
     author: optional(search.author, "string"),
     days: oneOf(WINDOWS, search.days),
     outcome: oneOf(OUTCOMES, search.outcome),
+    pr: optional(search.pr, "number"),
   }),
   component: () => <History workspace={useWorkspace().workspace} />,
 });
@@ -108,6 +112,13 @@ const repos = createRoute({
   component: () => <Repos {...useWorkspace()} />,
 });
 
+/** A PR's permalink, which the API hands out: it opens wherever the PR is. */
+const pull = createRoute({
+  getParentRoute: () => workspace,
+  path: "$repo/pull/$number",
+  component: () => <Permalink workspace={useWorkspace().workspace} />,
+});
+
 const settings = createRoute({
   getParentRoute: () => workspace,
   path: "settings",
@@ -118,7 +129,7 @@ export const router = createRouter({
   routeTree: root.addChildren([
     home,
     tray,
-    workspace.addChildren([workspaceHome, you, queue, history, repos, settings]),
+    workspace.addChildren([workspaceHome, you, queue, history, repos, settings, pull]),
   ]),
 });
 

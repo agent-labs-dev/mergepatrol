@@ -115,7 +115,7 @@ async fn call(app: &AppState, caller: &Caller, bearer: &str, params: &Value) -> 
     };
     let (text, is_error) = match result {
         Ok(text) => (text, false),
-        Err(ApiError::Status(_, m)) => (m, true),
+        Err(ApiError::Status(_, m) | ApiError::GitHubLimited(_, m)) => (m, true),
         Err(ApiError::Internal(e)) => {
             tracing::error!(error = %format!("{e:#}"), tool = name, "MCP error");
             ("Internal error.".into(), true)

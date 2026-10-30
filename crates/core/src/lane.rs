@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::PrNumber;
+use crate::{Hold, PrNumber};
 
 /// A labeled pull request, or a stack with a labeled layer, as GitHub shows it now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -8,8 +8,8 @@ pub struct Candidate {
     /// The PR's number, or the stack's: GitHub numbers stacks among PRs and issues.
     pub number: PrNumber,
     pub priority: bool,
-    /// `Some(reason)` when GitHub would not merge the PR yet: a draft, or missing approvals.
-    pub hold: Option<String>,
+    /// `Some(hold)` when the queue may not merge the PR yet: a draft, or missing approvals.
+    pub hold: Option<Hold>,
     pub summary: PrSummary,
     /// A stack's PRs, bottom to top. Empty for a PR.
     pub layers: Vec<PrNumber>,
@@ -60,10 +60,38 @@ pub struct Review {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SavedState")]
 pub enum EntryState {
     Waiting,
-    Held(String),
+    Held(Hold),
     Active,
+}
+
+/// An `EntryState` as lanes saved it, also before holds had types.
+#[derive(Deserialize)]
+enum SavedState {
+    Waiting,
+    Held(SavedHold),
+    Active,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedHold {
+    Typed(Hold),
+    Text(serde::de::IgnoredAny),
+}
+
+impl From<SavedState> for EntryState {
+    fn from(saved: SavedState) -> Self {
+        match saved {
+            SavedState::Waiting => EntryState::Waiting,
+            SavedState::Held(SavedHold::Typed(hold)) => EntryState::Held(hold),
+            // Its hold had no type yet: the next sync holds it again, with one.
+            SavedState::Held(SavedHold::Text(_)) => EntryState::Waiting,
+            SavedState::Active => EntryState::Active,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,7 +133,7 @@ pub enum LaneChange {
     /// A waiting PR went on hold, or its reason changed.
     Held {
         number: PrNumber,
-        reason: String,
+        reason: Hold,
     },
     /// A held PR can merge again, and waits in its place.
     Released(PrNumber),
@@ -297,7 +325,7 @@ impl Lane {
     }
 
     /// Ends the active job but keeps the PR in its place, for example to wait for an approval.
-    pub fn hold(&mut self, number: PrNumber, reason: String) {
+    pub fn hold(&mut self, number: PrNumber, reason: Hold) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.number == number) {
             e.state = EntryState::Held(reason);
         }
@@ -421,7 +449,7 @@ mod tests {
         let mut lane = Lane::default();
         lane.sync(&[
             Candidate {
-                hold: Some("draft".into()),
+                hold: Some(Hold::Draft),
                 ..c(1)
             },
             c(2),
@@ -434,20 +462,42 @@ mod tests {
     #[test]
     fn going_on_hold_is_reported_once_per_reason() {
         let mut lane = Lane::default();
-        let held = |reason: &str| Candidate {
-            hold: Some(reason.into()),
+        let held = |reason: Hold| Candidate {
+            hold: Some(reason),
             ..c(1)
         };
-        let report = |reason: &str| LaneChange::Held {
-            number: 1,
-            reason: reason.into(),
+        let report = |reason: Hold| LaneChange::Held { number: 1, reason };
+        assert_eq!(
+            lane.sync(&[held(Hold::Draft)]),
+            [LaneChange::Enqueued(1), report(Hold::Draft)]
+        );
+        assert!(lane.sync(&[held(Hold::Draft)]).is_empty());
+        assert_eq!(
+            lane.sync(&[held(Hold::ReviewRequired)]),
+            [report(Hold::ReviewRequired)]
+        );
+    }
+
+    #[test]
+    fn a_hold_saved_as_text_waits_until_the_next_sync_holds_it_again() {
+        let saved =
+            r#"{"entries":[{"number":1,"priority":false,"state":{"Held":"the PR is a draft"}}]}"#;
+        let mut lane: Lane = serde_json::from_str(saved).unwrap();
+        assert_eq!(lane.entries[0].state, EntryState::Waiting);
+        let held = Candidate {
+            hold: Some(Hold::Draft),
+            ..c(1)
         };
         assert_eq!(
-            lane.sync(&[held("draft")]),
-            [LaneChange::Enqueued(1), report("draft")]
+            lane.sync(&[held]),
+            [LaneChange::Held {
+                number: 1,
+                reason: Hold::Draft
+            }]
         );
-        assert!(lane.sync(&[held("draft")]).is_empty());
-        assert_eq!(lane.sync(&[held("review")]), [report("review")]);
+        let typed = serde_json::to_string(&lane).unwrap();
+        let again: Lane = serde_json::from_str(&typed).unwrap();
+        assert_eq!(again.entries[0].state, EntryState::Held(Hold::Draft));
     }
 
     #[test]
@@ -472,7 +522,7 @@ mod tests {
         lane.sync(&[c(1)]);
         lane.activate(1);
         lane.sync(&[Candidate {
-            hold: Some("needs approval".into()),
+            hold: Some(Hold::ReviewRequired),
             ..c(1)
         }]);
         assert_eq!(lane.active(), [1]);
@@ -536,11 +586,11 @@ mod tests {
         lane.batch_failed(&[1, 2]);
         lane.sync(&[
             Candidate {
-                hold: Some("draft".into()),
+                hold: Some(Hold::Draft),
                 ..c(1)
             },
             Candidate {
-                hold: Some("draft".into()),
+                hold: Some(Hold::Draft),
                 ..c(2)
             },
             c(3),
