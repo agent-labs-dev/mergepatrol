@@ -722,6 +722,9 @@ impl InboxStore for Mem {
     async fn inbox_reviewed(&self, _: u64, _: &RepoName, _: PrNumber, _: &str) -> Result<()> {
         unreachable!()
     }
+    async fn inbox_closed(&self, _: u64, _: &RepoName, _: PrNumber) -> Result<()> {
+        unreachable!()
+    }
     async fn inbox_stale(&self, _: Duration, _: u32) -> Result<Vec<InboxStale>> {
         unreachable!()
     }
@@ -753,6 +756,16 @@ impl InboxStore for Mem {
         unreachable!()
     }
     async fn inbox_seen(&self, _: &str, _: u64, _: &RepoName, _: PrNumber) -> Result<()> {
+        unreachable!()
+    }
+    async fn inbox_snooze(
+        &self,
+        _: &str,
+        _: u64,
+        _: &RepoName,
+        _: PrNumber,
+        _: Option<Duration>,
+    ) -> Result<()> {
         unreachable!()
     }
     async fn prune_inbox(&self, _: Duration) -> Result<u64> {

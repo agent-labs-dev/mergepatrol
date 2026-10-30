@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useReducer, useRef, useState } from "react";
 import {
+  closePull,
+  closeUrl,
   dequeuePull,
   fetchSession,
   fetchYou,
@@ -10,17 +12,20 @@ import {
   reviewPull,
   reviewUrl,
   seenPull,
+  snoozePull,
+  unsnoozePull,
 } from "./api";
 import type { InboxPullView } from "./api/InboxPullView";
 import type { ReviewPull } from "./api/ReviewPull";
 import type { VerdictView } from "./api/VerdictView";
 import { PullDetail } from "./PullDetail";
-import { Avatar, primary, RepoIcon, secondary, timeAgo } from "./ui";
+import { Avatar, RepoIcon, timeAgo } from "./ui";
 
-/** Needs you, then the user's own PRs by whose move it is, then those merged lately. */
-export const FOLDERS = ["needs", "turn", "queue", "others", "drafts", "merged"] as const;
+/** Needs you, then the user's own PRs by whose move it is, then those merged lately, then
+ * those snoozed. */
+export const FOLDERS = ["needs", "turn", "queue", "others", "drafts", "merged", "snoozed"] as const;
 export type Folder = (typeof FOLDERS)[number];
-type Own = Exclude<Folder, "needs" | "merged">;
+type Own = Exclude<Folder, "needs" | "merged" | "snoozed">;
 
 const folderNames: Record<Folder, string> = {
   needs: "Needs you",
@@ -29,6 +34,7 @@ const folderNames: Record<Folder, string> = {
   others: "Waiting on others",
   drafts: "Drafts",
   merged: "Merged",
+  snoozed: "Snoozed",
 };
 
 const keyOf = (p: InboxPullView) => `${p.repo}#${p.number}`;
@@ -42,8 +48,18 @@ const PENDING_MS = 60_000;
 /** A queue click the queue has not caught up with. */
 type Click = { kind: "queueing" | "dequeueing"; at: number };
 
-/** A review waiting out `HOLD_MS`, or on its way to GitHub. */
-type Held = { p: InboxPullView; review: ReviewPull; until: number; timer: number; sending?: true };
+/** What waits out `HOLD_MS`: a review, or closing the PR. */
+type Act = { kind: "review"; review: ReviewPull } | { kind: "close" };
+
+/** An act waiting out `HOLD_MS`, or on its way to GitHub, and the folder it was done in. */
+type Held = {
+  p: InboxPullView;
+  act: Act;
+  folder: Folder;
+  until: number;
+  timer: number;
+  sending?: true;
+};
 
 /** Three panes, as the Queue page: the folders, the PRs in one, the selected PR with the review
  * box or its author's moves under it. Every repo of every workspace, as webhooks keep them. */
@@ -95,36 +111,40 @@ export function You() {
       return next;
     });
 
-  /** Sends a held review now. Its PR stays out of Needs you until the inbox has the review. */
+  /** Sends a held act now. Its PR stays out of its folder until the inbox has it. */
   const send = async (key: string, h: Held) => {
     if (h.sending) return;
     h.sending = true;
     clearTimeout(h.timer);
     render();
+    const { p, act } = h;
     try {
-      await reviewPull(h.p.workspace, h.p.repo, h.p.number, h.review);
+      if (act.kind === "review") await reviewPull(p.workspace, p.repo, p.number, act.review);
+      else await closePull(p.workspace, p.repo, p.number);
       await client.refetchQueries({ queryKey: ["you"] });
       setToast(
-        `${verdicts[h.review.verdict]} ${shortRef(h.p)}${h.review.queue ? " and queued it" : ""}`,
+        act.kind === "review"
+          ? `${verdicts[act.review.verdict]} ${shortRef(p)}${act.review.queue ? " and queued it" : ""}`
+          : `Closed ${shortRef(p)}`,
       );
     } catch (e) {
       setError((e as Error).message);
-      setDraft(key, h.review.body);
+      if (act.kind === "review") setDraft(key, act.review.body);
     } finally {
       // A review held for the PR since is not this one's to drop.
       if (held.current.get(key) === h) held.current.delete(key);
       render();
     }
   };
-  const hold = (p: InboxPullView, review: ReviewPull) => {
+  const hold = (p: InboxPullView, act: Act) => {
     const key = keyOf(p);
-    // A review already waiting on the PR, a comment say, goes now.
+    // An act already waiting on the PR, a comment say, goes now.
     const waiting = held.current.get(key);
     if (waiting) send(key, waiting);
-    const h: Held = { p, review, until: Date.now() + HOLD_MS, timer: 0 };
+    const h: Held = { p, act, folder, until: Date.now() + HOLD_MS, timer: 0 };
     h.timer = window.setTimeout(() => send(key, h), HOLD_MS);
     held.current.set(key, h);
-    setDraft(key, "");
+    if (act.kind === "review") setDraft(key, "");
     render();
   };
   const undo = (key: string) => {
@@ -132,8 +152,8 @@ export function You() {
     if (!h || h.sending) return;
     clearTimeout(h.timer);
     held.current.delete(key);
-    setDraft(key, h.review.body);
-    navigate({ search: { folder: "needs", pr: key } });
+    if (h.act.kind === "review") setDraft(key, h.act.review.body);
+    navigate({ search: { folder: h.folder, pr: key } });
     render();
   };
   // Leaving the page sends what waits: a closing tab, or another tab of the dashboard.
@@ -143,12 +163,18 @@ export function You() {
         if (!h.sending) {
           clearTimeout(h.timer);
           held.current.delete(key);
-          fetch(reviewUrl(h.p.workspace, h.p.repo, h.p.number), {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(h.review),
-            keepalive: true,
-          });
+          const { p, act } = h;
+          fetch(
+            act.kind === "review"
+              ? reviewUrl(p.workspace, p.repo, p.number)
+              : closeUrl(p.workspace, p.repo, p.number),
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: act.kind === "review" ? JSON.stringify(act.review) : undefined,
+              keepalive: true,
+            },
+          );
         }
     };
     addEventListener("pagehide", flush);
@@ -196,17 +222,36 @@ export function You() {
     onError: (e) => setError(e.message),
   });
 
+  const snooze = useMutation({
+    mutationFn: async ({ p, minutes }: { p: InboxPullView; minutes: number }) => {
+      await snoozePull(p.workspace, p.repo, p.number, minutes);
+      await client.refetchQueries({ queryKey: ["you"] });
+    },
+    onSuccess: (_, { p, minutes }) =>
+      setToast(`Snoozed ${shortRef(p)} until ${untilText(Date.now() + minutes * MINUTE)}`),
+    onError: (e) => setError(e.message),
+  });
+  const unsnooze = useMutation({
+    mutationFn: async (p: InboxPullView) => {
+      await unsnoozePull(p.workspace, p.repo, p.number);
+      await client.refetchQueries({ queryKey: ["you"] });
+    },
+    onSuccess: (_, p) => setToast(`${shortRef(p)} is back`),
+    onError: (e) => setError(e.message),
+  });
+
   const data = you.data;
-  // A review waiting or on its way takes its PR out, but a comment, which answers nothing.
-  const reviewing = (p: InboxPullView) => {
-    const h = held.current.get(keyOf(p));
-    return h !== undefined && h.review.verdict !== "comment";
+  // An act waiting or on its way takes its PR out, but a comment, which answers nothing.
+  const acting = (p: InboxPullView) => {
+    const act = held.current.get(keyOf(p))?.act;
+    return act !== undefined && !(act.kind === "review" && act.review.verdict === "comment");
   };
+  const awake = (p: InboxPullView) => !p.snoozed_until && !acting(p);
   const needs = (data?.review_requested ?? [])
-    .filter((p) => !reviewing(p))
+    .filter(awake)
     // The queue's first, then those back for another look; each updated last first.
     .sort((a, b) => reasonRank[reasonOf(a, me).kind] - reasonRank[reasonOf(b, me).kind]);
-  const own = (data?.authored ?? []).map((p) => ({ p, step: stepOf(p, clickOf(p)) }));
+  const own = (data?.authored ?? []).filter(awake).map((p) => ({ p, step: stepOf(p, clickOf(p)) }));
   const lists: Record<Folder, InboxPullView[]> = {
     needs,
     turn: own.filter((o) => o.step.folder === "turn").map((o) => o.p),
@@ -214,6 +259,10 @@ export function You() {
     others: own.filter((o) => o.step.folder === "others").map((o) => o.p),
     drafts: own.filter((o) => o.step.folder === "drafts").map((o) => o.p),
     merged: data?.merged ?? [],
+    // The first back first.
+    snoozed: [...(data?.review_requested ?? []), ...(data?.authored ?? [])]
+      .filter((p) => p.snoozed_until && !acting(p))
+      .sort((a, b) => (a.snoozed_until ?? "").localeCompare(b.snoozed_until ?? "")),
   };
   const list = lists[folder];
   let i = list.findIndex((p) => keyOf(p) === pr);
@@ -241,13 +290,19 @@ export function You() {
     navigate({ search: { folder: f } });
   };
   const newest = [...held.current.keys()].at(-1);
+  const [snoozing, setSnoozing] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the menu is for the PR it opened on.
+  useEffect(() => setSnoozing(false), [pullKey]);
   useKeys({
     j: () => select(list[Math.min(i + 1, list.length - 1)]),
     k: () => select(list[Math.max(i - 1, 0)]),
     a: () =>
       pull &&
       folder === "needs" &&
-      hold(pull, { verdict: "approve", body: drafts.get(keyOf(pull)) ?? "", queue: false }),
+      hold(pull, {
+        kind: "review",
+        review: { verdict: "approve", body: drafts.get(keyOf(pull)) ?? "", queue: false },
+      }),
     r: () => pull && folder === "needs" && document.getElementById("review-body")?.focus(),
     u: () => newest && undo(newest),
     q: () =>
@@ -255,6 +310,7 @@ export function You() {
       folder !== "needs" &&
       stepOf(pull, clickOf(pull)).ready &&
       queue.mutate({ p: pull, priority: false }),
+    s: () => pull && folder !== "merged" && setSnoozing(true),
     ...Object.fromEntries(FOLDERS.map((f, n) => [String(n + 1), () => open(f)])),
   });
 
@@ -272,6 +328,7 @@ export function You() {
                 Your PRs · {own.length}
               </p>
             )}
+            {f === "snoozed" && <div className="mt-4 max-lg:hidden" />}
             <button
               type="button"
               onClick={() => open(f)}
@@ -310,13 +367,17 @@ export function You() {
           <dt>
             <Kbd>u</Kbd>
           </dt>
-          <dd>undo a review</dd>
+          <dd>undo a review or close</dd>
           <dt>
             <Kbd>q</Kbd>
           </dt>
           <dd>queue yours</dd>
           <dt>
-            <Kbd>1</Kbd>–<Kbd>6</Kbd>
+            <Kbd>s</Kbd>
+          </dt>
+          <dd>snooze</dd>
+          <dt>
+            <Kbd>1</Kbd>–<Kbd>7</Kbd>
           </dt>
           <dd>folders</dd>
         </dl>
@@ -332,7 +393,9 @@ export function You() {
               ? "PRs that ask for your review, or your team's, in every repo. Those the queue holds come first."
               : folder === "merged"
                 ? "Yours, merged in the last week."
-                : "Your open PRs, in every repo."}
+                : folder === "snoozed"
+                  ? "Out of the way until their time is up, or until someone else comments or reviews."
+                  : "Your open PRs, in every repo."}
           </p>
         </div>
         {error && (
@@ -375,6 +438,10 @@ export function You() {
                   <Reason pull={p} me={me} />
                 ) : folder === "merged" ? (
                   <span className="text-ok">Merged {p.merged_at && timeAgo(p.merged_at)}</span>
+                ) : folder === "snoozed" ? (
+                  <span className="truncate text-muted">
+                    Snoozed until {p.snoozed_until && untilText(Date.parse(p.snoozed_until))}
+                  </span>
                 ) : (
                   <StepLine step={stepOf(p, clickOf(p))} />
                 )
@@ -396,15 +463,51 @@ export function You() {
             trunk={pull.base}
             pull={pull}
             onBack={() => select()}
-            footer={
-              folder === "needs" ? (
-                <ReviewBox
-                  pull={pull}
-                  body={drafts.get(keyOf(pull)) ?? ""}
-                  onBody={(text) => setDraft(keyOf(pull), text)}
-                  onReview={(review) => hold(pull, review)}
+            footer={(() => {
+              const later = (
+                <Later
+                  open={snoozing}
+                  onOpen={setSnoozing}
+                  busy={snooze.isPending}
+                  onSnooze={(minutes) => snooze.mutate({ p: pull, minutes })}
+                  onClose={() => hold(pull, { kind: "close" })}
                 />
-              ) : folder === "merged" ? null : (
+              );
+              if (folder === "needs")
+                return (
+                  <ReviewBox
+                    pull={pull}
+                    body={drafts.get(keyOf(pull)) ?? ""}
+                    onBody={(text) => setDraft(keyOf(pull), text)}
+                    onReview={(review) => hold(pull, { kind: "review", review })}
+                    later={later}
+                  />
+                );
+              if (folder === "merged") return null;
+              if (folder === "snoozed")
+                return (
+                  <div className="flex flex-wrap items-center gap-2 border-t border-line bg-surface px-4 py-3 sm:px-6">
+                    <span className="min-w-0 flex-1 text-sm">
+                      <span className="font-medium">
+                        Snoozed until{" "}
+                        {pull.snoozed_until && untilText(Date.parse(pull.snoozed_until))}
+                      </span>
+                      <span className="block truncate text-xs text-muted">
+                        Back sooner if someone else comments or reviews
+                      </span>
+                    </span>
+                    {later}
+                    <button
+                      type="button"
+                      disabled={unsnooze.isPending}
+                      onClick={() => unsnooze.mutate(pull)}
+                      className={solid}
+                    >
+                      Unsnooze
+                    </button>
+                  </div>
+                );
+              return (
                 <OwnerBar
                   pull={pull}
                   step={stepOf(pull, clickOf(pull))}
@@ -412,9 +515,10 @@ export function You() {
                   onQueue={(priority) => queue.mutate({ p: pull, priority })}
                   onDequeue={() => dequeue.mutate(pull)}
                   onNudge={nudge.isPending ? undefined : () => nudge.mutate(pull)}
+                  later={later}
                 />
-              )
-            }
+              );
+            })()}
           />
         )}
       </section>
@@ -425,10 +529,10 @@ export function You() {
             className="flex items-center gap-3 rounded-lg bg-neutral-900 px-4 py-3 text-sm text-white shadow-xl dark:bg-neutral-100 dark:text-neutral-900"
           >
             <span
-              className={`size-2 rounded-full ${h.review.verdict === "request_changes" ? "bg-red-400" : "bg-emerald-400"}`}
+              className={`size-2 rounded-full ${h.act.kind === "close" || h.act.review.verdict === "request_changes" ? "bg-red-400" : "bg-emerald-400"}`}
             />
             <span>
-              {holding[h.review.verdict]} {shortRef(h.p)}
+              {h.act.kind === "review" ? holding[h.act.review.verdict] : "Closing"} {shortRef(h.p)}
               {h.sending ? "…" : ` in ${Math.max(1, Math.ceil((h.until - now) / 1000))}s`}
             </span>
             {!h.sending && (
@@ -476,6 +580,163 @@ const holding: Record<VerdictView, string> = {
 };
 
 const shortRef = (p: InboxPullView) => `${p.repo.split("/")[1]}#${p.number}`;
+
+// ── Snoozing ─────────────────────────────────────────────────────────────────
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+
+/** When a snooze ends, as a person says it: a time today, a weekday this week, else a date. */
+function untilText(ms: number) {
+  const at = new Date(ms);
+  const now = new Date();
+  const hour = { hour: "numeric", minute: at.getMinutes() ? "2-digit" : undefined } as const;
+  if (at.toDateString() === now.toDateString()) return at.toLocaleTimeString(undefined, hour);
+  if (ms - now.getTime() < 6 * 24 * HOUR)
+    return at.toLocaleString(undefined, { weekday: "short", ...hour });
+  return at.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/** At `hour` o'clock, `days` from today. */
+function morning(days: number, hour = 9) {
+  const at = new Date();
+  at.setDate(at.getDate() + days);
+  at.setHours(hour, 0, 0, 0);
+  return at.getTime();
+}
+
+/** Where a snooze can end, and in how many minutes, as the API takes it: on the minute. */
+function snoozeChoices() {
+  const now = Date.now();
+  const monday = (8 - new Date().getDay()) % 7 || 7;
+  return [
+    { label: "Later today", at: now + 3 * HOUR },
+    { label: "Tomorrow", at: morning(1) },
+    { label: "Next week", at: morning(monday) },
+    { label: "In a month", at: morning(30) },
+  ].map((c) => ({ ...c, minutes: Math.max(1, Math.ceil((c.at - now) / MINUTE)) }));
+}
+
+// ── Buttons ──────────────────────────────────────────────────────────────────
+
+/** The footers' buttons, all one height. */
+const button =
+  "inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors disabled:opacity-40";
+const outline = `${button} border border-line-strong bg-surface shadow-xs hover:bg-sunken`;
+const plain = `${outline} text-fg-2 hover:text-fg`;
+const solid = `${button} bg-fg text-surface hover:bg-fg-2`;
+const iconButton =
+  "inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-sunken hover:text-fg disabled:opacity-40";
+
+const icons = {
+  // An alarm clock: its face, hands, and two bells.
+  snooze: "M8 14a5 5 0 1 0 0-10a5 5 0 0 0 0 10M8 6.5V9l1.5 1M2.5 4l2-2M13.5 4l-2-2",
+  // GitHub's closed PR, as the Queue page draws it.
+  close:
+    "M5.5 3.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M4 5v6M5.5 12.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M13.5 12.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M12 11V8M10.5 2.5l3 3M13.5 2.5l-3 3",
+  caret: "M4.5 6.5 8 10l3.5-3.5",
+};
+
+function Icon({ d, className = "size-4" }: { d: string; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={d} />
+    </svg>
+  );
+}
+
+/** A menu under `ref` that its first item takes focus in, and a click elsewhere or Escape
+ * closes. */
+function useMenu(open: boolean, onOpen: (open: boolean) => void) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    ref.current?.querySelector<HTMLElement>("[role=menu] button")?.focus();
+    const away = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && onOpen(false);
+    document.addEventListener("mousedown", away);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", away);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open, onOpen]);
+  return ref;
+}
+
+/** Snooze, with its menu of when, and close: for a PR that is not ready, or not wanted. */
+function Later({
+  open,
+  onOpen,
+  busy,
+  onSnooze,
+  onClose,
+}: {
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  busy: boolean;
+  onSnooze: (minutes: number) => void;
+  onClose: () => void;
+}) {
+  const ref = useMenu(open, onOpen);
+  return (
+    <>
+      <span ref={ref} className="relative">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onOpen(!open)}
+          title="Snooze (s)"
+          aria-label="Snooze"
+          className={`${iconButton} ${open ? "bg-sunken text-fg" : ""}`}
+        >
+          <Icon d={icons.snooze} />
+        </button>
+        {open && (
+          <div
+            role="menu"
+            className="absolute bottom-10 left-0 z-30 w-48 overflow-hidden rounded-lg border border-line bg-surface py-1 text-sm shadow-lg"
+          >
+            {snoozeChoices().map((c) => (
+              <button
+                key={c.label}
+                type="button"
+                onClick={() => {
+                  onOpen(false);
+                  onSnooze(c.minutes);
+                }}
+                className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left hover:bg-sunken focus:bg-sunken focus:outline-none"
+              >
+                {c.label}
+                <span className="text-xs text-muted">{untilText(c.at)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </span>
+      <button
+        type="button"
+        onClick={onClose}
+        title="Close the PR on GitHub, as you"
+        aria-label="Close the PR"
+        className={iconButton}
+      >
+        <Icon d={icons.close} />
+      </button>
+    </>
+  );
+}
 
 // ── Why a PR needs you ───────────────────────────────────────────────────────
 
@@ -710,18 +971,20 @@ function Checks({ pull: p }: { pull: InboxPullView }) {
   );
 }
 
-/** Approve, request changes or comment, as the user. ⌘↵ approves. A change request or a comment
+/** Approve, request changes or comment, as the user. ⌘↵ presses Approve. A change request or a comment
  * needs words. The words stay with the PR, kept by the page, until the review goes. */
 function ReviewBox({
   pull: p,
   body,
   onBody,
   onReview,
+  later,
 }: {
   pull: InboxPullView;
   body: string;
   onBody: (body: string) => void;
   onReview: (review: ReviewPull) => void;
+  later: ReactNode;
 }) {
   const [needsWords, setNeedsWords] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -734,72 +997,152 @@ function ReviewBox({
     onReview({ verdict, body, queue });
   };
   const canQueue = !p.queue && p.queues && !p.draft;
+  const [choice, setChoice] = useApproveChoice();
   return (
     <div className="border-t border-line bg-surface px-4 py-3 sm:px-6">
-      <textarea
-        id="review-body"
-        ref={ref}
-        value={body}
-        onChange={(e) => {
-          onBody(e.target.value);
-          setNeedsWords(false);
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            send("approve");
-          }
-          if (e.key === "Escape") e.currentTarget.blur();
-        }}
-        rows={2}
-        placeholder="Leave a review comment…"
-        className={`w-full resize-none rounded-md border bg-page px-3 py-2 text-sm outline-none placeholder:text-faint focus:ring-2 focus:ring-fg/10 ${
-          needsWords ? "border-bad" : "border-line-strong focus:border-fg"
-        }`}
-      />
-      {needsWords && (
-        <p className="mt-1 text-xs text-bad">Say what to change, or what you think.</p>
+      {p.queue?.state === "held" && (
+        <p className="mb-2 text-xs text-muted">The queue holds it: your approval may let it go.</p>
       )}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => send("request_changes")}
-          className={`${secondary} h-8 px-3 text-bad!`}
-        >
-          Request changes
-        </button>
-        <button type="button" onClick={() => send("comment")} className={`${secondary} h-8 px-3`}>
-          Comment
-        </button>
-        <span className="ml-auto flex items-center gap-2">
-          {p.queue?.state === "held" && (
-            <span className="text-xs text-muted max-sm:hidden">
-              The queue holds it: your approval may let it go
-            </span>
-          )}
-          {canQueue && (
+      <div
+        className={`rounded-lg border bg-page shadow-xs focus-within:ring-2 focus-within:ring-fg/10 ${
+          needsWords ? "border-bad" : "border-line-strong focus-within:border-fg/40"
+        }`}
+      >
+        <textarea
+          id="review-body"
+          ref={ref}
+          value={body}
+          onChange={(e) => {
+            onBody(e.target.value);
+            setNeedsWords(false);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              send("approve", canQueue && choice === "queue");
+            }
+            if (e.key === "Escape") e.currentTarget.blur();
+          }}
+          rows={2}
+          placeholder="Leave a review comment…"
+          className="block w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-faint"
+        />
+        <div className="flex flex-wrap items-center gap-1 px-1.5 pb-1.5">
+          {later}
+          <span className="ml-auto flex items-center gap-1.5">
+            <button type="button" onClick={() => send("comment")} className={plain}>
+              Comment
+            </button>
             <button
               type="button"
-              onClick={() => send("approve", true)}
-              className={`${secondary} h-8 px-3`}
+              onClick={() => send("request_changes")}
+              className={`${outline} text-bad`}
             >
-              Approve & queue
+              Request changes
             </button>
-          )}
-          <button
-            type="button"
-            onClick={() => send("approve")}
-            className={`${primary} h-8 bg-emerald-600 px-3 text-white hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-400`}
-          >
-            Approve <span className="ml-2 text-[10px] opacity-70">⌘↵</span>
-          </button>
-        </span>
+            <ApproveButton
+              canQueue={canQueue}
+              choice={choice}
+              onChoice={setChoice}
+              onApprove={(queue) => send("approve", queue)}
+            />
+          </span>
+        </div>
       </div>
+      {needsWords && (
+        <p className="mt-1.5 text-xs text-bad">Say what to change, or what you think.</p>
+      )}
     </div>
   );
 }
 
-/** The author's moves on their own PR: queue it, or take it out. */
+type ApproveChoice = "approve" | "queue";
+
+/** What the Approve button does, as the user last picked it, on every PR it can do it on. */
+function useApproveChoice() {
+  const [choice, set] = useState<ApproveChoice>(() =>
+    localStorage.getItem("approve") === "queue" ? "queue" : "approve",
+  );
+  const pick = (c: ApproveChoice) => {
+    localStorage.setItem("approve", c);
+    set(c);
+  };
+  return [choice, pick] as const;
+}
+
+const approveChoices: Record<ApproveChoice, { label: string; detail: string }> = {
+  approve: { label: "Approve", detail: "Leave it to the author to queue." },
+  queue: { label: "Approve & queue", detail: "Then queue it to merge." },
+};
+
+/** Approve, or approve and queue, as GitHub's merge button picks how to merge: a pick from the
+ * menu does it, and the button does the last one picked from then on, on every PR. A PR that
+ * cannot queue only approves. ⌘↵ presses the button. */
+function ApproveButton({
+  canQueue,
+  choice,
+  onChoice,
+  onApprove,
+}: {
+  canQueue: boolean;
+  choice: ApproveChoice;
+  onChoice: (c: ApproveChoice) => void;
+  onApprove: (queue: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useMenu(open, setOpen);
+  const now = canQueue ? choice : "approve";
+  const green = `${button} bg-emerald-600 text-white hover:bg-emerald-700`;
+  return (
+    <span ref={ref} className="relative flex">
+      <button
+        type="button"
+        onClick={() => onApprove(now === "queue")}
+        title={`${approveChoices[now].label} (⌘↵)`}
+        className={`${green} ${canQueue ? "rounded-r-none" : ""}`}
+      >
+        {approveChoices[now].label}
+      </button>
+      {canQueue && (
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-label="Choose how to approve"
+          className={`${green} rounded-l-none border-l border-white/25 px-1.5`}
+        >
+          <Icon d={icons.caret} className="size-3.5" />
+        </button>
+      )}
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 bottom-10 z-30 w-72 overflow-hidden rounded-lg border border-line bg-surface py-1 text-sm shadow-lg"
+        >
+          {(["approve", "queue"] as const).map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => {
+                onChoice(c);
+                setOpen(false);
+                onApprove(c === "queue");
+              }}
+              className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-sunken focus:bg-sunken focus:outline-none"
+            >
+              <span className="w-4 shrink-0 text-ok">{c === choice ? "✓" : ""}</span>
+              <span>
+                <span className="block font-medium">{approveChoices[c].label}</span>
+                <span className="block text-xs text-muted">{approveChoices[c].detail}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** The author's moves on their own PR: queue it, or take it out, snooze or close it. */
 function OwnerBar({
   pull: p,
   step,
@@ -807,6 +1150,7 @@ function OwnerBar({
   onQueue,
   onDequeue,
   onNudge,
+  later,
 }: {
   pull: InboxPullView;
   step: Step;
@@ -815,6 +1159,7 @@ function OwnerBar({
   onDequeue: () => void;
   /** Mentions the reviewers who have not answered. `undefined` while it goes. */
   onNudge?: () => void;
+  later: ReactNode;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-2 border-t border-line bg-surface px-4 py-3 sm:px-6">
@@ -822,13 +1167,14 @@ function OwnerBar({
         <span className="font-medium">{step.label}</span>
         {step.detail && <span className="block truncate text-xs text-muted">{step.detail}</span>}
       </span>
+      {later}
       {step.folder === "others" && p.requested.length > 0 && (
         <button
           type="button"
           disabled={!onNudge}
           onClick={onNudge}
           title={`Mention ${p.requested.map((r) => `@${r.login}`).join(" ")} in a comment`}
-          className={`${secondary} h-8 px-3`}
+          className={plain}
         >
           Nudge
         </button>
@@ -841,17 +1187,12 @@ function OwnerBar({
               disabled={busy}
               onClick={() => onQueue(true)}
               title="Move to the front"
-              className={`${secondary} h-8 px-3 text-hot!`}
+              className={`${outline} text-hot`}
             >
               ↑ Priority
             </button>
           )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onDequeue}
-            className={`${secondary} h-8 px-3`}
-          >
+          <button type="button" disabled={busy} onClick={onDequeue} className={plain}>
             Dequeue
           </button>
         </>
@@ -864,7 +1205,7 @@ function OwnerBar({
               disabled={busy}
               onClick={() => onQueue(true)}
               title="Queue at the front"
-              className={`${secondary} h-8 px-3 text-hot!`}
+              className={`${outline} text-hot`}
             >
               ↑ Priority
             </button>
@@ -872,7 +1213,7 @@ function OwnerBar({
               type="button"
               disabled={busy}
               onClick={() => onQueue(false)}
-              className={step.ready ? `${primary} h-8 px-3` : `${secondary} h-8 px-3`}
+              className={step.ready ? solid : plain}
             >
               Queue
             </button>

@@ -24,6 +24,7 @@ import type { SessionView } from "./api/SessionView";
 import type { SetRepo } from "./api/SetRepo";
 import type { SetSecret } from "./api/SetSecret";
 import type { SettingsView } from "./api/SettingsView";
+import type { SnoozePull } from "./api/SnoozePull";
 import type { Unlock } from "./api/Unlock";
 import type { YouView } from "./api/YouView";
 
@@ -169,9 +170,12 @@ export const queuePull = (id: number, repo: string, pr: number, priority: boolea
 export const dequeuePull = (id: number, repo: string, pr: number) =>
   call("DELETE", w(id, `/repos/${repo}/pulls/${pr}/queue`));
 
+export const closeUrl = (id: number, repo: string, pr: number) =>
+  w(id, `/repos/${repo}/pulls/${pr}/close`);
+
 /** Closes the PR on GitHub, as the user. */
 export const closePull = (id: number, repo: string, pr: number) =>
-  call("POST", w(id, `/repos/${repo}/pulls/${pr}/close`));
+  call("POST", closeUrl(id, repo, pr));
 
 export const reviewUrl = (id: number, repo: string, pr: number) =>
   w(id, `/repos/${repo}/pulls/${pr}/review`);
@@ -183,6 +187,14 @@ export const reviewPull = (id: number, repo: string, pr: number, body: ReviewPul
 /** The user opened the PR here: what came before is read. */
 export const seenPull = (id: number, repo: string, pr: number) =>
   call("PUT", w(id, `/repos/${repo}/pulls/${pr}/seen`));
+
+/** Puts the PR out of the user's inbox for `minutes`. */
+export const snoozePull = (id: number, repo: string, pr: number, minutes: number) =>
+  call("PUT", w(id, `/repos/${repo}/pulls/${pr}/snooze`), { minutes } satisfies SnoozePull);
+
+/** Puts a snoozed PR back in the user's inbox. */
+export const unsnoozePull = (id: number, repo: string, pr: number) =>
+  call("DELETE", w(id, `/repos/${repo}/pulls/${pr}/snooze`));
 
 /** Mentions the reviewers in a comment, as the user. */
 export const nudgePull = (id: number, repo: string, pr: number, reviewers: string[]) =>
