@@ -10,7 +10,10 @@
 //! reads their installations from GitHub again once an hour, so a user who loses access to an
 //! installation loses its workspace within the hour.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::{FromRequestParts, Query, State};
@@ -20,6 +23,8 @@ use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use mergepatrol_analytics::WorkspaceInfo;
+use mergepatrol_core::RepoName;
+use mergepatrol_github::App;
 use mergepatrol_github::setup::{self, Pkce, random_token};
 use mergepatrol_github::setup::{Revoked, UserInstallation, UserToken};
 use mergepatrol_store::{GITHUB_APP, LoginCode, Scope, Sealed, Session, SessionKind, Workspace};
@@ -194,30 +199,234 @@ impl FromRequestParts<AppState> for SignedIn {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        match current_session(&parts.headers, state).await? {
-            Some(Session {
-                kind:
-                    SessionKind::User {
-                        login,
-                        installations,
-                        ..
-                    },
-                github,
-                ..
-            }) => Ok(SignedIn {
-                login,
-                installations,
-                // `current_session` found it, so the request has a token.
-                token_hash: session_token(&parts.headers)
-                    .map(|t| hash(&t))
-                    .unwrap_or_default(),
-                github,
-            }),
-            _ => Err(ApiError::Status(
-                StatusCode::UNAUTHORIZED,
-                "sign in first".into(),
+        let session = current_session(&parts.headers, state).await?;
+        // `current_session` found one only with a token.
+        let token_hash = session_token(&parts.headers)
+            .map(|t| hash(&t))
+            .unwrap_or_default();
+        session
+            .and_then(|s| signed_in(s, token_hash))
+            .ok_or_else(|| ApiError::Status(StatusCode::UNAUTHORIZED, "sign in first".into()))
+    }
+}
+
+/// The user a session is for. `None` for a setup session.
+fn signed_in(session: Session, token_hash: String) -> Option<SignedIn> {
+    match session {
+        Session {
+            kind:
+                SessionKind::User {
+                    login,
+                    installations,
+                    ..
+                },
+            github,
+            ..
+        } => Some(SignedIn {
+            login,
+            installations,
+            token_hash,
+            github,
+        }),
+        _ => None,
+    }
+}
+
+/// Who calls the API: a signed-in user, or anyone with a GitHub token, as a CI job or a coding
+/// agent calls. Mergepatrol cannot tell which installations a GitHub token reaches: it reaches
+/// only the repos GitHub lets it read, and calls across a workspace need a sign-in.
+pub(crate) enum Caller {
+    User(SignedIn),
+    Token(String),
+}
+
+impl Caller {
+    /// The signed-in user. Refuses a GitHub token.
+    pub(crate) fn user(&self) -> Result<&SignedIn, ApiError> {
+        match self {
+            Self::User(user) => Ok(user),
+            Self::Token(_) => Err(ApiError::Status(
+                StatusCode::FORBIDDEN,
+                "Sign in to Mergepatrol for this: a GitHub token reaches only single repos.".into(),
             )),
         }
+    }
+
+    /// The workspace, for a call across its repos: a signed-in user's only.
+    pub(crate) fn workspace(&self, id: u64) -> Result<u64, ApiError> {
+        self.user()?.workspace(id)
+    }
+
+    /// The workspace, for a call on one of its repos: a user's, or one that a GitHub token can
+    /// read the repo of.
+    pub(crate) async fn repo(
+        &self,
+        state: &AppState,
+        id: u64,
+        repo: &RepoName,
+    ) -> Result<u64, ApiError> {
+        match self {
+            Self::User(user) => user.workspace(id),
+            Self::Token(_) if self.workspace_of(state, repo).await? == id => Ok(id),
+            Self::Token(_) => Err(no_repo(repo)),
+        }
+    }
+
+    /// The workspace of a repo the caller can read. It reads it first: that Mergepatrol is
+    /// installed on a repo is the business of those who can read it.
+    pub(crate) async fn workspace_of(
+        &self,
+        state: &AppState,
+        repo: &RepoName,
+    ) -> Result<u64, ApiError> {
+        // Without the App, before GitHub hears of the token.
+        let app = crate::api::github_app(state).await?;
+        let token = self.github_token(state)?;
+        let key = (hash(&token), repo.clone());
+        if state.seen.reads.get(&key).is_none() {
+            match setup::can_read(&token, &repo.to_string()).await {
+                Ok(true) => state.seen.reads.put(key, ()),
+                Ok(false) => return Err(no_repo(repo)),
+                Err(e) if e.is::<Revoked>() => return Err(token_refused()),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        installation_of(state, app, repo).await
+    }
+
+    /// The GitHub token to act with, so GitHub checks what the caller may do.
+    pub(crate) fn github_token(&self, state: &AppState) -> Result<String, ApiError> {
+        match self {
+            Self::User(user) => user.github_token(state),
+            Self::Token(token) => Ok(token.clone()),
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for Caller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let rejected = match SignedIn::from_request_parts(parts, state).await {
+            Ok(user) => return Ok(Self::User(user)),
+            Err(e) => e,
+        };
+        match session_token(&parts.headers).filter(|t| is_github_token(t)) {
+            Some(token) if token_works(state, &token).await? => Ok(Self::Token(token)),
+            Some(_) => Err(token_refused()),
+            None => Err(rejected),
+        }
+    }
+}
+
+/// GitHub's token formats: a personal access token, an OAuth or App user token, or an App
+/// installation token, as a workflow's `GITHUB_TOKEN` is. Or 40 hex digits, from before GitHub
+/// prefixed them.
+fn is_github_token(token: &str) -> bool {
+    ["ghp_", "gho_", "ghu_", "ghs_", "github_pat_"]
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+        || (token.len() == 40 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Who an MCP client's bearer token is: a session that holds a GitHub token, or a GitHub token
+/// GitHub takes. `None` when it is neither, and the client signs in again.
+pub(crate) async fn bearer_caller(
+    state: &AppState,
+    bearer: &str,
+) -> Result<Option<Caller>, ApiError> {
+    if let Some(session) = session_of(state, bearer).await? {
+        let Some(user) = signed_in(session, hash(bearer)) else {
+            return Ok(None);
+        };
+        return match user.github_token(state) {
+            Ok(_) => Ok(Some(Caller::User(user))),
+            // A session whose GitHub token is gone.
+            Err(ApiError::Status(StatusCode::UNAUTHORIZED, _)) => Ok(None),
+            Err(e) => Err(e),
+        };
+    }
+    if is_github_token(bearer) && token_works(state, bearer).await? {
+        return Ok(Some(Caller::Token(bearer.to_owned())));
+    }
+    Ok(None)
+}
+
+/// Whether GitHub takes the token, as it said within `SEEN_FOR`.
+async fn token_works(state: &AppState, token: &str) -> Result<bool, ApiError> {
+    let key = hash(token);
+    if state.seen.tokens.get(&key).is_some() {
+        return Ok(true);
+    }
+    if !setup::token_works(token).await? {
+        return Ok(false);
+    }
+    state.seen.tokens.put(key, ());
+    Ok(true)
+}
+
+fn no_repo(repo: &RepoName) -> ApiError {
+    ApiError::Status(StatusCode::NOT_FOUND, format!("No repo {repo}."))
+}
+
+fn token_refused() -> ApiError {
+    ApiError::Status(
+        StatusCode::UNAUTHORIZED,
+        "GitHub does not take this token.".into(),
+    )
+}
+
+/// The installation of the App on the repo: its workspace.
+async fn installation_of(state: &AppState, app: App, repo: &RepoName) -> Result<u64, ApiError> {
+    if let Some(id) = state.seen.installations.get(repo) {
+        return Ok(id);
+    }
+    let gh = app.installation_for(repo).await?.ok_or_else(|| {
+        ApiError::Status(
+            StatusCode::NOT_FOUND,
+            format!("Mergepatrol is not installed on {repo}."),
+        )
+    })?;
+    state.seen.installations.put(repo.clone(), gh.id);
+    Ok(gh.id)
+}
+
+/// How long what GitHub said of a token holds. A token revoked meanwhile still reads the queue
+/// until then, but changes nothing: the labels go on with the token itself.
+const SEEN_FOR: Duration = Duration::from_secs(300);
+
+/// What GitHub said lately, so a call with a GitHub token costs none of its rate limit before
+/// its own.
+#[derive(Default)]
+pub(crate) struct Seen {
+    /// The tokens GitHub takes, by their hash.
+    tokens: Recent<String, ()>,
+    /// The repos each token can read.
+    reads: Recent<(String, RepoName), ()>,
+    /// The App's installation on each repo.
+    installations: Recent<RepoName, u64>,
+}
+
+struct Recent<K, V>(Mutex<HashMap<K, (Instant, V)>>);
+
+impl<K, V> Default for Recent<K, V> {
+    fn default() -> Self {
+        Self(Mutex::default())
+    }
+}
+
+impl<K: Eq + Hash, V: Clone> Recent<K, V> {
+    fn get(&self, key: &K) -> Option<V> {
+        let map = self.0.lock().unwrap();
+        map.get(key)
+            .filter(|(at, _)| at.elapsed() < SEEN_FOR)
+            .map(|(_, v)| v.clone())
+    }
+
+    fn put(&self, key: K, value: V) {
+        let mut map = self.0.lock().unwrap();
+        map.retain(|_, (at, _)| at.elapsed() < SEEN_FOR);
+        map.insert(key, (Instant::now(), value));
     }
 }
 
@@ -736,33 +945,6 @@ async fn current_session(headers: &HeaderMap, state: &AppState) -> anyhow::Resul
     match session_token(headers) {
         Some(token) => session_of(state, &token).await,
         None => Ok(None),
-    }
-}
-
-/// The GitHub token of the user session that `token` opens. `None` when it opens none.
-pub(crate) async fn session_github_token(
-    state: &AppState,
-    token: &str,
-) -> Result<Option<String>, ApiError> {
-    match session_of(state, token).await? {
-        Some(Session {
-            kind:
-                SessionKind::User {
-                    login,
-                    installations,
-                    ..
-                },
-            github,
-            ..
-        }) => SignedIn {
-            login,
-            installations,
-            token_hash: hash(token),
-            github,
-        }
-        .github_token(state)
-        .map(Some),
-        _ => Ok(None),
     }
 }
 

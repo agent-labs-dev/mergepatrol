@@ -22,6 +22,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 (cd ui && pnpm check)
 ```
 
+A dashboard feature is a route in `crates/web/src/routes.rs`, with the MCP tool that calls it, so agents can do what the dashboard does. `AGENTS.md` says how.
+
 The tests marked `#[ignore]` need Docker images, or a real Anthropic API key. Each one says how to run it.
 
 ## Pull requests

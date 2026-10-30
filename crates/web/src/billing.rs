@@ -9,7 +9,7 @@ use mergepatrol_billing::{Access, FAIR_USE_JOBS, FAIR_USE_PRS, PRICE_USD, TRIAL_
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::auth::SignedIn;
+use crate::auth::Caller;
 use crate::{ApiError, AppState};
 
 const DAY: i64 = 24 * 60 * 60;
@@ -71,10 +71,10 @@ pub struct RedirectView {
 
 pub(crate) async fn billing(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<Option<BillingView>>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     if app.billing.is_none() {
         return Ok(Json(None));
     }
@@ -104,10 +104,10 @@ async fn view(app: &AppState, id: u64) -> Result<BillingView, ApiError> {
 
 pub(crate) async fn checkout(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<RedirectView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let billing = app.billing.as_ref().ok_or_else(off)?;
     let account = account(&app, id).await?;
     let url = billing.checkout(id, &account).await.map_err(stripe_error)?;
@@ -117,10 +117,10 @@ pub(crate) async fn checkout(
 
 pub(crate) async fn portal(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<RedirectView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let billing = app.billing.as_ref().ok_or_else(off)?;
     let account = account(&app, id).await?;
     let url = billing
@@ -134,10 +134,10 @@ pub(crate) async fn portal(
 /// Frees a seat. The subscription drops it at its next period.
 pub(crate) async fn free_seat(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, login)): Path<(u64, String)>,
 ) -> Result<Json<BillingView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let billing = app.billing.as_ref().ok_or_else(off)?;
     if !billing.free_seat(id, &login).await? {
         return Err(ApiError::Status(
