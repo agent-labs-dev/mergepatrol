@@ -1,5 +1,6 @@
-# Each job's sandbox, rolled out by deploy/gcp/deploy.sh before the orchestrator, with
-# __JOB_IMAGE__ filled in.
+# Each job's sandbox and its egress proxy, rolled out by deploy/gcp/deploy.sh before the
+# orchestrator, with __JOB_IMAGE__ and __SQUID_CONF_HASH__ filled in, after the ConfigMap from
+# squid.conf.
 
 # One job's sandbox: `mergepatrol job --serve` under gVisor, which waits for its link from the
 # orchestrator. It runs untrusted repo code and an agent with a shell.
@@ -23,17 +24,14 @@ spec:
           - port: 8080
             protocol: TCP
     egress:
-      # The internet, but not the metadata server, the cluster's pods and services, or the VPC.
+      # The internet only through the egress proxy, below.
       - to:
-          - ipBlock:
-              cidr: 0.0.0.0/0
-              except:
-                - 10.0.0.0/8
-                - 172.16.0.0/12
-                - 192.168.0.0/16
-                - 169.254.0.0/16
-                - 100.64.0.0/10
-                - 34.118.224.0/20
+          - podSelector:
+              matchLabels:
+                app: mergepatrol-egress
+        ports:
+          - port: 3128
+            protocol: TCP
       # The orchestrator's job port: the job's link and the model API proxy.
       - to:
           - namespaceSelector:
@@ -59,10 +57,10 @@ spec:
           effect: NoSchedule
       automountServiceAccountToken: false
       enableServiceLinks: false
-      # Public resolvers: the cluster's DNS would name its services, and lives on link-local.
+      # No DNS: the proxy resolves the names it lets through, and a lookup can't carry data out.
       dnsPolicy: None
       dnsConfig:
-        nameservers: [8.8.8.8, 1.1.1.1]
+        nameservers: [127.0.0.1]
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -74,6 +72,17 @@ spec:
         - name: job
           image: __JOB_IMAGE__
           args: [job, --serve, "8080"]
+          # The orchestrator is plain HTTP, so it stays direct; HTTPS goes through the proxy.
+          env:
+            - name: HTTPS_PROXY
+              value: http://34.118.224.100:3128
+            - name: https_proxy
+              value: http://34.118.224.100:3128
+            # Node's built-in fetch, and Yarn 2+, ignore HTTPS_PROXY without these.
+            - name: NODE_USE_ENV_PROXY
+              value: "1"
+            - name: YARN_HTTPS_PROXY
+              value: http://34.118.224.100:3128
           ports:
             - containerPort: 8080
           resources:
@@ -111,3 +120,109 @@ spec:
     name: mergepatrol-job
   updateStrategy:
     type: Recreate
+---
+# The jobs' one way out: Squid, with the allowlist in squid.conf next to this file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mergepatrol-egress
+  namespace: mergepatrol-jobs
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mergepatrol-egress
+  template:
+    metadata:
+      labels:
+        app: mergepatrol-egress
+      annotations:
+        # A new squid.conf rolls the pods.
+        mergepatrol/squid-conf: __SQUID_CONF_HASH__
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: [8.8.8.8, 1.1.1.1]
+      containers:
+        - name: squid
+          image: ubuntu/squid:6.6-24.04_edge@sha256:8a3baed477e2c282ab8aa5edad442f69873246964f225c5c2ae8364b6610963c
+          ports:
+            - containerPort: 3128
+          readinessProbe:
+            tcpSocket:
+              port: 3128
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 1Gi
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/squid/squid.conf
+              subPath: squid.conf
+      volumes:
+        - name: conf
+          configMap:
+            name: mergepatrol-egress
+---
+# A fixed address in the cluster's service range, 34.118.224.0/20: jobs have no DNS to look up
+# a name. Kubernetes keeps the range's first 256 addresses for fixed ones.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mergepatrol-egress
+  namespace: mergepatrol-jobs
+spec:
+  clusterIP: 34.118.224.100
+  selector:
+    app: mergepatrol-egress
+  ports:
+    - port: 3128
+      targetPort: 3128
+---
+# Only jobs reach the proxy, and it reaches only port 443 of the internet, and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mergepatrol-egress
+  namespace: mergepatrol-jobs
+spec:
+  podSelector:
+    matchLabels:
+      app: mergepatrol-egress
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mergepatrol-job
+      ports:
+        - port: 3128
+          protocol: TCP
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+              - 34.118.224.0/20
+      ports:
+        - port: 443
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 8.8.8.8/32
+        - ipBlock:
+            cidr: 1.1.1.1/32
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
