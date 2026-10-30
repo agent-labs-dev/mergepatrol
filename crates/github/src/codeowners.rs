@@ -199,7 +199,7 @@ mod tests {
     fn only_a_rule_that_requires_code_owners_reads_them() {
         let repo = |required: bool| {
             json!({
-                "defaultBranchRef": { "rules": { "nodes": [
+                "defaultBranchRef": { "name": "main", "rules": { "nodes": [
                     { "parameters": null },
                     { "parameters": { "requireCodeOwnerReview": required } },
                 ] } },
