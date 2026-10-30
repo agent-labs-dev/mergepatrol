@@ -17,6 +17,8 @@ use axum::extract::{FromRequestParts, Query, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use mergepatrol_analytics::WorkspaceInfo;
 use mergepatrol_github::setup::{self, Pkce, random_token};
 use mergepatrol_github::setup::{Revoked, UserInstallation, UserToken};
@@ -36,6 +38,9 @@ const MANIFEST_COOKIE: &str = "mp_manifest";
 /// A sign-in for the menu bar app, in the browser that started it:
 /// `<port>.<the app's state>.<the app's PKCE challenge>`.
 const TRAY_COOKIE: &str = "mp_tray";
+/// A sign-in for an MCP client, in the browser that started it: its `McpClient`, as base64url
+/// JSON.
+const MCP_COOKIE: &str = "mp_mcp";
 /// From the session's last check: an active session does not end.
 const USER_SESSION: Duration = Duration::from_secs(30 * 24 * 3600);
 /// The session cookie outlives any session: the server's expiry is the one that counts.
@@ -422,6 +427,27 @@ pub(crate) async fn login(State(state): State<AppState>, Query(q): Query<LoginQu
         }
         _ => return error_redirect("the menu bar app's sign-in link is malformed"),
     };
+    start_login(&state, tray, None).await
+}
+
+/// An MCP client that signs in through the browser (OAuth's authorization code flow, with
+/// PKCE): where to send its one-time code, and the `state` to send with it.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct McpClient {
+    pub redirect_uri: String,
+    pub state: Option<String>,
+    pub challenge: String,
+}
+
+/// Signs in with GitHub for the MCP client, which gets a one-time code for the session.
+pub(crate) async fn mcp_login(state: &AppState, client: &McpClient) -> Response {
+    let json = serde_json::to_vec(client).expect("serializes");
+    start_login(state, None, Some(BASE64URL.encode(json))).await
+}
+
+/// To GitHub. The cookies say where the sign-in goes back to: the browser, the menu bar app, or
+/// an MCP client. A sign-in for one clears another's left over from before.
+async fn start_login(state: &AppState, tray: Option<String>, mcp: Option<String>) -> Response {
     let creds = match state.app_credentials().await {
         Ok(Some(c)) => c,
         Ok(None) => return Redirect::to("/").into_response(),
@@ -429,7 +455,7 @@ pub(crate) async fn login(State(state): State<AppState>, Query(q): Query<LoginQu
     };
     let token = random_token(24);
     let pkce = Pkce::new();
-    let url = match setup::authorize_url(&creds, &callback_url(&state), &token, &pkce.challenge) {
+    let url = match setup::authorize_url(&creds, &callback_url(state), &token, &pkce.challenge) {
         Ok(u) => u,
         Err(e) => return error_redirect(&format!("{e:#}")),
     };
@@ -437,14 +463,17 @@ pub(crate) async fn login(State(state): State<AppState>, Query(q): Query<LoginQu
     // the verifier too, so the sign-in does not depend on this process: a restart, or another
     // instance, takes the callback.
     let value = format!("{token}.{}", pkce.verifier);
-    let oauth = cookie(&state, OAUTH_COOKIE, &value, LOGIN_FLOW);
-    // A browser sign-in clears a tray sign-in left over from before.
-    let tray = match tray {
-        Some(tray) => cookie(&state, TRAY_COOKIE, &tray, LOGIN_FLOW),
-        None => cookie(&state, TRAY_COOKIE, "", Duration::ZERO),
+    let oauth = cookie(state, OAUTH_COOKIE, &value, LOGIN_FLOW);
+    let client = |name, value: Option<String>| match value {
+        Some(v) => cookie(state, name, &v, LOGIN_FLOW),
+        None => cookie(state, name, "", Duration::ZERO),
     };
     (
-        AppendHeaders([(header::SET_COOKIE, oauth), (header::SET_COOKIE, tray)]),
+        AppendHeaders([
+            (header::SET_COOKIE, oauth),
+            (header::SET_COOKIE, client(TRAY_COOKIE, tray)),
+            (header::SET_COOKIE, client(MCP_COOKIE, mcp)),
+        ]),
         Redirect::to(&url),
     )
         .into_response()
@@ -456,7 +485,7 @@ fn valid_tray_state(s: &str) -> bool {
 }
 
 /// An S256 challenge: 32 bytes in unpadded base64url.
-fn valid_challenge(s: &str) -> bool {
+pub(crate) fn valid_challenge(s: &str) -> bool {
     s.len() == 43
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -472,6 +501,13 @@ pub(crate) async fn login_callback(
         let port = parts.next()?.parse::<u16>().ok()?;
         Some((port, parts.next()?.to_owned(), parts.next()?.to_owned()))
     });
+    let mcp = read_cookie(&headers, MCP_COOKIE)
+        .and_then(|v| {
+            let json = BASE64URL.decode(v).ok()?;
+            serde_json::from_slice::<McpClient>(&json).ok()
+        })
+        // Anyone who can plant a cookie can plant this one: it sends the code to this machine only.
+        .filter(|client| crate::oauth::loopback(&client.redirect_uri));
     let result = async {
         if let Some(err) = q.error {
             anyhow::bail!("GitHub sign-in failed: {err}");
@@ -519,13 +555,27 @@ pub(crate) async fn login_callback(
             USER_SESSION,
         )
         .await?;
-        match &tray {
-            Some((_, _, challenge)) => login_code(&state, &token, challenge).await,
-            None => Ok(token),
+        match (&tray, &mcp) {
+            (Some((_, _, challenge)), _) => login_code(&state, &token, challenge).await,
+            (None, Some(client)) => login_code(&state, &token, &client.challenge).await,
+            (None, None) => Ok(token),
         }
     }
     .await;
     let clear_oauth = cookie(&state, OAUTH_COOKIE, "", Duration::ZERO);
+    if let (None, Some(client)) = (&tray, mcp) {
+        return (
+            AppendHeaders([
+                (header::SET_COOKIE, clear_oauth),
+                (
+                    header::SET_COOKIE,
+                    cookie(&state, MCP_COOKIE, "", Duration::ZERO),
+                ),
+            ]),
+            Redirect::to(&mcp_redirect(&client, result)),
+        )
+            .into_response();
+    }
     match (result, tray) {
         // The session goes to the menu bar app, not to this browser: the browser carries only a
         // one-time code to it.
@@ -566,7 +616,30 @@ pub(crate) async fn login_callback(
     }
 }
 
-/// Seals the new session's token under a one-time code for the menu bar app.
+/// Back to the MCP client, with the one-time code or OAuth's error, and its `state`.
+fn mcp_redirect(client: &McpClient, result: anyhow::Result<String>) -> String {
+    let mut query = match result {
+        Ok(code) => format!("code={code}"),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "MCP sign-in failed");
+            format!(
+                "error=access_denied&error_description={}",
+                percent_encode(&format!("{e:#}"))
+            )
+        }
+    };
+    if let Some(state) = &client.state {
+        query.push_str(&format!("&state={}", percent_encode(state)));
+    }
+    let sep = if client.redirect_uri.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    format!("{}{sep}{query}", client.redirect_uri)
+}
+
+/// Seals the new session's token under a one-time code for the menu bar app or an MCP client.
 async fn login_code(state: &AppState, token: &str, challenge: &str) -> anyhow::Result<String> {
     let code = random_token(32);
     let code_hash = hash(&code);
@@ -596,28 +669,36 @@ pub(crate) async fn tray_token(
     State(state): State<AppState>,
     Json(body): Json<TokenRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
-    let code_hash = hash(&body.code);
-    let refused = || {
-        ApiError::Status(
+    match redeem(&state, &body.code, &body.verifier).await? {
+        Some(token) => Ok(Json(TokenResponse { token })),
+        None => Err(ApiError::Status(
             StatusCode::BAD_REQUEST,
             "This sign-in expired, or was used.".into(),
-        )
-    };
+        )),
+    }
+}
+
+/// The session token a one-time code holds, for the client with the PKCE verifier. `None` for
+/// a code that expired or was used, or another's verifier.
+pub(crate) async fn redeem(
+    state: &AppState,
+    code: &str,
+    verifier: &str,
+) -> anyhow::Result<Option<String>> {
+    let code_hash = hash(code);
     let Some(code) = state.store.take_login_code(&code_hash, unix_now()).await? else {
-        return Err(refused());
+        return Ok(None);
     };
     if !constant_time_eq(
-        Pkce::challenge(&body.verifier).as_bytes(),
+        Pkce::challenge(verifier).as_bytes(),
         code.challenge.as_bytes(),
     ) {
-        // Whoever has the code is not the app that asked: the session it hands over goes.
+        // Whoever has the code is not the client that asked: the session it hands over goes.
         state.store.delete_session(&code.token_hash).await?;
-        return Err(refused());
+        return Ok(None);
     }
     let token = state.vault.open(&code_secret(&code_hash), &code.token)?;
-    Ok(Json(TokenResponse {
-        token: token.expose_secret().to_owned(),
-    }))
+    Ok(Some(token.expose_secret().to_owned()))
 }
 
 pub(crate) async fn logout(
@@ -636,10 +717,35 @@ pub(crate) async fn logout(
 }
 
 async fn current_session(headers: &HeaderMap, state: &AppState) -> anyhow::Result<Option<Session>> {
-    let Some(token) = session_token(headers) else {
-        return Ok(None);
-    };
-    let token_hash = hash(&token);
+    match session_token(headers) {
+        Some(token) => session_of(state, &token).await,
+        None => Ok(None),
+    }
+}
+
+/// The GitHub token of the user session that `token` opens. `None` when it opens none.
+pub(crate) async fn session_github_token(
+    state: &AppState,
+    token: &str,
+) -> Result<Option<String>, ApiError> {
+    match session_of(state, token).await? {
+        Some(Session {
+            kind: SessionKind::User { installations, .. },
+            github,
+            ..
+        }) => SignedIn {
+            installations,
+            token_hash: hash(token),
+            github,
+        }
+        .github_token(state)
+        .map(Some),
+        _ => Ok(None),
+    }
+}
+
+async fn session_of(state: &AppState, token: &str) -> anyhow::Result<Option<Session>> {
+    let token_hash = hash(token);
     let Some(session) = state.store.session(&token_hash).await? else {
         return Ok(None);
     };
@@ -869,7 +975,7 @@ fn error_redirect(error: &str) -> Response {
     Redirect::to(&format!("/?error={url}")).into_response()
 }
 
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {

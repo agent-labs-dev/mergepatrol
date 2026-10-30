@@ -691,7 +691,7 @@ pub(crate) async fn lanes(
 
 /// The order the queue takes them in, as `Lane::next` picks: the job, then waiting priority PRs,
 /// then waiting PRs, each by place. Held PRs last.
-fn in_merge_order(mut entries: Vec<Entry>) -> Vec<Entry> {
+pub(crate) fn in_merge_order(mut entries: Vec<Entry>) -> Vec<Entry> {
     entries.sort_by_key(|e| match e.state {
         EntryState::Active => 0,
         EntryState::Waiting if e.priority => 1,
@@ -958,11 +958,15 @@ pub(crate) async fn repos(
 }
 
 async fn installation(app: &AppState, id: u64) -> Result<Installation, ApiError> {
+    Ok(github_app(app).await?.installation(id))
+}
+
+pub(crate) async fn github_app(app: &AppState) -> Result<App, ApiError> {
     let creds = app
         .app_credentials()
         .await?
         .ok_or_else(|| ApiError::Status(StatusCode::CONFLICT, "No GitHub App yet.".into()))?;
-    Ok(App::from_credentials(&creds)?.installation(id))
+    Ok(App::from_credentials(&creds)?)
 }
 
 pub(crate) async fn set_repo(
@@ -1257,25 +1261,8 @@ pub(crate) async fn queue_pull(
     let repo = repo_name(owner, name)?;
     let token = user.github_token(&app)?;
     let gh = installation(&app, id).await?;
-    let (labels, _) = repo_labels(&app, &gh, &repo).await?;
-    let mut add = vec![labels.trigger.as_str()];
-    if body.priority {
-        add.push(&labels.priority);
-    } else {
-        // A stack has priority while any of its layers has the label.
-        for n in layers(&gh, &repo, number).await? {
-            as_user(
-                setup::remove_label_as(&token, &repo.to_string(), n, &labels.priority).await,
-                &repo,
-            )?;
-        }
-    }
-    as_user(
-        setup::add_labels_as(&token, &repo.to_string(), number, &add).await,
-        &repo,
-    )?;
+    queue(&app, &gh, &token, &repo, number, body.priority).await?;
     tracing::info!(installation = id, %repo, number, priority = body.priority, "queued from the dashboard");
-    app.wake.wake(id, repo);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1289,18 +1276,60 @@ pub(crate) async fn dequeue_pull(
     let repo = repo_name(owner, name)?;
     let token = user.github_token(&app)?;
     let gh = installation(&app, id).await?;
-    let (labels, _) = repo_labels(&app, &gh, &repo).await?;
-    for n in layers(&gh, &repo, number).await? {
-        for label in [&labels.trigger, &labels.priority] {
+    dequeue(&app, &gh, &token, &repo, number).await?;
+    tracing::info!(installation = id, %repo, number, "dequeued from the dashboard");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Puts the queue labels on the PR with `token`, and wakes the repo's queue.
+pub(crate) async fn queue(
+    app: &AppState,
+    gh: &Installation,
+    token: &str,
+    repo: &RepoName,
+    number: u64,
+    priority: bool,
+) -> Result<(), ApiError> {
+    let (labels, _) = repo_labels(app, gh, repo).await?;
+    let mut add = vec![labels.trigger.as_str()];
+    if priority {
+        add.push(&labels.priority);
+    } else {
+        // A stack has priority while any of its layers has the label.
+        for n in layers(gh, repo, number).await? {
             as_user(
-                setup::remove_label_as(&token, &repo.to_string(), n, label).await,
-                &repo,
+                setup::remove_label_as(token, &repo.to_string(), n, &labels.priority).await,
+                repo,
             )?;
         }
     }
-    tracing::info!(installation = id, %repo, number, "dequeued from the dashboard");
-    app.wake.wake(id, repo);
-    Ok(StatusCode::NO_CONTENT)
+    as_user(
+        setup::add_labels_as(token, &repo.to_string(), number, &add).await,
+        repo,
+    )?;
+    app.wake.wake(gh.id, repo.clone());
+    Ok(())
+}
+
+/// Takes the queue labels off the PR and its stack with `token`, and wakes the repo's queue.
+pub(crate) async fn dequeue(
+    app: &AppState,
+    gh: &Installation,
+    token: &str,
+    repo: &RepoName,
+    number: u64,
+) -> Result<(), ApiError> {
+    let (labels, _) = repo_labels(app, gh, repo).await?;
+    for n in layers(gh, repo, number).await? {
+        for label in [&labels.trigger, &labels.priority] {
+            as_user(
+                setup::remove_label_as(token, &repo.to_string(), n, label).await,
+                repo,
+            )?;
+        }
+    }
+    app.wake.wake(gh.id, repo.clone());
+    Ok(())
 }
 
 /// Closes an open PR, as the user. The queue lists only the open PRs it does not have, so
@@ -1728,6 +1757,19 @@ pub(crate) async fn delete_api_key(
 mod tests {
     use super::*;
     use mergepatrol_core::PrSummary;
+
+    /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
+    #[test]
+    fn this_repo_has_the_skill_every_repo_gets() {
+        assert_eq!(
+            include_str!("../../../.agents/skills/mergepatrol/SKILL.md"),
+            SKILL
+        );
+        assert_eq!(
+            include_str!("../../../.claude/skills/mergepatrol/SKILL.md"),
+            SKILL
+        );
+    }
 
     #[test]
     fn llm_stats_group_by_model_and_effort_costliest_first() {

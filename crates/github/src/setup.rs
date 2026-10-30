@@ -403,6 +403,30 @@ pub async fn close_pull_as(token: &str, repo: &str, number: u64) -> Result<()> {
     Ok(())
 }
 
+/// Whether GitHub takes the token, of any kind: `/rate_limit` answers every token, and costs
+/// none of its rate limit.
+pub async fn token_works(token: &str) -> Result<bool> {
+    match user_get(token, "/rate_limit").await {
+        Ok(res) => {
+            res.error_for_status()?;
+            Ok(true)
+        }
+        Err(e) if e.is::<Revoked>() => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the token can read `repo`. GitHub answers 404 for a private repo it cannot.
+/// `Revoked` when GitHub does not take the token.
+pub async fn can_read(token: &str, repo: &str) -> Result<bool> {
+    let res = user_get(token, &format!("/repos/{repo}")).await?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    res.error_for_status()?;
+    Ok(true)
+}
+
 /// A 401 is `Revoked`, a 403 `Refused`.
 async fn user_write(token: &str, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
     let res = req

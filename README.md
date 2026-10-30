@@ -174,6 +174,32 @@ The dashboard edits the file through PRs. **Set up** opens a PR that adds the fi
 
 When the file does not parse, the queue pauses, and **Repos** shows why, until the file is fixed.
 
+## Queue from an agent
+
+Mergepatrol serves an MCP server at `/mcp`, so a coding agent can queue a PR, take it out, and read where it is, without handling labels. Every call acts as a GitHub user or bot: Mergepatrol puts the labels on with their token, so GitHub checks they have triage access to the repo.
+
+An MCP client that supports OAuth signs in with GitHub in the browser, as the dashboard does:
+
+```sh
+claude mcp add --transport http mergepatrol https://mergepatrol.ai/mcp
+```
+
+The client gets a Mergepatrol session, and the GitHub token stays on the server. Mergepatrol sends the sign-in back only to a loopback address, where native clients such as Claude Code, Codex and Cursor listen.
+
+An agent without a browser, such as one in CI, passes a GitHub token instead: one from `gh auth token`, a personal access token, or a workflow's `GITHUB_TOKEN`. A fine-grained token also needs write access to issues or pull requests. Mergepatrol never stores the token. It remembers its hash, in memory for 5 minutes, so calls in a row do not each ask GitHub again.
+
+```sh
+claude mcp add --transport http mergepatrol https://mergepatrol.ai/mcp \
+  --header "Authorization: Bearer $(gh auth token)"
+```
+
+| Tool | Does |
+| --- | --- |
+| `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front |
+| `dequeue_pull` | Takes a PR, and its stack, out of the queue |
+| `pull_status` | The PR's place in the queue, and its latest events |
+| `list_queue` | The repo's queues, in the order they take PRs |
+
 ## How jobs are isolated
 
 A rebase job runs the repo's code (the verify commands) and an agent with a shell. Mergepatrol treats it as untrusted:
