@@ -1,85 +1,38 @@
-//! The MCP server at `/mcp`, for coding agents: queue a PR, take it out, and read where it is,
-//! without handling the labels. The bearer token is a GitHub token, or a Mergepatrol session
-//! from signing in through `oauth`, which holds one. Either way an agent acts as the person or
-//! bot the GitHub token is for, and GitHub checks what they may do.
+//! The MCP server at `/mcp`, for coding agents: a tool for each API route, as `routes` lists
+//! them, so an agent does what the dashboard does. The bearer token is a GitHub token, or a
+//! Mergepatrol session from signing in through `oauth`, which holds one. Either way an agent acts
+//! as the person or bot the GitHub token is for, and GitHub checks what they may do.
 //!
 //! Streamable HTTP without sessions: each POST carries one JSON-RPC message, answered as JSON.
 
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
 use axum::Json;
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use mergepatrol_core::{EntryState, RepoName};
-use mergepatrol_github::{Installation, setup};
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use mergepatrol_core::RepoName;
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
-use crate::api::{dequeue, github_app, in_merge_order, queue};
-use crate::auth::{hash, session_github_token};
+use crate::auth::{Caller, bearer_caller, percent_encode};
+use crate::routes::{self, Route, Tool, Ty};
 use crate::{ApiError, AppState};
 
 /// The newest first: the protocol versions this server speaks.
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "Mergepatrol is the merge queue of the repos it is installed on. Queue a PR with `queue_pull` instead of merging it, then follow it with `pull_status`. Calls act as the GitHub user or bot you connected as.";
-
-/// How many of a PR's events `pull_status` returns.
-const EVENTS: u32 = 10;
-
-/// How long what GitHub said of a token holds. A token revoked meanwhile still reads the queue
-/// until then, but changes nothing: the labels go on with the token itself.
-const SEEN_FOR: Duration = Duration::from_secs(300);
-
-/// What GitHub said lately of the GitHub tokens agents call with, by their hash: so a call costs
-/// none of a token's rate limit before its own.
-#[derive(Default)]
-pub(crate) struct Seen {
-    /// The tokens GitHub takes.
-    tokens: Recent<String, ()>,
-    /// The installation on each repo a token can read.
-    repos: Recent<(String, RepoName), u64>,
-}
-
-struct Recent<K, V>(Mutex<HashMap<K, (Instant, V)>>);
-
-impl<K, V> Default for Recent<K, V> {
-    fn default() -> Self {
-        Self(Mutex::default())
-    }
-}
-
-impl<K: Eq + Hash, V: Clone> Recent<K, V> {
-    fn get(&self, key: &K) -> Option<V> {
-        let map = self.0.lock().unwrap();
-        map.get(key)
-            .filter(|(at, _)| at.elapsed() < SEEN_FOR)
-            .map(|(_, v)| v.clone())
-    }
-
-    fn put(&self, key: K, value: V) {
-        let mut map = self.0.lock().unwrap();
-        map.retain(|_, (at, _)| at.elapsed() < SEEN_FOR);
-        map.insert(key, (Instant::now(), value));
-    }
-}
+const INSTRUCTIONS: &str = "Mergepatrol is the merge queue of the repos it is installed on. Queue a PR with `queue_pull` instead of merging it, then follow it with `pull_status`. The other tools do what the Mergepatrol dashboard does. Calls act as the GitHub user or bot you connected as. A GitHub token reaches single repos: the tools for a whole workspace need a Mergepatrol sign-in.";
 
 pub(crate) async fn post(
     State(app): State<AppState>,
     headers: HeaderMap,
     Json(message): Json<Value>,
 ) -> Response {
-    let token = match bearer(&headers) {
-        Some(bearer) => caller(&app, &bearer).await,
-        None => Ok(None),
+    let Some(bearer) = bearer(&headers) else {
+        return unauthorized(&app);
     };
-    let token = match token {
-        Ok(Some(token)) => token,
+    let caller = match bearer_caller(&app, &bearer).await {
+        Ok(Some(caller)) => caller,
         Ok(None) => return unauthorized(&app),
         Err(e) => return e.into_response(),
     };
@@ -91,8 +44,11 @@ pub(crate) async fn post(
     let result = match method {
         "initialize" => Ok(initialize(params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
-        "tools/call" => Ok(call(&app, &token, params).await),
+        "tools/list" => {
+            let tools: Vec<Value> = routes::tools().map(|(r, t)| t.listing(r)).collect();
+            Ok(json!({ "tools": tools }))
+        }
+        "tools/call" => Ok(call(&app, &caller, &bearer, params).await),
         _ => Err(json!({ "code": -32601, "message": format!("no method {method}") })),
     };
     let body = match result {
@@ -121,27 +77,6 @@ fn unauthorized(app: &AppState) -> Response {
         .into_response()
 }
 
-/// The GitHub token to act with: the session's, or the bearer itself. `None` when it is
-/// neither a session nor a token GitHub takes.
-async fn caller(app: &AppState, bearer: &str) -> Result<Option<String>, ApiError> {
-    match session_github_token(app, bearer).await {
-        Ok(Some(token)) => return Ok(Some(token)),
-        Ok(None) => {}
-        // A session whose GitHub token is gone: the client signs in again.
-        Err(ApiError::Status(StatusCode::UNAUTHORIZED, _)) => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    let key = hash(bearer);
-    if app.seen.tokens.get(&key).is_some() {
-        return Ok(Some(bearer.to_owned()));
-    }
-    if !setup::token_works(bearer).await? {
-        return Ok(None);
-    }
-    app.seen.tokens.put(key, ());
-    Ok(Some(bearer.to_owned()))
-}
-
 fn bearer(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)?
@@ -166,87 +101,20 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-fn tools() -> Value {
-    let repo = json!({ "type": "string", "description": "The repo, as `owner/name`." });
-    let number = json!({ "type": "integer", "description": "The PR's number." });
-    json!([
-        {
-            "name": "queue_pull",
-            "description": "Queue a PR to merge: Mergepatrol rebases it, tests it, and merges it once its checks pass. On a queued PR, changes its priority. Queuing one PR of a stack queues the whole stack. Needs triage access to the repo.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "repo": repo,
-                    "number": number,
-                    "priority": { "type": "boolean", "description": "Put it at the front of the queue. Default false." },
-                },
-                "required": ["repo", "number"],
-            },
-        },
-        {
-            "name": "dequeue_pull",
-            "description": "Take a PR, and its stack if it is in one, out of the queue. Cancels its run. Needs triage access to the repo.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "repo": repo, "number": number },
-                "required": ["repo", "number"],
-            },
-        },
-        {
-            "name": "pull_status",
-            "description": "Where a PR is: its place in the queue, or null when it is not queued, and its latest queue events, newest first. An event of kind `merged`, `ejected`, `dequeued` or `cancelled` is how it last left the queue.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "repo": repo, "number": number },
-                "required": ["repo", "number"],
-            },
-            "annotations": { "readOnlyHint": true },
-        },
-        {
-            "name": "list_queue",
-            "description": "A repo's queues, one per branch PRs merge into, each in the order it takes them.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "repo": repo },
-                "required": ["repo"],
-            },
-            "annotations": { "readOnlyHint": true },
-        },
-    ])
-}
-
-#[derive(Deserialize)]
-struct RepoArgs {
-    repo: String,
-}
-
-#[derive(Deserialize)]
-struct PullArgs {
-    repo: String,
-    number: u64,
-}
-
-#[derive(Deserialize)]
-struct QueueArgs {
-    repo: String,
-    number: u64,
-    #[serde(default)]
-    priority: bool,
-}
-
-/// A tool's result. Its errors are the tool's, for the agent to read, not the protocol's.
-async fn call(app: &AppState, token: &str, params: &Value) -> Value {
+/// A tool's result: its route's answer. Its errors are the tool's, for the agent to read, not
+/// the protocol's.
+async fn call(app: &AppState, caller: &Caller, bearer: &str, params: &Value) -> Value {
     let name = params["name"].as_str().unwrap_or_default();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    let result = match name {
-        "queue_pull" => queue_pull(app, token, args).await,
-        "dequeue_pull" => dequeue_pull(app, token, args).await,
-        "pull_status" => pull_status(app, token, args).await,
-        "list_queue" => list_queue(app, token, args).await,
-        _ => Err(ApiError::bad_request(&format!("No tool {name}."))),
+    let result = match routes::tools().find(|(_, t)| t.name == name) {
+        Some((route, tool)) => match request(app, caller, route, tool, bearer, args).await {
+            Ok(req) => answer(app, req).await,
+            Err(e) => Err(e),
+        },
+        None => Err(ApiError::bad_request(&format!("No tool {name}."))),
     };
     let (text, is_error) = match result {
-        Ok(value) => (value.to_string(), false),
+        Ok(text) => (text, false),
         Err(ApiError::Status(_, m)) => (m, true),
         Err(ApiError::Internal(e)) => {
             tracing::error!(error = %format!("{e:#}"), tool = name, "MCP error");
@@ -256,121 +124,104 @@ async fn call(app: &AppState, token: &str, params: &Value) -> Value {
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
-async fn queue_pull(app: &AppState, token: &str, args: Value) -> Result<Value, ApiError> {
-    let QueueArgs {
-        repo,
-        number,
-        priority,
-    } = parse(args)?;
-    let (repo, gh) = open(app, token, &repo).await?;
-    queue(app, &gh, token, &repo, number, priority).await?;
-    tracing::info!(installation = gh.id, %repo, number, priority, "queued over MCP");
-    Ok(json!({ "queued": true }))
-}
-
-async fn dequeue_pull(app: &AppState, token: &str, args: Value) -> Result<Value, ApiError> {
-    let PullArgs { repo, number } = parse(args)?;
-    let (repo, gh) = open(app, token, &repo).await?;
-    dequeue(app, &gh, token, &repo, number).await?;
-    tracing::info!(installation = gh.id, %repo, number, "dequeued over MCP");
-    Ok(json!({ "dequeued": true }))
-}
-
-async fn pull_status(app: &AppState, token: &str, args: Value) -> Result<Value, ApiError> {
-    let PullArgs { repo, number } = parse(args)?;
-    let (repo, gh) = open(app, token, &repo).await?;
-    let queued = app
-        .store
-        .repo_lanes(gh.id, &repo)
-        .await?
-        .into_iter()
-        .find_map(|(trunk, lane)| {
-            let entries = in_merge_order(lane.entries);
-            let place = entries.iter().position(|e| e.prs().contains(&number))?;
-            let mut view = entry(&entries[place]);
-            view["trunk"] = json!(trunk);
-            view["position"] = json!(place + 1);
-            view["batch_pr"] = json!(lane.batch_pr);
-            Some(view)
-        });
-    let events: Vec<Value> = app
-        .store
-        .events(gh.id, &repo, Some(number), EVENTS)
-        .await?
-        .into_iter()
-        .map(|e| json!({ "at": e.at, "kind": e.kind, "message": e.message }))
-        .collect();
-    Ok(json!({ "queued": queued, "events": events }))
-}
-
-async fn list_queue(app: &AppState, token: &str, args: Value) -> Result<Value, ApiError> {
-    let RepoArgs { repo } = parse(args)?;
-    let (repo, gh) = open(app, token, &repo).await?;
-    let lanes: Vec<Value> = app
-        .store
-        .repo_lanes(gh.id, &repo)
-        .await?
-        .into_iter()
-        .map(|(trunk, lane)| {
-            let entries: Vec<Value> = in_merge_order(lane.entries).iter().map(entry).collect();
-            json!({ "trunk": trunk, "batch_pr": lane.batch_pr, "entries": entries })
-        })
-        .collect();
-    Ok(json!({ "queues": lanes }))
-}
-
-fn entry(e: &mergepatrol_core::Entry) -> Value {
-    let (state, held_because) = match &e.state {
-        EntryState::Waiting => ("waiting", None),
-        EntryState::Active => ("running", None),
-        EntryState::Held(why) => ("held", Some(why)),
-    };
-    json!({
-        "number": e.number,
-        "title": e.summary.title,
-        "url": e.summary.url,
-        "state": state,
-        "held_because": held_because,
-        "priority": e.priority,
-        "stack": e.layers,
-    })
-}
-
-fn parse<T: DeserializeOwned>(args: Value) -> Result<T, ApiError> {
-    serde_json::from_value(args).map_err(|e| ApiError::bad_request(&format!("Bad arguments: {e}.")))
-}
-
-/// The repo, and the App's installation on it, once the token shows its owner can read it.
-async fn open(
+/// The tool's call to its route: the path parameters from their arguments, and the others as
+/// the query of a GET, or the body of anything else.
+async fn request(
     app: &AppState,
-    token: &str,
-    repo: &str,
-) -> Result<(RepoName, Installation), ApiError> {
-    let repo =
-        RepoName::parse(repo).ok_or_else(|| ApiError::bad_request("`repo` must be owner/name."))?;
-    let github = github_app(app).await?;
-    let key = (hash(token), repo.clone());
-    if let Some(id) = app.seen.repos.get(&key) {
-        return Ok((repo, github.installation(id)));
+    caller: &Caller,
+    route: &Route,
+    tool: &Tool,
+    bearer: &str,
+    args: Value,
+) -> Result<Request<Body>, ApiError> {
+    let Value::Object(mut args) = args else {
+        return Err(ApiError::bad_request("Bad arguments: not an object."));
+    };
+    let mut names: Vec<&str> = route.path_args().map(|(_, name, ..)| *name).collect();
+    names.extend(tool.args.iter().filter(|a| a.required).map(|a| a.name));
+    let workspace_from_repo = route.takes_repo(tool);
+    if let Some(missing) = names
+        .into_iter()
+        .filter(|&n| !(n == "workspace" && workspace_from_repo))
+        .find(|&n| !args.contains_key(n))
+    {
+        return Err(ApiError::bad_request(&format!(
+            "Bad arguments: missing field `{missing}`."
+        )));
     }
-    let not_found = || ApiError::Status(StatusCode::NOT_FOUND, format!("No repo {repo}."));
-    match setup::can_read(token, &repo.to_string()).await {
-        Ok(true) => {}
-        Ok(false) => return Err(not_found()),
-        Err(e) if e.is::<setup::Revoked>() => {
-            return Err(ApiError::Status(
-                StatusCode::UNAUTHORIZED,
-                "GitHub does not take this token.".into(),
-            ));
+    let repo = match args.get("repo") {
+        Some(repo) => Some(
+            repo.as_str()
+                .and_then(RepoName::parse)
+                .ok_or_else(|| ApiError::bad_request("`repo` must be owner/name."))?,
+        ),
+        None => None,
+    };
+    let mut path = route.path.to_owned();
+    for (param, name, ..) in route.path_args() {
+        let value = match (*param, &repo) {
+            ("id", Some(repo)) if !args.contains_key("workspace") => {
+                caller.workspace_of(app, repo).await?.to_string()
+            }
+            ("owner", Some(repo)) => {
+                args.remove("repo");
+                path = path.replace("{owner}/{name}", &repo.to_string());
+                continue;
+            }
+            _ => scalar(name, args.remove(*name))?,
+        };
+        path = path.replace(&format!("{{{param}}}"), &percent_encode(&value));
+    }
+    let req = Request::builder()
+        .method(route.method.clone())
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    let req = if route.method == Method::GET {
+        let query: Vec<String> = args
+            .into_iter()
+            .map(|(k, v)| Ok(format!("{k}={}", percent_encode(&scalar(&k, Some(v))?))))
+            .collect::<Result<_, ApiError>>()?;
+        if !query.is_empty() {
+            path = format!("{path}?{}", query.join("&"));
         }
-        Err(e) => return Err(e.into()),
+        req.uri(path).body(Body::empty())
+    } else {
+        let body = match tool.args.iter().find(|a| matches!(a.ty, Ty::Body)) {
+            Some(arg) => args.remove(arg.name).unwrap_or_default(),
+            None => Value::Object(args),
+        };
+        req.uri(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+    };
+    req.map_err(|e| ApiError::bad_request(&format!("Bad arguments: {e}.")))
+}
+
+/// An argument that goes in the URL.
+fn scalar(name: &str, value: Option<Value>) -> Result<String, ApiError> {
+    match value {
+        Some(Value::String(s)) => Ok(s),
+        Some(v @ (Value::Number(_) | Value::Bool(_))) => Ok(v.to_string()),
+        _ => Err(ApiError::bad_request(&format!(
+            "Bad arguments: `{name}` must be a string, number or boolean."
+        ))),
     }
-    let gh = github.installation_for(&repo).await?.ok_or_else(|| {
-        ApiError::Status(
-            StatusCode::NOT_FOUND,
-            format!("Mergepatrol is not installed on {repo}."),
-        )
-    })?;
-    app.seen.repos.put(key, gh.id);
-    Ok((repo, gh))
+}
+
+/// The route's answer, as the agent reads it.
+async fn answer(app: &AppState, req: Request<Body>) -> Result<String, ApiError> {
+    let res = routes::router()
+        .with_state(app.clone())
+        .oneshot(req)
+        .await
+        .unwrap_or_else(|e| match e {});
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    match (status.is_success(), text.is_empty()) {
+        (true, true) => Ok("Done.".into()),
+        (true, false) => Ok(text),
+        (false, _) => Err(ApiError::Status(status, text)),
+    }
 }

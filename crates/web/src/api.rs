@@ -13,14 +13,14 @@ use mergepatrol_github::{
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
-    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
-    InboxRow, LaneKey, RepoState, Scope, Slice, Store, api_key_secret,
+    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, EventRecord, ExitQuery,
+    ExitRecord, ExitStats, InboxRow, LaneKey, RepoState, Scope, Slice, Store, api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::auth::SignedIn;
+use crate::auth::Caller;
 use crate::{ApiError, AppState, Wake};
 
 #[derive(Serialize, TS)]
@@ -741,16 +741,31 @@ pub(crate) struct EventsQuery {
     pr: Option<u64>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct LanesQuery {
+    /// Every repo's without one.
+    repo: Option<String>,
+}
+
 pub(crate) async fn lanes(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
+    Query(q): Query<LanesQuery>,
 ) -> Result<Json<Vec<LaneView>>, ApiError> {
-    let id = user.workspace(id)?;
+    let repo = q
+        .repo
+        .map(|r| RepoName::parse(&r).ok_or(ApiError::bad_request("repo must be owner/name")))
+        .transpose()?;
+    let id = match &repo {
+        Some(repo) => caller.repo(&app, id, repo).await?,
+        None => caller.workspace(id)?,
+    };
     let lanes = app.store.lanes(id).await?;
     Ok(Json(
         lanes
             .into_iter()
+            .filter(|(key, _)| repo.as_ref().is_none_or(|r| key.repo == *r))
             .map(|(key, lane)| LaneView {
                 repo: key.repo.to_string(),
                 trunk: key.trunk,
@@ -778,26 +793,27 @@ pub(crate) fn in_merge_order(mut entries: Vec<Entry>) -> Vec<Entry> {
 
 pub(crate) async fn events(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
     Query(q): Query<EventsQuery>,
 ) -> Result<Json<Vec<EventView>>, ApiError> {
-    let id = user.workspace(id)?;
     let repo = RepoName::parse(&q.repo).ok_or(ApiError::bad_request("repo must be owner/name"))?;
+    let id = caller.repo(&app, id, &repo).await?;
     let events = app.store.events(id, &repo, q.pr, 200).await?;
-    Ok(Json(
-        events
-            .into_iter()
-            .map(|e| EventView {
-                spend: Spend::parse(&e.kind, &e.message).map(SpendView::from),
-                repo: e.repo,
-                pr: e.pr as u32,
-                at: e.at,
-                kind: e.kind,
-                message: e.message,
-            })
-            .collect(),
-    ))
+    Ok(Json(events.into_iter().map(EventView::from).collect()))
+}
+
+impl From<EventRecord> for EventView {
+    fn from(e: EventRecord) -> Self {
+        EventView {
+            spend: Spend::parse(&e.kind, &e.message).map(SpendView::from),
+            repo: e.repo,
+            pr: e.pr as u32,
+            at: e.at,
+            kind: e.kind,
+            message: e.message,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -816,12 +832,12 @@ pub struct FixView {
 /// The changes of the fix agent's commit `sha`. Not of any other commit.
 pub(crate) async fn fix(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
     Query(q): Query<FixQuery>,
 ) -> Result<Json<FixView>, ApiError> {
-    let id = user.workspace(id)?;
     let repo = RepoName::parse(&q.repo).ok_or(ApiError::bad_request("repo must be owner/name"))?;
+    let id = caller.repo(&app, id, &repo).await?;
     if q.sha.len() != 40 || !q.sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(ApiError::bad_request("sha must be a commit SHA"));
     }
@@ -874,11 +890,11 @@ impl HistoryQuery {
 
 pub(crate) async fn history(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<ExitsPage>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let repo = q.repo()?;
     let outcomes: &[&str] = match q.outcome {
         None => &[],
@@ -908,11 +924,11 @@ pub(crate) async fn history(
 
 pub(crate) async fn history_stats(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<HistoryStatsView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let (repo, days) = (q.repo()?, q.days()?);
     let slice = q.slice(repo.as_ref());
     // Each repo's of the author's, and each author's of the repo's, so either can break down
@@ -999,10 +1015,10 @@ impl From<ExitRecord> for ExitView {
 /// The repos this workspace's installation can access, and whether Mergepatrol runs on each.
 pub(crate) async fn repos(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<Vec<RepoView>>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let known: HashMap<RepoName, RepoState> = app
         .store
         .repos()
@@ -1046,11 +1062,11 @@ pub(crate) async fn github_app(app: &AppState) -> Result<App, ApiError> {
 
 pub(crate) async fn set_repo(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
     Json(body): Json<SetRepo>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
     app.store.set_repo_enabled(id, &repo, body.enabled).await?;
     tracing::info!(installation = id, %repo, enabled = ?body.enabled, "repo setting changed");
@@ -1065,12 +1081,12 @@ const OPEN_PULLS: u32 = 50;
 /// revoked token means signing in again.
 pub(crate) async fn open_pulls(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
 ) -> Result<Json<Vec<OpenPullView>>, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let gh = AsUser::new(user.github_token(&app)?)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let gh = AsUser::new(caller.github_token(&app)?)?;
     let file = as_user(gh.default_branch_file(&repo, REPO_CONFIG_PATH).await, &repo)?;
     let (labels, trunk) = labels_of(&app, file)?;
     // A stack's layers are in the queue with it, though one layer alone may have the label.
@@ -1266,12 +1282,12 @@ impl From<PullDetail> for PullDetailView {
 /// An open PR's description, labels, checks and timeline, read as the user like the open PRs.
 pub(crate) async fn pull_detail(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
 ) -> Result<Json<PullDetailView>, ApiError> {
-    user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let gh = AsUser::new(user.github_token(&app)?)?;
+    caller.repo(&app, id, &repo).await?;
+    let gh = AsUser::new(caller.github_token(&app)?)?;
     let detail = as_user(gh.pull_detail(&repo, number).await, &repo)?;
     Ok(Json(detail.into()))
 }
@@ -1292,18 +1308,18 @@ pub struct PullDiffView {
 /// An open PR's diff, or one of its commits', read as the user.
 pub(crate) async fn pull_diff(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
     Query(q): Query<PullDiffQuery>,
 ) -> Result<Json<PullDiffView>, ApiError> {
-    user.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    caller.repo(&app, id, &repo).await?;
     if let Some(sha) = &q.commit
         && (sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()))
     {
         return Err(ApiError::bad_request("commit must be a commit SHA"));
     }
-    let gh = AsUser::new(user.github_token(&app)?)?;
+    let gh = AsUser::new(caller.github_token(&app)?)?;
     let patch = as_user(
         gh.pull_diff(&repo, number, q.commit.as_deref()).await,
         &repo,
@@ -1321,6 +1337,7 @@ pub(crate) async fn pull_diff(
 #[ts(export)]
 pub struct QueuePull {
     /// To the front of the queue.
+    #[serde(default)]
     pub priority: bool,
 }
 
@@ -1328,13 +1345,13 @@ pub struct QueuePull {
 /// user, so GitHub checks that they may.
 pub(crate) async fn queue_pull(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
     Json(body): Json<QueuePull>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let token = user.github_token(&app)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let token = caller.github_token(&app)?;
     let gh = installation(&app, id).await?;
     queue(&app, &gh, &token, &repo, number, body.priority).await?;
     tracing::info!(installation = id, %repo, number, priority = body.priority, "queued from the dashboard");
@@ -1344,16 +1361,57 @@ pub(crate) async fn queue_pull(
 /// Takes the PR out of the queue, and its stack if it is in one, as the user.
 pub(crate) async fn dequeue_pull(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let token = user.github_token(&app)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let token = caller.github_token(&app)?;
     let gh = installation(&app, id).await?;
     dequeue(&app, &gh, &token, &repo, number).await?;
     tracing::info!(installation = id, %repo, number, "dequeued from the dashboard");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Where the queue has a PR, and how it last left.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct PullStatusView {
+    /// `None` when the PR is not queued.
+    pub queue: Option<QueueSpotView>,
+    /// The latest, newest first. One of kind `merged`, `ejected`, `dequeued` or `cancelled` is
+    /// how it last left the queue.
+    pub events: Vec<EventView>,
+}
+
+/// How many of a PR's events its status has.
+const STATUS_EVENTS: u32 = 10;
+
+pub(crate) async fn pull_status(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<Json<PullStatusView>, ApiError> {
+    let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let lanes = app.store.repo_lanes(id, &repo).await?;
+    let lanes = lanes.into_iter().map(|(trunk, lane)| {
+        let key = LaneKey {
+            installation_id: id,
+            repo: repo.clone(),
+            trunk,
+        };
+        (key, lane)
+    });
+    let queue = queue_spots(lanes.collect()).remove(&(repo.clone(), number));
+    let events = app
+        .store
+        .events(id, &repo, Some(number), STATUS_EVENTS)
+        .await?;
+    Ok(Json(PullStatusView {
+        queue,
+        events: events.into_iter().map(EventView::from).collect(),
+    }))
 }
 
 /// Puts the queue labels on the PR with `token`, and wakes the repo's queue.
@@ -1431,12 +1489,12 @@ pub(crate) async fn relabeled(
 /// none of its own.
 pub(crate) async fn close_pull(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let token = user.github_token(&app)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let token = caller.github_token(&app)?;
     as_user(
         setup::close_pull_as(&token, &repo.to_string(), number).await,
         &repo,
@@ -1451,8 +1509,9 @@ const MERGED_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 
 /// The user's inbox, as webhooks keep it, with where the queue has each PR.
 pub(crate) async fn you(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
 ) -> Result<Json<YouView>, ApiError> {
+    let user = caller.user()?;
     let ids = user.installations();
     let inbox = app.store.inbox(user.login(), ids, MERGED_FOR).await?;
     let on: HashSet<(u64, RepoName)> = app
@@ -1514,13 +1573,13 @@ fn unread(activity: &[(String, String)], me: &str, seen: Option<&str>) -> u32 {
 /// The user opened the PR in the dashboard: what came before is read.
 pub(crate) async fn seen_pull(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
     app.store
-        .inbox_seen(user.login(), id, &repo, number)
+        .inbox_seen(caller.user()?.login(), id, &repo, number)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1528,12 +1587,12 @@ pub(crate) async fn seen_pull(
 /// Mentions the reviewers in a comment as the user, so GitHub tells them.
 pub(crate) async fn nudge_pull(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
     Json(body): Json<NudgePull>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
     let login = |l: &String| {
         !l.is_empty() && l.len() <= 39 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     };
@@ -1545,7 +1604,7 @@ pub(crate) async fn nudge_pull(
         "{}, could you review this when you have a moment?",
         mentions.join(" ")
     );
-    let token = user.github_token(&app)?;
+    let token = caller.github_token(&app)?;
     as_user(
         setup::comment_as(&token, &repo.to_string(), number, &text).await,
         &repo,
@@ -1586,13 +1645,13 @@ fn queue_spots(lanes: Vec<(LaneKey, Lane)>) -> HashMap<(RepoName, u64), QueueSpo
 /// a review may be what held it.
 pub(crate) async fn review_pull(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
     Json(body): Json<ReviewPull>,
 ) -> Result<StatusCode, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
-    let token = user.github_token(&app)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let token = caller.github_token(&app)?;
     let verdict = match body.verdict {
         VerdictView::Approve => setup::Verdict::Approve,
         VerdictView::RequestChanges => setup::Verdict::RequestChanges,
@@ -1616,12 +1675,13 @@ pub(crate) async fn review_pull(
         })?;
     tracing::info!(installation = id, %repo, number, verdict = ?verdict, "reviewed from the dashboard");
     // The inbox shows the review now; GitHub's reads, a moment later, settle it.
-    if verdict == setup::Verdict::Comment {
-        app.store.inbox_changed(id, &repo, number).await?;
-    } else {
-        app.store
-            .inbox_reviewed(id, &repo, number, user.login())
-            .await?;
+    match &caller {
+        Caller::User(user) if verdict != setup::Verdict::Comment => {
+            app.store
+                .inbox_reviewed(id, &repo, number, user.login())
+                .await?;
+        }
+        _ => app.store.inbox_changed(id, &repo, number).await?,
     }
     let gh = installation(&app, id).await?;
     if body.queue {
@@ -1690,11 +1750,11 @@ const SKILL_DIRS: [&str; 2] = [".agents/skills", ".claude/skills"];
 /// The repo's settings as its default branch has them, and the PR that would change them.
 pub(crate) async fn repo_config(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
 ) -> Result<Json<RepoConfigView>, ApiError> {
-    let id = user.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
     let gh = installation(&app, id).await?;
     let file = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
     let defaults: &RepoSettings = &app.repo_defaults;
@@ -1726,11 +1786,11 @@ pub(crate) async fn repo_config(
 /// Opens a PR that writes these settings to the repo's config file, or updates the one open.
 pub(crate) async fn propose_repo_config(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
     Json(body): Json<RepoSettingsView>,
 ) -> Result<Json<PullRequestRef>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
     let settings = RepoSettings::from(body);
     settings
@@ -1844,10 +1904,10 @@ fn config_pr(
 
 pub(crate) async fn settings(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    settings_view(&app, user.workspace(id)?).await
+    settings_view(&app, caller.workspace(id)?).await
 }
 
 async fn settings_view(app: &AppState, id: u64) -> Result<Json<SettingsView>, ApiError> {
@@ -1899,10 +1959,10 @@ async fn device_login(app: &AppState, id: u64) -> anyhow::Result<Option<DeviceLo
 /// vault, not in memory: the user's next poll can reach another instance.
 pub(crate) async fn start_chatgpt_login(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let device = app
         .chatgpt
         .start()
@@ -1923,10 +1983,10 @@ pub(crate) async fn start_chatgpt_login(
 /// Asks OpenAI once whether the user has entered the code, and keeps the login once they have.
 pub(crate) async fn poll_chatgpt_login(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let scope = Scope::Installation(id);
     let Some(device) = device_login(&app, id).await? else {
         return Err(ApiError::Status(
@@ -1966,10 +2026,10 @@ async fn set_json(
 
 pub(crate) async fn delete_chatgpt_login(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let scope = Scope::Installation(id);
     app.vault.delete(scope, CHATGPT_LOGIN).await?;
     app.vault.delete(scope, CHATGPT_DEVICE_LOGIN).await?;
@@ -1987,11 +2047,11 @@ fn provider(id: &str) -> Result<Provider, ApiError> {
 /// rebase.
 pub(crate) async fn set_api_key(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, provider_id)): Path<(u64, String)>,
     Json(body): Json<SetSecret>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let provider = provider(&provider_id)?;
     let key = body.value.expose_secret().trim();
     if key.is_empty() {
@@ -2020,10 +2080,10 @@ pub(crate) async fn set_api_key(
 
 pub(crate) async fn delete_api_key(
     State(app): State<AppState>,
-    user: SignedIn,
+    caller: Caller,
     Path((id, provider_id)): Path<(u64, String)>,
 ) -> Result<Json<SettingsView>, ApiError> {
-    let id = user.workspace(id)?;
+    let id = caller.workspace(id)?;
     let provider = provider(&provider_id)?;
     app.vault
         .delete(Scope::Installation(id), api_key_secret(provider))

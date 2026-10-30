@@ -177,9 +177,9 @@ The dashboard edits the file through PRs. **Set up** opens a PR that adds the fi
 
 When the file does not parse, the queue pauses, and **Repos** shows why, until the file is fixed.
 
-## Queue from an agent
+## From an agent, or the API
 
-Mergepatrol serves an MCP server at `/mcp`, so a coding agent can queue a PR, take it out, and read where it is, without handling labels. Every call acts as a GitHub user or bot: Mergepatrol puts the labels on with their token, so GitHub checks they have triage access to the repo.
+Mergepatrol serves an MCP server at `/mcp`, so a coding agent can do anything the dashboard does: queue a PR, take it out, read where it is, review it, read the queue's history, change a repo's settings. Every call acts as a GitHub user or bot: Mergepatrol puts the labels on, comments, and reviews with their token, so GitHub checks they may.
 
 An MCP client that supports OAuth signs in with GitHub in the browser, as the dashboard does:
 
@@ -196,12 +196,50 @@ claude mcp add --transport http mergepatrol https://mergepatrol.ai/mcp \
   --header "Authorization: Bearer $(gh auth token)"
 ```
 
-| Tool | Does |
-| --- | --- |
-| `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front |
-| `dequeue_pull` | Takes a PR, and its stack, out of the queue |
-| `pull_status` | The PR's place in the queue, and its latest events |
-| `list_queue` | The repo's queues, in the order they take PRs |
+A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID, which `get_session` lists.
+
+<!-- tools: the order of `ROUTES` in crates/web/src/routes.rs -->
+| Tool | Does | Sign-in |
+| --- | --- | --- |
+| `get_session` | Who you are signed in as, and your workspaces | |
+| `get_inbox` | Your PRs, and the PRs that ask for your review, across workspaces | Yes |
+| `list_queue` | The queues, in the order they take PRs: a repo's, or the workspace's | Without `repo` |
+| `list_events` | A repo's queue events, newest first | |
+| `get_fix` | The diff of a commit the fix agent pushed | |
+| `list_history` | The PRs that left the queue: merged, ejected, or removed | Yes |
+| `get_history_stats` | The queue's numbers over a window | Yes |
+| `list_repos` | The workspace's repos, and whether each queues | Yes |
+| `set_repo` | Turns a repo's queue on or off, or back to following its config file | Yes |
+| `list_open_pulls` | A repo's open PRs that are not queued | |
+| `get_pull` | A PR's description, labels, checks, and timeline | |
+| `get_pull_diff` | A PR's changes, or one commit's | |
+| `pull_status` | A PR's place in the queue, and its latest events | |
+| `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front | |
+| `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
+| `close_pull` | Closes a PR | |
+| `review_pull` | Approves a PR, asks for changes, or comments, then queues it if asked | |
+| `mark_pull_seen` | Marks a PR read in your inbox | Yes |
+| `nudge_reviewers` | Mentions reviewers in a comment, asking them to review | |
+| `get_repo_config` | A repo's queue settings | |
+| `propose_repo_config` | Opens a PR that changes a repo's queue settings | Yes |
+| `get_settings` | Which model API keys and ChatGPT login the workspace has | Yes |
+| `set_api_key` | Sets a model provider's API key | Yes |
+| `delete_api_key` | Removes a model provider's API key | Yes |
+| `start_chatgpt_login` | Starts a ChatGPT sign-in: a code for the user to enter | Yes |
+| `delete_chatgpt_login` | Removes the ChatGPT login | Yes |
+| `poll_chatgpt_login` | Finishes the ChatGPT sign-in once the user entered the code | Yes |
+| `get_billing` | The workspace's plan and seats | Yes |
+| `start_checkout` | A Stripe page to subscribe | Yes |
+| `open_billing_portal` | A Stripe page to manage the subscription | Yes |
+| `free_seat` | Frees a seat | Yes |
+<!-- /tools -->
+
+Each tool calls a route of the JSON API under `/api`, which the dashboard uses. A script can call the API itself with the same `Authorization: Bearer` header:
+
+```sh
+curl -H "Authorization: Bearer $(gh auth token)" \
+  https://mergepatrol.ai/api/w/<installation ID>/repos/<owner>/<name>/pulls/<number>/status
+```
 
 ## How jobs are isolated
 

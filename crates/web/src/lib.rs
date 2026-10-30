@@ -7,16 +7,15 @@ mod billing;
 mod blog;
 mod mcp;
 mod oauth;
+mod routes;
 mod ui;
 mod webhook;
 
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
-use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
 use mergepatrol_analytics::Analytics;
 use mergepatrol_billing::Billing;
 use mergepatrol_core::RepoSettings;
@@ -66,7 +65,7 @@ struct AppState {
     billing: Option<Arc<Billing>>,
     chatgpt: ChatGptAuth,
     /// What GitHub said lately of the tokens MCP calls come with.
-    seen: Arc<mcp::Seen>,
+    seen: Arc<auth::Seen>,
 }
 
 impl AppState {
@@ -99,106 +98,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         chatgpt: config.chatgpt,
         seen: Arc::default(),
     };
-    Router::new()
-        .route("/api/health", get(|| async { "ok" }))
-        .route("/api/session", get(auth::session))
-        .route("/api/setup/unlock", post(auth::unlock))
-        .route("/api/setup/manifest", post(auth::start_manifest))
-        .route("/setup/callback", get(auth::manifest_callback))
-        .route("/setup/installed", get(auth::installed))
-        .route("/auth/login", get(auth::login))
-        .route("/auth/callback", get(auth::login_callback))
-        .route("/auth/logout", post(auth::logout))
-        .route("/auth/tray/token", post(auth::tray_token))
-        .route(
-            "/webhooks/github",
-            post(webhook::receive).layer(DefaultBodyLimit::max(webhook::MAX_BODY_BYTES)),
-        )
-        .route("/webhooks/stripe", post(billing::webhook))
-        // For coding agents, with the caller's GitHub token, or a session from the OAuth below.
-        .route("/mcp", post(mcp::post).get(mcp::get))
-        .route(
-            "/.well-known/oauth-protected-resource",
-            get(oauth::resource),
-        )
-        .route(
-            "/.well-known/oauth-protected-resource/mcp",
-            get(oauth::resource),
-        )
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(oauth::server),
-        )
-        .route("/oauth/register", post(oauth::register))
-        .route("/oauth/authorize", get(oauth::authorize))
-        .route("/oauth/token", post(oauth::token))
-        // A workspace is one installation of the App: `{id}` is its installation ID.
-        .route("/api/you", get(api::you))
-        .route("/api/w/{id}/lanes", get(api::lanes))
-        .route("/api/w/{id}/events", get(api::events))
-        .route("/api/w/{id}/fix", get(api::fix))
-        .route("/api/w/{id}/history", get(api::history))
-        .route("/api/w/{id}/history/stats", get(api::history_stats))
-        .route("/api/w/{id}/repos", get(api::repos))
-        .route("/api/w/{id}/repos/{owner}/{name}", put(api::set_repo))
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/open",
-            get(api::open_pulls),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}",
-            get(api::pull_detail),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/diff",
-            get(api::pull_diff),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/queue",
-            put(api::queue_pull).delete(api::dequeue_pull),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/close",
-            post(api::close_pull),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/review",
-            post(api::review_pull),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/seen",
-            put(api::seen_pull),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/nudge",
-            post(api::nudge_pull),
-        )
-        .route(
-            "/api/w/{id}/repos/{owner}/{name}/config",
-            get(api::repo_config).put(api::propose_repo_config),
-        )
-        .route("/api/w/{id}/settings", get(api::settings))
-        .route(
-            "/api/w/{id}/settings/api-keys/{provider}",
-            put(api::set_api_key).delete(api::delete_api_key),
-        )
-        .route(
-            "/api/w/{id}/settings/chatgpt",
-            post(api::start_chatgpt_login).delete(api::delete_chatgpt_login),
-        )
-        .route(
-            "/api/w/{id}/settings/chatgpt/poll",
-            post(api::poll_chatgpt_login),
-        )
-        .route("/api/w/{id}/billing", get(billing::billing))
-        .route("/api/w/{id}/billing/checkout", post(billing::checkout))
-        .route("/api/w/{id}/billing/portal", post(billing::portal))
-        .route(
-            "/api/w/{id}/billing/seats/{login}",
-            axum::routing::delete(billing::free_seat),
-        )
-        .fallback(ui::serve)
-        .with_state(state)
+    routes::router().fallback(ui::serve).with_state(state)
 }
 
 enum ApiError {
@@ -714,15 +614,23 @@ mod tests {
 
         let list = serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
         let res = json_of(mcp(&router, auth, list).await).await;
-        let names: Vec<&str> = res["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let tools = res["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), routes::tools().count());
+        let tool = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap().clone();
+        // The repo names the workspace.
+        let queue = tool("queue_pull");
         assert_eq!(
-            names,
-            ["queue_pull", "dequeue_pull", "pull_status", "list_queue"]
+            queue["inputSchema"]["required"],
+            serde_json::json!(["repo", "number"])
+        );
+        assert_eq!(queue["annotations"]["readOnlyHint"], false);
+        assert_eq!(
+            tool("list_repos")["inputSchema"]["required"],
+            serde_json::json!(["workspace"])
+        );
+        assert_eq!(
+            tool("delete_api_key")["annotations"]["destructiveHint"],
+            true
         );
 
         let unknown = serde_json::json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/list" });
@@ -769,6 +677,90 @@ mod tests {
         let args = serde_json::json!({ "repo": "acme/app", "number": 7 });
         let res = mcp(&router, auth, call("pull_status", args)).await;
         assert_eq!(text(json_of(res).await), "No GitHub App yet.");
+    }
+
+    /// No tool's route answers anyone it does not know: the session status alone is public.
+    #[sqlx::test(migrations = false)]
+    async fn every_tool_route_needs_a_caller(pool: PgPool) {
+        let (router, _) = signed_in(pool).await;
+        for (route, tool) in routes::tools() {
+            if route.path == "/api/session" {
+                continue;
+            }
+            let path = route
+                .path
+                .replace("{id}", "1")
+                .replace("{owner}/{name}", "acme/app")
+                .replace("{number}", "7")
+                .replace("{provider}", "anthropic")
+                .replace("{login}", "ada");
+            for auth in [
+                None,
+                Some(("authorization", "Bearer nope")),
+                Some(("cookie", "mp_session=nope")),
+            ] {
+                let mut req = Request::builder()
+                    .method(route.method.clone())
+                    .uri(&path)
+                    .header("content-type", "application/json");
+                if let Some((name, value)) = auth {
+                    req = req.header(name, value);
+                }
+                let res = send(&router, req.body(Body::from("{}")).unwrap()).await;
+                assert_eq!(
+                    res.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{} with {auth:?}",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    /// A tool is its route, called as the agent.
+    #[sqlx::test(migrations = false)]
+    async fn an_mcp_tool_calls_its_route(pool: PgPool) {
+        let router = mcp_router(pool).await;
+        let call = |name: &str, arguments: serde_json::Value| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments },
+            })
+        };
+        let result = |res: serde_json::Value| {
+            let text = res["result"]["content"][0]["text"].as_str().unwrap();
+            (res["result"]["isError"].as_bool().unwrap(), text.to_owned())
+        };
+        let auth = Some("Bearer old");
+        let res = mcp(&router, auth, call("get_session", serde_json::json!({}))).await;
+        let (error, text) = result(json_of(res).await);
+        assert!(!error);
+        let session: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(session["user"]["login"], "ada");
+        let res = mcp(
+            &router,
+            auth,
+            call("list_queue", serde_json::json!({ "workspace": 1 })),
+        )
+        .await;
+        assert_eq!(result(json_of(res).await), (false, "[]".into()));
+        // The route checks who may: not the tool.
+        let res = mcp(
+            &router,
+            auth,
+            call("list_repos", serde_json::json!({ "workspace": 2 })),
+        )
+        .await;
+        assert_eq!(
+            result(json_of(res).await),
+            (true, "no such workspace".into())
+        );
+        let args = serde_json::json!({ "workspace": 1, "days": 400 });
+        let res = mcp(&router, auth, call("list_history", args)).await;
+        assert_eq!(
+            result(json_of(res).await),
+            (true, "days must be from 1 to 365".into())
+        );
     }
 
     #[sqlx::test(migrations = false)]
