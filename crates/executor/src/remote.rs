@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 use crate::Executor;
-use crate::protocol::{BUNDLE_FILE, JobResult, JobSpec, MAX_BUNDLE_BYTES, RESULT_FILE};
+use crate::protocol::{JobResult, JobSpec, MAX_BUNDLE_BYTES, OUTPUT_FILES};
 
 /// The bundle goes up in parts of this size, so no one request holds all of it.
 pub const CHUNK_BYTES: usize = 16 * 1024 * 1024;
@@ -130,7 +130,7 @@ async fn append(
     UrlPath((token, name)): UrlPath<(String, String)>,
     body: Bytes,
 ) -> StatusCode {
-    if name != RESULT_FILE && name != BUNDLE_FILE {
+    if !OUTPUT_FILES.contains(&name.as_str()) {
         return StatusCode::NOT_FOUND;
     }
     let out = match mb.receive(&token, body.len()) {
@@ -189,7 +189,7 @@ pub async fn fetch_spec(link: &str) -> Result<JobSpec> {
 /// The job's side: uploads the output in `out`, then says it is done.
 pub async fn upload(link: &str, out: &Path, chunk: usize) -> Result<()> {
     let http = reqwest::Client::new();
-    for name in [BUNDLE_FILE, RESULT_FILE] {
+    for name in OUTPUT_FILES {
         let data = match tokio::fs::read(out.join(name)).await {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -294,7 +294,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{JobOutcome, ResolverSpec};
+    use crate::protocol::{BUNDLE_FILE, JobOutcome, RESULT_FILE, REVIEW_FILE, ResolverSpec};
 
     fn spec() -> JobSpec {
         JobSpec {
@@ -353,6 +353,7 @@ mod tests {
                 }
                 let dir = tempfile::tempdir()?;
                 tokio::fs::write(dir.path().join(BUNDLE_FILE), b"0123456789").await?;
+                tokio::fs::write(dir.path().join(REVIEW_FILE), b"{}").await?;
                 let result = JobResult {
                     outcome: JobOutcome::Done,
                     events: vec![],
@@ -411,6 +412,7 @@ mod tests {
             std::fs::read(out.path().join(BUNDLE_FILE)).unwrap(),
             b"0123456789"
         );
+        assert_eq!(std::fs::read(out.path().join(REVIEW_FILE)).unwrap(), b"{}");
         assert!(
             ex.mailbox.slots.lock().unwrap().is_empty(),
             "the link is closed"
