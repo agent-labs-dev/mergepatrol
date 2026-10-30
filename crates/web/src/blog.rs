@@ -31,11 +31,14 @@ impl Article {
     }
 }
 
+/// The PostHog project key and ingestion host, when product analytics are on.
+pub type Analytics<'a> = Option<(&'a str, &'a str)>;
+
 /// Answers `/blog` and `/blog/<slug>`. `None` for any other path, so the caller serves the app.
-pub fn serve(path: &str, public_url: &str) -> Option<Response> {
+pub fn serve(path: &str, public_url: &str, analytics: Analytics) -> Option<Response> {
     let rest = path.strip_prefix("blog")?;
     let slug = match rest.trim_end_matches('/') {
-        "" => return Some(Html(index_page(&articles(), public_url)).into_response()),
+        "" => return Some(Html(index_page(&articles(), public_url, analytics)).into_response()),
         s => s.strip_prefix('/')?,
     };
     if slug.contains('/') {
@@ -47,7 +50,7 @@ pub fn serve(path: &str, public_url: &str) -> Option<Response> {
     Some(
         (
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            article_page(&article, public_url),
+            article_page(&article, public_url, analytics),
         )
             .into_response(),
     )
@@ -160,7 +163,7 @@ pub fn sitemap_entries(public_url: &str) -> String {
     out
 }
 
-fn article_page(a: &Article, public_url: &str) -> String {
+fn article_page(a: &Article, public_url: &str, analytics: Analytics) -> String {
     let mut body = String::new();
     pulldown_cmark::html::push_html(&mut body, Parser::new_ext(&a.body, Options::all()));
     let url = format!("{public_url}/blog/{}", a.slug);
@@ -188,10 +191,18 @@ fn article_page(a: &Article, public_url: &str) -> String {
         a.date,
         a.date,
     );
-    page(&a.title, &a.description, &url, &head, &main, public_url)
+    page(
+        &a.title,
+        &a.description,
+        &url,
+        &head,
+        &main,
+        public_url,
+        analytics,
+    )
 }
 
-fn index_page(all: &[Article], public_url: &str) -> String {
+fn index_page(all: &[Article], public_url: &str, analytics: Analytics) -> String {
     let mut list = String::from("<h1>Blog</h1><ul class=\"posts\">");
     for a in all {
         list.push_str(&format!(
@@ -211,6 +222,7 @@ fn index_page(all: &[Article], public_url: &str) -> String {
         "<meta property=\"og:type\" content=\"website\" />",
         &list,
         public_url,
+        analytics,
     )
 }
 
@@ -221,12 +233,14 @@ fn page(
     head: &str,
     main: &str,
     public_url: &str,
+    analytics: Analytics,
 ) -> String {
     let (title, description) = (
         escape(&format!("{title} | Mergepatrol")),
         escape(description),
     );
     let image = format!("{public_url}/og/mergepatrol-og-1200x630.png");
+    let tracking = analytics.map(tracking).unwrap_or_default();
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -250,6 +264,7 @@ fn page(
 <link rel="icon" href="/favicon.ico" sizes="32x32" />
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <style>{STYLE}</style>
+{tracking}
 </head>
 <body>
 <header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><a href="/blog">Blog</a></header>
@@ -277,6 +292,32 @@ pre{background:var(--sunken);padding:1rem;overflow-x:auto;border-radius:.5rem}\
 code{font:.875em ui-monospace,monospace}img{max-width:100%}\
 table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:.25rem .5rem}\
 footer{border-top:1px solid var(--line);padding-top:1rem;padding-bottom:2rem;color:var(--fg2);font-size:.875rem}";
+
+/// PostHog's browser library, configured as `ui/src/analytics.ts` configures the dashboard's. The
+/// articles are plain HTML with no app bundle, so without this a reader who arrives from a search
+/// or a share is invisible until they reach the landing page. Both write the same first-party
+/// cookie, so a reader keeps one anonymous id from article to landing page to sign-in, where
+/// `identify` joins it to their GitHub login. Persons are made only at sign-in
+/// (`identified_only`), so an anonymous reader stays a bare id with no profile.
+fn tracking((key, host): (&str, &str)) -> String {
+    // PostHog Cloud serves the library from a separate assets host; a self-hosted PostHog from
+    // its own.
+    let assets = match host.strip_suffix(".i.posthog.com") {
+        Some(region) => format!("{region}-assets.i.posthog.com"),
+        None => host.to_owned(),
+    };
+    let config = serde_json::json!({
+        "api_host": host,
+        "defaults": "2026-08-30",
+        "person_profiles": "identified_only",
+    });
+    format!(
+        "<script async src=\"{}/static/array.js\" onload=\"posthog.init({}, {})\"></script>",
+        escape(&assets),
+        escape(&serde_json::json!(key).to_string()),
+        escape(&config.to_string()),
+    )
+}
 
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -334,8 +375,32 @@ mod tests {
             "---\ntitle: <b>\"T\"\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        let html = article_page(&a, "https://mergepatrol.ai");
+        let html = article_page(&a, "https://mergepatrol.ai", None);
         assert!(html.contains("<title>&lt;b&gt;&quot;T&quot; | Mergepatrol</title>"));
         assert!(html.contains("<link rel=\"canonical\" href=\"https://mergepatrol.ai/blog/x\" />"));
+    }
+
+    #[test]
+    fn loads_posthog_only_when_analytics_are_on() {
+        let a = parse(
+            "x",
+            "---\ntitle: T\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
+        )
+        .unwrap();
+        assert!(!article_page(&a, "https://mergepatrol.ai", None).contains("posthog"));
+        for (host, script) in [
+            (
+                "https://us.i.posthog.com",
+                "https://us-assets.i.posthog.com/static/array.js",
+            ),
+            (
+                "https://ph.example.com",
+                "https://ph.example.com/static/array.js",
+            ),
+        ] {
+            let html = article_page(&a, "https://mergepatrol.ai", Some(("phc_x", host)));
+            assert!(html.contains(&format!("src=\"{script}\"")), "{html}");
+            assert!(html.contains("posthog.init(&quot;phc_x&quot;"), "{html}");
+        }
     }
 }

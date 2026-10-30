@@ -269,6 +269,7 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 - Each queue event goes to its PR's author and workspace as `pr <kind>`, such as `pr merged` or `pr ejected`, with the repo, trunk and PR number. When a PR leaves the queue, the event also has `queue_seconds`, the seconds in each step (`waiting_seconds`, `held_seconds`, `rebasing_seconds`, `checks_seconds`, `fixing_seconds`), and, for `pr ejected`, the `reason`: `fork`, `rebase-failed`, `checks-failed`, `fix-failed`, `base-moved`, `merge-rejected` or `checks-timed-out`.
 - Installing the App sends `app installed`, for the person who installed it, and uninstalling it `app uninstalled`.
 - The dashboard sends `api key set` and `api key removed`, with the `provider`, and `repo config proposed`.
+- Before sign-in, the landing page and the `/blog` articles send PostHog's `$pageview` and autocaptured clicks under an anonymous id, with no person profile. The articles load PostHog's script themselves, as they are plain HTML outside the dashboard. A reader keeps the same id from an article to the landing page, and signing in joins it to their login.
 
 ## Crates
 

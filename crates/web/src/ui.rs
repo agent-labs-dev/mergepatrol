@@ -28,7 +28,7 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
         }
         _ => {}
     }
-    if let Some(page) = crate::blog::serve(path, &state.public_url) {
+    if let Some(page) = crate::blog::serve(path, &state.public_url, state.analytics.browser()) {
         return page;
     }
     if !path.is_empty()
