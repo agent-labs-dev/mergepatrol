@@ -8,5 +8,10 @@
     "name": "keep-last-10-deploys",
     "action": {"type": "Keep"},
     "mostRecentVersions": {"keepCount": 10}
+  },
+  {
+    "name": "keep-current-cache",
+    "action": {"type": "Keep"},
+    "condition": {"tagState": "tagged", "packageNamePrefixes": ["cache"]}
   }
 ]
