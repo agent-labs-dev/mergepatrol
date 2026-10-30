@@ -18,7 +18,7 @@ pub use codeowners::CodeOwners;
 pub use detail::{CheckRun, CheckRunState, Label, PullDetail, TimelineEvent, TimelineItem};
 pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{
-    BranchMerge, HeadRepository, Inbox, InboxPull, MergeOutcome, PrDetails, PullRequest, RepoOwner,
+    BranchMerge, HeadRepository, InboxPull, MergeOutcome, PrDetails, PullRequest, RepoOwner,
     RepoSnapshot, SnapshotParts, StackRef, TreeEntry, queued,
 };
 pub use setup::{AppCredentials, GithubUser};

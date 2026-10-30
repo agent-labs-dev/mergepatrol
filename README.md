@@ -13,7 +13,7 @@ The hosted Mergepatrol at https://mergepatrol.ai runs the public GitHub App `Mer
 3. In **Repos**, **Set up** a repo. Mergepatrol opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
 4. In **Settings**, add an Anthropic or OpenAI API key. Create one for Mergepatrol alone, with a spend limit.
 5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue. The dashboard puts the label on as you, so it takes triage access to the repo.
-6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review, those the queue holds first. Approve, request changes or comment there, as you.
+6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review or your team's, those the queue holds first. Approve, request changes or comment there, as you. A review waits 5 seconds before it goes to GitHub, so you can undo it.
 
 Public repos are free. Private repos cost $15 a seat a month, after a free trial: see [Pricing](#pricing). To run your own, see [Run it](#run-it).
 
@@ -67,6 +67,8 @@ A maintainer queues a PR from a fork with the label, as any other. Its author is
 - While GitHub waits for a maintainer to approve the fork's workflow runs, the PR waits on hold.
 
 A stack with a PR from a fork is not supported yet.
+
+The You tab reads Mergepatrol's own database, never GitHub, when you open it. Webhooks tell Mergepatrol which PRs changed, and it reads those again from GitHub as the App. It also reads every open PR of each repo once a day, in case a webhook got lost. Without webhooks, as on a self-hosted http URL, it reads them every 10 minutes. Team review requests need the App's `members: read` permission, which each organization's owner accepts. An App created before this permission existed must be given it on GitHub, along with the `pull_request_review_comment`, `issue_comment`, `membership` and `team` events. Until then, only review requests made to you directly show.
 
 ## Pricing
 
@@ -285,7 +287,6 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 | `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
 | `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
 | `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
-
 
 ### Analytics
 

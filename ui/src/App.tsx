@@ -238,7 +238,7 @@ function NoKeyBanner({ workspace, account }: { workspace: number; account: strin
 
 /** How many PRs ask for the user's review, on the You tab. */
 function NeedsYouCount() {
-  const you = useQuery({ queryKey: ["you"], queryFn: fetchYou, refetchInterval: 60_000 });
+  const you = useQuery({ queryKey: ["you"], queryFn: fetchYou, refetchInterval: 30_000 });
   const n = you.data?.review_requested.length ?? 0;
   if (!n) return null;
   return (

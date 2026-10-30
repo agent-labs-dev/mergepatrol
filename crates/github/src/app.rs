@@ -136,6 +136,7 @@ impl App {
                 Some(InstallationInfo {
                     id: i["id"].as_u64()?,
                     account: i["account"]["login"].as_str()?.to_owned(),
+                    organization: i["account"]["type"] == "Organization",
                 })
             }));
             if list.len() < 100 {
@@ -230,6 +231,8 @@ impl App {
 pub struct InstallationInfo {
     pub id: u64,
     pub account: String,
+    /// On an organization, which has teams, not a user.
+    pub organization: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -11,9 +11,13 @@ export type InboxPullView = { repo: string, number: number,
  */
 base: string, draft: boolean, updated_at: string, 
 /**
- * The workspace the repo is in, to act on the PR in. `None` outside the user's.
+ * When it merged, for a merged one.
  */
-workspace: number | null, 
+merged_at: string | null, 
+/**
+ * The workspace the PR is in, to act on it in.
+ */
+workspace: number, 
 /**
  * Whether Mergepatrol runs on the repo, so the PR can be queued.
  */
@@ -21,7 +25,12 @@ queues: boolean,
 /**
  * Where the queue has it. `None` when it is not queued.
  */
-queue: QueueSpotView | null, title: string, url: string, 
+queue: QueueSpotView | null, 
+/**
+ * Comments and reviews by others since the user last opened it here, or last said
+ * something on it.
+ */
+unread: number, title: string, url: string, 
 /**
  * `None` for a deleted account.
  */

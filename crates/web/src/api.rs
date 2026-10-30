@@ -14,7 +14,7 @@ use mergepatrol_github::{
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
     CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
-    LaneKey, RepoState, Scope, Slice, Store, api_key_secret,
+    InboxRow, LaneKey, RepoState, Scope, Slice, Store, api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -198,10 +198,12 @@ pub enum EntryStateView {
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct YouView {
-    /// Theirs, updated last first.
+    /// Theirs and open, updated last first.
     pub authored: Vec<InboxPullView>,
     /// Asked of them, or of a team of theirs, updated last first.
     pub review_requested: Vec<InboxPullView>,
+    /// Theirs, merged in the last week, last first.
+    pub merged: Vec<InboxPullView>,
 }
 
 #[derive(Serialize, TS)]
@@ -213,12 +215,17 @@ pub struct InboxPullView {
     pub base: String,
     pub draft: bool,
     pub updated_at: String,
-    /// The workspace the repo is in, to act on the PR in. `None` outside the user's.
-    pub workspace: Option<u32>,
+    /// When it merged, for a merged one.
+    pub merged_at: Option<String>,
+    /// The workspace the PR is in, to act on it in.
+    pub workspace: u32,
     /// Whether Mergepatrol runs on the repo, so the PR can be queued.
     pub queues: bool,
     /// Where the queue has it. `None` when it is not queued.
     pub queue: Option<QueueSpotView>,
+    /// Comments and reviews by others since the user last opened it here, or last said
+    /// something on it.
+    pub unread: u32,
     #[serde(flatten)]
     pub pull: PullView,
 }
@@ -235,6 +242,13 @@ pub struct QueueSpotView {
     pub priority: bool,
     /// Why it is held.
     pub detail: Option<String>,
+}
+
+/// Asks the reviewers who have not answered to review, in a comment that mentions them.
+#[derive(Deserialize, TS)]
+#[ts(export)]
+pub struct NudgePull {
+    pub reviewers: Vec<String>,
 }
 
 #[derive(Deserialize, TS)]
@@ -1431,53 +1445,114 @@ pub(crate) async fn close_pull(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The user's inbox, read as them, with where the queue has each PR.
+/// How long the You tab lists a merged PR.
+const MERGED_FOR: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// The user's inbox, as webhooks keep it, with where the queue has each PR.
 pub(crate) async fn you(
     State(app): State<AppState>,
     user: SignedIn,
 ) -> Result<Json<YouView>, ApiError> {
-    let gh = AsUser::new(user.github_token(&app)?)?;
-    let inbox = gh.inbox().await.map_err(|e| {
-        if e.is::<setup::Revoked>() {
-            ApiError::Status(StatusCode::UNAUTHORIZED, "Sign in again first.".into())
-        } else {
-            e.into()
-        }
-    })?;
     let ids = user.installations();
-    let workspaces = app.store.workspaces(ids).await?;
-    let on: HashSet<RepoName> = app
+    let inbox = app.store.inbox(user.login(), ids, MERGED_FOR).await?;
+    let on: HashSet<(u64, RepoName)> = app
         .store
         .repos()
         .await?
         .into_iter()
         .filter(|r| ids.contains(&r.installation_id) && r.on())
-        .map(|r| r.repo)
+        .map(|r| (r.installation_id, r.repo))
         .collect();
     let mut spots = HashMap::new();
     for &id in ids {
         spots.extend(queue_spots(app.store.lanes(id).await?));
     }
-    let mut view = |p: InboxPull| InboxPullView {
-        number: p.pr.number as u32,
-        base: p.pr.merges_into().to_owned(),
-        draft: p.pr.is_draft,
-        updated_at: p.updated_at,
-        workspace: workspaces
-            .iter()
-            .find(|w| w.account.eq_ignore_ascii_case(&p.repo.owner))
-            .map(|w| w.installation_id as u32),
-        queues: on.contains(&p.repo),
-        queue: spots.remove(&(p.repo.clone(), p.pr.number)),
-        pull: p.pr.summary().into(),
-        repo: p.repo.to_string(),
+    let view = |rows: Vec<InboxRow>| -> Vec<InboxPullView> {
+        rows.into_iter()
+            .filter_map(|row| {
+                let p = InboxPull::from_node(&row.node)
+                    .inspect_err(|e| tracing::warn!(error = %format!("{e:#}"), "an inbox PR"))
+                    .ok()?;
+                Some(InboxPullView {
+                    number: p.pr.number as u32,
+                    base: p.pr.merges_into().to_owned(),
+                    draft: p.pr.is_draft,
+                    merged_at: (p.state == "merged").then(|| p.closed_at.clone()).flatten(),
+                    workspace: row.installation_id as u32,
+                    queues: on.contains(&(row.installation_id, p.repo.clone())),
+                    queue: spots.get(&(p.repo.clone(), p.pr.number)).cloned(),
+                    unread: unread(&p.activity, user.login(), row.seen_at.as_deref()),
+                    pull: p.pr.summary().into(),
+                    updated_at: p.updated_at,
+                    repo: p.repo.to_string(),
+                })
+            })
+            .collect()
     };
-    let authored = inbox.authored.into_iter().map(&mut view).collect();
-    let review_requested = inbox.review_requested.into_iter().map(&mut view).collect();
     Ok(Json(YouView {
-        authored,
-        review_requested,
+        authored: view(inbox.authored),
+        review_requested: view(inbox.requested),
+        merged: view(inbox.merged),
     }))
+}
+
+/// What others said since `me` last opened the PR, or last said something on it: GitHub's
+/// times compare as strings.
+fn unread(activity: &[(String, String)], me: &str, seen: Option<&str>) -> u32 {
+    let mine = activity
+        .iter()
+        .filter(|(who, _)| who.eq_ignore_ascii_case(me))
+        .map(|(_, at)| at.as_str())
+        .max();
+    let since = seen.max(mine).unwrap_or("");
+    activity
+        .iter()
+        .filter(|(who, at)| !who.eq_ignore_ascii_case(me) && at.as_str() > since)
+        .count() as u32
+}
+
+/// The user opened the PR in the dashboard: what came before is read.
+pub(crate) async fn seen_pull(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    app.store
+        .inbox_seen(user.login(), id, &repo, number)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Mentions the reviewers in a comment as the user, so GitHub tells them.
+pub(crate) async fn nudge_pull(
+    State(app): State<AppState>,
+    user: SignedIn,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+    Json(body): Json<NudgePull>,
+) -> Result<StatusCode, ApiError> {
+    let id = user.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let login = |l: &String| {
+        !l.is_empty() && l.len() <= 39 && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    if body.reviewers.is_empty() || !body.reviewers.iter().all(login) {
+        return Err(ApiError::bad_request("reviewers must be GitHub logins"));
+    }
+    let mentions: Vec<String> = body.reviewers.iter().map(|r| format!("@{r}")).collect();
+    let text = format!(
+        "{}, could you review this when you have a moment?",
+        mentions.join(" ")
+    );
+    let token = user.github_token(&app)?;
+    as_user(
+        setup::comment_as(&token, &repo.to_string(), number, &text).await,
+        &repo,
+    )?;
+    app.store.inbox_changed(id, &repo, number).await?;
+    tracing::info!(installation = id, %repo, number, "nudged from the dashboard");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Where the queue has each PR of these lanes. A stack's layers each take the stack's spot.
@@ -1540,6 +1615,14 @@ pub(crate) async fn review_pull(
             }
         })?;
     tracing::info!(installation = id, %repo, number, verdict = ?verdict, "reviewed from the dashboard");
+    // The inbox shows the review now; GitHub's reads, a moment later, settle it.
+    if verdict == setup::Verdict::Comment {
+        app.store.inbox_changed(id, &repo, number).await?;
+    } else {
+        app.store
+            .inbox_reviewed(id, &repo, number, user.login())
+            .await?;
+    }
     let gh = installation(&app, id).await?;
     if body.queue {
         queue(&app, &gh, &token, &repo, number, false).await?;
@@ -2018,6 +2101,17 @@ mod tests {
         assert_eq!(json["number"], 1);
         assert_eq!(json["title"], "");
         assert!(json.get("pull").is_none());
+    }
+
+    #[test]
+    fn unread_is_what_others_said_since_i_looked_or_last_spoke() {
+        let a = |who: &str, at: &str| (who.to_owned(), at.to_owned());
+        let activity = [a("ann", "1"), a("Me", "2"), a("bo", "3"), a("ann", "5")];
+        assert_eq!(unread(&activity, "me", None), 2);
+        assert_eq!(unread(&activity, "me", Some("4")), 1);
+        assert_eq!(unread(&activity, "me", Some("1")), 2);
+        assert_eq!(unread(&[a("ann", "1")], "me", None), 1);
+        assert_eq!(unread(&[], "me", None), 0);
     }
 
     #[test]

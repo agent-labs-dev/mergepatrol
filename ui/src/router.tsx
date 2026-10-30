@@ -57,7 +57,7 @@ const you = createRoute({
     folder: oneOf(FOLDERS, search.folder),
     pr: optional(search.pr, "string"),
   }),
-  component: () => <You workspace={useWorkspace().workspace} />,
+  component: You,
 });
 
 const queue = createRoute({

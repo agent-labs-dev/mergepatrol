@@ -55,6 +55,9 @@ pub(crate) async fn receive(
         installation(&state.analytics, &payload);
     }
     let installation = payload["installation"]["id"].as_u64();
+    if let Some(id) = installation {
+        team_changed(&state, id, event, &payload).await?;
+    }
     let repo = payload["repository"]["full_name"]
         .as_str()
         .and_then(RepoName::parse);
@@ -73,6 +76,11 @@ pub(crate) async fn receive(
                 .store
                 .set_label_head(installation, &repo, pr, label, head)
                 .await;
+        }
+        for pr in inbox_prs(event, &payload) {
+            if stored.is_ok() {
+                stored = state.store.inbox_changed(installation, &repo, pr).await;
+            }
         }
         for change in changed(event, &payload) {
             if stored.is_ok() {
@@ -115,6 +123,56 @@ fn installation(analytics: &Analytics, payload: &Value) {
             account_type: i["account"]["type"].as_str().unwrap_or_default(),
         },
     );
+}
+
+/// The PRs the delivery changed of what the You tab shows: themselves, their reviews, comments
+/// and checks.
+fn inbox_prs(event: Option<&str>, payload: &Value) -> Vec<u64> {
+    let number = |v: &Value| v["number"].as_u64();
+    match event {
+        Some("pull_request" | "pull_request_review" | "pull_request_review_comment") => {
+            number(&payload["pull_request"]).into_iter().collect()
+        }
+        // An issue's comment is not a PR's.
+        Some("issue_comment") if !payload["issue"]["pull_request"].is_null() => {
+            number(&payload["issue"]).into_iter().collect()
+        }
+        Some("check_suite") if payload["action"] == "completed" => {
+            payload["check_suite"]["pull_requests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(number)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Keeps who is on which team, for the reviews asked of a team.
+async fn team_changed(
+    state: &AppState,
+    installation: u64,
+    event: Option<&str>,
+    payload: &Value,
+) -> anyhow::Result<()> {
+    let team = payload["team"]["slug"].as_str();
+    match (event, payload["action"].as_str(), team) {
+        (Some("membership"), Some(action @ ("added" | "removed")), Some(team)) => {
+            if let Some(login) = payload["member"]["login"].as_str() {
+                let member = action == "added";
+                state
+                    .store
+                    .set_inbox_member(installation, team, login, member)
+                    .await?;
+            }
+        }
+        (Some("team"), Some("deleted"), Some(team)) => {
+            state.store.delete_inbox_team(installation, team).await?;
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// What the delivery changed of what the queue reads from GitHub.

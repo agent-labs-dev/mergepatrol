@@ -6,10 +6,14 @@ import type { InboxPullView } from "./InboxPullView";
  */
 export type YouView = { 
 /**
- * Theirs, updated last first.
+ * Theirs and open, updated last first.
  */
 authored: Array<InboxPullView>, 
 /**
  * Asked of them, or of a team of theirs, updated last first.
  */
-review_requested: Array<InboxPullView>, };
+review_requested: Array<InboxPullView>, 
+/**
+ * Theirs, merged in the last week, last first.
+ */
+merged: Array<InboxPullView>, };

@@ -143,6 +143,7 @@ pub struct ManifestForm {
 
 /// A signed-in user, and the installations they could access when they signed in.
 pub(crate) struct SignedIn {
+    login: String,
     installations: Vec<u64>,
     token_hash: String,
     /// Their GitHub token, sealed. `None` for a session from before sessions kept it.
@@ -160,6 +161,10 @@ impl SignedIn {
                 "no such workspace".into(),
             ))
         }
+    }
+
+    pub(crate) fn login(&self) -> &str {
+        &self.login
     }
 
     /// The workspaces the user can access, by installation ID.
@@ -191,10 +196,16 @@ impl FromRequestParts<AppState> for SignedIn {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         match current_session(&parts.headers, state).await? {
             Some(Session {
-                kind: SessionKind::User { installations, .. },
+                kind:
+                    SessionKind::User {
+                        login,
+                        installations,
+                        ..
+                    },
                 github,
                 ..
             }) => Ok(SignedIn {
+                login,
                 installations,
                 // `current_session` found it, so the request has a token.
                 token_hash: session_token(&parts.headers)
@@ -735,10 +746,16 @@ pub(crate) async fn session_github_token(
 ) -> Result<Option<String>, ApiError> {
     match session_of(state, token).await? {
         Some(Session {
-            kind: SessionKind::User { installations, .. },
+            kind:
+                SessionKind::User {
+                    login,
+                    installations,
+                    ..
+                },
             github,
             ..
         }) => SignedIn {
+            login,
             installations,
             token_hash: hash(token),
             github,

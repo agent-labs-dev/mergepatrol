@@ -31,10 +31,15 @@ impl AppCredentials {
     }
 }
 
-/// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves.
-pub const WEBHOOK_EVENTS: [&str; 9] = [
+/// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves. And
+/// what the You tab keeps of each PR: its comments, and who is on which team.
+pub const WEBHOOK_EVENTS: [&str; 13] = [
     "pull_request",
     "pull_request_review",
+    "pull_request_review_comment",
+    "issue_comment",
+    "membership",
+    "team",
     "push",
     "check_suite",
     "check_run",
@@ -76,6 +81,8 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
             // The logs of failed GitHub Actions jobs, for the agent that fixes them.
             "actions": "read",
             "metadata": "read",
+            // Who is on which team, for the reviews asked of a team.
+            "members": "read",
         },
     })
 }
@@ -409,6 +416,14 @@ pub enum Verdict {
     Approve,
     RequestChanges,
     Comment,
+}
+
+/// Comments on a PR as the user.
+pub async fn comment_as(token: &str, repo: &str, number: u64, body: &str) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/issues/{number}/comments");
+    let req = client()?.post(url).json(&json!({ "body": body }));
+    user_write(token, req).await?.error_for_status()?;
+    Ok(())
 }
 
 /// GitHub turned the user's change down, for the reason it gives: approving their own PR, say.
