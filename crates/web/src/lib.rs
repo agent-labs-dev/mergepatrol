@@ -1194,6 +1194,8 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(get(&router, "/api/session", None).await, StatusCode::OK);
+        // Public, as /changelog is.
+        assert_eq!(get(&router, "/api/changelog", None).await, StatusCode::OK);
     }
 
     fn app(webhook_secret: Option<&str>) -> AppCredentials {

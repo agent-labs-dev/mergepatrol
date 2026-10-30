@@ -1,4 +1,5 @@
 import type { BillingView } from "./api/BillingView";
+import type { ChangelogEntryView } from "./api/ChangelogEntryView";
 import type { EventView } from "./api/EventView";
 import type { ExitsPage } from "./api/ExitsPage";
 import type { FixView } from "./api/FixView";
@@ -49,6 +50,9 @@ export const fetchSession = () => get<SessionView>("/api/session");
 /** Where PR `number` of `repo` is, read with the session's GitHub token. */
 export const fetchPullStatus = (repo: string, number: number) =>
   get<PullStateView>(`/api/v1/repos/${repo}/pulls/${number}`);
+
+/** The changelog's newest entries, newest first. */
+export const fetchChangelog = () => get<ChangelogEntryView[]>("/api/changelog");
 
 export const unlock = (token: string) =>
   call("POST", "/api/setup/unlock", { token } satisfies Unlock);
