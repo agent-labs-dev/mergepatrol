@@ -19,6 +19,7 @@ import { NotHere, permalinkAfterSignIn, permalinkAt, rememberPermalink } from ".
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { TraySignedIn } from "./TraySignedIn";
 import { type ThemeProps, useTheme } from "./theme";
+import { UpdateToast } from "./UpdateToast";
 import { Avatar, feedbackUrl, Mark, ThemeToggle, trayDownloadUrl } from "./ui";
 import { WorkspaceContext } from "./workspace";
 
@@ -231,6 +232,7 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
           <Outlet />
         </WorkspaceContext>
       </main>
+      <UpdateToast />
     </div>
   );
 }
