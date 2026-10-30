@@ -1,7 +1,8 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
-import { type CSSProperties, useMemo, useSyncExternalStore } from "react";
+import { type CSSProperties, useMemo } from "react";
 import type { FixView } from "./api/FixView";
+import { useDark } from "./theme";
 
 /** A fix's files, each as a diff. Its own chunk: the highlighter is most of the dashboard's
  * weight, and only an opened fix needs it. */
@@ -28,14 +29,3 @@ export default function FixDiff({ fix }: { fix: FixView }) {
     </div>
   );
 }
-
-/** Whether the dashboard is dark, as `useTheme` sets it on the root. */
-const useDark = () =>
-  useSyncExternalStore(
-    (onChange) => {
-      const o = new MutationObserver(onChange);
-      o.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
-      return () => o.disconnect();
-    },
-    () => document.documentElement.classList.contains("dark"),
-  );

@@ -3,6 +3,7 @@
 mod app;
 mod checks;
 mod codeowners;
+mod detail;
 mod files;
 mod repo;
 pub mod setup;
@@ -14,6 +15,7 @@ pub use app::{
 };
 pub use checks::{CheckState, Checks, RequiredChecks};
 pub use codeowners::CodeOwners;
+pub use detail::{CheckRun, CheckRunState, Label, PullDetail, TimelineEvent, TimelineItem};
 pub use files::{BranchFile, Proposal, PullRef};
 pub use repo::{
     BranchMerge, HeadRepository, MergeOutcome, PrDetails, PullRequest, RepoOwner, RepoSnapshot,

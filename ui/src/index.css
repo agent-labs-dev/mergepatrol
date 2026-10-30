@@ -79,3 +79,89 @@ select {
   background-position: right 0.625rem center;
   background-size: 1rem;
 }
+
+/* GitHub's rendering of a PR's description and comments, in the dashboard's type. */
+.markdown {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+  & > * + * {
+    margin-top: 0.75rem;
+  }
+  & :is(h1, h2, h3, h4, h5, h6) {
+    font-weight: 600;
+    color: var(--fg);
+  }
+  & > * + :is(h1, h2, h3, h4, h5, h6) {
+    margin-top: 1.25rem;
+  }
+  & h1 {
+    font-size: 1.125rem;
+  }
+  & h2 {
+    font-size: 1rem;
+  }
+  & a {
+    color: var(--fg);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 2px;
+  }
+  & :is(ul, ol) {
+    padding-left: 1.25rem;
+  }
+  & ul {
+    list-style: disc;
+  }
+  & ol {
+    list-style: decimal;
+  }
+  & li + li {
+    margin-top: 0.25rem;
+  }
+  & .contains-task-list {
+    list-style: none;
+    padding-left: 0;
+  }
+  & .task-list-item input {
+    margin-right: 0.5rem;
+  }
+  & code {
+    border-radius: 0.25rem;
+    background: var(--sunken);
+    padding: 0 0.25rem;
+    font-size: 0.75rem;
+    color: var(--fg);
+  }
+  & pre {
+    overflow-x: auto;
+    border-radius: 0.375rem;
+    background: var(--sunken);
+    padding: 0.75rem;
+    font-size: 0.75rem;
+    & code {
+      padding: 0;
+    }
+  }
+  & blockquote {
+    border-left: 3px solid var(--line-strong);
+    padding-left: 0.75rem;
+    color: var(--muted);
+  }
+  & img {
+    max-width: 100%;
+  }
+  & table {
+    display: block;
+    overflow-x: auto;
+    border-collapse: collapse;
+  }
+  & :is(th, td) {
+    border: 1px solid var(--line);
+    padding: 0.25rem 0.5rem;
+  }
+  & hr {
+    border-color: var(--line);
+  }
+}

@@ -8,6 +8,8 @@ import type { ManifestForm } from "./api/ManifestForm";
 import type { ManifestRequest } from "./api/ManifestRequest";
 import type { OpenPullView } from "./api/OpenPullView";
 import type { OutcomeView } from "./api/OutcomeView";
+import type { PullDetailView } from "./api/PullDetailView";
+import type { PullDiffView } from "./api/PullDiffView";
 import type { PullRequestRef } from "./api/PullRequestRef";
 import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
@@ -128,6 +130,14 @@ export const deleteChatGptLogin = (id: number) =>
 /** The repo's open PRs into its default branch that are not in its queue. */
 export const fetchOpenPulls = (id: number, repo: string) =>
   get<OpenPullView[]>(w(id, `/repos/${repo}/open`));
+
+/** An open PR's description, labels, checks and timeline. */
+export const fetchPullDetail = (id: number, repo: string, pr: number) =>
+  get<PullDetailView>(w(id, `/repos/${repo}/pulls/${pr}`));
+
+/** An open PR's diff, or one of its commits' with `commit`. */
+export const fetchPullDiff = (id: number, repo: string, pr: number, commit?: string) =>
+  get<PullDiffView>(w(id, `/repos/${repo}/pulls/${pr}/diff${commit ? `?commit=${commit}` : ""}`));
 
 /** Queues the PR, or changes the priority of a queued one, as the user. */
 export const queuePull = (id: number, repo: string, pr: number, priority: boolean) =>

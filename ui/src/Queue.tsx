@@ -15,6 +15,7 @@ import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
 import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
+import { PullDetail } from "./PullDetail";
 import { Avatar, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
@@ -210,14 +211,30 @@ export function Queue({ workspace }: { workspace: number }) {
         )}
       </div>
       <div className={`min-h-0 flex-1 overflow-y-auto ${picked ? "" : "max-lg:hidden"}`}>
-        {entry && (
-          <Detail
+        {entry?.state === "open" ? (
+          <PullDetail
+            key={entry.number}
             workspace={workspace}
-            lane={lane}
-            entry={entry}
-            onSelect={setPr}
+            repo={lane.repo}
+            trunk={lane.trunk}
+            pull={{
+              ...entry,
+              draft: open.data?.find((o) => o.number === entry.number)?.draft ?? false,
+            }}
+            busy={pending.has(entry.number)}
+            onQueue={(priority) => actions.queue(entry, priority)}
             onBack={() => setPr()}
           />
+        ) : (
+          entry && (
+            <Detail
+              workspace={workspace}
+              lane={lane}
+              entry={entry}
+              onSelect={setPr}
+              onBack={() => setPr()}
+            />
+          )
         )}
       </div>
     </div>
