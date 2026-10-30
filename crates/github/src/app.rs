@@ -14,6 +14,30 @@ use mergepatrol_core::RepoName;
 
 const API: &str = "https://api.github.com";
 
+/// One delivery of the App's webhook: GitHub keeps one per attempt, a redelivery under the same
+/// `guid`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HookDelivery {
+    pub id: u64,
+    pub guid: String,
+    /// The response's. 0 for none, as when the request timed out.
+    pub status_code: u16,
+    pub event: String,
+}
+
+impl HookDelivery {
+    pub fn delivered(&self) -> bool {
+        (200..300).contains(&self.status_code)
+    }
+}
+
+/// The `rel="next"` URL of a `Link` header.
+fn next_link(link: &str) -> Option<String> {
+    let next = link.split(',').find(|l| l.contains(r#"rel="next""#))?;
+    let url = next.split(';').next()?.trim();
+    Some(url.strip_prefix('<')?.strip_suffix('>')?.to_owned())
+}
+
 #[derive(Clone)]
 pub struct App {
     app_id: u64,
@@ -21,6 +45,8 @@ pub struct App {
     http: reqwest::Client,
     /// GitHub's REST API. Another in tests.
     api: String,
+    /// RS256 with the App's key. Another in tests.
+    alg: Algorithm,
 }
 
 impl App {
@@ -36,6 +62,7 @@ impl App {
             ),
             http,
             api: API.into(),
+            alg: Algorithm::RS256,
         })
     }
 
@@ -43,7 +70,7 @@ impl App {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let claims = json!({ "iat": now - 60, "exp": now + 540, "iss": self.app_id.to_string() });
         Ok(jsonwebtoken::encode(
-            &Header::new(Algorithm::RS256),
+            &Header::new(self.alg),
             &claims,
             &self.key,
         )?)
@@ -116,6 +143,54 @@ impl App {
             }
         }
         Ok(all)
+    }
+
+    /// The webhook's deliveries newer than `after`, newest first. Without `after`, the newest
+    /// page of them.
+    pub async fn hook_deliveries(&self, after: Option<u64>) -> Result<Vec<HookDelivery>> {
+        let mut all = Vec::new();
+        let mut url = format!("{}/app/hook/deliveries?per_page=100", self.api);
+        // GitHub keeps three days of them: a hiccup's worth is a few pages.
+        for _ in 0..10 {
+            let res = self
+                .http
+                .get(&url)
+                .bearer_auth(self.jwt()?)
+                .headers(api_headers())
+                .send()
+                .await?
+                .error_for_status()
+                .context("GET /app/hook/deliveries")?;
+            let next = res
+                .headers()
+                .get("link")
+                .and_then(|l| l.to_str().ok())
+                .and_then(next_link);
+            let page: Vec<HookDelivery> = res.json().await?;
+            let reached = page.is_empty() || after.is_none_or(|a| page.iter().any(|d| d.id <= a));
+            all.extend(page.into_iter().filter(|d| after.is_none_or(|a| d.id > a)));
+            match next {
+                Some(next) if !reached => url = next,
+                _ => break,
+            }
+        }
+        Ok(all)
+    }
+
+    /// Has GitHub send a delivery of the webhook again.
+    pub async fn redeliver(&self, delivery: u64) -> Result<()> {
+        self.http
+            .post(format!(
+                "{}/app/hook/deliveries/{delivery}/attempts",
+                self.api
+            ))
+            .bearer_auth(self.jwt()?)
+            .headers(api_headers())
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("redeliver webhook delivery {delivery}"))?;
+        Ok(())
     }
 
     pub fn installation(&self, id: u64) -> Installation {
@@ -704,6 +779,7 @@ pub mod fake {
             key: Arc::new(jsonwebtoken::EncodingKey::from_secret(b"unused")),
             http: reqwest::Client::new(),
             api,
+            alg: jsonwebtoken::Algorithm::HS256,
         };
         let token = Some(("t".into(), SystemTime::now() + Duration::from_secs(3600)));
         let inst = Installation {
@@ -924,6 +1000,38 @@ mod tests {
         let res = gh.request(Method::GET, "/z", None).await.unwrap();
         assert_eq!(res.status, StatusCode::NOT_FOUND);
         assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_deliveries_stop_at_the_last_one_seen() {
+        let page = r#"[
+            {"id":12,"guid":"c","status_code":502,"event":"push"},
+            {"id":11,"guid":"b","status_code":204,"event":"pull_request"},
+            {"id":10,"guid":"a","status_code":204,"event":"push"}
+        ]"#;
+        let more = "link: <http://unused/app/hook/deliveries?cursor=v1_10>; rel=\"next\"\r\n";
+        let (gh, requests) = fake::serve(vec![(200, more, page), (202, "", "{}")]).await;
+        let seen = gh.app.hook_deliveries(Some(10)).await.unwrap();
+        assert_eq!(seen.iter().map(|d| d.id).collect::<Vec<_>>(), [12, 11]);
+        assert!(!seen[0].delivered() && seen[1].delivered());
+        gh.app.redeliver(12).await.unwrap();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /app/hook/deliveries?per_page=100 HTTP/1.1",
+                "POST /app/hook/deliveries/12/attempts HTTP/1.1",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_next_page_is_in_the_link_header() {
+        let link = r#"<https://api.github.com/x?cursor=b>; rel="next", <https://api.github.com/x?cursor=a>; rel="prev""#;
+        assert_eq!(
+            next_link(link).as_deref(),
+            Some("https://api.github.com/x?cursor=b")
+        );
+        assert_eq!(next_link(r#"<https://api.github.com/x>; rel="prev""#), None);
     }
 
     #[tokio::test]

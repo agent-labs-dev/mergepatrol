@@ -69,6 +69,9 @@ const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflo
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
+/// How long the reads of GitHub that the queue no longer makes stay: a repo turned off, a commit
+/// long merged.
+const GITHUB_READS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often each subscription's seats are brought in line with Stripe.
 const SYNC_SEATS_EVERY: Duration = Duration::from_secs(60);
 
@@ -210,6 +213,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                     Spawned::spawn(discover(ctx.clone()), &alive),
                     Spawned::spawn(prune(ctx.clone()), &alive),
                     Spawned::spawn(sync_seats(ctx.clone()), &alive),
+                    Spawned::spawn(crate::redeliver::redeliver(ctx.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -257,6 +261,12 @@ async fn prune(ctx: Arc<Ctx>) {
             Ok(n) => tracing::info!(sessions = n, "deleted expired sessions"),
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "could not delete expired sessions")
+            }
+        }
+        match ctx.store.prune_github_reads(GITHUB_READS_FOR).await {
+            Ok(n) => tracing::info!(rows = n, "deleted old GitHub reads"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not delete old GitHub reads")
             }
         }
         let jobs = ctx.config.data_dir.join("jobs");
@@ -407,7 +417,7 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
 }
 
 /// The GitHub App: the hosted one from the environment, or the self-hosted one from the vault.
-async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
+pub(crate) async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
     if let Some(app) = &ctx.hosted_app {
         return Ok(Some(app.clone()));
     }
@@ -895,7 +905,7 @@ async fn fork_pin(
 }
 
 /// Whether GitHub delivers webhooks to this Mergepatrol: it does only with a secret, and to https.
-async fn webhooks(ctx: &Ctx) -> Result<bool> {
+pub(crate) async fn webhooks(ctx: &Ctx) -> Result<bool> {
     let secret = app_credentials(ctx)
         .await?
         .is_some_and(|app| app.webhook_secret.is_some());

@@ -680,6 +680,9 @@ impl ReadCache for Mem {
     async fn github_value(&self, _: u64, _: &RepoName, _: &str) -> Result<ValueRead> {
         unreachable!()
     }
+    async fn prune_github_reads(&self, _: Duration) -> Result<u64> {
+        unreachable!()
+    }
     async fn save_github_value(
         &self,
         _: u64,

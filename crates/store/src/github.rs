@@ -135,6 +135,9 @@ pub trait ReadCache: Send + Sync {
         changes: i64,
         value: &Value,
     ) -> Result<()>;
+    /// Deletes the reads the queue has not made for `age`, as of a repo turned off or a commit
+    /// long merged: how many.
+    async fn prune_github_reads(&self, age: Duration) -> Result<u64>;
 }
 
 #[async_trait]
@@ -407,6 +410,31 @@ impl ReadCache for PgStore {
         .await?;
         Ok(())
     }
+
+    async fn prune_github_reads(&self, age: Duration) -> Result<u64> {
+        let secs = age.as_secs_f64();
+        let values = sqlx::query(
+            "DELETE FROM github_values
+             WHERE coalesce(read_at, changed_at, 'epoch') < now() - make_interval(secs => $1)",
+        )
+        .bind(secs)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        // A repo's PRs and other reads go with it.
+        let repos = sqlx::query(
+            "DELETE FROM github_repos r
+             WHERE coalesce(greatest(config_read_at, repository_read_at), 'epoch')
+                 < now() - make_interval(secs => $1)
+             AND NOT EXISTS (SELECT 1 FROM github_values v
+                 WHERE v.installation_id = r.installation_id AND v.repo = r.repo)",
+        )
+        .bind(secs)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(values + repos)
+    }
 }
 
 /// Holds the repo's row until the transaction ends. Not `FOR UPDATE`, which would hold off the
@@ -665,5 +693,36 @@ mod tests {
             .expect("not held off by the lock")
             .unwrap();
         read.commit().await.unwrap();
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn reads_not_made_for_a_while_are_pruned(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let other = RepoName::parse("o/other").unwrap();
+        store.github_reads(1, &repo()).await.unwrap();
+        store.save_config_read(1, &repo(), 0, None).await.unwrap();
+        store.github_reads(1, &other).await.unwrap();
+        store.save_config_read(1, &other, 0, None).await.unwrap();
+        for key in ["checks:old", "checks:new"] {
+            store.github_value(1, &repo(), key).await.unwrap();
+            store
+                .save_github_value(1, &repo(), key, 0, &json!(true))
+                .await
+                .unwrap();
+        }
+        for aged in [
+            "UPDATE github_values SET read_at = now() - interval '2 days' WHERE key = 'checks:old'",
+            "UPDATE github_repos SET config_read_at = now() - interval '2 days'",
+        ] {
+            sqlx::query(aged).execute(&pool).await.unwrap();
+        }
+        // `o/other`, and the old commit's checks. `o/r` stays, for its other read.
+        let pruned = store
+            .prune_github_reads(Duration::from_secs(24 * 60 * 60))
+            .await
+            .unwrap();
+        assert_eq!(pruned, 2);
+        let reads = store.github_value(1, &repo(), "checks:new").await.unwrap();
+        assert!(reads.read.is_some());
     }
 }
