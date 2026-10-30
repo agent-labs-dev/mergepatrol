@@ -40,6 +40,7 @@ impl CodexResolver {
         let toml = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
         let mut cmd = tokio::process::Command::new("codex");
         cmd.current_dir(workdir).env(KEY_VAR, key);
+        cli::bypass_proxy(&mut cmd, &self.base_url);
         cmd.args(["exec", "--json", "--ephemeral", "--ignore-user-config"])
             // The job's container is the sandbox, and Codex's own does not run inside gVisor.
             // Nothing asks for approval: there is nobody to answer.
@@ -194,6 +195,11 @@ mod tests {
             .find(|(k, _)| *k == KEY_VAR)
             .and_then(|(_, v)| v);
         assert_eq!(env, Some("job-token".as_ref()));
+        let no_proxy = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "NO_PROXY")
+            .and_then(|(_, v)| v);
+        assert_eq!(no_proxy, Some("orchestrator".as_ref()));
         let args: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
