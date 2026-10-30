@@ -1,6 +1,7 @@
 ---
 title: Snooze a PR, or close one you no longer want, from the You tab
 kind: improved
+pr: 140
 image: /changelog/snooze-close/snooze.png
 ---
 
