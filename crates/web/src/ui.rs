@@ -31,6 +31,10 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
     if let Some(page) = crate::blog::serve(path, &state.public_url, state.analytics.browser()) {
         return page;
     }
+    if let Some(page) = crate::changelog::serve(path, &state.public_url, state.analytics.browser())
+    {
+        return page;
+    }
     if !path.is_empty()
         && let Some(file) = UiAssets::get(path)
     {
@@ -57,7 +61,7 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
     }
 }
 
-/// The landing page and the blog are public. The rest is the API, sign-in and webhooks.
+/// The landing page, the blog and the changelog are public. The rest is the API, sign-in and webhooks.
 fn robots(public_url: &str) -> String {
     format!(
         "User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /auth/\nDisallow: /setup/\nDisallow: /webhooks/\n\nSitemap: {public_url}/sitemap.xml\n"
@@ -66,7 +70,8 @@ fn robots(public_url: &str) -> String {
 
 fn sitemap(public_url: &str) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url><loc>{public_url}/</loc></url>\n{}</urlset>\n",
-        crate::blog::sitemap_entries(public_url)
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url><loc>{public_url}/</loc></url>\n{}{}</urlset>\n",
+        crate::blog::sitemap_entries(public_url),
+        crate::changelog::sitemap_entries(public_url)
     )
 }

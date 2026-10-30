@@ -5,6 +5,7 @@ mod api;
 mod auth;
 mod billing;
 mod blog;
+mod changelog;
 mod mcp;
 mod oauth;
 mod routes;
@@ -1159,6 +1160,12 @@ mod tests {
                 .await
                 .contains("<loc>http://localhost:8080/</loc>")
         );
+        assert!(
+            body(&router, "/sitemap.xml", "")
+                .await
+                .contains("<loc>http://localhost:8080/changelog</loc>")
+        );
+        assert_eq!(get(&router, "/changelog", None).await, StatusCode::OK);
         assert_eq!(get(&router, "/og.png", None).await, StatusCode::NOT_FOUND);
         let page = body(&router, "/ada/queue", "").await;
         // CI builds ui/ before the tests. Without the build there is no page to fill in.
@@ -1169,6 +1176,9 @@ mod tests {
             let card = "/og/mergepatrol-og-1200x630.png";
             assert!(page.contains(&format!(r#"content="http://localhost:8080{card}""#)));
             assert_eq!(get(&router, card, None).await, StatusCode::OK);
+            // An entry's picture sits under its page's path, and is the dashboard's asset.
+            let shot = "/changelog/you-tab/needs-you.png";
+            assert_eq!(get(&router, shot, None).await, StatusCode::OK);
         }
     }
 

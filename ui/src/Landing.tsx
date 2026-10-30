@@ -201,6 +201,10 @@ export function Landing({
         Mergepatrol · Apache-2.0 ·{" "}
         <a className="hover:text-fg" href={repoUrl}>
           GitHub
+        </a>{" "}
+        ·{" "}
+        <a className="hover:text-fg" href="/changelog">
+          Changelog
         </a>
       </footer>
     </div>
