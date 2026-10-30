@@ -503,6 +503,8 @@ pub struct RepoSettingsView {
     pub fix_ci: bool,
     /// The most fixes a PR gets, before it is ejected.
     pub fix_ci_attempts: u32,
+    /// The branches with a queue besides the default branch.
+    pub branches: Vec<String>,
 }
 
 impl From<RepoSettings> for RepoSettingsView {
@@ -516,6 +518,7 @@ impl From<RepoSettings> for RepoSettingsView {
             verify: s.verify,
             fix_ci: s.fix_ci.enabled,
             fix_ci_attempts: s.fix_ci.attempts,
+            branches: s.branches,
         }
     }
 }
@@ -540,6 +543,12 @@ impl From<RepoSettingsView> for RepoSettings {
                 enabled: v.fix_ci,
                 attempts: v.fix_ci_attempts,
             },
+            branches: v
+                .branches
+                .iter()
+                .map(|b| b.trim().to_owned())
+                .filter(|b| !b.is_empty())
+                .collect(),
         }
     }
 }
@@ -1243,8 +1252,13 @@ fn config_pr(
         1 => "on, one attempt".to_owned(),
         n => format!("on, up to {n} attempts"),
     };
+    let branches: Vec<String> = settings.branches.iter().map(|b| format!("`{b}`")).collect();
+    let branches = match branches.is_empty() {
+        true => "the default branch only".to_owned(),
+        false => format!("the default branch, {}", branches.join(", ")),
+    };
     let list = format!(
-        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: {} `{}`, effort `{}`\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}",
+        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: {} `{}`, effort `{}`\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}\n- Queues: {branches}",
         settings.label,
         settings.batch_size,
         settings.resolver.provider.name(),

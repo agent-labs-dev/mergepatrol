@@ -28,9 +28,9 @@ An error outside the PR's job does not eject it. That covers GitHub being down, 
 
 ### Branches
 
-Each base branch has its own queue: a labeled PR joins the queue of the branch it targets, `main` or `release` alike, and is rebased onto that branch. The queues of a repo take turns, one job each, so a busy branch does not hold another up; they share the repo's git cache, so two never run a job at once. A batch holds PRs into one branch only.
+The default branch has a queue, and so does each branch that `branches` in [`.mergepatrol/mergepatrol.yml`](#repo-settings) lists, `release` say. A labeled PR joins the queue of the branch it targets, and is rebased onto that branch. A PR into any other branch is held, as is a PR stacked by hand on another PR's branch: a stack made with `gh stack` joins the queue of the branch the whole stack merges into. The queues of a repo take turns, one job each, so a busy branch does not hold another up; they share the repo's git cache, so two never run a job at once. A batch holds PRs into one branch only.
 
-A PR retargeted to another branch leaves its queue, and joins the other branch's at the back. Deleting a branch closes the PRs into it, which leave its queue. The settings in [`.mergepatrol/mergepatrol.yml`](#repo-settings), on the default branch, apply to every branch's queue.
+A PR retargeted to another branch leaves its queue, and joins the other branch's at the back. Deleting a branch closes the PRs into it, which leave its queue. A branch taken off the list holds its PRs. The settings in the file, on the default branch, apply to every branch's queue.
 
 ### Batches
 
@@ -158,6 +158,8 @@ verify:
 fix_ci:
   enabled: true    # an agent fixes failed required checks
   attempts: 2      # 1 to 5 fixes, before the PR is ejected
+branches:          # queues besides the default branch's: exact names
+  - release
 ```
 
 The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too.

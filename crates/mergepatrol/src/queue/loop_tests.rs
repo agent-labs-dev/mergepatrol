@@ -912,6 +912,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                 },
                 verify: Vec::new(),
                 fix_ci: Default::default(),
+                branches: Vec::new(),
             },
             data_dir: PathBuf::new(),
             poll: Duration::from_secs(60),
@@ -2588,6 +2589,9 @@ async fn a_public_repo_over_its_fair_use_waits_for_the_hour() {
     assert!(plans.seats.lock().unwrap().is_empty());
 }
 
+/// The settings that give `release` a queue.
+const RELEASE: &str = "version: 1\nbranches: [release]\n";
+
 impl Run {
     /// The PRs of the lane into `trunk`, if it has one.
     fn lane_into(&self, trunk: &str) -> Option<Vec<PrNumber>> {
@@ -2601,6 +2605,7 @@ impl Run {
 async fn a_pr_into_another_branch_is_merged_into_it() {
     let run = Run::new(Fake::new(|s| {
         s.add_branch("release");
+        s.config = Some(RELEASE.into());
         s.add_pr(1);
         s.retarget(1, "release");
     }));
@@ -2621,6 +2626,7 @@ async fn a_pr_into_another_branch_is_merged_into_it() {
 async fn each_branch_has_its_own_queue_and_they_take_turns() {
     let run = Run::new(Fake::new(|s| {
         s.add_branch("release");
+        s.config = Some(RELEASE.into());
         for n in 1..=3 {
             s.add_pr(n);
         }
@@ -2640,6 +2646,7 @@ async fn each_branch_has_its_own_queue_and_they_take_turns() {
 async fn a_retargeted_pr_leaves_its_queue_for_its_new_branch() {
     let gh = Fake::new(|s| {
         s.add_branch("release");
+        s.config = Some(RELEASE.into());
         s.add_pr(1);
         s.prs.get_mut(&1).unwrap().is_draft = true;
     });
@@ -2672,6 +2679,7 @@ async fn a_retargeted_pr_leaves_its_queue_for_its_new_branch() {
 async fn a_pr_retargeted_while_its_checks_run_is_not_merged_into_its_old_branch() {
     let run = Run::new(Fake::new(|s| {
         s.add_branch("release");
+        s.config = Some(RELEASE.into());
         s.add_pr(1);
         s.checks.insert("ci".into(), CheckState::Pending);
     }));
@@ -2689,6 +2697,7 @@ async fn a_pr_retargeted_while_its_checks_run_is_not_merged_into_its_old_branch(
 async fn the_prs_of_a_deleted_branch_leave_its_queue() {
     let run = Run::new(Fake::new(|s| {
         s.add_branch("release");
+        s.config = Some(RELEASE.into());
         s.add_pr(1);
         s.retarget(1, "release");
         s.prs.get_mut(&1).unwrap().is_draft = true;
@@ -2703,4 +2712,47 @@ async fn the_prs_of_a_deleted_branch_leave_its_queue() {
     assert!(matches!(run.tick().await, Ran::Idle));
     assert_eq!(run.exits(), [(1, "dequeued".into(), "PR 1".into())]);
     assert_eq!(run.lane_into("release"), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_into_a_branch_without_a_queue_is_held() {
+    // A PR stacked by hand on another PR's branch.
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("feat/a");
+        s.add_pr(1);
+        s.retarget(1, "feat/a");
+    }));
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    assert_eq!(run.lane_into("main"), Some(vec![1]));
+    assert_eq!(run.lane_into("feat/a"), None);
+    assert_eq!(run.gh.with(|s| s.branches["feat/a"].clone()), "feat/a-0");
+    // Once it targets a branch with a queue, it merges there.
+    run.gh.with_mut(|s| s.retarget(1, "main"));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_prs_of_a_branch_taken_off_the_list_are_held() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.add_pr(1);
+        s.retarget(1, "release");
+        s.prs.get_mut(&1).unwrap().is_draft = true;
+    }));
+    run.tick().await;
+    assert_eq!(run.lane_into("release"), Some(vec![1]));
+    run.gh.with_mut(|s| s.config = None);
+    run.tick().await;
+    assert_eq!(run.lane_into("release"), None);
+    // The default branch's lane ran first, before `release` let the PR go.
+    run.tick().await;
+    assert_eq!(run.lane_into("main"), Some(vec![1]));
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "held", "dequeued", "enqueued", "held"]
+    );
 }

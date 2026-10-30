@@ -582,19 +582,29 @@ struct RepoRead {
 }
 
 impl RepoRead {
-    /// The branches with a lane to run: the default branch, each other branch a queued unit
+    /// The branches with a lane to run: the default branch, each listed branch a queued unit
     /// merges into, and each with a saved lane: its PRs may have left, as GitHub closes the PRs
-    /// of a deleted branch, and a drained lane goes.
+    /// of a deleted branch, or the branch left the list, and a drained lane goes.
     fn trunks(&self) -> Vec<String> {
         let others: BTreeSet<&String> = self
             .units
             .iter()
-            .map(|u| &u.base)
+            .map(|u| self.lane_of(&u.base))
             .chain(self.lanes.iter().map(|(trunk, _)| trunk))
             .filter(|t| **t != self.snap.default_branch)
             .collect();
         let default = std::iter::once(self.snap.default_branch.clone());
         default.chain(others.into_iter().cloned()).collect()
+    }
+
+    /// The trunk of the lane a unit into `base` waits in. A branch without a queue is not
+    /// listed in the settings, as a PR stacked by hand on another PR's branch: its units wait in
+    /// the default branch's lane, held.
+    fn lane_of<'a>(&'a self, base: &'a String) -> &'a String {
+        match self.settings.queues(base, &self.snap.default_branch) {
+            true => base,
+            false => &self.snap.default_branch,
+        }
     }
 
     fn lane(&self, trunk: &str) -> Lane {
@@ -612,7 +622,7 @@ impl RepoRead {
         };
         self.units
             .iter()
-            .filter(|u| u.base == trunk && !elsewhere(u.number))
+            .filter(|u| self.lane_of(&u.base) == trunk && !elsewhere(u.number))
             .cloned()
             .collect()
     }
@@ -663,6 +673,17 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
         lanes,
         gate,
     }))
+}
+
+/// Why a unit into `base` waits: the branch has no queue.
+fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> String {
+    let queues =
+        std::iter::once(default_branch).chain(settings.branches.iter().map(String::as_str));
+    let queues: Vec<String> = queues.map(|b| format!("`{b}`")).collect();
+    format!(
+        "targets `{base}`, which has no queue (queues: {}; `branches` in `{REPO_CONFIG_PATH}` adds one)",
+        queues.join(", ")
+    )
 }
 
 /// Syncs the lane of `trunk` with GitHub, and runs its next job, if it has one.
@@ -730,6 +751,8 @@ async fn tick_lane(
         }
         let hold = if let Some(gate) = &gate {
             Some(gate.reason.clone())
+        } else if unit.base != trunk {
+            Some(no_queue(&unit.base, &read.snap.default_branch, &settings))
         } else if let Some(reason) = unit.hold_reason() {
             Some(reason)
         } else if unit.fork() {

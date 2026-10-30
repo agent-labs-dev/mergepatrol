@@ -11,4 +11,8 @@ fix_ci: boolean,
 /**
  * The most fixes a PR gets, before it is ejected.
  */
-fix_ci_attempts: number, };
+fix_ci_attempts: number, 
+/**
+ * The branches with a queue besides the default branch.
+ */
+branches: Array<string>, };
