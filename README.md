@@ -179,13 +179,13 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `cloud-run` runs it as a Cloud Run Job execution (below). `local` runs it as a process, without isolation, for development |
+| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `agent-sandbox` runs it in a GKE sandbox (below). `local` runs it as a process, without isolation, for development |
 | `MERGEPATROL_JOB_IMAGE` | `mergepatrol-job:latest` | The job image (`docker build --target job`) |
 | `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
 | `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
 | `MERGEPATROL_JOB_RESOLV_CONF` | Docker's default | A file on the Docker host, mounted as the jobs' `/etc/resolv.conf`. `/etc/mergepatrol/job-resolv.conf` on the sandbox network |
-| `MERGEPATROL_JOB_PROXY_URL` | `MERGEPATROL_PUBLIC_URL` | Where jobs reach the orchestrator's model API proxy. `http://10.213.0.1:8081` on the sandbox network |
-| `MERGEPATROL_JOB_PROXY_BIND` | None | A second listener that serves only the proxy, for jobs that cannot reach the dashboard's. `0.0.0.0:8081` in `compose.yml` |
+| `MERGEPATROL_JOB_PROXY_URL` | `MERGEPATROL_PUBLIC_URL` | Where jobs reach the orchestrator: its model API proxy, and a GKE sandbox's link. `http://10.213.0.1:8081` on the sandbox network |
+| `MERGEPATROL_JOB_PROXY_BIND` | None | A second listener that serves only what jobs use, for jobs that cannot reach the dashboard's. `0.0.0.0:8081` in `compose.yml` |
 | `MERGEPATROL_JOB_MEMORY` | `4g` | Memory limit per job |
 | `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
 
@@ -195,13 +195,18 @@ Each release publishes both images, tagged with its version and `latest`: `ghcr.
 
 ## On GCP
 
-`deploy/gcp/bootstrap.sh` sets up one environment in a GCP project with billing linked, and deploys it with `deploy/gcp/cloudbuild.yaml`. The orchestrator runs as the Cloud Run service `mergepatrol`, as one instance that is always on, with Cloud SQL Postgres. Only the instance that holds a lock in Postgres runs the queues, so the new instance of a deploy waits until the old one has stopped. On SIGTERM, an instance lets go of the lock at once. Each job runs as an execution of the Cloud Run Job `mergepatrol-job`, which Cloud Run sandboxes with gVisor. The job's service account has no roles, and the job has no way into the orchestrator but its link: `<MERGEPATROL_PUBLIC_URL>/jobs/<token>`. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done. The token is in the execution's arguments, so anyone who can read the project's Cloud Run executions can see it.
+`deploy/gcp/bootstrap.sh` sets up one environment in a GCP project with billing linked: the GKE Autopilot cluster `mergepatrol`, Cloud SQL Postgres, and a load balancer for the public URL. It deploys with `deploy/gcp/cloudbuild.yaml`, which runs `deploy/gcp/deploy.sh`. The manifests are under `deploy/gcp/k8s`.
+
+The orchestrator runs as the Deployment `mergepatrol`, one instance, with Cloud SQL through a proxy sidecar and its secrets from Secret Manager. Only the instance that holds a lock in Postgres runs the queues, so the new instance of a deploy waits until the old one has stopped. On SIGTERM, an instance lets go of the lock at once.
+
+Each job runs in its own gVisor sandbox, through [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox): the orchestrator claims one from the warm pool `mergepatrol-job`, which keeps one sandbox ready, so a job starts in about a second. Jobs past the first start cold, on a new node, in 1 to 2.5 minutes. A sandbox has no service account, uses public DNS, and its network policy lets it reach the internet but not the metadata server, the cluster, or the VPC. The one exception is the orchestrator's job port. The orchestrator hands the sandbox its link, `http://<orchestrator pod IP>:8081/jobs/<token>`, over HTTP, since a claim that sets env would skip the warm pool. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done.
 
 This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public App `Mergepatrol`, which any account can install; each workspace brings its own Anthropic or OpenAI API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
 
 | Variable | What it is |
 | --- | --- |
-| `MERGEPATROL_CLOUD_RUN_JOB` | `projects/<p>/locations/<r>/jobs/<name>`, with `MERGEPATROL_EXECUTOR=cloud-run` |
+| `MERGEPATROL_SANDBOX_NAMESPACE` | Where the jobs' sandboxes run, with `MERGEPATROL_EXECUTOR=agent-sandbox`. `mergepatrol-jobs` by default |
+| `MERGEPATROL_SANDBOX_WARM_POOL` | The `SandboxWarmPool` that sandboxes are claimed from. `mergepatrol-job` by default |
 | `MERGEPATROL_POSTHOG_KEY` | The PostHog project key. Turns on product analytics (below) |
 | `MERGEPATROL_POSTHOG_HOST` | The PostHog host. `https://us.i.posthog.com` by default |
 

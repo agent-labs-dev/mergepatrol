@@ -15,7 +15,8 @@ use anyhow::{Context, Result};
 use mergepatrol_analytics::Analytics;
 use mergepatrol_billing::Billing;
 use mergepatrol_executor::proxy::{ApiProxy, Upstreams};
-use mergepatrol_executor::remote::{CloudRunLaunch, Mailbox, RemoteExecutor};
+use mergepatrol_executor::remote::{Mailbox, RemoteExecutor};
+use mergepatrol_executor::sandbox::{Kube, START_PORT, SandboxLaunch};
 use mergepatrol_executor::{DockerExecutor, Executor, LocalExecutor};
 use mergepatrol_github::App;
 use mergepatrol_github::setup::random_token;
@@ -34,11 +35,15 @@ const JOB_TIMEOUT: Duration = Duration::from_secs(40 * 60);
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("job") {
-        // `mergepatrol job --out <dir>` or `--remote <link>`: runs inside the sandbox, with no config.
+        // `mergepatrol job --out <dir>`, `--remote <link>` or `--serve <port>`: runs inside the
+        // sandbox, with no config.
         return match args.get(2..4) {
             Some([flag, dir]) if flag == "--out" => job::main(PathBuf::from(dir)).await,
             Some([flag, link]) if flag == "--remote" => job::main_remote(link).await,
-            _ => anyhow::bail!("usage: mergepatrol job --out <dir> | --remote <link>"),
+            Some([flag, port]) if flag == "--serve" => job::main_serve(port.parse()?).await,
+            _ => anyhow::bail!(
+                "usage: mergepatrol job --out <dir> | --remote <link> | --serve <port>"
+            ),
         };
     }
     if args.get(1).map(String::as_str) == Some("--version") {
@@ -138,17 +143,20 @@ async fn orchestrator() -> Result<()> {
                 timeout: JOB_TIMEOUT,
             })
         }
-        ExecutorConfig::CloudRun { job } => {
-            tracing::info!(%job, "jobs run as Cloud Run Job executions");
+        ExecutorConfig::AgentSandbox {
+            namespace,
+            warm_pool,
+        } => {
+            tracing::info!(%namespace, %warm_pool, "jobs run in GKE sandboxes");
             Arc::new(RemoteExecutor {
                 mailbox: mailbox.clone(),
-                base_url: config.public_url.clone(),
-                launch: Box::new(CloudRunLaunch {
-                    job: job.clone(),
+                base_url: config.job_proxy_url.clone(),
+                launch: Box::new(SandboxLaunch {
+                    kube: Kube::in_cluster()?,
+                    namespace: namespace.clone(),
+                    warm_pool: warm_pool.clone(),
                     timeout: JOB_TIMEOUT,
-                    http: reqwest::Client::builder()
-                        .timeout(mergepatrol_executor::remote::CLOUD_RUN_REQUEST_TIMEOUT)
-                        .build()?,
+                    start_port: START_PORT,
                 }),
                 timeout: JOB_TIMEOUT,
             })
@@ -193,8 +201,9 @@ async fn orchestrator() -> Result<()> {
 
     if let Some(proxy_bind) = ctx.config.job_proxy_bind {
         let listener = tokio::net::TcpListener::bind(proxy_bind).await?;
-        tracing::info!(bind = %proxy_bind, "model API proxy for jobs");
-        tokio::spawn(axum::serve(listener, proxy.clone().router()).into_future());
+        tracing::info!(bind = %proxy_bind, "model API proxy and links for jobs");
+        let jobs = proxy.clone().router().merge(mailbox.clone().router());
+        tokio::spawn(axum::serve(listener, jobs).into_future());
     }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(%bind, "dashboard");

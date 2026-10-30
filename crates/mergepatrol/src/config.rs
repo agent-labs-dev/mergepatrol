@@ -24,9 +24,10 @@ pub struct Config {
     pub bind: SocketAddr,
     pub max_jobs: usize,
     pub executor: ExecutorConfig,
-    /// Where jobs reach the orchestrator's Anthropic proxy. `public_url` by default.
+    /// Where jobs reach the orchestrator: its model API proxy, and a remote job's link.
+    /// `public_url` by default.
     pub job_proxy_url: String,
-    /// A second listener that serves only the proxy, for jobs that cannot reach `bind`: the
+    /// A second listener that serves only what jobs use, for jobs that cannot reach `bind`: the
     /// Docker sandbox network reaches the host on one port only.
     pub job_proxy_bind: Option<SocketAddr>,
     /// The PostHog project key. Product analytics are off without it, as when self-hosted.
@@ -49,10 +50,11 @@ pub enum ExecutorConfig {
         memory: String,
         cpus: String,
     },
-    /// An execution of a Cloud Run Job per job, which reaches back to `public_url`.
-    CloudRun {
-        /// `projects/<p>/locations/<r>/jobs/<name>`.
-        job: String,
+    /// A GKE sandbox per job, claimed from an Agent Sandbox warm pool, which reaches back to
+    /// `job_proxy_url`. The orchestrator runs in the same cluster.
+    AgentSandbox {
+        namespace: String,
+        warm_pool: String,
     },
 }
 
@@ -122,10 +124,13 @@ impl Config {
                     memory: opt("MERGEPATROL_JOB_MEMORY", "4g"),
                     cpus: opt("MERGEPATROL_JOB_CPUS", "2"),
                 },
-                "cloud-run" => ExecutorConfig::CloudRun {
-                    job: req("MERGEPATROL_CLOUD_RUN_JOB")?,
+                "agent-sandbox" => ExecutorConfig::AgentSandbox {
+                    namespace: opt("MERGEPATROL_SANDBOX_NAMESPACE", "mergepatrol-jobs"),
+                    warm_pool: opt("MERGEPATROL_SANDBOX_WARM_POOL", "mergepatrol-job"),
                 },
-                other => bail!("MERGEPATROL_EXECUTOR: {other:?} is not local, docker or cloud-run"),
+                other => {
+                    bail!("MERGEPATROL_EXECUTOR: {other:?} is not local, docker or agent-sandbox")
+                }
             },
             posthog_key: var("MERGEPATROL_POSTHOG_KEY"),
             posthog_host: opt("MERGEPATROL_POSTHOG_HOST", "https://us.i.posthog.com"),

@@ -1,0 +1,121 @@
+# The orchestrator, rolled out by deploy/gcp/deploy.sh with __PROJECT__, __REGION__,
+# __PUBLIC_URL__, __ORCHESTRATOR_IMAGE__, __POSTHOG_KEY__ and __STRIPE_PRICE__ filled in.
+
+# One instance: the queue runs in the background, not per request. During a deploy the new one
+# serves requests and waits for the queue lock in Postgres, which the old one lets go of on
+# SIGTERM. The repo caches live on its disk.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: mergepatrol
+  template:
+    metadata:
+      labels:
+        app: mergepatrol
+    spec:
+      serviceAccountName: mergepatrol
+      # The Service `mergepatrol` would set MERGEPATROL_SERVICE_HOST, MERGEPATROL_PORT and others,
+      # in the orchestrator's own namespace of variables.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # Cloud SQL, at the socket in MERGEPATROL_DATABASE_URL. A sidecar: it runs as long as
+        # the orchestrator does.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.27.0
+          restartPolicy: Always
+          args:
+            - --unix-socket=/cloudsql
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+            - __PROJECT__:__REGION__:mergepatrol
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: 9090
+            periodSeconds: 1
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+              ephemeral-storage: 100Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: cloudsql
+              mountPath: /cloudsql
+      containers:
+        - name: orchestrator
+          image: __ORCHESTRATOR_IMAGE__
+          # Each file under /secrets sets the variable it is named after.
+          command:
+            - sh
+            - -c
+            - for f in /secrets/*; do export "${f##*/}=$(cat "$f")"; done; exec mergepatrol
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: MERGEPATROL_PUBLIC_URL
+              value: __PUBLIC_URL__
+            - name: MERGEPATROL_EXECUTOR
+              value: agent-sandbox
+            - name: MERGEPATROL_JOB_PROXY_BIND
+              value: 0.0.0.0:8081
+            # This pod, not the Service: a job's link and proxy token live in the memory of the
+            # instance that started it.
+            - name: MERGEPATROL_JOB_PROXY_URL
+              value: http://$(POD_IP):8081
+            - name: MERGEPATROL_POSTHOG_KEY
+              value: __POSTHOG_KEY__
+            - name: MERGEPATROL_STRIPE_PRICE
+              value: __STRIPE_PRICE__
+          ports:
+            - containerPort: 8080
+            - containerPort: 8081
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+              # With the proxy's, under Autopilot's 10Gi a pod.
+              ephemeral-storage: 9Gi
+          volumeMounts:
+            - name: cloudsql
+              mountPath: /cloudsql
+            - name: secrets
+              mountPath: /secrets
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: cloudsql
+          emptyDir: {}
+        - name: secrets
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: mergepatrol
+        - name: data
+          emptyDir:
+            sizeLimit: 9Gi

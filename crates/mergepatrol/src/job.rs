@@ -39,6 +39,44 @@ pub async fn main_remote(link: &str) -> Result<()> {
     remote::upload(link, &out, remote::CHUNK_BYTES).await
 }
 
+/// `mergepatrol job --serve <port>`: a warm sandbox, started before its job. It waits for the
+/// orchestrator to send the link, takes the first one, and stops listening.
+pub async fn main_serve(port: u16) -> Result<()> {
+    let link = receive_link(tokio::net::TcpListener::bind(("0.0.0.0", port)).await?).await?;
+    main_remote(&link).await
+}
+
+/// Serves `POST /start`, with the link as the body, until it gets one.
+async fn receive_link(listener: tokio::net::TcpListener) -> Result<String> {
+    use axum::http::StatusCode;
+    use std::sync::{Arc, Mutex};
+    let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let app = axum::Router::new().route(
+        "/start",
+        axum::routing::post(move |link: String| async move {
+            if link.is_empty() {
+                return StatusCode::BAD_REQUEST;
+            }
+            match tx.lock().unwrap().take() {
+                Some(tx) => {
+                    let _ = tx.send(link);
+                    StatusCode::NO_CONTENT
+                }
+                None => StatusCode::CONFLICT,
+            }
+        }),
+    );
+    let (got, link) = tokio::sync::oneshot::channel();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        if let Ok(l) = rx.await {
+            let _ = got.send(l);
+        }
+    });
+    server.await?;
+    link.await.context("no link")
+}
+
 async fn run_to(spec: &JobSpec, out: &Path) -> Result<()> {
     let out = out.to_owned();
     tokio::fs::create_dir_all(&out).await?;
@@ -339,4 +377,31 @@ async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &s
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_warm_sandbox_takes_the_first_link_and_stops_listening() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/start", listener.local_addr().unwrap());
+        let received = tokio::spawn(receive_link(listener));
+        let http = reqwest::Client::new();
+        let empty = http.post(&url).body("").send().await.unwrap();
+        assert_eq!(empty.status(), 400, "an empty link is refused");
+        let res = http
+            .post(&url)
+            .body("http://orch/jobs/t")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 204);
+        assert_eq!(received.await.unwrap().unwrap(), "http://orch/jobs/t");
+        assert!(
+            http.post(&url).body("x").send().await.is_err(),
+            "it stopped listening"
+        );
+    }
 }
