@@ -26,6 +26,12 @@ Required checks that have not finished 3 hours after a rebase or a fix also ejec
 
 An error outside the PR's job does not eject it. That covers GitHub being down, or slow to answer, as well as a rate limit. The PR keeps its place at the head of the queue, and its job runs again. Only after 30 minutes of such errors is it ejected.
 
+### Branches
+
+Each base branch has its own queue: a labeled PR joins the queue of the branch it targets, `main` or `release` alike, and is rebased onto that branch. The queues of a repo take turns, one job each, so a busy branch does not hold another up; they share the repo's git cache, so two never run a job at once. A batch holds PRs into one branch only.
+
+A PR retargeted to another branch leaves its queue, and joins the other branch's at the back. Deleting a branch closes the PRs into it, which leave its queue. The settings in [`.mergepatrol/mergepatrol.yml`](#repo-settings), on the default branch, apply to every branch's queue.
+
 ### Batches
 
 A queue that runs CI once per PR merges a few PRs an hour. So when several queued PRs have passed their own checks, Mergepatrol tests them together:
@@ -73,7 +79,7 @@ A self-hosted Mergepatrol has no limits, and bills no one.
 
 ## Run it
 
-The spike has one queue per repo, on the default branch. GitHub webhooks wake a queue as soon as something changes, but GitHub only delivers them to a public https URL. On localhost, Mergepatrol polls.
+GitHub webhooks wake a queue as soon as something changes, but GitHub only delivers them to a public https URL. On localhost, Mergepatrol polls.
 
 1. Generate the secret key. It encrypts the GitHub App and the model API keys in the database. Keep it: without it, you must set Mergepatrol up again.
 

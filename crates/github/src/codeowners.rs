@@ -4,9 +4,9 @@
 
 use serde_json::Value;
 
-/// What the repository query reads of the trunk, for [`CodeOwners::from_repository`]: its rules,
-/// and CODEOWNERS where GitHub looks for it, in its order.
-pub(crate) const FIELDS: &str = "defaultBranchRef { rules(first: 50) { nodes { parameters { ... on PullRequestParameters { requireCodeOwnerReview } } } } }
+/// What the repository query reads of the trunk, for [`CodeOwners::from_repository`]: its name, its
+/// rules, and CODEOWNERS where GitHub looks for it, in its order.
+pub(crate) const FIELDS: &str = "defaultBranchRef { name rules(first: 50) { nodes { parameters { ... on PullRequestParameters { requireCodeOwnerReview } } } } }
   codeowners0: object(expression: \"HEAD:.github/CODEOWNERS\") { ... on Blob { text } }
   codeowners1: object(expression: \"HEAD:CODEOWNERS\") { ... on Blob { text } }
   codeowners2: object(expression: \"HEAD:docs/CODEOWNERS\") { ... on Blob { text } }";
@@ -14,6 +14,8 @@ pub(crate) const FIELDS: &str = "defaultBranchRef { rules(first: 50) { nodes { p
 /// The trunk's CODEOWNERS, as GitHub reads it: the last line that matches a path names its owners.
 #[derive(Debug, Default)]
 pub struct CodeOwners {
+    /// The branch whose rules require the review: the default branch.
+    pub branch: String,
     lines: Vec<(String, Vec<String>)>,
 }
 
@@ -25,10 +27,11 @@ impl CodeOwners {
             .iter()
             .any(|r| r["parameters"]["requireCodeOwnerReview"] == true);
         let text = (0..3).find_map(|i| repo[format!("codeowners{i}")]["text"].as_str())?;
-        required.then(|| Self::parse(text))
+        let branch = repo["defaultBranchRef"]["name"].as_str()?;
+        required.then(|| Self::parse(branch, text))
     }
 
-    pub fn parse(text: &str) -> Self {
+    pub fn parse(branch: &str, text: &str) -> Self {
         let lines = text
             .lines()
             .filter_map(|line| {
@@ -38,7 +41,10 @@ impl CodeOwners {
                 Some((pattern.to_owned(), owners.map(str::to_owned).collect()))
             })
             .collect();
-        CodeOwners { lines }
+        CodeOwners {
+            branch: branch.to_owned(),
+            lines,
+        }
     }
 
     /// The owners of a path: empty when it has none.
@@ -162,7 +168,7 @@ mod tests {
 
     #[test]
     fn an_owned_file_awaits_one_of_its_owners() {
-        let owners = CodeOwners::parse(NEBULA);
+        let owners = CodeOwners::parse("main", NEBULA);
         let workflow = files(&[".github/workflows/maintainability.yml"]);
         assert!(owners.awaits_review(&workflow, &[]));
         assert!(owners.awaits_review(&workflow, &["someone-else"]));
@@ -175,7 +181,7 @@ mod tests {
 
     #[test]
     fn files_without_an_owner_await_no_one() {
-        let owners = CodeOwners::parse(NEBULA);
+        let owners = CodeOwners::parse("main", NEBULA);
         assert!(!owners.awaits_review(&files(&["src/models/postgres/user.py"]), &[]));
         // The last match wins, and it can name no owner.
         assert!(!owners.awaits_review(&files(&["apps/public/a.ts"]), &[]));
@@ -183,7 +189,7 @@ mod tests {
 
     #[test]
     fn any_approval_counts_for_a_team() {
-        let owners = CodeOwners::parse(NEBULA);
+        let owners = CodeOwners::parse("main", NEBULA);
         let app = files(&["apps/a.ts"]);
         assert!(owners.awaits_review(&app, &[]));
         assert!(!owners.awaits_review(&app, &["ann"]));

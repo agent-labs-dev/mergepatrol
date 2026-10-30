@@ -132,6 +132,13 @@ pub trait Store: ReadCache {
     async fn save_lane(&self, key: &LaneKey, lane: &Lane) -> Result<()>;
     /// The lanes of one workspace.
     async fn lanes(&self, installation_id: u64) -> Result<Vec<(LaneKey, Lane)>>;
+    /// The lanes of one repo, one per trunk, with their trunks.
+    async fn repo_lanes(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+    ) -> Result<Vec<(String, Lane)>>;
+    async fn delete_lane(&self, key: &LaneKey) -> Result<()>;
     async fn record(&self, key: &LaneKey, pr: PrNumber, kind: &str, message: &str) -> Result<()>;
     /// The newest events first.
     async fn events(
@@ -467,6 +474,33 @@ impl Store for PgStore {
                 Ok((key, serde_json::from_value(row.get("lane"))?))
             })
             .collect()
+    }
+
+    async fn repo_lanes(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+    ) -> Result<Vec<(String, Lane)>> {
+        let rows = sqlx::query(
+            "SELECT trunk, lane FROM lanes WHERE installation_id = $1 AND repo = $2 ORDER BY trunk",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| Ok((row.get("trunk"), serde_json::from_value(row.get("lane"))?)))
+            .collect()
+    }
+
+    async fn delete_lane(&self, key: &LaneKey) -> Result<()> {
+        sqlx::query("DELETE FROM lanes WHERE installation_id = $1 AND repo = $2 AND trunk = $3")
+            .bind(key.installation_id as i64)
+            .bind(key.repo.to_string())
+            .bind(&key.trunk)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     async fn record(&self, key: &LaneKey, pr: PrNumber, kind: &str, message: &str) -> Result<()> {
@@ -1548,8 +1582,20 @@ mod tests {
         }]);
         store.save_lane(&key, &lane).await.unwrap();
         assert_eq!(store.load_lane(&key).await.unwrap(), lane);
-        assert_eq!(store.lanes(1).await.unwrap(), [(key.clone(), lane)]);
+        assert_eq!(store.lanes(1).await.unwrap(), [(key.clone(), lane.clone())]);
         assert_eq!(store.lanes(2).await.unwrap(), []);
+        let release = LaneKey {
+            trunk: "release".into(),
+            ..key.clone()
+        };
+        store.save_lane(&release, &Lane::default()).await.unwrap();
+        let trunks: Vec<String> = (store.repo_lanes(1, &key.repo).await.unwrap())
+            .into_iter()
+            .map(|(trunk, _)| trunk)
+            .collect();
+        assert_eq!(trunks, ["main", "release"]);
+        store.delete_lane(&release).await.unwrap();
+        assert_eq!(store.lanes(1).await.unwrap(), [(key.clone(), lane)]);
 
         store.record(&key, 4, "enqueued", "hi").await.unwrap();
         store.record(&key, 5, "enqueued", "other").await.unwrap();

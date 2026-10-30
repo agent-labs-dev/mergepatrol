@@ -115,12 +115,10 @@ impl Unpinned {
     }
 
     /// Forgets the repo's PRs that lost the label: a new labeling waits afresh.
-    fn keep_labeled(&self, key: &LaneKey, labeled: &[PullRequest]) {
+    fn keep_labeled(&self, installation: u64, repo: &RepoName, labeled: &[PullRequest]) {
         let mut map = self.0.lock().unwrap();
-        map.retain(|(installation, repo, number), _| {
-            *installation != key.installation_id
-                || *repo != key.repo
-                || labeled.iter().any(|pr| pr.number == *number)
+        map.retain(|(i, r, number), _| {
+            *i != installation || r != repo || labeled.iter().any(|pr| pr.number == *number)
         });
     }
 }
@@ -149,14 +147,15 @@ impl JobErrors {
 pub struct Prs(std::sync::Mutex<HashMap<(u64, RepoName), HashMap<PrNumber, PrSummary>>>);
 
 impl Prs {
-    /// The PRs of the lane before it syncs, so a PR that just left is still here, and the
-    /// labeled PRs, so one that just joined is.
-    fn update(&self, key: &LaneKey, lane: &Lane, labeled: &[PullRequest]) {
-        let left = lane.entries.iter().map(|e| (e.number, e.summary.clone()));
+    /// The PRs of the repo's lanes before they sync, so a PR that just left is still here, and
+    /// the labeled PRs, so one that just joined is.
+    fn update(&self, installation: u64, repo: &RepoName, lanes: &[Lane], labeled: &[PullRequest]) {
+        let left = lanes.iter().flat_map(|lane| &lane.entries);
+        let left = left.map(|e| (e.number, e.summary.clone()));
         let labeled = labeled.iter().map(|pr| (pr.number, pr.summary()));
         let prs = left.chain(labeled).collect();
         let mut map = self.0.lock().unwrap();
-        map.insert((key.installation_id, key.repo.clone()), prs);
+        map.insert((installation, repo.clone()), prs);
     }
 
     fn get(&self, key: &LaneKey, number: PrNumber) -> Option<PrSummary> {
@@ -533,7 +532,95 @@ enum Outcome {
     Pushed(String),
 }
 
+/// One turn of each of the repo's lanes, one per base branch: the default branch first, then
+/// each other branch a queued PR merges into, or a lane still holds. A lane runs at most one job
+/// a turn, so a busy branch does not starve another. The lanes run one after the other: they
+/// share the repo's git cache.
 async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName) -> Result<Ran> {
+    let Some(mut read) = read_repo(ctx, gh, repo).await? else {
+        return Ok(Ran::Idle);
+    };
+    let mut ran = Ran::Idle;
+    let mut failed = None;
+    let mut visited = BTreeSet::new();
+    while let Some(trunk) = read.trunks().into_iter().find(|t| !visited.contains(t)) {
+        visited.insert(trunk.clone());
+        match tick_lane(ctx, gh, sandbox, repo, &read, &trunk).await {
+            // The lane may have let a retargeted PR go, for the next lane to take.
+            Ok(Ran::Idle) => {
+                read.lanes = ctx.store.repo_lanes(gh.installation_id(), repo).await?;
+                continue;
+            }
+            Ok(Ran::Job) => ran = Ran::Job,
+            // The other lanes still get their turn.
+            Err(e) if failed.is_none() => failed = Some(e),
+            Err(e) => {
+                let error = format!("{e:#}");
+                tracing::error!(installation = gh.installation_id(), %repo, %trunk, %error, "tick failed");
+            }
+        }
+        // A job takes a while: the next lane reads GitHub again.
+        match read_repo(ctx, gh, repo).await? {
+            Some(r) => read = r,
+            None => break,
+        }
+    }
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(ran),
+    }
+}
+
+/// What a tick reads of a repo once, for all its lanes.
+struct RepoRead {
+    settings: RepoSettings,
+    snap: RepoSnapshot,
+    units: Vec<Unit>,
+    /// The repo's lanes as saved, each with its trunk.
+    lanes: Vec<(String, Lane)>,
+    gate: Option<Hold>,
+}
+
+impl RepoRead {
+    /// The branches with a lane to run: the default branch, each other branch a queued unit
+    /// merges into, and each with a saved lane: its PRs may have left, as GitHub closes the PRs
+    /// of a deleted branch, and a drained lane goes.
+    fn trunks(&self) -> Vec<String> {
+        let others: BTreeSet<&String> = self
+            .units
+            .iter()
+            .map(|u| &u.base)
+            .chain(self.lanes.iter().map(|(trunk, _)| trunk))
+            .filter(|t| **t != self.snap.default_branch)
+            .collect();
+        let default = std::iter::once(self.snap.default_branch.clone());
+        default.chain(others.into_iter().cloned()).collect()
+    }
+
+    fn lane(&self, trunk: &str) -> Lane {
+        let saved = self.lanes.iter().find(|(t, _)| t == trunk);
+        saved.map(|(_, lane)| lane.clone()).unwrap_or_default()
+    }
+
+    /// The units that merge into `trunk`. A PR retargeted from another branch joins only once
+    /// that branch's lane has let it go, so its history reads in order.
+    fn units_into(&self, trunk: &str) -> Vec<Unit> {
+        let elsewhere = |number: PrNumber| {
+            self.lanes
+                .iter()
+                .any(|(t, lane)| t != trunk && lane.entries.iter().any(|e| e.number == number))
+        };
+        self.units
+            .iter()
+            .filter(|u| u.base == trunk && !elsewhere(u.number))
+            .cloned()
+            .collect()
+    }
+}
+
+/// The repo's settings, labels, labeled PRs and lanes. `None` while the config file does not
+/// parse: the queue is paused.
+async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option<RepoRead>> {
     let installation = gh.installation_id();
     let file = gh.config_file(repo).await?;
     let settings = match RepoSettings::from_file(file.as_deref(), &ctx.config.repo_defaults) {
@@ -544,7 +631,7 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
             ctx.store
                 .set_config_error(installation, repo, Some(&e))
                 .await?;
-            return Ok(Ran::Idle);
+            return Ok(None);
         }
     };
     ctx.store.set_config_error(installation, repo, None).await?;
@@ -556,16 +643,12 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
             gh.create_label(repo, &spec).await?;
         }
     }
-    let key = LaneKey {
-        installation_id: installation,
-        repo: repo.clone(),
-        trunk: snap.default_branch.clone(),
-    };
-    let mut lane = ctx.store.load_lane(&key).await?;
-    ctx.unpinned.keep_labeled(&key, &snap.labeled);
-    let mut units = units(gh, repo, &snap.labeled).await?;
+    let lanes = ctx.store.repo_lanes(installation, repo).await?;
+    ctx.unpinned.keep_labeled(installation, repo, &snap.labeled);
+    let units = units(gh, repo, &snap.labeled).await?;
     let layers: Vec<PullRequest> = units.iter().flat_map(|u| u.layers.clone()).collect();
-    ctx.prs.update(&key, &lane, &layers);
+    let saved: Vec<Lane> = lanes.iter().map(|(_, lane)| lane.clone()).collect();
+    ctx.prs.update(installation, repo, &saved, &layers);
     let gate = match &ctx.billing {
         Some(b) => {
             b.gate(installation, &repo.owner, snap.private, unix_now())
@@ -573,6 +656,48 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         }
         None => None,
     };
+    Ok(Some(RepoRead {
+        settings,
+        snap,
+        units,
+        lanes,
+        gate,
+    }))
+}
+
+/// Syncs the lane of `trunk` with GitHub, and runs its next job, if it has one.
+async fn tick_lane(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    sandbox: &dyn Sandbox,
+    repo: &RepoName,
+    read: &RepoRead,
+    trunk: &str,
+) -> Result<Ran> {
+    let installation = gh.installation_id();
+    let settings = read.settings.clone();
+    let gate = read.gate.clone();
+    let labels = settings.labels();
+    let mut units = read.units_into(trunk);
+    // The snapshot as this lane sees it: its trunk's head. A lane with no PR left reads none,
+    // as its branch may be gone.
+    let trunk_sha = if trunk == read.snap.default_branch {
+        read.snap.trunk_sha.clone()
+    } else if units.is_empty() {
+        String::new()
+    } else {
+        gh.branch_sha(repo, trunk).await?
+    };
+    let snap = RepoSnapshot {
+        trunk_sha,
+        ..read.snap.clone()
+    };
+    let key = LaneKey {
+        installation_id: installation,
+        repo: repo.clone(),
+        trunk: trunk.to_owned(),
+    };
+    let mut lane = read.lane(trunk);
     if let Some(merge) = lane.merging.clone() {
         let method = &snap.merge_method;
         let number = merge.number;
@@ -605,11 +730,6 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         }
         let hold = if let Some(gate) = &gate {
             Some(gate.reason.clone())
-        } else if unit.base != snap.default_branch {
-            Some(format!(
-                "targets `{}`; only `{}` has a queue for now",
-                unit.base, snap.default_branch
-            ))
         } else if let Some(reason) = unit.hold_reason() {
             Some(reason)
         } else if unit.fork() {
@@ -697,6 +817,10 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
         next = lane.next(settings.batch_size);
     }
     let Some(&number) = next.first() else {
+        // The default branch's lane stays, empty, on the dashboard. Another goes once drained.
+        if trunk != read.snap.default_branch && lane == Lane::default() {
+            ctx.store.delete_lane(&key).await?;
+        }
         return Ok(Ran::Idle);
     };
     let unit = units
@@ -809,6 +933,13 @@ impl Unit {
             layers,
             ..self.clone()
         })
+    }
+
+    /// The branch a refreshed unit merges into now, if it is not `trunk`: it was retargeted,
+    /// and leaves this lane for that branch's.
+    fn retargeted(&self, trunk: &str) -> Option<String> {
+        let base = self.layers[0].merges_into();
+        (base != trunk).then(|| format!("{} now targets `{base}`", self.refs()))
     }
 
     /// How the stack changed since this unit was read: a PR joined or left it.
@@ -1574,7 +1705,7 @@ async fn merge_batch(
             record_all(ctx, key, &tested.prs(), "batch-stopped", why).await?;
             return Ok(());
         }
-        if let Some(why) = now.reshaped(gh, repo).await? {
+        if let Some(why) = now.reshaped(gh, repo).await?.or(now.retargeted(&key.trunk)) {
             record_all(ctx, key, &tested.prs(), "batch-stopped", &why).await?;
             return Ok(());
         }
@@ -1775,6 +1906,9 @@ async fn run_job(
             return Ok(Outcome::Cancelled);
         }
         if let Some(why) = now.reshaped(gh, repo).await? {
+            return Ok(Outcome::Restarted(why));
+        }
+        if let Some(why) = now.retargeted(&key.trunk) {
             return Ok(Outcome::Restarted(why));
         }
         if now.fork() {
