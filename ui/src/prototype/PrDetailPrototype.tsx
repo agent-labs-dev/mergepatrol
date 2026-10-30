@@ -8,7 +8,13 @@ import { type ReactNode, useEffect, useMemo, useState } from "react";
 import type { OpenPullView } from "../api/OpenPullView";
 import { Avatar, primary, secondary, timeAgo } from "../ui";
 import { type ChangedFile, ChangedFilesTree, Diff, fileAnchor, useChangedFiles } from "./code";
-import { type CheckRun, extrasFor, type PrExtras, type TimelineItem } from "./fixtures";
+import {
+  type CheckRun,
+  type Comment,
+  extrasFor,
+  type PrExtras,
+  type TimelineItem,
+} from "./fixtures";
 import type { Variant } from "./variants";
 
 export type PrDetailProps = {
@@ -275,10 +281,6 @@ function VariantA({ pull: p, repo, trunk, onQueue, busy, onBack }: PrDetailProps
   const x = useExtras(p.number);
   const files = useChangedFiles();
   const [tab, setTab] = useState<"summary" | "timeline" | "code">("summary");
-  const [file, setFile] = useState(files[0]?.name);
-  const [split, setSplit] = useState(false);
-  const [showChecks, setShowChecks] = useState(false);
-  const selected = files.find((f) => f.name === file) ?? files[0];
   const total = x.checkRuns.length;
   const ok = passing(x.checkRuns);
   return (
@@ -294,12 +296,7 @@ function VariantA({ pull: p, repo, trunk, onQueue, busy, onBack }: PrDetailProps
           >
             {repo} <span className="text-ok">#{p.number}</span> ↗
           </a>
-          <span className="flex items-center gap-3">
-            <span className="text-sm text-muted" title="Comments">
-              {x.comments} {x.comments === 1 ? "comment" : "comments"}
-            </span>
-            <QueueButtons onQueue={onQueue} busy={busy} compact />
-          </span>
+          <QueueButtons onQueue={onQueue} busy={busy} compact />
         </div>
         <h2 className="mt-2 text-lg font-semibold tracking-tight">{p.title}</h2>
         <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-sm text-muted">
@@ -342,12 +339,20 @@ function VariantA({ pull: p, repo, trunk, onQueue, busy, onBack }: PrDetailProps
             type="button"
             onClick={() => {
               setTab("summary");
-              setShowChecks(true);
+              requestAnimationFrame(() =>
+                document.getElementById("proto-checks")?.scrollIntoView({ behavior: "smooth" }),
+              );
             }}
-            className={`text-sm ${ok === total ? "text-ok" : "text-muted"} hover:text-fg`}
+            className="text-sm text-muted hover:text-fg"
           >
-            <span className={ok === total ? "" : "text-bad"}>{ok === total ? "✓" : "✕"}</span> {ok}{" "}
-            of {total} passing
+            {x.checkRuns.some((r) => r.status === "failed") ? (
+              <span className="text-bad">✕</span>
+            ) : ok === total ? (
+              <span className="text-ok">✓</span>
+            ) : (
+              <span className="text-warn">●</span>
+            )}{" "}
+            {ok} of {total} passing
           </button>
         </div>
         <div className="h-3" />
@@ -390,24 +395,14 @@ function VariantA({ pull: p, repo, trunk, onQueue, busy, onBack }: PrDetailProps
                 <span className="text-faint">None</span>
               )}
             </dd>
-            <dt className="text-muted">Checks</dt>
-            <dd>
-              <button
-                type="button"
-                onClick={() => setShowChecks((s) => !s)}
-                className="text-fg-2 hover:text-fg"
-              >
-                {ok} of {total} passing {showChecks ? "▾" : "▸"}
-              </button>
-            </dd>
           </dl>
-          {showChecks && (
-            <div className="mt-3 rounded-md border border-line px-3">
-              <CheckList runs={x.checkRuns} />
-            </div>
-          )}
-          <h3 className="mt-6 mb-3 text-xs font-medium text-muted">Description</h3>
-          <Body text={x.body} />
+          <Section title="Description">
+            <Body text={x.body} />
+          </Section>
+          <Section id="proto-checks" title="Checks">
+            <CheckRows runs={x.checkRuns} />
+          </Section>
+          <Comments comments={x.comments} />
         </div>
       )}
       {tab === "timeline" && (
@@ -415,26 +410,346 @@ function VariantA({ pull: p, repo, trunk, onQueue, busy, onBack }: PrDetailProps
           <Timeline items={x.timeline} />
         </div>
       )}
-      {tab === "code" && selected && (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex items-center justify-between border-b border-line px-4 py-2 text-xs text-muted sm:px-6">
-            <span>{files.length} files</span>
-            <button type="button" onClick={() => setSplit((s) => !s)} className="hover:text-fg">
-              {split ? "Unified" : "Split"}
+      {tab === "code" && <CodeTab files={files} commits={x.timeline} />}
+    </div>
+  );
+}
+
+/** A collapsible section of A's Summary, open by default. */
+function Section({
+  id,
+  title,
+  actions,
+  children,
+}: {
+  id?: string;
+  title: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <section id={id} className="mt-8 scroll-mt-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex items-center gap-1.5 text-muted hover:text-fg"
+        >
+          {title}
+          <span className={`transition-transform ${open ? "" : "-rotate-90"}`}>
+            <Icon d="M4 6l4 4 4-4" />
+          </span>
+        </button>
+        {open && actions}
+      </div>
+      {open && children}
+    </section>
+  );
+}
+
+const runStatus: Record<CheckRun["status"], [string, string, string]> = {
+  passed: ["Passed", "text-ok", "M5.5 8.2l1.8 1.8 3.2-3.6"],
+  failed: ["Failed", "text-bad", "M6 6l4 4M10 6l-4 4"],
+  pending: ["Running", "text-warn", "M8 5v3l2 1.5"],
+  skipped: ["Skipped", "text-faint", "M5.5 8h5"],
+};
+
+function CheckRows({ runs }: { runs: CheckRun[] }) {
+  const order = { failed: 0, pending: 1, passed: 2, skipped: 3 };
+  return (
+    <ul className="space-y-1">
+      {[...runs]
+        .sort((a, b) => order[a.status] - order[b.status])
+        .map((r) => {
+          const [label, color, d] = runStatus[r.status];
+          return (
+            <li
+              key={r.name}
+              className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-sunken"
+            >
+              <svg viewBox="0 0 16 16" className={`size-4 shrink-0 ${color}`} aria-hidden>
+                <circle
+                  cx="8"
+                  cy="8"
+                  r="6.25"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                />
+                <path
+                  d={d}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.25"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span className="min-w-0 flex-1 truncate">{r.name}</span>
+              <span className="text-xs text-faint tabular-nums">{r.took}</span>
+              <span
+                className={`w-16 text-right text-sm ${r.status === "passed" ? "text-muted" : color}`}
+              >
+                {label}
+              </span>
+            </li>
+          );
+        })}
+    </ul>
+  );
+}
+
+const commentKinds = { all: "All", comment: "Comments", review: "Reviews", bot: "Bots" } as const;
+
+function Comments({ comments }: { comments: Comment[] }) {
+  const [kind, setKind] = useState<keyof typeof commentKinds>("all");
+  const [newest, setNewest] = useState(true);
+  const shown = comments
+    .filter((c) => kind === "all" || c.kind === kind)
+    .sort((a, b) => (newest ? b.at.localeCompare(a.at) : a.at.localeCompare(b.at)));
+  const quiet = "flex items-center gap-1.5 text-muted hover:text-fg";
+  return (
+    <Section
+      title={`Comments (${comments.length})`}
+      actions={
+        comments.length > 0 && (
+          <span className="flex items-center gap-4 text-sm">
+            <label className={quiet}>
+              <Icon d="M3 4.5h10M5 8h6M7 11.5h2" />
+              <select
+                value={kind}
+                onChange={(e) => setKind(e.target.value as keyof typeof commentKinds)}
+                // The global select chevron is unlayered, so utilities can't drop it.
+                style={{ backgroundImage: "none", paddingRight: 0 }}
+                className="h-auto w-auto border-0 bg-transparent p-0 text-sm text-inherit shadow-none"
+              >
+                {Object.entries(commentKinds).map(([k, v]) => (
+                  <option key={k} value={k}>
+                    {k === "all" ? "Filter" : v}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={() => setNewest((n) => !n)} className={quiet}>
+              <Icon d="M5 3v10M3 11l2 2 2-2M11 13V3M9 5l2-2 2 2" />
+              {newest ? "Newest first" : "Oldest first"}
             </button>
-          </div>
+          </span>
+        )
+      }
+    >
+      {comments.length === 0 ? (
+        <p className="text-muted">No comments yet.</p>
+      ) : shown.length === 0 ? (
+        <p className="text-muted">No {commentKinds[kind].toLowerCase()}.</p>
+      ) : (
+        <ol className="space-y-3">
+          {shown.map((c) => (
+            <li key={c.at} className="rounded-lg border border-line bg-surface">
+              <p className="flex items-center gap-2 border-b border-line-soft px-3 py-2 text-sm">
+                <Avatar src={avatar(c.login)} alt={c.login} size="size-5" />
+                <span className="font-medium">{c.login}</span>
+                {c.kind !== "comment" && (
+                  <span className="rounded-full bg-sunken px-1.5 py-0.5 text-xs text-muted">
+                    {c.kind === "bot" ? "bot" : "review"}
+                  </span>
+                )}
+                <span className="ml-auto text-xs text-faint">{timeAgo(c.at)}</span>
+              </p>
+              <p className="px-3 py-2.5 text-sm text-fg-2">{c.body}</p>
+            </li>
+          ))}
+        </ol>
+      )}
+    </Section>
+  );
+}
+
+/** A's Code tab: every changed file as a row that opens to its diff, GitHub's "Files changed"
+ * in a pane. Viewed closes a file and counts it. The tree toggle adds a @pierre/trees navigator. */
+function CodeTab({ files, commits }: { files: ChangedFile[]; commits: TimelineItem[] }) {
+  const [open, setOpen] = useState(new Set<string>());
+  const [viewed, setViewed] = useState(new Set<string>());
+  const [split, setSplit] = useState(false);
+  const [tree, setTree] = useState(false);
+  const [commit, setCommit] = useState("all");
+  const toggle = (set: Set<string>, path: string, on = !set.has(path)) => {
+    const next = new Set(set);
+    if (on) next.add(path);
+    else next.delete(path);
+    return next;
+  };
+  const allOpen = open.size === files.length;
+  const reveal = (path: string) => {
+    setOpen((o) => toggle(o, path, true));
+    requestAnimationFrame(() =>
+      document.getElementById(fileAnchor(path))?.scrollIntoView({ block: "start" }),
+    );
+  };
+  const tool = (on = false) =>
+    `grid size-8 place-items-center rounded-md hover:bg-sunken hover:text-fg ${on ? "bg-sunken text-fg" : "text-muted"}`;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center gap-3 border-b border-line px-4 py-2 sm:px-6">
+        <select
+          value={commit}
+          onChange={(e) => setCommit(e.target.value)}
+          className="h-8 w-auto max-w-40 shrink-0 truncate rounded-md border-0 bg-sunken pl-3 text-sm"
+        >
+          <option value="all">All commits</option>
+          {commits.flatMap((c) =>
+            c.kind === "commit"
+              ? [
+                  <option key={c.sha} value={c.sha}>
+                    {c.sha} {c.message}
+                  </option>,
+                ]
+              : [],
+          )}
+        </select>
+        <span className="truncate text-sm whitespace-nowrap text-muted tabular-nums">
+          {files.length} files · {viewed.size} / {files.length} viewed
+        </span>
+        <span className="ml-auto flex items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => setSplit((v) => !v)}
+            className={tool(split)}
+            title={split ? "Unified diff" : "Split diff"}
+          >
+            <Icon d="M2.5 4.5h7M12.5 4.5h1M2.5 11.5h1M6.5 11.5h7M11 3v3M5 10v3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpen(allOpen ? new Set() : new Set(files.map((f) => f.name)))}
+            className={tool()}
+            title={allOpen ? "Collapse all" : "Expand all"}
+          >
+            <Icon d={allOpen ? "M5 3l3 3 3-3M5 13l3-3 3 3" : "M5 6l3-3 3 3M5 10l3 3 3-3"} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setTree((t) => !t)}
+            className={tool(tree)}
+            title="File tree"
+          >
+            <Icon d="M3.5 2.5v9h4M3.5 6.5h4M9.5 4.5h4v4h-4zM9.5 9.5h4v4h-4z" />
+          </button>
+        </span>
+      </div>
+      <div
+        className={`min-h-0 flex-1 ${tree ? "grid grid-cols-[minmax(180px,35%)_1fr]" : "flex flex-col"}`}
+      >
+        {tree && (
           <ChangedFilesTree
             files={files}
-            onSelect={setFile}
-            className="block shrink-0 border-b border-line"
-            style={{ height: 180 }}
+            onSelect={reveal}
+            stats={false}
+            className="block min-h-0 border-r border-line"
           />
-          <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:px-6">
-            <Diff file={selected} split={split} />
-          </div>
-        </div>
-      )}
+        )}
+        <ul className="min-h-0 overflow-y-auto">
+          {files.map((f) => {
+            const isOpen = open.has(f.name);
+            const seen = viewed.has(f.name);
+            return (
+              <li key={f.name} id={fileAnchor(f.name)} className="border-b border-line-soft">
+                <div
+                  className={`sticky top-0 z-10 flex items-center gap-3 bg-surface px-4 py-2.5 text-sm sm:px-6 ${seen ? "opacity-60" : ""}`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setOpen((o) => toggle(o, f.name))}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  >
+                    <span
+                      className={`text-faint transition-transform ${isOpen ? "rotate-90" : ""}`}
+                    >
+                      <Icon d="M6 4l4 4-4 4" />
+                    </span>
+                    <FileStatus type={f.type} />
+                    <span className="truncate" title={f.name}>
+                      {f.prevName ? `${f.prevName} → ` : ""}
+                      {f.name}
+                    </span>
+                  </button>
+                  <Stat additions={f.additions} deletions={f.deletions} />
+                  <label className="flex cursor-pointer items-center gap-2 text-muted">
+                    <input
+                      type="checkbox"
+                      checked={seen}
+                      onChange={(e) => {
+                        setViewed((v) => toggle(v, f.name, e.target.checked));
+                        // GitHub's way: marking a file viewed folds it away.
+                        if (e.target.checked) setOpen((o) => toggle(o, f.name, false));
+                      }}
+                      className="size-4 rounded accent-fg"
+                    />
+                    Viewed
+                  </label>
+                </div>
+                {isOpen && (
+                  <div className="px-4 pb-4 sm:px-6">
+                    <Diff file={f} split={split} header={false} />
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
     </div>
+  );
+}
+
+const fileStatus: Record<ChangedFile["type"], [string, string, string]> = {
+  change: ["Modified", "text-blue-500", "M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"],
+  new: ["Added", "text-ok", "M8 5v6M5 8h6"],
+  deleted: ["Deleted", "text-bad", "M5 8h6"],
+  "rename-pure": ["Renamed", "text-warn", "M5 8h6M9 6l2 2-2 2"],
+  "rename-changed": ["Renamed", "text-warn", "M5 8h6M9 6l2 2-2 2"],
+};
+
+function FileStatus({ type }: { type: ChangedFile["type"] }) {
+  const [label, color, d] = fileStatus[type];
+  return (
+    <svg viewBox="0 0 16 16" className={`size-4 shrink-0 ${color}`} aria-label={label}>
+      <rect
+        x="1.5"
+        y="1.5"
+        width="13"
+        height="13"
+        rx="3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path
+        d={d}
+        fill={type === "change" ? "currentColor" : "none"}
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function Icon({ d }: { d: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      className="size-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d={d} />
+    </svg>
   );
 }
 

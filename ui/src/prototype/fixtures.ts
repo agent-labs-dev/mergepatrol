@@ -24,10 +24,17 @@ export type CheckRun = {
   took?: string;
 };
 
+export type Comment = {
+  at: string;
+  login: string;
+  kind: "comment" | "review" | "bot";
+  body: string;
+};
+
 export type PrExtras = {
   body: string;
   labels: string[];
-  comments: number;
+  comments: Comment[];
   mergeable: "clean" | "conflicts" | "behind";
   timeline: TimelineItem[];
   checkRuns: CheckRun[];
@@ -73,7 +80,30 @@ export const extrasFor = (number: number): PrExtras => {
   return {
     body,
     labels: number % 2 ? ["enhancement"] : [],
-    comments: number % 4,
+    // #215 and the like have none, for the empty state.
+    comments:
+      number % 3 === 2
+        ? []
+        : [
+            {
+              at: ago(200),
+              login: "mpcode",
+              kind: "review",
+              body: "The prune deletes reads a running batch still needs. Keep anything younger than the oldest active batch?",
+            },
+            {
+              at: ago(120),
+              login: "jnsdls",
+              kind: "comment",
+              body: "Good catch. The prune now skips anything a batch in flight has read.",
+            },
+            {
+              at: ago(90),
+              login: "github-actions",
+              kind: "bot",
+              body: "Coverage: 81.4% (+0.6%) on crates/mergepatrol.",
+            },
+          ],
     mergeable: number % 5 === 0 ? "conflicts" : number % 4 === 0 ? "behind" : "clean",
     checkRuns: checkNames.map((name, i) => ({
       name,
