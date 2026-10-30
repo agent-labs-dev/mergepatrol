@@ -394,6 +394,15 @@ pub async fn remove_label_as(token: &str, repo: &str, number: u64, label: &str) 
     Ok(())
 }
 
+/// Closes a PR as the user, so GitHub checks that they may: it takes triage access, or being its
+/// author. `Refused` when they may not.
+pub async fn close_pull_as(token: &str, repo: &str, number: u64) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/pulls/{number}");
+    let req = client()?.patch(url).json(&json!({ "state": "closed" }));
+    user_write(token, req).await?.error_for_status()?;
+    Ok(())
+}
+
 /// A 401 is `Revoked`, a 403 `Refused`.
 async fn user_write(token: &str, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
     let res = req

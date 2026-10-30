@@ -1,8 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 import { Activity } from "./Activity";
 import {
+  closePull,
   dequeuePull,
   fetchEvents,
   fetchLanes,
@@ -91,10 +92,10 @@ export function Queue({ workspace }: { workspace: number }) {
             : lane.entries.findIndex((q) => q.number === e.number) + 1
         }
         selected={e === entry}
-        pending={pending.get(e.number)?.kind}
+        pending={actions.kinds.get(e.number)}
         onClick={() => setPr(e.number)}
       />
-      <RowActions item={e} actions={actions} busy={pending.has(e.number)} />
+      <RowActions item={e} actions={actions} busy={actions.kinds.has(e.number)} />
     </div>
   );
   return (
@@ -259,6 +260,8 @@ const asItem = (p: OpenPullView): Item => ({
 
 /** A click the queue has not caught up with: GitHub has the labels, the lane not yet. */
 type Pending = { kind: "queueing" | "removing"; item: Item; repo: string };
+/** What a row shows as in flight: a queue click, or an open PR closing. */
+type PendingKind = Pending["kind"] | "closing";
 
 /** The queue looks at a repo within seconds of a label change. Past this, stop waiting. */
 const PENDING_MS = 60_000;
@@ -318,17 +321,39 @@ function useActions(workspace: number, lane: LaneView | undefined) {
     // The open PRs stay as they are, the clicked one in its place, until the lane has it.
     onSuccess: () => client.invalidateQueries({ queryKey: ["lanes"] }),
   });
+  // GitHub closes it at once: it is closing until the open PRs are read again without it.
+  const closing = useMutation({
+    mutationKey: ["close", workspace],
+    mutationFn: ({ item, repo }: Omit<Pending, "kind">) => closePull(workspace, repo, item.number),
+    onMutate: () => setError(null),
+    onError: (e) => setError(e.message),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["open"] }),
+  });
   const repo = lane?.repo ?? "";
+  const kinds = new Map<number, PendingKind>(
+    [...pending.values()].filter((p) => p.repo === repo).map((p) => [p.item.number, p.kind]),
+  );
+  // Each close still running, not only the last one clicked.
+  const closingNow = useMutationState({
+    filters: { mutationKey: ["close", workspace], status: "pending" },
+    select: (m) => m.state.variables as Omit<Pending, "kind">,
+  });
+  for (const c of closingNow) if (c.repo === repo) kinds.set(c.item.number, "closing");
   return {
     /** The lane's clicks still to show, by PR. */
     pending: new Map(
       [...pending.values()].filter((p) => p.repo === repo).map((p) => [p.item.number, p]),
     ) as ReadonlyMap<number, Pending>,
+    /** What each of the lane's PRs has in flight. */
+    kinds: kinds as ReadonlyMap<number, PendingKind>,
     error,
     dismiss: () => setError(null),
     queue: (item: Item, priority: boolean) =>
       mutation.mutate({ kind: "queueing", item: { ...item, priority }, repo }),
     remove: (item: Item) => mutation.mutate({ kind: "removing", item, repo }),
+    close: (item: Item) => {
+      if (window.confirm(`Close #${item.number} on GitHub?`)) closing.mutate({ item, repo });
+    },
   };
 }
 type Actions = ReturnType<typeof useActions>;
@@ -338,6 +363,9 @@ const icons = {
   priority: "M4 8.5 8 4.5l4 4M4 12.5l4-4 4 4",
   queue: "M8 3.5v9M3.5 8h9",
   remove: "M4.5 4.5l7 7M11.5 4.5l-7 7",
+  // GitHub's closed PR: the base branch, the head, and a cross where it would merge.
+  close:
+    "M5.5 3.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M4 5v6M5.5 12.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M13.5 12.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 1 1 3 0M12 11V8M10.5 2.5l3 3M13.5 2.5l-3 3",
 };
 
 function IconButton({
@@ -378,13 +406,24 @@ function IconButton({
   );
 }
 
-/** Two slots at the end of every row, so every row lines up: priority, then queue or remove.
- * A queued PR's are faint until hovered, but for a priority it has. */
+/** Three slots at the end of every row, so every row lines up: close for an open PR, priority,
+ * then queue or remove. A queued PR's are faint until hovered, but for a priority it has. */
 function RowActions({ item, actions, busy }: { item: Item; actions: Actions; busy: boolean }) {
   const quiet = "text-faint/60 group-hover:text-muted group-focus-within:text-muted";
   const open = item.state === "open";
   return (
     <span className="flex shrink-0 items-center gap-0.5 pr-3">
+      {open ? (
+        <IconButton
+          icon="close"
+          label="Close pull request"
+          disabled={busy}
+          onClick={() => actions.close(item)}
+          className={`${quiet} hover:text-bad!`}
+        />
+      ) : (
+        <span className="size-7" />
+      )}
       <IconButton
         icon="priority"
         label={open ? "Priority queue" : item.priority ? "Drop priority" : "Make priority"}
@@ -461,7 +500,7 @@ function Row({
   /** `null` for a held or open PR: it has no place until it is released or queued. */
   place: number | null;
   selected: boolean;
-  pending?: Pending["kind"];
+  pending?: PendingKind;
   onClick: () => void;
 }) {
   return (
@@ -496,11 +535,13 @@ function Row({
         </span>
         {pending ? (
           <span className="mt-1 block text-muted">
-            {pending === "removing"
-              ? "Leaving the queue…"
-              : e.state === "open"
-                ? "Queueing…"
-                : "Changing its priority…"}
+            {pending === "closing"
+              ? "Closing…"
+              : pending === "removing"
+                ? "Leaving the queue…"
+                : e.state === "open"
+                  ? "Queueing…"
+                  : "Changing its priority…"}
           </span>
         ) : (
           e.detail && <span className="mt-1 block text-warn">{e.detail}</span>

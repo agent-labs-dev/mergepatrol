@@ -135,6 +135,10 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
             put(api::queue_pull).delete(api::dequeue_pull),
         )
         .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/close",
+            post(api::close_pull),
+        )
+        .route(
             "/api/w/{id}/repos/{owner}/{name}/config",
             get(api::repo_config).put(api::propose_repo_config),
         )
@@ -548,6 +552,15 @@ mod tests {
                 StatusCode::UNAUTHORIZED
             );
         }
+        // Nor can it close a PR.
+        let close = Request::post("/api/w/1/repos/acme/app/pulls/7/close")
+            .header("cookie", "mp_session=tok")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            send(&router, close).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
         old_session(&*store, &vault, now() - 60, Some(expired_token())).await;
         assert_eq!(
             status("PUT", 1, "mp_session=old").await,
