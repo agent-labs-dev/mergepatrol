@@ -241,7 +241,8 @@ fn index_page(all: &[Article], public_url: &str, analytics: Analytics) -> String
     )
 }
 
-fn page(
+/// The public pages' shell: the blog's and the changelog's. `head` goes at the end of `<head>`.
+pub(crate) fn page(
     title: &str,
     description: &str,
     url: &str,
@@ -284,7 +285,7 @@ fn page(
 {tracking}
 </head>
 <body>
-<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><a href="/blog">Blog</a></header>
+<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
 <main>{main}</main>
 <footer><a href="/">Mergepatrol</a>: a merge queue for GitHub, with an agent on conflicts. <a href="/auth/login">Sign in with GitHub</a></footer>
 </body>
@@ -299,7 +300,7 @@ const STYLE: &str = "\
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 ui-sans-serif,system-ui,sans-serif}\
 header,main,footer{max-width:42rem;margin:0 auto;padding:0 1.25rem}\
 header{display:flex;justify-content:space-between;align-items:center;height:3.5rem;border-bottom:1px solid var(--line)}\
-.brand{display:flex;gap:.5rem;align-items:center;font-weight:600}\
+.brand{display:flex;gap:.5rem;align-items:center;font-weight:600}nav{display:flex;gap:1rem}\
 a{color:inherit}header a{text-decoration:none}\
 main{padding-top:2rem;padding-bottom:3rem}h1,h2,h3{font-weight:600;letter-spacing:-.02em;line-height:1.25}h1{font-size:2rem;margin:0 0 .5rem}\
 .meta,time,.posts p{color:var(--fg2);font-size:.875rem}\
@@ -336,7 +337,7 @@ fn tracking((key, host): (&str, &str)) -> String {
     )
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
