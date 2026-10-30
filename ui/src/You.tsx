@@ -19,6 +19,7 @@ import type { InboxPullView } from "./api/InboxPullView";
 import type { ReviewPull } from "./api/ReviewPull";
 import type { VerdictView } from "./api/VerdictView";
 import { PullDetail } from "./PullDetail";
+import { Countdown, toasts } from "./Toasts";
 import { Avatar, RepoIcon, timeAgo } from "./ui";
 
 /** Needs you, then the user's own PRs by whose move it is, then those merged lately, then
@@ -56,8 +57,9 @@ type Held = {
   p: InboxPullView;
   act: Act;
   folder: Folder;
-  until: number;
   timer: number;
+  /** Its toast, which turns into the outcome. */
+  toast: string;
   sending?: true;
 };
 
@@ -73,21 +75,15 @@ export function You() {
   const [clicks, setClicks] = useState(new Map<string, Click>());
   const [drafts, setDrafts] = useState(new Map<string, string>());
   const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
   const last = useRef(0);
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 4000);
-    return () => clearTimeout(t);
-  }, [toast]);
   const [now, setNow] = useState(Date.now());
   const held = useRef(new Map<string, Held>());
   const [, render] = useReducer((n: number) => n + 1, 0);
-  // Ticks the countdown while a review waits, and each click until the data has it.
+  // Ticks each click until the data has it.
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), held.current.size ? 250 : 5000);
+    const t = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(t);
-  });
+  }, []);
   const clickOf = (p: InboxPullView) => {
     const c = clicks.get(keyOf(p));
     if (!c) return undefined;
@@ -116,18 +112,24 @@ export function You() {
     if (h.sending) return;
     h.sending = true;
     clearTimeout(h.timer);
+    toasts.update(h.toast, { type: "loading", description: "Sending…", data: {} });
     render();
     const { p, act } = h;
     try {
       if (act.kind === "review") await reviewPull(p.workspace, p.repo, p.number, act.review);
       else await closePull(p.workspace, p.repo, p.number);
       await client.refetchQueries({ queryKey: ["you"] });
-      setToast(
-        act.kind === "review"
-          ? `${verdicts[act.review.verdict]} ${shortRef(p)}${act.review.queue ? " and queued it" : ""}`
-          : `Closed ${shortRef(p)}`,
-      );
+      toasts.update(h.toast, {
+        type: "success",
+        title:
+          act.kind === "review"
+            ? `${verdicts[act.review.verdict]} ${shortRef(p)}${act.review.queue ? " and queued it" : ""}`
+            : `Closed ${shortRef(p)}`,
+        description: undefined,
+        timeout: 4000,
+      });
     } catch (e) {
+      toasts.close(h.toast);
       setError((e as Error).message);
       if (act.kind === "review") setDraft(key, act.review.body);
     } finally {
@@ -141,8 +143,22 @@ export function You() {
     // An act already waiting on the PR, a comment say, goes now.
     const waiting = held.current.get(key);
     if (waiting) send(key, waiting);
-    const h: Held = { p, act, folder, until: Date.now() + HOLD_MS, timer: 0 };
+    const until = Date.now() + HOLD_MS;
+    const h: Held = { p, act, folder, timer: 0, toast: "" };
     h.timer = window.setTimeout(() => send(key, h), HOLD_MS);
+    h.toast = toasts.add({
+      type: "held",
+      title: `${act.kind === "review" ? holding[act.review.verdict] : "Closing"} ${shortRef(p)}`,
+      description: <Countdown until={until} verb={act.kind === "review" ? "Sends" : "Closes"} />,
+      timeout: 0,
+      data: {
+        ms: HOLD_MS,
+        actions: [
+          { label: "Send now", onClick: () => send(key, h) },
+          { label: "Undo", onClick: () => undo(key), primary: true },
+        ],
+      },
+    });
     held.current.set(key, h);
     if (act.kind === "review") setDraft(key, "");
     render();
@@ -151,6 +167,7 @@ export function You() {
     const h = held.current.get(key);
     if (!h || h.sending) return;
     clearTimeout(h.timer);
+    toasts.close(h.toast);
     held.current.delete(key);
     if (h.act.kind === "review") setDraft(key, h.act.review.body);
     navigate({ search: { folder: h.folder, pr: key } });
@@ -162,6 +179,7 @@ export function You() {
       for (const [key, h] of held.current)
         if (!h.sending) {
           clearTimeout(h.timer);
+          toasts.close(h.toast);
           held.current.delete(key);
           const { p, act } = h;
           fetch(
@@ -189,7 +207,10 @@ export function You() {
       queuePull(p.workspace, p.repo, p.number, priority),
     onMutate: ({ p }) => click(p, "queueing"),
     onSuccess: (_, { p, priority }) => {
-      setToast(`${priority ? "Queued at the front:" : "Queued"} ${shortRef(p)}`);
+      toasts.add({
+        type: "success",
+        title: `${priority ? "Queued at the front:" : "Queued"} ${shortRef(p)}`,
+      });
       client.invalidateQueries({ queryKey: ["you"] });
     },
     onError: (e, { p }) => {
@@ -201,7 +222,7 @@ export function You() {
     mutationFn: (p: InboxPullView) => dequeuePull(p.workspace, p.repo, p.number),
     onMutate: (p) => click(p, "dequeueing"),
     onSuccess: (_, p) => {
-      setToast(`Took ${shortRef(p)} out of the queue`);
+      toasts.add({ type: "success", title: `Took ${shortRef(p)} out of the queue` });
       client.invalidateQueries({ queryKey: ["you"] });
     },
     onError: (e, p) => {
@@ -218,7 +239,10 @@ export function You() {
         p.requested.map((r) => r.login),
       ),
     onSuccess: (_, p) =>
-      setToast(`Asked ${p.requested.map((r) => r.login).join(", ")} to review ${shortRef(p)}`),
+      toasts.add({
+        type: "success",
+        title: `Asked ${p.requested.map((r) => r.login).join(", ")} to review ${shortRef(p)}`,
+      }),
     onError: (e) => setError(e.message),
   });
 
@@ -228,7 +252,10 @@ export function You() {
       await client.refetchQueries({ queryKey: ["you"] });
     },
     onSuccess: (_, { p, minutes }) =>
-      setToast(`Snoozed ${shortRef(p)} until ${untilText(Date.now() + minutes * MINUTE)}`),
+      toasts.add({
+        type: "success",
+        title: `Snoozed ${shortRef(p)} until ${untilText(Date.now() + minutes * MINUTE)}`,
+      }),
     onError: (e) => setError(e.message),
   });
   const unsnooze = useMutation({
@@ -236,7 +263,7 @@ export function You() {
       await unsnoozePull(p.workspace, p.repo, p.number);
       await client.refetchQueries({ queryKey: ["you"] });
     },
-    onSuccess: (_, p) => setToast(`${shortRef(p)} is back`),
+    onSuccess: (_, p) => toasts.add({ type: "success", title: `${shortRef(p)} is back` }),
     onError: (e) => setError(e.message),
   });
 
@@ -522,47 +549,6 @@ export function You() {
           />
         )}
       </section>
-      <div className="fixed bottom-4 left-4 z-50 flex flex-col gap-2">
-        {[...held.current].map(([key, h]) => (
-          <div
-            key={key}
-            className="flex items-center gap-3 rounded-lg bg-neutral-900 px-4 py-3 text-sm text-white shadow-xl dark:bg-neutral-100 dark:text-neutral-900"
-          >
-            <span
-              className={`size-2 rounded-full ${h.act.kind === "close" || h.act.review.verdict === "request_changes" ? "bg-red-400" : "bg-emerald-400"}`}
-            />
-            <span>
-              {h.act.kind === "review" ? holding[h.act.review.verdict] : "Closing"} {shortRef(h.p)}
-              {h.sending ? "…" : ` in ${Math.max(1, Math.ceil((h.until - now) / 1000))}s`}
-            </span>
-            {!h.sending && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => undo(key)}
-                  className="font-medium underline underline-offset-2 hover:opacity-80"
-                >
-                  Undo
-                </button>
-                <button
-                  type="button"
-                  onClick={() => send(key, h)}
-                  className="opacity-60 hover:opacity-100"
-                  title="Send it now"
-                >
-                  Send now
-                </button>
-              </>
-            )}
-          </div>
-        ))}
-        {toast && (
-          <div className="flex items-center gap-3 rounded-lg bg-neutral-900 px-4 py-3 text-sm text-white shadow-xl dark:bg-neutral-100 dark:text-neutral-900">
-            <span className="size-2 rounded-full bg-emerald-400" />
-            {toast}
-          </div>
-        )}
-      </div>
     </div>
   );
 }

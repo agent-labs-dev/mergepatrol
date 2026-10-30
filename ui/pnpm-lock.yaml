@@ -7,6 +7,9 @@ settings:
 importers:
   .:
     dependencies:
+      "@base-ui/react":
+        specifier: ^1.9.0
+        version: 1.9.0(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
       "@pierre/diffs":
         specifier: ^1.6.2
         version: 1.6.2(@shikijs/themes@4.5.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
@@ -55,6 +58,45 @@ importers:
         version: 8.3.5(jiti@2.7.0)
 
 packages:
+  "@babel/runtime@8.0.10":
+    resolution:
+      {
+        integrity: sha512-0QyWQOIhl2onOgg96BuOYV+oCgLINVDPC8RkVPCiQhLILVqpefDUmcY+aAsW6vp7fcuTZL6SXXlFrSDCTFIu1w==,
+      }
+
+  "@base-ui/react@1.9.0":
+    resolution:
+      {
+        integrity: sha512-S8CSYosASBKtpL8SWUfS78rFElfLijiCgA7oHOK22jCJ95FULsYyKwBNFOgudt0RA+/7yNc7F81bOvQnRgbBiQ==,
+      }
+    engines: { node: ">=14.0.0" }
+    peerDependencies:
+      "@date-fns/tz": ^1.2.0
+      "@types/react": ^17 || ^18 || ^19
+      date-fns: ^4.0.0
+      react: ^17 || ^18 || ^19
+      react-dom: ^17 || ^18 || ^19
+    peerDependenciesMeta:
+      "@date-fns/tz":
+        optional: true
+      "@types/react":
+        optional: true
+      date-fns:
+        optional: true
+
+  "@base-ui/utils@0.5.0":
+    resolution:
+      {
+        integrity: sha512-dYGGcEttjkYiMoa5nHm8vLaJ2UcuTWxo3BFAwOYXeRg/q7UVVvA6cacEIXEs3FgBfK1CGtW1ptElqs7wsx+t9A==,
+      }
+    peerDependencies:
+      "@types/react": ^17 || ^18 || ^19
+      react: ^17 || ^18 || ^19
+      react-dom: ^17 || ^18 || ^19
+    peerDependenciesMeta:
+      "@types/react":
+        optional: true
+
   "@biomejs/biome@2.6.3":
     resolution:
       {
@@ -156,6 +198,33 @@ packages:
     engines: { node: ">=14.21.3" }
     cpu: [x64]
     os: [win32]
+
+  "@floating-ui/core@1.8.0":
+    resolution:
+      {
+        integrity: sha512-0CIZ5itps/8x7BG8dEIhs53BvCUH2PCoogtakwRTut+Arm58sJooJ0AuZhLw2HJYIR5cMLNPBSS728sPho2khQ==,
+      }
+
+  "@floating-ui/dom@1.8.0":
+    resolution:
+      {
+        integrity: sha512-yXSrzeHZBTZadLOlfyhCkJHNeLJnHRnRInwdZ40L7ZiaAtrBwoYlsDrX3v5zB1Utk7CLfzcOVnVVWoXEky7Ceg==,
+      }
+
+  "@floating-ui/react-dom@2.1.9":
+    resolution:
+      {
+        integrity: sha512-JDjEFGCpImxDCA7JJKviA0M9+RtmJdj0m/NVU5IMgBK+AmZouAQQ7/+2GLH0GXXY0YMw9oXPB8hKdbPYg5QLYg==,
+      }
+    peerDependencies:
+      react: ">=16.8.0"
+      react-dom: ">=16.8.0"
+
+  "@floating-ui/utils@0.2.12":
+    resolution:
+      {
+        integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==,
+      }
 
   "@jridgewell/gen-mapping@0.3.13":
     resolution:
@@ -1473,6 +1542,12 @@ packages:
         integrity: sha512-6VwtthbV4o/7+OaAF9I5L5V3llLEsoPyq9P1JVXkedTP33c7MfCG0/5NOPcSJn0TzXcG9YUrR0gQSWioew3LDg==,
       }
 
+  reselect@5.3.0:
+    resolution:
+      {
+        integrity: sha512-XGoLeRAVzUTcJ1qkxPQhDJyIZ5d6zzZD9nT7AEZOaaU9UbWclhycElmhO+VD5bFeLuzhPBaOV2oXC8uG35ZSpg==,
+      }
+
   rolldown@1.2.15:
     resolution:
       {
@@ -1678,6 +1753,31 @@ packages:
       }
 
 snapshots:
+  "@babel/runtime@8.0.10": {}
+
+  "@base-ui/react@1.9.0(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)":
+    dependencies:
+      "@babel/runtime": 8.0.10
+      "@base-ui/utils": 0.5.0(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      "@floating-ui/react-dom": 2.1.9(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      "@floating-ui/utils": 0.2.12
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
+      use-sync-external-store: 1.7.0(react@19.3.1)
+    optionalDependencies:
+      "@types/react": 19.3.0
+
+  "@base-ui/utils@0.5.0(@types/react@19.3.0)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)":
+    dependencies:
+      "@babel/runtime": 8.0.10
+      "@floating-ui/utils": 0.2.12
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
+      reselect: 5.3.0
+      use-sync-external-store: 1.7.0(react@19.3.1)
+    optionalDependencies:
+      "@types/react": 19.3.0
+
   "@biomejs/biome@2.6.3":
     optionalDependencies:
       "@biomejs/cli-android-arm64": 2.6.3
@@ -1720,6 +1820,23 @@ snapshots:
 
   "@biomejs/cli-win32-x64@2.6.3":
     optional: true
+
+  "@floating-ui/core@1.8.0":
+    dependencies:
+      "@floating-ui/utils": 0.2.12
+
+  "@floating-ui/dom@1.8.0":
+    dependencies:
+      "@floating-ui/core": 1.8.0
+      "@floating-ui/utils": 0.2.12
+
+  "@floating-ui/react-dom@2.1.9(react-dom@19.3.1(react@19.3.1))(react@19.3.1)":
+    dependencies:
+      "@floating-ui/dom": 1.8.0
+      react: 19.3.1
+      react-dom: 19.3.1(react@19.3.1)
+
+  "@floating-ui/utils@0.2.12": {}
 
   "@jridgewell/gen-mapping@0.3.13":
     dependencies:
@@ -2351,6 +2468,8 @@ snapshots:
   regex@6.1.0:
     dependencies:
       regex-utilities: 2.3.0
+
+  reselect@5.3.0: {}
 
   rolldown@1.2.15:
     dependencies:

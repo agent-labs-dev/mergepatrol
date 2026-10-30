@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { fetchChangelog } from "./api";
+import type { ChangelogEntryView } from "./api/ChangelogEntryView";
 import type { ChangelogKind } from "./api/ChangelogKind";
-import { primary } from "./ui";
+import { toasts } from "./Toasts";
 
 /** The hashed files a build of the dashboard loads, which every build names anew. Empty under
  * `vite dev`, which serves the source. */
@@ -68,51 +69,52 @@ export function UpdateToast() {
     staleTime: Number.POSITIVE_INFINITY,
   });
   const [later, setLater] = useState<string>();
-  if (!updated || next === later) return null;
-  const seen = new Set(known.data?.map((e) => e.slug));
-  const news = known.data ? (now.data ?? []).filter((e) => !seen.has(e.slug)) : [];
+  useEffect(() => {
+    if (!updated || next === later) return;
+    const seen = new Set(known.data?.map((e) => e.slug));
+    const news = known.data ? (now.data ?? []).filter((e) => !seen.has(e.slug)) : [];
+    // The same id each time, so the entries fill in the toast already up.
+    toasts.add({
+      id: "update",
+      type: "update",
+      title: "Mergepatrol was updated",
+      description: <News news={news} />,
+      timeout: 0,
+      onClose: () => setLater(next),
+      data: {
+        actions: [
+          { label: "Later", onClick: () => toasts.close("update") },
+          { label: "Reload", onClick: () => location.reload(), primary: true },
+        ],
+      },
+    });
+  }, [updated, next, later, known.data, now.data]);
+  return null;
+}
+
+/** The changelog entries since this page loaded, or a nudge to reload when there are none. */
+function News({ news }: { news: ChangelogEntryView[] }) {
+  if (news.length === 0) return <>Reload to get the newest version.</>;
   return (
-    <div
-      role="status"
-      className="fixed right-4 bottom-4 z-40 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-surface p-4 text-sm shadow-lg"
-    >
-      <div className="flex items-baseline justify-between gap-3">
-        <p className="font-semibold">Mergepatrol was updated</p>
-        <a href="/changelog" className="shrink-0 text-xs text-muted hover:text-fg">
-          Changelog →
-        </a>
-      </div>
-      {news.length === 0 ? (
-        <p className="mt-1 text-muted">Reload to get the newest version.</p>
-      ) : (
-        <ul className="mt-3 space-y-2">
-          {news.slice(0, SHOWN).map((e) => (
-            <li key={e.slug} className="flex items-start gap-2">
-              <span
-                className={`mt-px shrink-0 rounded-full border px-2 text-xs leading-[18px] font-semibold ${pills[e.kind][1]}`}
-              >
-                {pills[e.kind][0]}
-              </span>
-              <a href={`/changelog/${e.slug}`} className="text-fg-2 hover:text-fg hover:underline">
-                {e.title}
-              </a>
-            </li>
-          ))}
-          {news.length > SHOWN && <li className="text-muted">and {news.length - SHOWN} more</li>}
-        </ul>
-      )}
-      <div className="mt-4 flex justify-end gap-2">
-        <button
-          type="button"
-          onClick={() => setLater(next)}
-          className="h-9 rounded-md px-3 text-muted hover:text-fg"
-        >
-          Later
-        </button>
-        <button type="button" onClick={() => location.reload()} className={primary}>
-          Reload
-        </button>
-      </div>
-    </div>
+    <>
+      <ul className="mt-2 space-y-2">
+        {news.slice(0, SHOWN).map((e) => (
+          <li key={e.slug} className="flex items-start gap-2">
+            <span
+              className={`mt-px shrink-0 rounded-full border px-2 text-xs leading-[18px] font-semibold ${pills[e.kind][1]}`}
+            >
+              {pills[e.kind][0]}
+            </span>
+            <a href={`/changelog/${e.slug}`} className="text-fg-2 hover:text-fg hover:underline">
+              {e.title}
+            </a>
+          </li>
+        ))}
+        {news.length > SHOWN && <li>and {news.length - SHOWN} more</li>}
+      </ul>
+      <a href="/changelog" className="mt-2 inline-block text-xs hover:text-fg">
+        Full changelog →
+      </a>
+    </>
   );
 }
