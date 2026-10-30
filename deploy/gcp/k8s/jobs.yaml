@@ -107,15 +107,16 @@ spec:
           emptyDir:
             sizeLimit: 10Gi
 ---
-# One sandbox always ready, so a job starts in a second. More at once start cold, in 1 to 2.5
-# minutes. A deploy replaces the ready one with the new image.
+# Three sandboxes always ready, so a job starts in a second: a day of real job starts, replayed,
+# found about 95% warm, against 60% with one. More at once start cold, in 1 to 2.5 minutes. A
+# deploy replaces the ready ones with the new image.
 apiVersion: extensions.agents.x-k8s.io/v1beta1
 kind: SandboxWarmPool
 metadata:
   name: mergepatrol-job
   namespace: mergepatrol-jobs
 spec:
-  replicas: 1
+  replicas: 3
   sandboxTemplateRef:
     name: mergepatrol-job
   updateStrategy:

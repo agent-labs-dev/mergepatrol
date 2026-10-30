@@ -35,6 +35,8 @@ pub struct RepoSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: PrNumber,
+    /// `OPEN`, `CLOSED` or `MERGED`.
+    pub state: String,
     pub title: String,
     pub body: String,
     pub is_draft: bool,
@@ -136,6 +138,10 @@ struct ReviewNode {
 }
 
 impl PullRequest {
+    pub fn is_open(&self) -> bool {
+        self.state == "OPEN"
+    }
+
     pub fn has_label(&self, label: &str) -> bool {
         self.labels.iter().any(|l| l == label)
     }
@@ -1400,7 +1406,7 @@ mod tests {
     /// nebula#11186 before its approval: `reviewDecision` is empty, though `main` requires a code
     /// owner's review and the PR changes an owned file.
     const UNREVIEWED: &str = r#"{"data":{"repository":{
-        "pullRequest":{"number":11186,"title":"ci","body":"","isDraft":false,"isCrossRepository":false,
+        "pullRequest":{"number":11186,"state":"OPEN","title":"ci","body":"","isDraft":false,"isCrossRepository":false,
             "reviewDecision":null,"baseRefName":"main","headRefName":"ci","headRefOid":"abc",
             "labels":{"nodes":[]},"files":{"nodes":[{"path":".github/dependabot.yml"}]},
             "url":"","createdAt":"","additions":1,"deletions":0,"changedFiles":1,"author":null,
@@ -1436,7 +1442,7 @@ mod tests {
     #[test]
     fn summary_reads_graphql() {
         let pr: PullRequest = serde_json::from_value(json!({
-            "number": 7, "title": "Fix it", "body": "", "isDraft": false,
+            "number": 7, "state": "OPEN", "title": "Fix it", "body": "", "isDraft": false,
             "isCrossRepository": false, "reviewDecision": "APPROVED", "baseRefName": "main",
             "headRefName": "fix", "headRefOid": "abc", "labels": { "nodes": [{ "name": "mergepatrol" }] },
             "files": { "nodes": [{ "path": "src/a.rs" }] },
