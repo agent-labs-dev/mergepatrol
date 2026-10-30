@@ -28,6 +28,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
 
 [dev-dependencies]
+mergepatrol-github = { path = "../github", features = ["testing"] }
 mergepatrol-executor = { path = "../executor" }
 mergepatrol-resolver = { path = "../resolver", features = ["testing"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "migrate", "macros"] }

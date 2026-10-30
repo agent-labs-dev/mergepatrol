@@ -1,3 +1,4 @@
+mod cached;
 mod config;
 mod credentials;
 mod github;

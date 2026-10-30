@@ -666,8 +666,8 @@ fn api_headers() -> reqwest::header::HeaderMap {
 }
 
 /// A GitHub on localhost that answers each request with the next scripted response.
-#[cfg(test)]
-pub(crate) mod fake {
+#[cfg(any(test, feature = "testing"))]
+pub mod fake {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
@@ -677,10 +677,10 @@ pub(crate) mod fake {
     use super::{App, Installation};
 
     /// A response: status, extra header lines, body.
-    pub(crate) type Scripted = (u16, &'static str, &'static str);
+    pub type Scripted = (u16, &'static str, &'static str);
 
     /// An installation, with a token already, that talks to the fake. The request lines it got.
-    pub(crate) async fn serve(responses: Vec<Scripted>) -> (Installation, Arc<Mutex<Vec<String>>>) {
+    pub async fn serve(responses: Vec<Scripted>) -> (Installation, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));

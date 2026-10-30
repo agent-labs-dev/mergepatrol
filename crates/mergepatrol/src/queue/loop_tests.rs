@@ -14,8 +14,8 @@ use mergepatrol_github::{
 };
 use mergepatrol_store::{
     BillingStore, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse,
-    LoginCode, RepoState, SecretRecord, Session, Slice, StepStats, Subscription, Unsynced,
-    Workspace,
+    LoginCode, PrWrite, ReadCache, RepoReads, RepoState, SecretRecord, Session, Slice, StepStats,
+    Subscription, Unsynced, Workspace,
 };
 
 use super::*;
@@ -650,6 +650,33 @@ struct Mem {
     config_error: Mutex<Option<String>>,
     /// The head each PR had when the trigger label went on, as the webhook told.
     label_heads: Mutex<HashMap<PrNumber, String>>,
+}
+
+/// The queue loop reads GitHub past the cache.
+#[async_trait]
+impl ReadCache for Mem {
+    async fn github_changed(&self, _: u64, _: &RepoName, _: Option<PrNumber>) -> Result<()> {
+        unreachable!()
+    }
+    async fn github_reads(&self, _: u64, _: &RepoName) -> Result<RepoReads> {
+        unreachable!()
+    }
+    async fn save_config_read(&self, _: u64, _: &RepoName, _: i64, _: Option<&str>) -> Result<()> {
+        unreachable!()
+    }
+    async fn save_repository_read(
+        &self,
+        _: u64,
+        _: &RepoName,
+        _: i64,
+        _: &serde_json::Value,
+        _: &serde_json::Value,
+    ) -> Result<()> {
+        unreachable!()
+    }
+    async fn save_pr_reads(&self, _: u64, _: &RepoName, _: &[PrWrite]) -> Result<()> {
+        unreachable!()
+    }
 }
 
 #[async_trait]

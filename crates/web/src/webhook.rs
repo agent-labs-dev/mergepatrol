@@ -1,12 +1,13 @@
-//! GitHub webhooks. A delivery only wakes the queue of the repo it names: the queue then reads
-//! what changed from GitHub, as it does when it polls. A lost delivery costs time, not state.
+//! GitHub webhooks. A delivery marks what it changed of what the queue reads, and wakes the
+//! queue of its repo, which reads that again from GitHub. A lost delivery costs time, not state:
+//! the queue reads the whole repo again now and then.
 
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use mergepatrol_analytics::{Analytics, WorkspaceInfo};
-use mergepatrol_core::{REPO_CONFIG_PATH, RepoName};
+use mergepatrol_core::{PrNumber, REPO_CONFIG_PATH, RepoName};
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -72,6 +73,11 @@ pub(crate) async fn receive(
                 .set_label_head(installation, &repo, pr, label, head)
                 .await;
         }
+        for pr in changed(event, &payload) {
+            if stored.is_ok() {
+                stored = state.store.github_changed(installation, &repo, pr).await;
+            }
+        }
         // The queue reads the rest from GitHub, so it wakes even when the write failed. The
         // error still goes back, so the delivery shows as failed on GitHub, to send again.
         state.wake.wake(installation, repo);
@@ -105,6 +111,32 @@ fn installation(analytics: &Analytics, payload: &Value) {
             account_type: i["account"]["type"].as_str().unwrap_or_default(),
         },
     );
+}
+
+/// What the delivery changed of what the queue reads from GitHub: the repo itself with `None`,
+/// or a PR. The checks of a PR, for the dashboard, once a suite of them completes.
+fn changed(event: Option<&str>, payload: &Value) -> Vec<Option<PrNumber>> {
+    let pr = |pr: &Value| pr["number"].as_u64();
+    match event {
+        Some("push") => {
+            let default = payload["repository"]["default_branch"].as_str();
+            let to_default = default.is_some_and(|d| payload["ref"] == format!("refs/heads/{d}"));
+            if to_default { vec![None] } else { vec![] }
+        }
+        Some("pull_request" | "pull_request_review") => {
+            pr(&payload["pull_request"]).map(Some).into_iter().collect()
+        }
+        Some("check_suite") if payload["action"] == "completed" => {
+            payload["check_suite"]["pull_requests"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(pr)
+                .map(Some)
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 /// Whether a push to the default branch leaves it with the config file, if the push touched the

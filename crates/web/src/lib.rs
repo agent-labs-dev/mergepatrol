@@ -883,6 +883,33 @@ mod tests {
         assert_eq!(head(2).await, None);
     }
 
+    #[sqlx::test(migrations = false)]
+    async fn a_webhook_marks_what_it_changed_for_the_queue_to_read_again(pool: PgPool) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
+        let (router, _) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;
+        let repo = mergepatrol_core::RepoName::parse("o/r").unwrap();
+        // The queue reads the repo.
+        store.github_reads(7, &repo).await.unwrap();
+
+        let edited = r#"{"action":"edited","installation":{"id":7},"repository":{"full_name":"o/r"},"pull_request":{"number":3,"head":{"sha":"s","repo":{"full_name":"o/r"}}}}"#;
+        let signature = webhook::sign("hush", edited.as_bytes());
+        deliver(&router, edited, &signature).await;
+        deliver_push(&router, &push("refs/heads/topic", "")).await;
+        let reads = store.github_reads(7, &repo).await.unwrap();
+        assert_eq!(reads.changes, 0);
+        assert_eq!(
+            reads
+                .prs
+                .iter()
+                .map(|p| (p.number, p.changes))
+                .collect::<Vec<_>>(),
+            [(3, 1)]
+        );
+
+        deliver_push(&router, &push("refs/heads/main", "")).await;
+        assert_eq!(store.github_reads(7, &repo).await.unwrap().changes, 1);
+    }
+
     async fn deliver_push(router: &Router, body: &str) -> StatusCode {
         let req = Request::post("/webhooks/github")
             .header("x-github-event", "push")

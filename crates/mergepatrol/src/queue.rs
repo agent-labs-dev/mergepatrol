@@ -33,6 +33,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::cached::{Cached, Reader};
 use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
@@ -461,9 +462,28 @@ const TICK_GAP: Duration = Duration::from_secs(10);
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
     let sandbox = JobSandbox { ctx: &ctx, gh: &gh };
+    let cached = Cached {
+        gh: &gh,
+        reader: Reader {
+            installation: gh.id,
+            reads: &gh,
+            store: ctx.store.as_ref(),
+        },
+    };
     loop {
         let started = tokio::time::Instant::now();
-        match tick(&ctx, &gh, &sandbox, &repo).await {
+        // Without webhooks, only a read tells what changed.
+        let webhooks = webhooks(&ctx).await.unwrap_or(false);
+        let github: &dyn GitHub = if webhooks { &cached } else { &gh };
+        let ran = tick(&ctx, github, &sandbox, &repo).await;
+        // A job publishes past the cache, and a failed tick may have written part of its work.
+        if webhooks
+            && !matches!(ran, Ok(Ran::Idle))
+            && let Err(e) = cached.reader.changed(&repo, None).await
+        {
+            tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "could not mark the repo changed");
+        }
+        match ran {
             // The lane may have a next PR: start it now, not a poll later.
             Ok(Ran::Job) => continue,
             Ok(Ran::Idle) => {}

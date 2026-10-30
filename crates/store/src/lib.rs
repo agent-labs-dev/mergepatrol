@@ -1,9 +1,11 @@
 //! Persistence, in Postgres. Migrations are in `migrations/`, embedded, and run at startup.
 
 mod billing;
+mod github;
 mod vault;
 
 pub use billing::{BillingStore, FairUse, Subscription, Unsynced};
+pub use github::{PrRead, PrWrite, Read, ReadCache, RepoReads};
 pub use vault::{
     ANTHROPIC_API_KEY, CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, GITHUB_APP, SecretStatus, Vault,
     api_key_secret,
@@ -125,7 +127,7 @@ pub struct SecretRecord {
 }
 
 #[async_trait]
-pub trait Store: Send + Sync {
+pub trait Store: ReadCache {
     async fn load_lane(&self, key: &LaneKey) -> Result<Lane>;
     async fn save_lane(&self, key: &LaneKey, lane: &Lane) -> Result<()>;
     /// The lanes of one workspace.
