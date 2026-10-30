@@ -44,7 +44,7 @@ export function Queue({ workspace }: { workspace: number }) {
     // Read as the user, on their own rate limit. A label change shows sooner through the lane.
     refetchInterval: 30_000,
   });
-  const actions = useActions(workspace, current);
+  const actions = useActions(workspace, current, open.data, open.dataUpdatedAt);
 
   if (lanes.isError) return <p className="p-6 text-bad">Could not load the queue.</p>;
   if (lanes.data?.length === 0)
@@ -63,20 +63,22 @@ export function Queue({ workspace }: { workspace: number }) {
 
   const lane = current ?? lanes.data[0];
   const { pending } = actions;
-  // What the filters narrow: the open PRs, without any the lane has already.
-  const notQueued = (open.data ?? []).filter((p) => !entryOf(lane, p.number));
-  const unqueued = [
-    ...notQueued.filter(matches(filter, me)).map(asItem),
-    // Queued, gone from the open PRs, and not in the lane yet: a poll of each came between.
-    ...[...pending.values()].flatMap((p) =>
-      p.kind === "queueing" && !open.data?.some((o) => o.number === p.item.number) ? [p.item] : [],
-    ),
-  ].filter((i) => !entryOf(lane, i.number));
-  const items: Item[] = [...lane.entries, ...unqueued];
+  const queued = withClicks(lane, pending);
+  // Removed: at the top of the open PRs, as the PR GitHub updated last.
+  const leaving = [...pending.values()].flatMap((p) =>
+    p.kind === "removing" ? [{ ...p.item, state: "open" as const, priority: false }] : [],
+  );
+  // What the filters narrow: the open PRs, without any the lane or `leaving` has already.
+  const notQueued = (open.data ?? []).filter(
+    (p) =>
+      ![...queued, ...leaving].some((e) => e.number === p.number || e.layers.includes(p.number)),
+  );
+  const unqueued = [...leaving, ...notQueued.filter(matches(filter, me)).map(asItem)];
+  const items: Item[] = [...queued, ...unqueued];
   const entry = items.find((e) => e.number === pr) ?? items[0];
   // The queue lists the active PRs first, so the batch is the head of the lane.
-  const batched = lane.batch === null ? [] : lane.entries.filter((e) => e.state === "active");
-  const rest = lane.entries.slice(batched.length);
+  const batched = lane.batch === null ? [] : queued.filter((e) => e.state === "active");
+  const rest = queued.slice(batched.length);
   const picked = entry !== undefined && entry.number === pr;
   const row = (e: Item) => (
     <div
@@ -89,7 +91,7 @@ export function Queue({ workspace }: { workspace: number }) {
         place={
           e.state === "held" || e.state === "open"
             ? null
-            : lane.entries.findIndex((q) => q.number === e.number) + 1
+            : queued.findIndex((q) => q.number === e.number) + 1
         }
         selected={e === entry}
         pending={actions.kinds.get(e.number)}
@@ -146,7 +148,7 @@ export function Queue({ workspace }: { workspace: number }) {
             </button>
           </p>
         )}
-        {lane.entries.length === 0 && <p className="p-4 text-faint">Nothing queued</p>}
+        {queued.length === 0 && <p className="p-4 text-faint">Nothing queued</p>}
         <ol>
           {lane.batch !== null && (
             <li className="border-b border-line-soft">
@@ -185,7 +187,9 @@ export function Queue({ workspace }: { workspace: number }) {
                 <span className="font-medium text-fg-2">Open</span> · not queued
               </span>
               <span className="tabular-nums">
-                {narrows(filter) ? `${unqueued.length} of ${notQueued.length}` : unqueued.length}
+                {narrows(filter)
+                  ? `${unqueued.length} of ${leaving.length + notQueued.length}`
+                  : unqueued.length}
               </span>
             </p>
             <OpenFilters pulls={notQueued} me={me} filter={filter} onChange={setFilter} />
@@ -258,10 +262,11 @@ const asItem = (p: OpenPullView): Item => ({
       : null,
 });
 
-/** A click the queue has not caught up with: GitHub has the labels, the lane not yet. */
-type Pending = { kind: "queueing" | "removing"; item: Item; repo: string };
+/** A click the queue has not caught up with: GitHub has the labels, the lane or the open PRs
+ * not yet. `left`: when the lane no longer had a removed PR, for the open PRs to read again. */
+type Pending = { kind: "queueing" | "removing"; item: Item; repo: string; left?: number };
 /** What a row shows as in flight: a queue click, or an open PR closing. */
-type PendingKind = Pending["kind"] | "closing";
+type PendingKind = Pending["kind"] | "prioritizing" | "closing";
 
 /** The queue looks at a repo within seconds of a label change. Past this, stop waiting. */
 const PENDING_MS = 60_000;
@@ -272,7 +277,36 @@ const entryOf = (lane: LaneView, n: number) =>
 
 const pendingKey = (repo: string, n: number) => `${repo}#${n}`;
 
-function useActions(workspace: number, lane: LaneView | undefined) {
+/** Whether the open PRs have `item`, or a layer of its stack. */
+const inOpen = (open: OpenPullView[] | undefined, item: Item) =>
+  !!open?.some((o) => o.number === item.number || item.layers.includes(o.number));
+
+/** Where the queue takes a PR from, as the server orders the lane. */
+const rank = (e: Item) =>
+  e.state === "active" ? 0 : e.state === "waiting" ? (e.priority ? 1 : 2) : 3;
+
+/** The lane as it is once the queue has the clicks: queued PRs in, removed ones out, each in
+ * merge order. A queued PR goes last of its rank, as the queue puts it. */
+function withClicks(lane: LaneView, pending: ReadonlyMap<number, Pending>): Item[] {
+  const entries: Item[] = lane.entries.flatMap((e) => {
+    const p = pending.get(e.number);
+    if (!p) return [e];
+    return p.kind === "removing" ? [] : [{ ...e, priority: p.item.priority }];
+  });
+  for (const p of pending.values())
+    if (p.kind === "queueing" && !entryOf(lane, p.item.number))
+      entries.push({ ...p.item, state: "waiting", detail: null });
+  // Stable: each keeps its place within its rank.
+  return entries.sort((a, b) => rank(a) - rank(b));
+}
+
+function useActions(
+  workspace: number,
+  lane: LaneView | undefined,
+  open: OpenPullView[] | undefined,
+  /** When `open` was read. */
+  openAt: number,
+) {
   const client = useQueryClient();
   const [pending, setPending] = useState(new Map<string, Pending & { at: number }>());
   const [error, setError] = useState<string | null>(null);
@@ -282,27 +316,40 @@ function useActions(workspace: number, lane: LaneView | undefined) {
       next.delete(key);
       return next;
     });
-  // Each poll of the lane may show what a click did, and then the open PRs change too. A poll
-  // that changes nothing keeps the same lane, so the expiry needs its own timer.
+  // Each poll of the lane may show what a click did. A removed PR then waits for the open PRs,
+  // read again once after. A poll that changes nothing keeps the same data, so the expiry needs its
+  // own timer.
   useEffect(() => {
     const prune = () =>
       setPending((p) => {
-        const next = new Map(
-          [...p].filter(([, { kind, item, repo, at }]) => {
-            const e = lane?.repo === repo ? entryOf(lane, item.number) : undefined;
-            const done =
-              lane?.repo === repo && (kind === "removing" ? !e : e?.priority === item.priority);
-            return !done && Date.now() - at < PENDING_MS;
-          }),
-        );
-        if (next.size === p.size) return p;
-        client.invalidateQueries({ queryKey: ["open"] });
-        return next;
+        let changed = false;
+        let readOpen = false;
+        const next = new Map<string, Pending & { at: number }>();
+        for (const [key, click] of p) {
+          const { kind, item, repo, at } = click;
+          const here = lane?.repo === repo;
+          const e = here ? entryOf(lane, item.number) : undefined;
+          const done =
+            here &&
+            (kind === "removing"
+              ? !e && (click.left ?? Infinity) < openAt && inOpen(open, item)
+              : e?.priority === item.priority);
+          if (done || Date.now() - at >= PENDING_MS) {
+            changed = true;
+            continue;
+          }
+          if (kind === "removing" && here && !e && click.left === undefined) {
+            changed = readOpen = true;
+            next.set(key, { ...click, left: Date.now() });
+          } else next.set(key, click);
+        }
+        if (readOpen) client.invalidateQueries({ queryKey: ["open"] });
+        return changed ? next : p;
       });
     prune();
     const timer = setInterval(prune, 5_000);
     return () => clearInterval(timer);
-  }, [lane, client]);
+  }, [lane, open, openAt, client]);
   const mutation = useMutation({
     mutationFn: ({ kind, item, repo }: Pending) =>
       kind === "removing"
@@ -331,7 +378,13 @@ function useActions(workspace: number, lane: LaneView | undefined) {
   });
   const repo = lane?.repo ?? "";
   const kinds = new Map<number, PendingKind>(
-    [...pending.values()].filter((p) => p.repo === repo).map((p) => [p.item.number, p.kind]),
+    [...pending.values()]
+      .filter((p) => p.repo === repo)
+      .map((p) => [
+        p.item.number,
+        // The item as clicked: an open PR is queueing, a queued one changing its priority.
+        p.kind === "queueing" && p.item.state !== "open" ? "prioritizing" : p.kind,
+      ]),
   );
   // Each close still running, not only the last one clicked.
   const closingNow = useMutationState({
@@ -539,7 +592,7 @@ function Row({
               ? "Closing…"
               : pending === "removing"
                 ? "Leaving the queue…"
-                : e.state === "open"
+                : pending === "queueing"
                   ? "Queueing…"
                   : "Changing its priority…"}
           </span>
