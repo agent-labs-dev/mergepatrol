@@ -1,6 +1,6 @@
-//! Jobs that run on another machine and reach the orchestrator over HTTPS: in production, one
-//! Cloud Run Job execution per job. A job's only way in is its link, which holds a single-use
-//! token: it fetches its spec once, uploads its output, and says it is done.
+//! Jobs that run on another machine and reach the orchestrator over HTTP: in production, one
+//! GKE sandbox per job (`crate::sandbox`). A job's only way in is its link, which holds a
+//! single-use token: it fetches its spec once, uploads its output, and says it is done.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,14 +14,13 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
-use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 use crate::Executor;
 use crate::protocol::{BUNDLE_FILE, JobResult, JobSpec, MAX_BUNDLE_BYTES, RESULT_FILE};
 
-/// Under Cloud Run's 32 MiB limit on an HTTP/1 request, which the bundle can exceed.
+/// The bundle goes up in parts of this size, so no one request holds all of it.
 pub const CHUNK_BYTES: usize = 16 * 1024 * 1024;
 /// The most a job may upload: its bundle, and room for its result. The job is untrusted, so
 /// more is refused as it comes, not after it filled the disk.
@@ -219,12 +218,12 @@ pub trait Launch: Send + Sync {
     async fn launch(&self, job_id: &str, link: &str) -> Result<Box<dyn Launched>>;
 }
 
+/// Dropping it stops the job, if it still runs, and frees its machine: after the job, after an
+/// error, and when the job is cut off because its queue stopped.
 #[async_trait]
 pub trait Launched: Send + Sync {
     /// Returns when the job's machine is done with it: `Err` with why, if it failed.
     async fn ended(&self) -> Result<()>;
-    /// Stops the job. Called when it is cut off: it cannot wait.
-    fn cancel(&self);
 }
 
 /// Runs each job through `launch`, which starts it on a machine that reaches back to
@@ -247,15 +246,13 @@ impl Executor for RemoteExecutor {
             self.base_url.trim_end_matches('/'),
             closed.token
         );
-        let mut launched = Cancelled(Some(self.launch.launch(job_id, &link).await?));
-        let job = launched.0.as_deref().expect("launched");
+        let job = self.launch.launch(job_id, &link).await?;
         let ended = tokio::select! {
             _ = &mut done => None,
             ended = job.ended() => Some(ended),
             _ = tokio::time::sleep(self.timeout) => bail!("the job did not finish in {:?}", self.timeout),
         };
-        // Done, or over on its own: nothing to cancel.
-        launched.0 = None;
+        drop(job);
         if let Some(ended) = ended {
             ended?;
             // The job reports done before it exits.
@@ -267,116 +264,13 @@ impl Executor for RemoteExecutor {
     }
 }
 
-/// Cancels the job when dropped while it still runs: on an error, and when its queue stops.
-struct Cancelled(Option<Box<dyn Launched>>);
-
-impl Drop for Cancelled {
-    fn drop(&mut self) {
-        if let Some(job) = &self.0 {
-            job.cancel();
-        }
-    }
-}
-
-/// Launches each job as an execution of a Cloud Run Job, with the job's link as its arguments.
-/// It authenticates as the orchestrator's service account, from the metadata server.
-pub struct CloudRunLaunch {
-    /// `projects/<p>/locations/<r>/jobs/<name>`.
-    pub job: String,
-    pub timeout: Duration,
-    pub http: reqwest::Client,
-}
-
-const RUN_API: &str = "https://run.googleapis.com/v2";
 const EXECUTION_POLL: Duration = Duration::from_secs(10);
-/// Failed polls in a row before the execution counts as lost: a minute.
+/// Failed polls in a row before the job counts as lost: a minute.
 const MAX_FAILED_POLLS: u32 = 6;
-/// Every call to Cloud Run and the metadata server: a hung one would hold the job's queue.
-pub const CLOUD_RUN_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-
-async fn gcp_token(http: &reqwest::Client) -> Result<String> {
-    let r: Value = http
-        .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token")
-        .header("Metadata-Flavor", "Google")
-        .send()
-        .await?
-        .error_for_status()
-        .context("get a token from the metadata server")?
-        .json()
-        .await?;
-    Ok(r["access_token"]
-        .as_str()
-        .context("metadata token")?
-        .to_owned())
-}
-
-#[async_trait]
-impl Launch for CloudRunLaunch {
-    async fn launch(&self, job_id: &str, link: &str) -> Result<Box<dyn Launched>> {
-        let res = self
-            .http
-            .post(format!("{RUN_API}/{}:run", self.job))
-            .bearer_auth(gcp_token(&self.http).await?)
-            .json(&json!({
-                "overrides": {
-                    "containerOverrides": [{ "args": ["job", "--remote", link] }],
-                    "timeout": format!("{}s", self.timeout.as_secs()),
-                }
-            }))
-            .send()
-            .await?;
-        let status = res.status();
-        let op: Value = res.json().await?;
-        if !status.is_success() {
-            bail!("run the Cloud Run job for {job_id}: {status} {op}");
-        }
-        let name = op["metadata"]["name"]
-            .as_str()
-            .context("the execution's name")?
-            .to_owned();
-        tracing::info!(job = job_id, execution = %name, "job started on Cloud Run");
-        Ok(Box::new(CloudRunExecution {
-            name,
-            http: self.http.clone(),
-        }))
-    }
-}
-
-struct CloudRunExecution {
-    /// `projects/<p>/locations/<r>/jobs/<name>/executions/<id>`.
-    name: String,
-    http: reqwest::Client,
-}
-
-impl CloudRunExecution {
-    /// `None` while the execution runs; then whether it succeeded.
-    async fn poll(&self) -> Result<Option<Result<()>>> {
-        let e: Value = self
-            .http
-            .get(format!("{RUN_API}/{}", self.name))
-            .bearer_auth(gcp_token(&self.http).await?)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if e.get("completionTime").is_none() {
-            return Ok(None);
-        }
-        if e["succeededCount"].as_u64().unwrap_or(0) > 0 {
-            return Ok(Some(Ok(())));
-        }
-        Ok(Some(Err(anyhow::anyhow!(
-            "the Cloud Run execution failed: {}. Logs: {}",
-            e["conditions"],
-            e["logUri"].as_str().unwrap_or("none")
-        ))))
-    }
-}
 
 /// Polls a job until it ends. One failed poll says nothing of the job, which runs on; after
-/// `MAX_FAILED_POLLS` in a row it counts as lost, and is cancelled, since it may still run.
-async fn watch<F>(mut poll: impl FnMut() -> F, cancel: impl Fn()) -> Result<()>
+/// `MAX_FAILED_POLLS` in a row it counts as lost, and its caller drops it, since it may still run.
+pub(crate) async fn watch<F>(mut poll: impl FnMut() -> F) -> Result<()>
 where
     F: Future<Output = Result<Option<Result<()>>>>,
 {
@@ -389,40 +283,11 @@ where
             Err(e) => {
                 failed += 1;
                 if failed == MAX_FAILED_POLLS {
-                    cancel();
-                    return Err(e.context("read the job's execution"));
+                    return Err(e.context("read the job's state"));
                 }
-                tracing::warn!(error = %format!("{e:#}"), "could not read the job's execution");
+                tracing::warn!(error = %format!("{e:#}"), "could not read the job's state");
             }
         }
-    }
-}
-
-#[async_trait]
-impl Launched for CloudRunExecution {
-    async fn ended(&self) -> Result<()> {
-        watch(|| self.poll(), || self.cancel()).await
-    }
-
-    fn cancel(&self) {
-        let (http, name) = (self.http.clone(), self.name.clone());
-        let Ok(rt) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        rt.spawn(async move {
-            let cancelled = async {
-                http.post(format!("{RUN_API}/{name}:cancel"))
-                    .bearer_auth(gcp_token(&http).await?)
-                    .json(&json!({}))
-                    .send()
-                    .await?
-                    .error_for_status()?;
-                anyhow::Ok(())
-            };
-            if let Err(e) = cancelled.await {
-                tracing::warn!(error = %format!("{e:#}"), execution = %name, "could not cancel the job");
-            }
-        });
     }
 }
 
@@ -468,7 +333,7 @@ mod tests {
 
     struct InProcess {
         behave: Behave,
-        cancelled: Arc<Mutex<bool>>,
+        freed: Arc<Mutex<bool>>,
     }
 
     struct Task(tokio::task::JoinHandle<Result<()>>, Arc<Mutex<bool>>);
@@ -496,7 +361,7 @@ mod tests {
                     .await?;
                 upload(&link, dir.path(), 3).await
             });
-            Ok(Box::new(Task(task, self.cancelled.clone())))
+            Ok(Box::new(Task(task, self.freed.clone())))
         }
     }
 
@@ -508,7 +373,10 @@ mod tests {
             }
             Ok(())
         }
-        fn cancel(&self) {
+    }
+
+    impl Drop for Task {
+        fn drop(&mut self) {
             *self.1.lock().unwrap() = true;
         }
     }
@@ -518,24 +386,24 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(axum::serve(listener, mailbox.clone().router()).into_future());
-        let cancelled = Arc::new(Mutex::new(false));
+        let freed = Arc::new(Mutex::new(false));
         (
             RemoteExecutor {
                 mailbox,
                 base_url,
                 launch: Box::new(InProcess {
                     behave,
-                    cancelled: cancelled.clone(),
+                    freed: freed.clone(),
                 }),
                 timeout: Duration::from_secs(10),
             },
-            cancelled,
+            freed,
         )
     }
 
     #[tokio::test]
     async fn a_remote_job_fetches_its_spec_once_and_uploads_its_output() {
-        let (ex, cancelled) = executor(Behave::Report).await;
+        let (ex, freed) = executor(Behave::Report).await;
         let out = tempfile::tempdir().unwrap();
         let result = ex.run("j", &spec(), out.path()).await.unwrap();
         assert_eq!(result.outcome, JobOutcome::Done);
@@ -547,10 +415,7 @@ mod tests {
             ex.mailbox.slots.lock().unwrap().is_empty(),
             "the link is closed"
         );
-        assert!(
-            !*cancelled.lock().unwrap(),
-            "a finished job is not cancelled"
-        );
+        assert!(*freed.lock().unwrap(), "the job's machine is freed");
     }
 
     #[tokio::test]
@@ -585,28 +450,25 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn failed_polls_are_retried_until_the_job_counts_as_lost() {
         // Fails `failures` polls, then says the job succeeded.
-        async fn watched(failures: u32) -> (Result<()>, bool) {
+        async fn watched(failures: u32) -> Result<()> {
             let polls = std::sync::atomic::AtomicU32::new(0);
-            let cancelled = std::sync::atomic::AtomicBool::new(false);
             let poll = || async {
                 match polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < failures {
                     true => bail!("503 Service Unavailable"),
                     false => Ok(Some(Ok(()))),
                 }
             };
-            let cancel = || cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
-            let ended = watch(poll, cancel).await;
-            (ended, cancelled.into_inner())
+            watch(poll).await
         }
-        let (ended, cancelled) = watched(MAX_FAILED_POLLS - 1).await;
-        assert!(ended.is_ok() && !cancelled, "{ended:?}");
-        let (ended, cancelled) = watched(MAX_FAILED_POLLS).await;
-        assert!(ended.is_err() && cancelled, "{ended:?}");
+        let ended = watched(MAX_FAILED_POLLS - 1).await;
+        assert!(ended.is_ok(), "{ended:?}");
+        let ended = watched(MAX_FAILED_POLLS).await;
+        assert!(ended.is_err(), "{ended:?}");
     }
 
     #[tokio::test]
-    async fn a_job_cut_off_is_cancelled() {
-        let (ex, cancelled) = executor(Behave::Hang).await;
+    async fn a_job_cut_off_is_freed() {
+        let (ex, freed) = executor(Behave::Hang).await;
         let out = tempfile::tempdir().unwrap();
         let spec = spec();
         // The queue stops: the job's future is dropped while it waits.
@@ -616,6 +478,6 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(*cancelled.lock().unwrap());
+        assert!(*freed.lock().unwrap());
     }
 }

@@ -1,0 +1,113 @@
+# Each job's sandbox, rolled out by deploy/gcp/deploy.sh before the orchestrator, with
+# __JOB_IMAGE__ filled in.
+
+# One job's sandbox: `mergepatrol job --serve` under gVisor, which waits for its link from the
+# orchestrator. It runs untrusted repo code and an agent with a shell.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: mergepatrol-job
+  namespace: mergepatrol-jobs
+spec:
+  networkPolicy:
+    # The orchestrator hands the job its link; nothing else gets in.
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: mergepatrol
+            podSelector:
+              matchLabels:
+                app: mergepatrol
+        ports:
+          - port: 8080
+            protocol: TCP
+    egress:
+      # The internet, but not the metadata server, the cluster's pods and services, or the VPC.
+      - to:
+          - ipBlock:
+              cidr: 0.0.0.0/0
+              except:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+                - 192.168.0.0/16
+                - 169.254.0.0/16
+                - 100.64.0.0/10
+                - 34.118.224.0/20
+      # The orchestrator's job port: the job's link and the model API proxy.
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: mergepatrol
+            podSelector:
+              matchLabels:
+                app: mergepatrol
+        ports:
+          - port: 8081
+            protocol: TCP
+  podTemplate:
+    metadata:
+      labels:
+        app: mergepatrol-job
+    spec:
+      runtimeClassName: gvisor
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          value: gvisor
+          effect: NoSchedule
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # Public resolvers: the cluster's DNS would name its services, and lives on link-local.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: [8.8.8.8, 1.1.1.1]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: job
+          image: __JOB_IMAGE__
+          args: [job, --serve, "8080"]
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+              ephemeral-storage: 10Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+              ephemeral-storage: 10Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The repo and the job's output.
+        - name: tmp
+          emptyDir:
+            sizeLimit: 10Gi
+---
+# One sandbox always ready, so a job starts in a second. More at once start cold, in 1 to 2.5
+# minutes. A deploy replaces the ready one with the new image.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: mergepatrol-job
+  namespace: mergepatrol-jobs
+spec:
+  replicas: 1
+  sandboxTemplateRef:
+    name: mergepatrol-job
+  updateStrategy:
+    type: Recreate

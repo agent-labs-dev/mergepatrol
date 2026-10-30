@@ -1,11 +1,12 @@
 //! Runs rebase jobs. A job runs the repo's code and an agent with a shell, so it is untrusted:
 //! in production each job gets its own gVisor container (`DockerExecutor`). `LocalExecutor`
 //! runs the job as a subprocess, for development. `RemoteExecutor` runs each job on another
-//! machine: a Cloud Run Job execution.
+//! machine: a GKE sandbox, through `sandbox::SandboxLaunch`.
 
 pub mod protocol;
 pub mod proxy;
 pub mod remote;
+pub mod sandbox;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;

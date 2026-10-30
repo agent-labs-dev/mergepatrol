@@ -1,0 +1,180 @@
+# What a deploy does not change: the namespaces, the orchestrator's identity and what it may do,
+# and how the internet reaches it. deploy/gcp/bootstrap.sh applies it, with __PROJECT__,
+# __REGION__ and __HOST__ filled in; jobs.yaml and orchestrator.yaml hold what each deploy rolls out.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mergepatrol
+---
+# Each job's sandbox. Nothing here may reach the orchestrator but its job port; see the
+# template's network policy in jobs.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mergepatrol-jobs
+---
+# Signs in to GCP as mergepatrol@, which reaches Cloud SQL and the secrets.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+  annotations:
+    iam.gke.io/gcp-service-account: mergepatrol@__PROJECT__.iam.gserviceaccount.com
+---
+# Claims a sandbox per job, and watches its pod.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: claim-sandboxes
+  namespace: mergepatrol-jobs
+rules:
+  - apiGroups: [extensions.agents.x-k8s.io]
+    resources: [sandboxclaims]
+    verbs: [create, get, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mergepatrol-claims-sandboxes
+  namespace: mergepatrol-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: claim-sandboxes
+subjects:
+  - kind: ServiceAccount
+    name: mergepatrol
+    namespace: mergepatrol
+---
+# The orchestrator's secrets, as files named after the variables they set. Read with its own
+# identity, by the Secret Manager add-on.
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+spec:
+  provider: gke
+  parameters:
+    secrets: |
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-database-url/versions/latest
+        path: MERGEPATROL_DATABASE_URL
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-secret-key/versions/latest
+        path: MERGEPATROL_SECRET_KEY
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-github-app-id/versions/latest
+        path: MERGEPATROL_GITHUB_APP_ID
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-github-app-private-key/versions/latest
+        path: MERGEPATROL_GITHUB_APP_PRIVATE_KEY
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-github-client-id/versions/latest
+        path: MERGEPATROL_GITHUB_CLIENT_ID
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-github-client-secret/versions/latest
+        path: MERGEPATROL_GITHUB_CLIENT_SECRET
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-github-webhook-secret/versions/latest
+        path: MERGEPATROL_GITHUB_WEBHOOK_SECRET
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-stripe-secret-key/versions/latest
+        path: MERGEPATROL_STRIPE_SECRET_KEY
+      - resourceName: projects/__PROJECT__/secrets/mergepatrol-stripe-webhook-secret/versions/latest
+        path: MERGEPATROL_STRIPE_WEBHOOK_SECRET
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+spec:
+  selector:
+    app: mergepatrol
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+# The load balancer, at the static address `mergepatrol`, with the certificate map `mergepatrol`
+# from Certificate Manager.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+  annotations:
+    networking.gke.io/certmap: mergepatrol
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: mergepatrol
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+spec:
+  parentRefs:
+    - name: mergepatrol
+      sectionName: https
+  hostnames: [__HOST__]
+  rules:
+    - backendRefs:
+        - name: mergepatrol
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mergepatrol-https-redirect
+  namespace: mergepatrol
+spec:
+  parentRefs:
+    - name: mergepatrol
+      sectionName: http
+  hostnames: [__HOST__]
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+spec:
+  default:
+    config:
+      type: HTTP
+      httpHealthCheck:
+        requestPath: /api/health
+        port: 8080
+  targetRef:
+    group: ""
+    kind: Service
+    name: mergepatrol
+---
+# A job's model API calls stream through the orchestrator, and one can outlast the load
+# balancer's default 30s.
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: mergepatrol
+  namespace: mergepatrol
+spec:
+  default:
+    timeoutSec: 3600
+  targetRef:
+    group: ""
+    kind: Service
+    name: mergepatrol
