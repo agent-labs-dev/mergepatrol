@@ -11,6 +11,7 @@ import {
 import { useEffect, useState } from "react";
 import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
 import { fetchSession, fetchSettings, fetchYou, logout } from "./api";
+import type { AppView } from "./api/AppView";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
@@ -57,8 +58,6 @@ export function App() {
 }
 
 function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
-  const queryClient = useQueryClient();
-  const { pathname } = useLocation();
   if (session.status === "needs_setup") {
     return session.setup_unlocked ? <CreateApp /> : <UnlockSetup />;
   }
@@ -68,19 +67,27 @@ function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
   }
   if (session.status === "signed_in" && session.app) {
     if (session.workspaces.length > 0) return <Dashboard session={session} {...theme} />;
-    // No workspace at all: a permalink still says so, and lets them sign in as someone else.
-    const here = permalinkAt(pathname);
-    const signOut = () =>
-      logout().then(() => {
-        resetAnalytics();
-        return queryClient.invalidateQueries({ queryKey: ["session"] });
-      });
-    if (here) return <NotHere {...here} login={session.user?.login} onSignOut={signOut} />;
-    const resume = permalinkAfterSignIn();
-    if (resume) return <Navigate to="/$account/$repo/pull/$number" params={resume} replace />;
-    return <Install app={session.app} />;
+    return <NoWorkspace session={session} app={session.app} />;
   }
   return null;
+}
+
+/** Signed in without a workspace: a permalink still says so, and lets them sign in as someone
+ * else. It reads the location here, not in `Screen`: there it would re-render the dashboard
+ * mid-navigation, and its `<Navigate>` would start over, forever. */
+function NoWorkspace({ session, app }: { session: SessionView; app: AppView }) {
+  const queryClient = useQueryClient();
+  const { pathname } = useLocation();
+  const here = permalinkAt(pathname);
+  const signOut = () =>
+    logout().then(() => {
+      resetAnalytics();
+      return queryClient.invalidateQueries({ queryKey: ["session"] });
+    });
+  if (here) return <NotHere {...here} login={session.user?.login} onSignOut={signOut} />;
+  const resume = permalinkAfterSignIn();
+  if (resume) return <Navigate to="/$account/$repo/pull/$number" params={resume} replace />;
+  return <Install app={app} />;
 }
 
 const tabs = [
