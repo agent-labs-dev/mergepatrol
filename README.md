@@ -210,9 +210,9 @@ The orchestrator runs as the Deployment `mergepatrol`, one instance, with Cloud 
 Each job runs in its own gVisor sandbox, through [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox): the orchestrator claims one from the warm pool `mergepatrol-job`, which keeps one sandbox ready, so a job starts in about a second. Jobs past the first start cold, on a new node, in 1 to 2.5 minutes. A sandbox has no service account and no DNS. Its network policy lets it reach two things: the orchestrator's job port, and the egress proxy `mergepatrol-egress`. It can't reach the metadata server, the rest of the cluster, the VPC, or the internet directly. The egress proxy is Squid, at `34.118.224.100:3128`, set as the sandbox's `HTTPS_PROXY`. It opens tunnels to port 443 of the hosts in `deploy/gcp/k8s/squid.conf`, and refuses every other host:
 
 - GitHub, to fetch the repo and revoke the job's token.
-- The package registries the verify commands use: npm and Yarn, PyPI, the Go module proxy, crates.io, and rustup's toolchains.
+- The package registries the verify commands use: npm and Yarn, PyPI, the Go module proxy and its bucket, crates.io, and rustup's toolchains.
 
-A job that needs another host fails until the host is added there. The proxy logs every tunnel it opens or refuses (`kubectl -n mergepatrol-jobs logs -l app=mergepatrol-egress`). The allowlist goes by host name, so it doesn't stop a job that brings its own credentials from pushing to GitHub or publishing to a registry.
+A job that needs another host fails until the host is added there. The proxy logs every tunnel it opens or refuses (`kubectl -n mergepatrol-jobs logs -l app=mergepatrol-egress`). The allowlist goes by host name. So it doesn't stop a job that brings its own credentials from pushing to GitHub or publishing to a registry. It also doesn't stop a job from writing to a bucket that anyone can write to on `storage.googleapis.com`, where the Go proxy keeps large modules.
 
 The orchestrator hands the sandbox its link, `http://<orchestrator pod IP>:8081/jobs/<token>`, over HTTP, since a claim that sets env would skip the warm pool. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done.
 
