@@ -8,6 +8,7 @@ import {
 import { App } from "./App";
 import type { OutcomeView } from "./api/OutcomeView";
 import { History, LISTS, type List, OUTCOMES, WINDOWS, type Window } from "./History";
+import { type OpenFilter, REVIEWS, STATUSES } from "./OpenFilters";
 import { Queue } from "./Queue";
 import { Repos } from "./Repos";
 import { Settings } from "./Settings";
@@ -50,10 +51,16 @@ const workspaceHome = createRoute({
 const queue = createRoute({
   getParentRoute: () => workspace,
   path: "queue",
-  /** The lane in view, as `owner/repo:trunk`, and the PR in it. Both default to the first. */
-  validateSearch: (search): { lane?: string; pr?: number } => ({
+  /** The lane in view, as `owner/repo:trunk`, and the PR in it, both the first by default, and
+   * the filters on its open PRs. */
+  validateSearch: (search): { lane?: string; pr?: number } & OpenFilter => ({
     lane: optional(search.lane, "string"),
     pr: optional(search.pr, "number"),
+    author: optional(search.author, "string"),
+    status: oneOf(STATUSES, search.status),
+    review: oneOf(REVIEWS, search.review),
+    drafts: search.drafts === true || undefined,
+    q: optional(search.q, "string"),
   }),
   component: () => <Queue workspace={useWorkspace().workspace} />,
 });
