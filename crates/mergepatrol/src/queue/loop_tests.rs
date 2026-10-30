@@ -184,6 +184,23 @@ impl State {
         pr.head_ref_oid = sha.into();
     }
 
+    /// The head of the branch `base`: `trunk` for `main`.
+    fn trunk_of(&self, base: &str) -> String {
+        match base {
+            "main" => self.trunk.clone(),
+            _ => self.branches[base].clone(),
+        }
+    }
+
+    /// A branch other than `main` for PRs to merge into, at its first commit.
+    fn add_branch(&mut self, branch: &str) {
+        self.branches.insert(branch.into(), format!("{branch}-0"));
+    }
+
+    fn retarget(&mut self, number: PrNumber, base: &str) {
+        self.prs.get_mut(&number).unwrap().base_ref_name = base.into();
+    }
+
     fn head(&self, number: PrNumber) -> String {
         self.branches[&self.prs[&number].head_ref_name].clone()
     }
@@ -254,23 +271,27 @@ impl Fake {
             }
         }
         s.merges += 1;
-        let mut tree = s.tree(&s.trunk.clone());
+        let base = s.prs[&layers[0]].merges_into().to_owned();
+        let mut tree = s.tree(&s.trunk_of(&base));
         for n in &layers {
             tree = format!("{tree}-{n}");
             if s.diverges.contains(n) {
                 tree.push('x');
             }
         }
-        s.trunk = format!("merge-{number}");
-        let trunk = s.trunk.clone();
+        let trunk = format!("merge-{number}");
+        match base.as_str() {
+            "main" => s.trunk = trunk.clone(),
+            _ => {
+                s.branches.insert(base, trunk.clone());
+            }
+        }
         s.trees.insert(trunk.clone(), tree);
         for n in &layers {
             s.merge_commits.insert(*n, trunk.clone());
         }
         s.merged.extend(layers);
-        Ok(MergeOutcome::Merged {
-            sha: s.trunk.clone(),
-        })
+        Ok(MergeOutcome::Merged { sha: trunk })
     }
 
     fn with<T>(&self, f: impl FnOnce(&State) -> T) -> T {
@@ -346,12 +367,7 @@ impl GitHub for Fake {
     }
 
     async fn branch_sha(&self, _: &RepoName, branch: &str) -> Result<String> {
-        let s = self.state.lock().unwrap();
-        Ok(if branch == "main" {
-            s.trunk.clone()
-        } else {
-            s.branches[branch].clone()
-        })
+        Ok(self.state.lock().unwrap().trunk_of(branch))
     }
 
     async fn pull_head(&self, _: &RepoName, number: PrNumber) -> Result<String> {
@@ -492,7 +508,7 @@ impl GitHub for Fake {
         _: &str,
     ) -> Result<PrNumber> {
         let mut s = self.state.lock().unwrap();
-        assert!(s.branches.contains_key(head) && base == "main");
+        assert!(s.branches.contains_key(head) && (base == "main" || s.branches.contains_key(base)));
         s.drafts.push(title.into());
         Ok(1000 + s.drafts.len() as PrNumber)
     }
@@ -575,7 +591,7 @@ impl Scripted {
 impl Sandbox for Scripted {
     async fn rebase(
         &self,
-        _: &LaneKey,
+        key: &LaneKey,
         _: &RepoSnapshot,
         unit: &Unit,
         _: &RepoSettings,
@@ -601,7 +617,7 @@ impl Sandbox for Scripted {
         }
         Ok(Event::Rebased {
             head,
-            base: s.trunk.clone(),
+            base: s.trunk_of(&key.trunk),
         })
     }
 
@@ -719,6 +735,19 @@ impl Store for Mem {
     }
     async fn lanes(&self, _: u64) -> Result<Vec<(LaneKey, Lane)>> {
         unreachable!()
+    }
+    async fn repo_lanes(&self, _: u64, _: &RepoName) -> Result<Vec<(String, Lane)>> {
+        let lanes = self.lanes.lock().unwrap();
+        let mut lanes: Vec<(String, Lane)> = lanes
+            .iter()
+            .map(|(key, lane)| (key.trunk.clone(), lane.clone()))
+            .collect();
+        lanes.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(lanes)
+    }
+    async fn delete_lane(&self, key: &LaneKey) -> Result<()> {
+        self.lanes.lock().unwrap().remove(key);
+        Ok(())
     }
     async fn events(
         &self,
@@ -883,6 +912,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                 },
                 verify: Vec::new(),
                 fix_ci: Default::default(),
+                branches: Vec::new(),
             },
             data_dir: PathBuf::new(),
             poll: Duration::from_secs(60),
@@ -2557,4 +2587,187 @@ async fn a_public_repo_over_its_fair_use_waits_for_the_hour() {
         .collect();
     assert_eq!(kinds, [FairUse::Pr]);
     assert!(plans.seats.lock().unwrap().is_empty());
+}
+
+/// The settings that give `release` a queue.
+const RELEASE: &str = "version: 1\nbranches: [release]\n";
+
+impl Run {
+    /// The PRs of the lane into `trunk`, if it has one.
+    fn lane_into(&self, trunk: &str) -> Option<Vec<PrNumber>> {
+        let lanes = self.store.lanes.lock().unwrap();
+        let lane = lanes.iter().find(|(key, _)| key.trunk == trunk)?.1;
+        Some(lane.entries.iter().map(|e| e.number).collect())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_into_another_branch_is_merged_into_it() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.add_pr(1);
+        s.retarget(1, "release");
+    }));
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "merged"]
+    );
+    assert_eq!(run.gh.with(|s| s.branches["release"].clone()), "merge-1");
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "trunk-0");
+    // Drained, the lane into `release` goes; the default branch's stays.
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane_into("release"), None);
+    assert_eq!(run.lane_into("main"), Some(vec![]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_branch_has_its_own_queue_and_they_take_turns() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        for n in 1..=3 {
+            s.add_pr(n);
+        }
+        s.retarget(3, "release");
+    }));
+    // One job in each lane a tick: `release` does not wait for all of `main`.
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.merged(), [1, 3]);
+    assert_eq!(run.lane_into("main"), Some(vec![2]));
+    run.drain().await;
+    assert_eq!(run.merged(), [1, 3, 2]);
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-2");
+    assert_eq!(run.gh.with(|s| s.branches["release"].clone()), "merge-3");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retargeted_pr_leaves_its_queue_for_its_new_branch() {
+    let gh = Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().is_draft = true;
+    });
+    let run = Run::new(gh);
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane_into("main"), Some(vec![1]));
+    run.gh.with_mut(|s| {
+        s.retarget(1, "release");
+        s.prs.get_mut(&1).unwrap().is_draft = false;
+    });
+    run.drain().await;
+    assert_eq!(
+        run.kinds(1),
+        [
+            "enqueued",
+            "held",
+            "dequeued",
+            "enqueued",
+            "rebasing",
+            "published",
+            "merged"
+        ]
+    );
+    let exits: Vec<String> = run.exits().into_iter().map(|(_, o, _)| o).collect();
+    assert_eq!(exits, ["dequeued", "merged"]);
+    assert_eq!(run.gh.with(|s| s.branches["release"].clone()), "merge-1");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_retargeted_while_its_checks_run_is_not_merged_into_its_old_branch() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Pending);
+    }));
+    run.gh.then(|s| s.retarget(1, "release"));
+    run.gh.then(|s| {
+        s.checks.insert("ci".into(), CheckState::Passed);
+    });
+    run.drain().await;
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "trunk-0");
+    assert_eq!(run.gh.with(|s| s.branches["release"].clone()), "merge-1");
+    assert!(run.kinds(1).contains(&"restarted".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_prs_of_a_deleted_branch_leave_its_queue() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.add_pr(1);
+        s.retarget(1, "release");
+        s.prs.get_mut(&1).unwrap().is_draft = true;
+    }));
+    run.tick().await;
+    assert_eq!(run.lane_into("release"), Some(vec![1]));
+    // Deleting a branch closes the PRs into it.
+    run.gh.with_mut(|s| {
+        s.branches.remove("release");
+        s.prs.remove(&1);
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.exits(), [(1, "dequeued".into(), "PR 1".into())]);
+    assert_eq!(run.lane_into("release"), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_into_a_branch_without_a_queue_is_held() {
+    // A PR stacked by hand on another PR's branch.
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("feat/a");
+        s.add_pr(1);
+        s.retarget(1, "feat/a");
+    }));
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    assert_eq!(run.lane_into("main"), Some(vec![1]));
+    assert_eq!(run.lane_into("feat/a"), None);
+    assert_eq!(run.gh.with(|s| s.branches["feat/a"].clone()), "feat/a-0");
+    // Once it targets a branch with a queue, it merges there.
+    run.gh.with_mut(|s| s.retarget(1, "main"));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_prs_of_a_branch_taken_off_the_list_are_held() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.add_pr(1);
+        s.retarget(1, "release");
+        s.prs.get_mut(&1).unwrap().is_draft = true;
+    }));
+    run.tick().await;
+    assert_eq!(run.lane_into("release"), Some(vec![1]));
+    run.gh.with_mut(|s| s.config = None);
+    run.tick().await;
+    assert_eq!(run.lane_into("release"), None);
+    // The default branch's lane ran first, before `release` let the PR go.
+    run.tick().await;
+    assert_eq!(run.lane_into("main"), Some(vec![1]));
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "held", "dequeued", "enqueued", "held"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn prs_into_another_branch_are_tested_together() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.add_branch("release");
+        s.config = Some(RELEASE.into());
+        s.retarget(1, "release");
+        s.retarget(2, "release");
+    }));
+    assert!(matches!(run.tick().await, Ran::Job));
+    assert_eq!(run.merged(), [1, 2]);
+    assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
+    assert_eq!(run.gh.with(|s| s.trunk.clone()), "trunk-0");
 }

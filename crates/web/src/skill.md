@@ -17,7 +17,7 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 ## What the queue does
 
-Mergepatrol rebases the PR onto the default branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The queue only serves PRs that target the default branch, and stacks of PRs (from `gh stack`) that merge into it.
+Mergepatrol rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in `.mergepatrol/mergepatrol.yml`: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
 
 A PR from a fork merges only as it was when the label went on: a push to it after that takes it out of the queue, until a maintainer adds `<label>` again. It never joins a batch, gets no agent, and is ejected on a conflict or a failed check. Mergepatrol can push its rebase only while the author allows edits by maintainers.
 

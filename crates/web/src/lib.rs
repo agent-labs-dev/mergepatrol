@@ -272,6 +272,7 @@ mod tests {
                 },
                 verify: Vec::new(),
                 fix_ci: Default::default(),
+                branches: Vec::new(),
             },
             analytics: Analytics::default(),
             billing: None,

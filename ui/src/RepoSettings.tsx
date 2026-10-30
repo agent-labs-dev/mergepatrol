@@ -34,6 +34,7 @@ function Form({
   const id = useId();
   const [draft, setDraft] = useState<RepoSettingsView>(config.settings);
   const [verify, setVerify] = useState(config.settings.verify.join("\n"));
+  const [branches, setBranches] = useState(config.settings.branches.join("\n"));
   const set = (patch: Partial<RepoSettingsView>) => setDraft({ ...draft, ...patch });
   const propose = useMutation({
     mutationFn: (settings: RepoSettingsView) => proposeRepoConfig(workspace, repo, settings),
@@ -45,7 +46,11 @@ function Form({
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    propose.mutate({ ...draft, verify: verify.split("\n").filter((c) => c.trim()) });
+    propose.mutate({
+      ...draft,
+      verify: verify.split("\n").filter((c) => c.trim()),
+      branches: branches.split("\n").filter((b) => b.trim()),
+    });
   };
   const pr = propose.data ?? config.pull_request;
   const branch = <code className="text-xs">{config.default_branch}</code>;
@@ -161,6 +166,22 @@ function Form({
             onChange={(e) => setVerify(e.target.value)}
             rows={3}
             placeholder="cargo check"
+            className={`${field} h-auto w-full py-2 font-mono`}
+          />
+        </Field>
+      </div>
+      <div className="mt-3">
+        <Field
+          id={`${id}-branches`}
+          label="Other branches"
+          hint="One per line. Each gets a queue, as the default branch has"
+        >
+          <textarea
+            id={`${id}-branches`}
+            value={branches}
+            onChange={(e) => setBranches(e.target.value)}
+            rows={2}
+            placeholder="release"
             className={`${field} h-auto w-full py-2 font-mono`}
           />
         </Field>

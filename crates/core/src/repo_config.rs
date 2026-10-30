@@ -21,6 +21,10 @@ pub struct RepoSettings {
     /// Run after an agent resolution or fix, before the publish.
     pub verify: Vec<String>,
     pub fix_ci: FixCiSettings,
+    /// The branches with a queue besides the default branch, which always has one. A PR into
+    /// any other branch is held.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +112,7 @@ struct RepoConfig {
     verify: Option<Vec<String>>,
     #[serde(default)]
     fix_ci: FixCiConfig,
+    branches: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -177,6 +182,7 @@ impl RepoSettings {
                 enabled: config.fix_ci.enabled.unwrap_or(defaults.fix_ci.enabled),
                 attempts: config.fix_ci.attempts.unwrap_or(defaults.fix_ci.attempts),
             },
+            branches: config.branches.unwrap_or_else(|| defaults.branches.clone()),
         };
         settings
             .check()
@@ -221,7 +227,20 @@ impl RepoSettings {
                 FixCiSettings::MAX_ATTEMPTS
             ));
         }
+        // Exact names: a pattern would read as one, and queue nothing.
+        if let Some(b) = self
+            .branches
+            .iter()
+            .find(|b| b.is_empty() || b.trim() != b.as_str() || b.contains(['*', '?', '[', ' ']))
+        {
+            return Err(format!("branches: {b:?} is not a branch name"));
+        }
         Ok(())
+    }
+
+    /// Whether a PR into `branch` has a queue: the default branch, or a listed one.
+    pub fn queues(&self, branch: &str, default_branch: &str) -> bool {
+        branch == default_branch || self.branches.iter().any(|b| b == branch)
     }
 
     /// The file that sets exactly these settings.
@@ -260,7 +279,18 @@ mod tests {
             },
             verify: vec![],
             fix_ci: FixCiSettings::default(),
+            branches: vec![],
         }
+    }
+
+    #[test]
+    fn the_default_branch_queues_and_the_listed_ones_do() {
+        let s = RepoSettings::from_file(Some("version: 1\nbranches: [release]\n"), &defaults())
+            .unwrap();
+        assert!(s.queues("main", "main"));
+        assert!(s.queues("release", "main"));
+        assert!(!s.queues("feat/a", "main"));
+        assert!(!defaults().queues("release", "main"));
     }
 
     #[test]
@@ -330,6 +360,7 @@ resolver: { provider: openai }
         s.fix_ci.enabled = false;
         s.resolver.provider = Provider::OpenAi;
         s.resolver.model = "gpt-6.1-sol".into();
+        s.branches = vec!["release".into(), "release/2026-10".into()];
         assert_eq!(
             RepoSettings::from_file(Some(&s.to_yaml()), &defaults()),
             Ok(s)
@@ -349,6 +380,9 @@ resolver: { provider: openai }
             "version: 1\nfix_ci: { attempts: 0 }\n",
             "version: 1\nfix_ci: { attempts: 6 }\n",
             "version: 1\nfix_ci: { retries: 1 }\n",
+            "version: 1\nbranches: ['release/*']\n",
+            "version: 1\nbranches: ['']\n",
+            "version: 1\nbranches: release\n",
             "{",
         ] {
             assert!(

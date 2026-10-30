@@ -140,9 +140,18 @@ impl PullRequest {
         self.labels.iter().any(|l| l == label)
     }
 
-    /// Notes whether the trunk's code owners, if its rules require their review, must still
-    /// approve.
+    /// The branch the PR merges into: its base, or a stacked layer's, the stack's.
+    pub fn merges_into(&self) -> &str {
+        match &self.stack {
+            Some(stack) => &stack.base_ref_name,
+            None => &self.base_ref_name,
+        }
+    }
+
+    /// Notes whether the default branch's code owners, if its rules require their review, must
+    /// still approve. Only a PR into the default branch: another branch has rules of its own.
     fn check_code_owners(&mut self, owners: Option<&CodeOwners>) {
+        let owners = owners.filter(|o| o.branch == self.merges_into());
         let approvers: Vec<&str> = self
             .details
             .latest_opinionated_reviews
@@ -1176,7 +1185,7 @@ mod tests {
             "labels":{"nodes":[]},"files":{"nodes":[{"path":".github/dependabot.yml"}]},
             "url":"","createdAt":"","additions":1,"deletions":0,"changedFiles":1,"author":null,
             "latestOpinionatedReviews":{"nodes":[]},"reviewRequests":{"nodes":[]},"commits":{"nodes":[]}},
-        "defaultBranchRef":{"rules":{"nodes":[{"parameters":{"requireCodeOwnerReview":true}},{"parameters":null}]}},
+        "defaultBranchRef":{"name":"main","rules":{"nodes":[{"parameters":{"requireCodeOwnerReview":true}},{"parameters":null}]}},
         "codeowners0":{"text":"/.github/ @joaquim-verges @jnsdls\n"},"codeowners1":null,"codeowners2":null}}}"#;
 
     #[tokio::test]
@@ -1192,6 +1201,16 @@ mod tests {
             pr.summary().review_decision.as_deref(),
             Some("REVIEW_REQUIRED")
         );
+    }
+
+    #[tokio::test]
+    async fn the_default_branch_code_owners_do_not_hold_a_pr_into_another_branch() {
+        let into_release =
+            UNREVIEWED.replace(r#""baseRefName":"main""#, r#""baseRefName":"release""#);
+        let (gh, _) = fake::serve(vec![(200, "", leak(into_release))]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let pr = gh.pull_request(&repo, 11186).await.unwrap();
+        assert_eq!(pr.hold_reason(), None);
     }
 
     #[test]
