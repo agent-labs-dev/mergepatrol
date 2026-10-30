@@ -11,11 +11,11 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
-use mergepatrol_billing::{Billing, Hold};
+use mergepatrol_billing::Billing;
 use mergepatrol_core::{
-    BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Job, Lane,
-    LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH, RepoName,
-    RepoSettings, Transition,
+    BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Hold, Job,
+    Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH,
+    RepoName, RepoSettings, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -64,7 +64,6 @@ const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 const JOB_ERRORS_FOR: Duration = Duration::from_secs(30 * 60);
 /// A fix may change any file but these: CI's own config, and the queue's.
 const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
-const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflow runs";
 /// How long to wait for a fork PR's pull ref to follow a push to the fork.
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
@@ -530,7 +529,7 @@ enum Ran {
 enum Outcome {
     Merged(String),
     Ejected(EjectReason),
-    Held(String),
+    Held(Hold),
     /// The label was removed while the job ran.
     Cancelled,
     /// It was merged or closed outside the queue while the job ran.
@@ -588,7 +587,7 @@ struct RepoRead {
     units: Vec<Unit>,
     /// The repo's lanes as saved, each with its trunk.
     lanes: Vec<(String, Lane)>,
-    gate: Option<Hold>,
+    gate: Option<mergepatrol_billing::Hold>,
 }
 
 impl RepoRead {
@@ -686,14 +685,13 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
 }
 
 /// Why a unit into `base` waits: the branch has no queue.
-fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> String {
+fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> Hold {
     let queues =
         std::iter::once(default_branch).chain(settings.branches.iter().map(String::as_str));
-    let queues: Vec<String> = queues.map(|b| format!("`{b}`")).collect();
-    format!(
-        "targets `{base}`, which has no queue (queues: {}; `branches` in `{REPO_CONFIG_PATH}` adds one)",
-        queues.join(", ")
-    )
+    Hold::NoQueue {
+        base: base.to_owned(),
+        queues: queues.map(str::to_owned).collect(),
+    }
 }
 
 /// Syncs the lane of `trunk` with GitHub, and runs its next job, if it has one.
@@ -809,10 +807,10 @@ async fn tick_lane(
             }
             LaneChange::Held { number, reason } => {
                 let comment = match &gate {
-                    Some(Hold { reason: r, comment }) if *r == reason => comment.clone(),
+                    Some(g) if g.reason == reason => g.comment.clone(),
                     _ => on_hold(&reason),
                 };
-                (number, "held", reason, Some(comment))
+                (number, "held", reason.to_string(), Some(comment))
             }
             LaneChange::Released(n) => (
                 n,
@@ -945,11 +943,14 @@ impl Unit {
     }
 
     /// Why GitHub would not merge it yet: a stack waits for every layer.
-    fn hold_reason(&self) -> Option<String> {
+    fn hold_reason(&self) -> Option<Hold> {
         self.layers.iter().find_map(|pr| {
             let reason = pr.hold_reason()?;
             Some(if self.stacked {
-                format!("#{} is not ready: {reason}", pr.number)
+                Hold::Layer {
+                    number: pr.number,
+                    hold: Box::new(reason),
+                }
             } else {
                 reason
             })
@@ -1101,7 +1102,7 @@ async fn drop_fork(
 #[derive(Debug, PartialEq, Eq)]
 enum Block {
     /// A maintainer, or the author, can lift it without a push.
-    Hold(String),
+    Hold(Hold),
     /// Only the author's push can mend it, which drops the PR from the queue anyway.
     Eject(String),
 }
@@ -1117,7 +1118,7 @@ async fn fork_block(
     let repo = &key.repo;
     let trunk = &key.trunk;
     if gh.awaiting_approval(repo, &pr.head_ref_oid).await? {
-        return Ok(Some(Block::Hold(AWAITING_APPROVAL.into())));
+        return Ok(Some(Block::Hold(Hold::WorkflowApproval)));
     }
     if !gh.behind(repo, trunk_sha, &pr.head_ref_oid).await? {
         return Ok(None);
@@ -1143,9 +1144,9 @@ async fn fork_block(
                 "it is behind `{trunk}`, and it changes workflow files, which GitHub does not let Mergepatrol push to a fork: {rebase_it}"
             )))
         }
-        Some(false) if !pr.maintainer_can_modify => Some(Block::Hold(format!(
-            "it is behind `{trunk}`, and Mergepatrol can push the rebase to its fork only once its author allows edits by maintainers"
-        ))),
+        Some(false) if !pr.maintainer_can_modify => Some(Block::Hold(Hold::ForkEditsOff {
+            trunk: trunk.clone(),
+        })),
         Some(false) => None,
     })
 }
@@ -1300,7 +1301,7 @@ async fn finish(
         }
         Outcome::Held(reason) => {
             lane.hold(unit.number, reason.clone());
-            record_all(ctx, key, &prs, "held", &reason).await?;
+            record_all(ctx, key, &prs, "held", &reason.to_string()).await?;
             comment_all(gh, repo, &prs, &on_hold(&reason)).await?;
         }
         Outcome::Cancelled => {
@@ -1406,7 +1407,7 @@ async fn resume_merge(
     Ok(sha.is_some())
 }
 
-fn on_hold(reason: &str) -> String {
+fn on_hold(reason: &Hold) -> String {
     format!(
         "On hold: {reason}. It keeps its place in the queue, and goes on once GitHub would merge it."
     )
@@ -2009,7 +2010,7 @@ async fn run_job(
                     Event::BaseMoved
                 } else if now.fork() && gh.awaiting_approval(repo, &heads[0]).await? {
                     // Runs waiting for approval can show as failed checks.
-                    Event::OnHold(AWAITING_APPROVAL.into())
+                    Event::OnHold(Hold::WorkflowApproval)
                 } else {
                     // GitHub merges a stack only when every layer's required checks passed.
                     let mut verdict = (CheckState::Passed, Vec::new());

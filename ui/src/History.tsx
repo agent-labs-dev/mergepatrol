@@ -30,6 +30,7 @@ export function History({ workspace }: { workspace: number }) {
     author,
     days = 30,
     outcome,
+    pr,
   } = useSearch({
     from: "/$account/history",
   });
@@ -48,9 +49,9 @@ export function History({ workspace }: { workspace: number }) {
     refetchInterval: 10_000,
   });
   const exits = useInfiniteQuery({
-    queryKey: ["history", workspace, repo, author, days, outcome],
+    queryKey: ["history", workspace, repo, author, days, outcome, pr],
     queryFn: ({ pageParam }) =>
-      fetchExits(workspace, { repo, author, days, outcome, before: pageParam ?? undefined }),
+      fetchExits(workspace, { repo, author, days, outcome, pr, before: pageParam ?? undefined }),
     initialPageParam: null as number | null,
     getNextPageParam: (page) => page.next,
     placeholderData: keepPreviousData,
@@ -65,7 +66,7 @@ export function History({ workspace }: { workspace: number }) {
   const of = (all: StatsView[]) => all.find((s) => s.repo === (repo ?? null));
   const rows = exits.data?.pages.flatMap((p) => p.exits) ?? [];
   const scope = (s: { repo?: string; author?: string }) =>
-    navigate({ search: (prev) => ({ ...prev, ...s }) });
+    navigate({ search: (prev) => ({ ...prev, ...s, pr: undefined }) });
   const byRepo = list === "repos";
   // The scope the side did not pick: one picked in the breakdown.
   const narrowed = byRepo ? author : repo;
@@ -202,9 +203,23 @@ export function History({ workspace }: { workspace: number }) {
           )}
           <Llms llms={llms} days={days} />
         </div>
+        {pr !== undefined && repo && (
+          <p className="flex items-baseline gap-2 border-b border-line-soft px-4 py-2 text-sm sm:px-6">
+            Only #{pr}, from any time
+            <button
+              type="button"
+              className="text-xs text-muted hover:text-fg"
+              onClick={() => navigate({ search: (s) => ({ ...s, pr: undefined }) })}
+            >
+              Show every PR
+            </button>
+          </p>
+        )}
         {exits.data && rows.length === 0 && (
           <p className="p-6 text-faint">
-            No PR {outcome ? `was ${outcome}` : "left the queue"} in the last {days} days.
+            {pr !== undefined && repo
+              ? `#${pr} has not left the queue.`
+              : `No PR ${outcome ? `was ${outcome}` : "left the queue"} in the last ${days} days.`}
           </p>
         )}
         <ol>

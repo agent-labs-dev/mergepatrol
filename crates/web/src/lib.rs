@@ -9,6 +9,7 @@ mod mcp;
 mod oauth;
 mod routes;
 mod ui;
+mod v1;
 mod webhook;
 
 use std::sync::{Arc, Mutex};
@@ -66,6 +67,8 @@ struct AppState {
     chatgpt: ChatGptAuth,
     /// What GitHub said lately of the tokens MCP calls come with.
     seen: Arc<auth::Seen>,
+    /// The `/api/v1` calls each caller has left.
+    budgets: Arc<v1::Budgets>,
 }
 
 impl AppState {
@@ -85,7 +88,11 @@ impl AppState {
 }
 
 pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Router {
-    let state = AppState {
+    serve(state(store, vault, config))
+}
+
+fn state(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> AppState {
+    AppState {
         store,
         vault,
         public_url: config.public_url.trim_end_matches('/').into(),
@@ -97,13 +104,19 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         billing: config.billing,
         chatgpt: config.chatgpt,
         seen: Arc::default(),
-    };
+        budgets: Arc::default(),
+    }
+}
+
+fn serve(state: AppState) -> Router {
     routes::router().fallback(ui::serve).with_state(state)
 }
 
 enum ApiError {
     /// A message for the user.
     Status(StatusCode, String),
+    /// GitHub's rate limit is used up, until this much later.
+    GitHubLimited(std::time::Duration, String),
     Internal(anyhow::Error),
 }
 
@@ -116,7 +129,7 @@ impl ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         match e.downcast_ref::<mergepatrol_github::RateLimited>() {
-            Some(limited) => Self::Status(StatusCode::SERVICE_UNAVAILABLE, format!("{limited}.")),
+            Some(limited) => Self::GitHubLimited(limited.remaining(), format!("{limited}.")),
             None => Self::Internal(e),
         }
     }
@@ -126,6 +139,11 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             Self::Status(code, m) => (code, m).into_response(),
+            Self::GitHubLimited(wait, m) => {
+                let secs = wait.as_secs().max(1).to_string();
+                let retry = [(axum::http::header::RETRY_AFTER, secs)];
+                (StatusCode::SERVICE_UNAVAILABLE, retry, m).into_response()
+            }
             Self::Internal(e) => {
                 tracing::error!(error = %format!("{e:#}"), "API error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
@@ -139,6 +157,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use mergepatrol_core::RepoName;
     use mergepatrol_github::setup::{Pkce, UserToken};
     use mergepatrol_store::{LoginCode, PgStore, Session, SessionKind};
     use sqlx::PgPool;
@@ -1588,5 +1607,218 @@ mod tests {
 
         let removed = settings(send(&router, call("DELETE", "")).await).await;
         assert!(removed["login"].is_null());
+    }
+
+    /// A router whose session "old" holds the GitHub token `ghu_x`, and GitHub as if it had
+    /// said that token, and `ghp_y`, read `o/r` (installation 1) and `o/off` (no installation).
+    async fn v1_router(pool: PgPool) -> (Router, Arc<dyn Store>) {
+        let (store, vault) = store_and_vault(pool).await;
+        let live = UserToken {
+            expires_at: Some(now() + 3600),
+            ..expired_token()
+        };
+        old_session(&*store, &vault, now() - 60, Some(live)).await;
+        let state = state(
+            store.clone(),
+            Arc::new(vault),
+            web_config(Some(app(None)), Arc::default()),
+        );
+        for token in ["ghu_x", "ghp_y"] {
+            let r = |name: &str| RepoName::parse(name).unwrap();
+            state.seen.assume(token, &r("o/r"), Some(1));
+            state.seen.assume(token, &r("o/off"), None);
+        }
+        (serve(state), store)
+    }
+
+    async fn v1_get(router: &Router, path: &str, headers: &[(&str, &str)]) -> Response {
+        let mut req = Request::get(path);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        send(router, req.body(Body::empty()).unwrap()).await
+    }
+
+    const BEARER: (&str, &str) = ("authorization", "Bearer ghp_y");
+
+    #[sqlx::test(migrations = false)]
+    async fn v1_says_where_each_pr_is(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Hold, Lane, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_has_config(1, &repo, true).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo: repo.clone(),
+            trunk: "main".into(),
+        };
+        let entry = |number, state, layers: Vec<u64>| Entry {
+            number,
+            priority: number == 5,
+            state,
+            summary: PrSummary::default(),
+            layers,
+            heads: Vec::new(),
+        };
+        let held = Hold::Layer {
+            number: 6,
+            hold: Box::new(Hold::Draft),
+        };
+        let lane = Lane {
+            entries: vec![
+                entry(7, EntryState::Held(held), vec![6, 7]),
+                entry(5, EntryState::Waiting, Vec::new()),
+                entry(4, EntryState::Active, Vec::new()),
+            ],
+            batch_pr: Some(99),
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        let summary = PrSummary::default();
+        store
+            .record_exit(&key, 8, "merged", "abc", &summary)
+            .await
+            .unwrap();
+        store
+            .record_exit(&key, 9, "ejected", "checks failed", &summary)
+            .await
+            .unwrap();
+        // Ejected once, and queued again: the ejection is over.
+        store
+            .record_exit(&key, 5, "ejected", "old", &summary)
+            .await
+            .unwrap();
+
+        let res = v1_get(&router, "/api/v1/repos/o/r/pulls/6", &[BEARER]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()["x-ratelimit-limit"], "5000");
+        assert_eq!(res.headers()["x-ratelimit-remaining"], "4999");
+        let etag = res.headers()["etag"].to_str().unwrap().to_owned();
+        assert_eq!(
+            json_of(res).await,
+            serde_json::json!({
+                "repo": "o/r",
+                "number": 6,
+                "url": "http://localhost:8080/o/r/pull/6",
+                "mergepatrol": {
+                    "state": "on",
+                    "installed": true,
+                    "has_config": true,
+                    "override": null,
+                    "config_error": null,
+                },
+                "queue": {
+                    "trunk": "main",
+                    "state": "held",
+                    "hold": {
+                        "reason": "draft",
+                        "layer": 6,
+                        "message": "#6 is not ready: the PR is a draft",
+                    },
+                    "priority": false,
+                    "position": 3,
+                    "stack": { "number": 7, "layers": [6, 7] },
+                    "batch_pr": null,
+                },
+                "merged": null,
+                "ejected": null,
+            })
+        );
+        // Unchanged: nothing to send again.
+        let res = v1_get(
+            &router,
+            "/api/v1/repos/o/r/pulls/6",
+            &[BEARER, ("if-none-match", &etag)],
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(res.headers()["etag"], etag.as_str());
+        assert_eq!(res.headers()["x-ratelimit-remaining"], "4998");
+
+        let res = v1_get(
+            &router,
+            "/api/v1/repos/o/r/pulls?numbers=4,5,8,9,10",
+            &[BEARER],
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let pulls = json_of(res).await["pulls"].clone();
+        let at = |i: usize, field: &str| pulls[i][field].clone();
+        assert_eq!(at(0, "number"), 4);
+        assert_eq!(at(0, "queue")["state"], "running");
+        assert_eq!(at(0, "queue")["position"], 1);
+        assert_eq!(at(0, "queue")["batch_pr"], 99);
+        assert_eq!(at(1, "queue")["state"], "waiting");
+        assert_eq!(at(1, "queue")["priority"], true);
+        assert_eq!(at(1, "ejected"), serde_json::Value::Null);
+        assert_eq!(at(2, "queue"), serde_json::Value::Null);
+        assert_eq!(at(2, "merged")["sha"], "abc");
+        assert_eq!(at(3, "ejected")["reason"], "checks failed");
+        assert_eq!(at(3, "merged"), serde_json::Value::Null);
+        // Never queued.
+        for field in ["queue", "merged", "ejected"] {
+            assert_eq!(at(4, field), serde_json::Value::Null);
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn v1_says_whether_a_repo_uses_mergepatrol(pool: PgPool) {
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let status = |router: Router, path: &'static str| async move {
+            let res = v1_get(&router, path, &[BEARER]).await;
+            assert_eq!(res.status(), StatusCode::OK);
+            json_of(res).await["mergepatrol"].clone()
+        };
+        let off = status(router.clone(), "/api/v1/repos/o/off/pulls/1").await;
+        assert_eq!(off["state"], "off");
+        assert_eq!(off["installed"], false);
+        // Installed, without a config file.
+        let r = "/api/v1/repos/o/r/pulls/1";
+        let no_file = status(router.clone(), r).await;
+        assert_eq!(
+            (&no_file["state"], &no_file["installed"]),
+            (&"off".into(), &true.into())
+        );
+        store.set_repo_enabled(1, &repo, Some(true)).await.unwrap();
+        let forced = status(router.clone(), r).await;
+        assert_eq!(
+            (&forced["state"], &forced["override"]),
+            (&"on".into(), &"on".into())
+        );
+        store
+            .set_config_error(1, &repo, Some("bad yaml"))
+            .await
+            .unwrap();
+        let paused = status(router.clone(), r).await;
+        assert_eq!(paused["state"], "paused");
+        assert_eq!(paused["config_error"], "bad yaml");
+        store.set_repo_enabled(1, &repo, Some(false)).await.unwrap();
+        let turned_off = status(router.clone(), r).await;
+        assert_eq!(
+            (&turned_off["state"], &turned_off["override"]),
+            (&"off".into(), &"off".into())
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn v1_takes_a_github_token_or_a_session(pool: PgPool) {
+        let (router, _) = v1_router(pool).await;
+        let path = "/api/v1/repos/o/off/pulls/1";
+        let res = v1_get(&router, path, &[]).await;
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        // The session's own GitHub token reads it, by header or by the dashboard's cookie.
+        let res = v1_get(&router, path, &[("authorization", "Bearer old")]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = v1_get(&router, path, &[("cookie", "mp_session=old")]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        // Each credential has its own budget.
+        assert_eq!(res.headers()["x-ratelimit-remaining"], "4998");
+        let bad = "/api/v1/repos/o/off/pulls?numbers=1,x";
+        assert_eq!(
+            v1_get(&router, bad, &[BEARER]).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }

@@ -134,7 +134,7 @@ impl EntryView {
         } = e;
         let (state, detail) = match state {
             EntryState::Waiting => (EntryStateView::Waiting, None),
-            EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
+            EntryState::Held(reason) => (EntryStateView::Held, Some(reason.to_string())),
             EntryState::Active => (EntryStateView::Active, None),
         };
         EntryView {
@@ -863,6 +863,8 @@ pub(crate) struct HistoryQuery {
     outcome: Option<OutcomeView>,
     /// The `next` of the page before.
     before: Option<i64>,
+    /// One PR of `repo`, from any time: `days` does not narrow it.
+    pr: Option<u64>,
 }
 
 impl HistoryQuery {
@@ -908,9 +910,13 @@ pub(crate) async fn history(
             installation_id: id,
             slice: q.slice(repo.as_ref()),
             outcomes,
-            days: q.days()?,
+            days: match q.pr {
+                Some(_) if repo.is_some() => None,
+                _ => Some(q.days()?),
+            },
             before: q.before,
             limit: HISTORY_PAGE,
+            pr: q.pr.filter(|_| repo.is_some()),
         })
         .await?;
     let next = (exits.len() == HISTORY_PAGE as usize)
@@ -1373,12 +1379,12 @@ pub(crate) async fn dequeue_pull(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Where the queue has a PR, and how it last left.
+/// What `/api/v1` says of a PR, and its latest queue events.
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct PullStatusView {
-    /// `None` when the PR is not queued.
-    pub queue: Option<QueueSpotView>,
+    #[serde(flatten)]
+    pub state: crate::v1::PullStateView,
     /// The latest, newest first. One of kind `merged`, `ejected`, `dequeued` or `cancelled` is
     /// how it last left the queue.
     pub events: Vec<EventView>,
@@ -1394,22 +1400,15 @@ pub(crate) async fn pull_status(
 ) -> Result<Json<PullStatusView>, ApiError> {
     let repo = repo_name(owner, name)?;
     let id = caller.repo(&app, id, &repo).await?;
-    let lanes = app.store.repo_lanes(id, &repo).await?;
-    let lanes = lanes.into_iter().map(|(trunk, lane)| {
-        let key = LaneKey {
-            installation_id: id,
-            repo: repo.clone(),
-            trunk,
-        };
-        (key, lane)
-    });
-    let queue = queue_spots(lanes.collect()).remove(&(repo.clone(), number));
+    let state = crate::v1::statuses(&app, &repo, Some(id), &[number])
+        .await?
+        .remove(0);
     let events = app
         .store
         .events(id, &repo, Some(number), STATUS_EVENTS)
         .await?;
     Ok(Json(PullStatusView {
-        queue,
+        state,
         events: events.into_iter().map(EventView::from).collect(),
     }))
 }
@@ -1623,7 +1622,7 @@ fn queue_spots(lanes: Vec<(LaneKey, Lane)>) -> HashMap<(RepoName, u64), QueueSpo
         for (i, e) in entries.into_iter().enumerate() {
             let (state, detail) = match e.state {
                 EntryState::Waiting => (EntryStateView::Waiting, None),
-                EntryState::Held(reason) => (EntryStateView::Held, Some(reason)),
+                EntryState::Held(reason) => (EntryStateView::Held, Some(reason.to_string())),
                 EntryState::Active => (EntryStateView::Active, None),
             };
             let spot = QueueSpotView {
@@ -2184,7 +2183,7 @@ mod tests {
                 entry(
                     1,
                     false,
-                    EntryState::Held("waiting for a required review".into()),
+                    EntryState::Held(mergepatrol_core::Hold::ReviewRequired),
                 ),
                 stack,
                 entry(3, true, EntryState::Waiting),
@@ -2216,7 +2215,7 @@ mod tests {
     #[test]
     fn lanes_list_prs_in_the_order_they_merge() {
         let entries = vec![
-            entry(1, false, EntryState::Held("draft".into())),
+            entry(1, false, EntryState::Held(mergepatrol_core::Hold::Draft)),
             entry(2, false, EntryState::Waiting),
             entry(3, true, EntryState::Waiting),
             entry(4, false, EntryState::Active),

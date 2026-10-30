@@ -213,7 +213,7 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `list_open_pulls` | A repo's open PRs that are not queued | |
 | `get_pull` | A PR's description, labels, checks, and timeline | |
 | `get_pull_diff` | A PR's changes, or one commit's | |
-| `pull_status` | A PR's place in the queue, and its latest events | |
+| `pull_status` | Where a PR is, as `/api/v1` below says, and its latest events | |
 | `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front | |
 | `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
 | `close_pull` | Closes a PR | |
@@ -240,6 +240,60 @@ Each tool calls a route of the JSON API under `/api`, which the dashboard uses. 
 curl -H "Authorization: Bearer $(gh auth token)" \
   https://mergepatrol.ai/api/w/<installation ID>/repos/<owner>/<name>/pulls/<number>/status
 ```
+
+## Read a PR's state from another app
+
+An app that shows PRs, such as a PR list in an editor, reads what Mergepatrol knows of them from `/api/v1`, instead of working it out from labels and the config file. It authenticates as the API above does: `Authorization: Bearer` with the viewer's GitHub token (OAuth, personal access token, or an App installation token) or a Mergepatrol session. GitHub decides what the token can read. A repo it cannot read is a 404, the same as a repo that does not exist. A repo it can read is a 200, also when Mergepatrol does not run there.
+
+```sh
+curl -H "Authorization: Bearer $(gh auth token)" \
+  https://mergepatrol.ai/api/v1/repos/acme/widgets/pulls/42
+curl -H "Authorization: Bearer $(gh auth token)" \
+  "https://mergepatrol.ai/api/v1/repos/acme/widgets/pulls?numbers=42,43,44"
+```
+
+The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the order asked. Each PR reads:
+
+```json
+{
+  "repo": "acme/widgets",
+  "number": 42,
+  "url": "https://mergepatrol.ai/acme/widgets/pull/42",
+  "mergepatrol": {
+    "state": "on",
+    "installed": true,
+    "has_config": true,
+    "override": null,
+    "config_error": null
+  },
+  "queue": {
+    "trunk": "main",
+    "state": "held",
+    "hold": {
+      "reason": "review_required",
+      "layer": null,
+      "message": "waiting for a required review"
+    },
+    "priority": false,
+    "position": 3,
+    "stack": null,
+    "batch_pr": null
+  },
+  "merged": null,
+  "ejected": null
+}
+```
+
+| Field | Says |
+| --- | --- |
+| `url` | The PR in the dashboard. It opens the PR's lane while queued, its history once merged or ejected, the repo's settings while Mergepatrol is off there, and the repo's open PRs otherwise |
+| `mergepatrol.state` | `on`, `off` (no App on the repo, no config file, or turned off), or `paused` (the config file does not parse: `config_error` says why) |
+| `mergepatrol.override` | `on` or `off` when turned so in the dashboard, whatever the config file says. `null` follows the file |
+| `queue` | `null` unless queued. `state` is `waiting`, `running` or `held`. `position` counts from 1 in the order the queue takes PRs. `stack` is `{ number, layers }` for a stack. `batch_pr` is the draft PR testing it, while it runs in a batch |
+| `queue.hold.reason` | `draft`, `review_required`, `changes_requested`, `workflow_approval` (a fork PR's runs wait for approval), `fork_edits_off` (a fork PR behind its trunk that does not allow edits by maintainers), `no_queue` (it targets a branch without a queue), `no_subscription` or `fair_use_limit`. `layer` is the stack's PR that holds it |
+| `merged`, `ejected` | How it last left the queue: `{ at, sha }` or `{ at, reason }`. Both `null` while it is queued, and when it left otherwise |
+
+Every response has an `ETag`: send it back as `If-None-Match` for a `304` when nothing changed. Each caller, by its token, has 5,000 calls an hour, a `304` included, which `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-used` and `x-ratelimit-reset` (Unix seconds) report. Past the limit, a `429` has a `retry-after`, in seconds. So does a `503` when GitHub's own rate limit is used up.
 
 ## How jobs are isolated
 

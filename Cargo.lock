@@ -1274,6 +1274,7 @@ dependencies = [
  "anyhow",
  "hex",
  "hmac",
+ "mergepatrol-core",
  "mergepatrol-store",
  "reqwest",
  "serde_json",

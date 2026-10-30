@@ -3,6 +3,7 @@ import {
   Link,
   Navigate,
   Outlet,
+  useLocation,
   useMatchRoute,
   useNavigate,
   useParams,
@@ -13,6 +14,7 @@ import { fetchSession, fetchSettings, fetchYou, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
+import { NotHere, permalinkAfterSignIn, permalinkAt, rememberPermalink } from "./Permalink";
 import { CreateApp, Install, UnlockSetup } from "./Setup";
 import { TraySignedIn } from "./TraySignedIn";
 import { type ThemeProps, useTheme } from "./theme";
@@ -55,16 +57,28 @@ export function App() {
 }
 
 function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
+  const queryClient = useQueryClient();
+  const { pathname } = useLocation();
   if (session.status === "needs_setup") {
     return session.setup_unlocked ? <CreateApp /> : <UnlockSetup />;
   }
-  if (session.status === "signed_out") return <Landing {...theme} pricing={session.pricing} />;
+  if (session.status === "signed_out") {
+    rememberPermalink();
+    return <Landing {...theme} pricing={session.pricing} />;
+  }
   if (session.status === "signed_in" && session.app) {
-    return session.workspaces.length === 0 ? (
-      <Install app={session.app} />
-    ) : (
-      <Dashboard session={session} {...theme} />
-    );
+    if (session.workspaces.length > 0) return <Dashboard session={session} {...theme} />;
+    // No workspace at all: a permalink still says so, and lets them sign in as someone else.
+    const here = permalinkAt(pathname);
+    const signOut = () =>
+      logout().then(() => {
+        resetAnalytics();
+        return queryClient.invalidateQueries({ queryKey: ["session"] });
+      });
+    if (here) return <NotHere {...here} login={session.user?.login} onSignOut={signOut} />;
+    const resume = permalinkAfterSignIn();
+    if (resume) return <Navigate to="/$account/$repo/pull/$number" params={resume} replace />;
+    return <Install app={session.app} />;
   }
   return null;
 }
@@ -86,6 +100,7 @@ function remembered(workspaces: WorkspaceView[]) {
 function Dashboard({ session, theme, setTheme }: { session: SessionView } & ThemeProps) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const matchRoute = useMatchRoute();
   const { account } = useParams({ strict: false });
   const current = session.workspaces.find((w) => w.account === account);
   useEffect(() => {
@@ -101,6 +116,14 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
   useWorkspaceAnalytics(session, current);
   const app = session.app;
   if (!app) return null;
+  const permalink = matchRoute({ to: "/$account/$repo/pull/$number" });
+  if (!current && permalink)
+    return (
+      <NotHere {...permalink} login={session.user?.login} onSignOut={() => signOut.mutate()} />
+    );
+  const resume = permalinkAfterSignIn();
+  if (!current && resume)
+    return <Navigate to="/$account/$repo/pull/$number" params={resume} replace />;
   if (!current)
     return (
       <Navigate

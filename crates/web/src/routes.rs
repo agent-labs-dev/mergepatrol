@@ -13,7 +13,7 @@ use axum::http::Method;
 use axum::routing::{MethodFilter, MethodRouter, on};
 use serde_json::{Map, Value, json};
 
-use crate::{AppState, api, auth, billing, mcp, oauth, webhook};
+use crate::{AppState, api, auth, billing, mcp, oauth, v1, webhook};
 
 pub(crate) struct Route {
     pub method: Method,
@@ -156,6 +156,10 @@ pub(crate) static ROUTES: &[Route] = &[
     route!(POST "/oauth/register", oauth::register, Agent::Exempt(OAUTH)),
     route!(GET "/oauth/authorize", oauth::authorize, Agent::Exempt(OAUTH)),
     route!(POST "/oauth/token", oauth::token, Agent::Exempt(OAUTH)),
+    route!(GET "/api/v1/repos/{owner}/{name}/pulls/{number}", v1::pull,
+        Agent::Exempt("For other apps, by repo and with an ETag: an agent calls `pull_status`, which says the same.")),
+    route!(GET "/api/v1/repos/{owner}/{name}/pulls", v1::pulls,
+        Agent::Exempt("For other apps, by repo and with an ETag: an agent calls `pull_status`, which says the same.")),
     route!(GET "/api/you", api::you, tool!("get_inbox", Reads,
         "Your PRs, the PRs that ask for your review, and your PRs merged in the last week, across your workspaces, with where the queue has each. Needs a Mergepatrol sign-in.")),
     route!(GET "/api/w/{id}/lanes", api::lanes, tool!("list_queue", Reads,
@@ -194,7 +198,7 @@ pub(crate) static ROUTES: &[Route] = &[
         "A PR's changes, or one of its commits', as `git diff` prints them.",
         opt("commit", Ty::Str, "One of the PR's commits, by full SHA. The whole PR without one."))),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/status", api::pull_status, tool!("pull_status", Reads,
-        "Where a PR is: its place in the queue, or null when it is not queued, and its latest queue events, newest first. An event of kind `merged`, `ejected`, `dequeued` or `cancelled` is how it last left the queue.")),
+        "Where a PR is, as `GET /api/v1/repos/{owner}/{name}/pulls/{number}` says it: whether the repo's queue runs (`mergepatrol`), the PR's place in the queue (`queue`, null when it is not queued, with a typed `hold` while held), how it last left the queue (`merged` or `ejected`), its dashboard link (`url`), and its latest queue events, newest first.")),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/queue", api::queue_pull, tool!("queue_pull", Writes,
         "Queue a PR to merge: Mergepatrol rebases it, tests it, and merges it once its checks pass. On a queued PR, changes its priority. Queuing one PR of a stack queues the whole stack. Needs triage access to the repo.",
         opt("priority", Ty::Bool, "Put it at the front of the queue. Default false."))),

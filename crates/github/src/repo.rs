@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use mergepatrol_core::{
-    FIXED_BY, LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review,
+    FIXED_BY, Hold, LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review,
 };
 
 use crate::Installation;
@@ -177,15 +177,13 @@ impl PullRequest {
     }
 
     /// Why GitHub would not merge this PR yet, if it would not.
-    pub fn hold_reason(&self) -> Option<String> {
+    pub fn hold_reason(&self) -> Option<Hold> {
         if self.is_draft {
-            return Some("the PR is a draft".into());
+            return Some(Hold::Draft);
         }
         match self.review_decision() {
-            Some("REVIEW_REQUIRED") => Some("waiting for a required review".into()),
-            Some("CHANGES_REQUESTED") => {
-                Some("a reviewer requested changes, and their approval is required".into())
-            }
+            Some("REVIEW_REQUIRED") => Some(Hold::ReviewRequired),
+            Some("CHANGES_REQUESTED") => Some(Hold::ChangesRequested),
             _ => None,
         }
     }
@@ -1419,10 +1417,7 @@ mod tests {
         let (gh, _) = fake::serve(vec![(200, "", UNREVIEWED)]).await;
         let repo = RepoName::parse("o/r").unwrap();
         let pr = gh.pull_request(&repo, 11186).await.unwrap();
-        assert_eq!(
-            pr.hold_reason().as_deref(),
-            Some("waiting for a required review")
-        );
+        assert_eq!(pr.hold_reason(), Some(Hold::ReviewRequired));
         assert_eq!(
             pr.summary().review_decision.as_deref(),
             Some("REVIEW_REQUIRED")
