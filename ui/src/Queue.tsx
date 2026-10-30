@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useState } from "react";
+import { lazy, type ReactNode, Suspense, useEffect, useState } from "react";
 import { Activity } from "./Activity";
 import {
   dequeuePull,
@@ -15,14 +15,20 @@ import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
 import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
+import { PrototypeSwitcher } from "./prototype/PrototypeSwitcher";
+import { VARIANTS, type Variant } from "./prototype/variants";
 import { Avatar, secondary, timeAgo } from "./ui";
+
+// PROTOTYPE: the detail pane for an open PR, in variants. Its own chunk for the highlighter.
+const PrDetailPrototype = lazy(() => import("./prototype/PrDetailPrototype"));
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 
 /** Three panes: the lanes, the selected lane's PRs in merge order, the selected PR. A narrow
  * screen shows the lanes and the PRs until a PR is picked, then the PR alone. */
 export function Queue({ workspace }: { workspace: number }) {
-  const { lane: laneId, pr, ...filter } = useSearch({ from: "/$account/queue" });
+  const { lane: laneId, pr, variant: v, ...filter } = useSearch({ from: "/$account/queue" });
+  const variant: Variant = v && v in VARIANTS ? (v as Variant) : "A";
   const navigate = useNavigate({ from: "/$account/queue" });
   const setPr = (pr?: number) => navigate({ search: (s) => ({ ...s, pr }) });
   // Replaced, not pushed: each keystroke of the search changes it.
@@ -210,14 +216,39 @@ export function Queue({ workspace }: { workspace: number }) {
         )}
       </div>
       <div className={`min-h-0 flex-1 overflow-y-auto ${picked ? "" : "max-lg:hidden"}`}>
-        {entry && (
-          <Detail
-            workspace={workspace}
-            lane={lane}
-            entry={entry}
-            onSelect={setPr}
-            onBack={() => setPr()}
-          />
+        {entry?.state === "open" && import.meta.env.DEV ? (
+          <Suspense fallback={<p className="p-6 text-faint">Loading the prototype…</p>}>
+            <PrDetailPrototype
+              key={entry.number}
+              variant={variant}
+              pull={{
+                ...entry,
+                draft: open.data?.find((o) => o.number === entry.number)?.draft ?? false,
+              }}
+              repo={lane.repo}
+              trunk={lane.trunk}
+              busy={pending.has(entry.number)}
+              onQueue={(priority) => actions.queue(entry, priority)}
+              onBack={() => setPr()}
+            />
+            <PrototypeSwitcher
+              variants={VARIANTS}
+              current={variant}
+              onChange={(variant) =>
+                navigate({ search: (s) => ({ ...s, variant }), replace: true })
+              }
+            />
+          </Suspense>
+        ) : (
+          entry && (
+            <Detail
+              workspace={workspace}
+              lane={lane}
+              entry={entry}
+              onSelect={setPr}
+              onBack={() => setPr()}
+            />
+          )
         )}
       </div>
     </div>

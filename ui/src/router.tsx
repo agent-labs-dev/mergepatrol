@@ -53,8 +53,10 @@ const queue = createRoute({
   path: "queue",
   /** The lane in view, as `owner/repo:trunk`, and the PR in it, both the first by default, and
    * the filters on its open PRs. */
-  validateSearch: (search): { lane?: string; pr?: number } & OpenFilter => ({
+  validateSearch: (search): { lane?: string; pr?: number; variant?: string } & OpenFilter => ({
     lane: optional(search.lane, "string"),
+    // PROTOTYPE: the PR detail variant for an open PR, see `prototype/PrDetailPrototype`.
+    variant: optional(search.variant, "string"),
     pr: optional(search.pr, "number"),
     author: optional(search.author, "string"),
     status: oneOf(STATUSES, search.status),

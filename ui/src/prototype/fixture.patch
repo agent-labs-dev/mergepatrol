@@ -1,0 +1,509 @@
+diff --git a/crates/github/src/app.rs b/crates/github/src/app.rs
+index 3c21c5f..5bc9cc4 100644
+--- a/crates/github/src/app.rs
++++ b/crates/github/src/app.rs
+@@ -14,6 +14,30 @@ use mergepatrol_core::RepoName;
+ 
+ const API: &str = "https://api.github.com";
+ 
++/// One delivery of the App's webhook: GitHub keeps one per attempt, a redelivery under the same
++/// `guid`.
++#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
++pub struct HookDelivery {
++    pub id: u64,
++    pub guid: String,
++    /// The response's. 0 for none, as when the request timed out.
++    pub status_code: u16,
++    pub event: String,
++}
++
++impl HookDelivery {
++    pub fn delivered(&self) -> bool {
++        (200..300).contains(&self.status_code)
++    }
++}
++
++/// The `rel="next"` URL of a `Link` header.
++fn next_link(link: &str) -> Option<String> {
++    let next = link.split(',').find(|l| l.contains(r#"rel="next""#))?;
++    let url = next.split(';').next()?.trim();
++    Some(url.strip_prefix('<')?.strip_suffix('>')?.to_owned())
++}
++
+ #[derive(Clone)]
+ pub struct App {
+     app_id: u64,
+@@ -21,6 +45,8 @@ pub struct App {
+     http: reqwest::Client,
+     /// GitHub's REST API. Another in tests.
+     api: String,
++    /// RS256 with the App's key. Another in tests.
++    alg: Algorithm,
+ }
+ 
+ impl App {
+@@ -36,6 +62,7 @@ impl App {
+             ),
+             http,
+             api: API.into(),
++            alg: Algorithm::RS256,
+         })
+     }
+ 
+@@ -43,7 +70,7 @@ impl App {
+         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+         let claims = json!({ "iat": now - 60, "exp": now + 540, "iss": self.app_id.to_string() });
+         Ok(jsonwebtoken::encode(
+-            &Header::new(Algorithm::RS256),
++            &Header::new(self.alg),
+             &claims,
+             &self.key,
+         )?)
+@@ -118,6 +145,54 @@ impl App {
+         Ok(all)
+     }
+ 
++    /// The webhook's deliveries newer than `after`, newest first. Without `after`, the newest
++    /// page of them.
++    pub async fn hook_deliveries(&self, after: Option<u64>) -> Result<Vec<HookDelivery>> {
++        let mut all = Vec::new();
++        let mut url = format!("{}/app/hook/deliveries?per_page=100", self.api);
++        // GitHub keeps three days of them: a hiccup's worth is a few pages.
++        for _ in 0..10 {
++            let res = self
++                .http
++                .get(&url)
++                .bearer_auth(self.jwt()?)
++                .headers(api_headers())
++                .send()
++                .await?
++                .error_for_status()
++                .context("GET /app/hook/deliveries")?;
++            let next = res
++                .headers()
++                .get("link")
++                .and_then(|l| l.to_str().ok())
++                .and_then(next_link);
++            let page: Vec<HookDelivery> = res.json().await?;
++            let reached = page.is_empty() || after.is_none_or(|a| page.iter().any(|d| d.id <= a));
++            all.extend(page.into_iter().filter(|d| after.is_none_or(|a| d.id > a)));
++            match next {
++                Some(next) if !reached => url = next,
++                _ => break,
++            }
++        }
++        Ok(all)
++    }
++
++    /// Has GitHub send a delivery of the webhook again.
++    pub async fn redeliver(&self, delivery: u64) -> Result<()> {
++        self.http
++            .post(format!(
++                "{}/app/hook/deliveries/{delivery}/attempts",
++                self.api
++            ))
++            .bearer_auth(self.jwt()?)
++            .headers(api_headers())
++            .send()
++            .await?
++            .error_for_status()
++            .with_context(|| format!("redeliver webhook delivery {delivery}"))?;
++        Ok(())
++    }
++
+     pub fn installation(&self, id: u64) -> Installation {
+         Installation {
+             id,
+@@ -704,6 +779,7 @@ pub mod fake {
+             key: Arc::new(jsonwebtoken::EncodingKey::from_secret(b"unused")),
+             http: reqwest::Client::new(),
+             api,
++            alg: jsonwebtoken::Algorithm::HS256,
+         };
+         let token = Some(("t".into(), SystemTime::now() + Duration::from_secs(3600)));
+         let inst = Installation {
+@@ -926,6 +1002,38 @@ mod tests {
+         assert_eq!(requests.lock().unwrap().len(), 1);
+     }
+ 
++    #[tokio::test]
++    async fn the_deliveries_stop_at_the_last_one_seen() {
++        let page = r#"[
++            {"id":12,"guid":"c","status_code":502,"event":"push"},
++            {"id":11,"guid":"b","status_code":204,"event":"pull_request"},
++            {"id":10,"guid":"a","status_code":204,"event":"push"}
++        ]"#;
++        let more = "link: <http://unused/app/hook/deliveries?cursor=v1_10>; rel=\"next\"\r\n";
++        let (gh, requests) = fake::serve(vec![(200, more, page), (202, "", "{}")]).await;
++        let seen = gh.app.hook_deliveries(Some(10)).await.unwrap();
++        assert_eq!(seen.iter().map(|d| d.id).collect::<Vec<_>>(), [12, 11]);
++        assert!(!seen[0].delivered() && seen[1].delivered());
++        gh.app.redeliver(12).await.unwrap();
++        assert_eq!(
++            *requests.lock().unwrap(),
++            [
++                "GET /app/hook/deliveries?per_page=100 HTTP/1.1",
++                "POST /app/hook/deliveries/12/attempts HTTP/1.1",
++            ]
++        );
++    }
++
++    #[test]
++    fn the_next_page_is_in_the_link_header() {
++        let link = r#"<https://api.github.com/x?cursor=b>; rel="next", <https://api.github.com/x?cursor=a>; rel="prev""#;
++        assert_eq!(
++            next_link(link).as_deref(),
++            Some("https://api.github.com/x?cursor=b")
++        );
++        assert_eq!(next_link(r#"<https://api.github.com/x>; rel="prev""#), None);
++    }
++
+     #[tokio::test]
+     async fn a_token_revokes_itself() {
+         let (gh, requests) = fake::serve(vec![(204, "", "")]).await;
+diff --git a/crates/github/src/lib.rs b/crates/github/src/lib.rs
+index a246505..44d2bbe 100644
+--- a/crates/github/src/lib.rs
++++ b/crates/github/src/lib.rs
+@@ -9,7 +9,9 @@ pub mod setup;
+ 
+ #[cfg(any(test, feature = "testing"))]
+ pub use app::fake;
+-pub use app::{App, AsUser, Installation, InstallationInfo, RateLimited, RepoInfo, revoke_token};
++pub use app::{
++    App, AsUser, HookDelivery, Installation, InstallationInfo, RateLimited, RepoInfo, revoke_token,
++};
+ pub use checks::{CheckState, Checks, RequiredChecks};
+ pub use codeowners::CodeOwners;
+ pub use files::{BranchFile, Proposal, PullRef};
+diff --git a/crates/mergepatrol/src/main.rs b/crates/mergepatrol/src/main.rs
+index 86f16ce..da6feef 100644
+--- a/crates/mergepatrol/src/main.rs
++++ b/crates/mergepatrol/src/main.rs
+@@ -5,6 +5,7 @@ mod github;
+ mod job;
+ mod publish;
+ mod queue;
++mod redeliver;
+ 
+ use std::path::PathBuf;
+ use std::sync::Arc;
+diff --git a/crates/mergepatrol/src/queue.rs b/crates/mergepatrol/src/queue.rs
+index f69f984..d1bd4d7 100644
+--- a/crates/mergepatrol/src/queue.rs
++++ b/crates/mergepatrol/src/queue.rs
+@@ -69,6 +69,9 @@ const AWAITING_APPROVAL: &str = "waiting for a maintainer to approve its workflo
+ const PULL_REF_WAIT: Duration = Duration::from_secs(30);
+ /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
+ const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
++/// How long the reads of GitHub that the queue no longer makes stay: a repo turned off, a commit
++/// long merged.
++const GITHUB_READS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+ /// How often each subscription's seats are brought in line with Stripe.
+ const SYNC_SEATS_EVERY: Duration = Duration::from_secs(60);
+ 
+@@ -210,6 +213,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
+                     Spawned::spawn(discover(ctx.clone()), &alive),
+                     Spawned::spawn(prune(ctx.clone()), &alive),
+                     Spawned::spawn(sync_seats(ctx.clone()), &alive),
++                    Spawned::spawn(crate::redeliver::redeliver(ctx.clone()), &alive),
+                 );
+                 let stopping = loop {
+                     tokio::select! {
+@@ -259,6 +263,12 @@ async fn prune(ctx: Arc<Ctx>) {
+                 tracing::warn!(error = %format!("{e:#}"), "could not delete expired sessions")
+             }
+         }
++        match ctx.store.prune_github_reads(GITHUB_READS_FOR).await {
++            Ok(n) => tracing::info!(rows = n, "deleted old GitHub reads"),
++            Err(e) => {
++                tracing::warn!(error = %format!("{e:#}"), "could not delete old GitHub reads")
++            }
++        }
+         let jobs = ctx.config.data_dir.join("jobs");
+         match prune_job_outputs(&jobs, JOB_OUTPUTS_FOR).await {
+             Ok(n) => tracing::info!(jobs = n, "deleted old job outputs"),
+@@ -407,7 +417,7 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
+ }
+ 
+ /// The GitHub App: the hosted one from the environment, or the self-hosted one from the vault.
+-async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
++pub(crate) async fn app_credentials(ctx: &Ctx) -> Result<Option<AppCredentials>> {
+     if let Some(app) = &ctx.hosted_app {
+         return Ok(Some(app.clone()));
+     }
+@@ -895,7 +905,7 @@ async fn fork_pin(
+ }
+ 
+ /// Whether GitHub delivers webhooks to this Mergepatrol: it does only with a secret, and to https.
+-async fn webhooks(ctx: &Ctx) -> Result<bool> {
++pub(crate) async fn webhooks(ctx: &Ctx) -> Result<bool> {
+     let secret = app_credentials(ctx)
+         .await?
+         .is_some_and(|app| app.webhook_secret.is_some());
+diff --git a/crates/mergepatrol/src/queue/loop_tests.rs b/crates/mergepatrol/src/queue/loop_tests.rs
+index e198188..97bc22b 100644
+--- a/crates/mergepatrol/src/queue/loop_tests.rs
++++ b/crates/mergepatrol/src/queue/loop_tests.rs
+@@ -680,6 +680,9 @@ impl ReadCache for Mem {
+     async fn github_value(&self, _: u64, _: &RepoName, _: &str) -> Result<ValueRead> {
+         unreachable!()
+     }
++    async fn prune_github_reads(&self, _: Duration) -> Result<u64> {
++        unreachable!()
++    }
+     async fn save_github_value(
+         &self,
+         _: u64,
+diff --git a/crates/mergepatrol/src/redeliver.rs b/crates/mergepatrol/src/redeliver.rs
+new file mode 100644
+index 0000000..7621ac4
+--- /dev/null
++++ b/crates/mergepatrol/src/redeliver.rs
+@@ -0,0 +1,164 @@
++//! Has GitHub send the webhook deliveries that failed again, as when Mergepatrol was down or
++//! restarting: the queue reads only what webhooks say changed, so a lost one leaves a read stale
++//! until the queue reads the whole repo again.
++
++use std::collections::{HashMap, HashSet};
++use std::sync::Arc;
++use std::time::Duration;
++
++use anyhow::Result;
++use mergepatrol_github::{App, HookDelivery};
++
++use crate::queue::{Ctx, app_credentials, webhooks};
++
++const REDELIVER_EVERY: Duration = Duration::from_secs(5 * 60);
++/// A delivery that fails this often fails for a reason a redelivery does not fix.
++const TRIES: u32 = 3;
++
++/// The failed deliveries, by `guid`: the latest attempt, and how many times it was redelivered.
++#[derive(Default)]
++struct Failed {
++    /// The newest delivery seen.
++    last: Option<u64>,
++    pending: HashMap<String, (u64, u32)>,
++    /// Tried `TRIES` times: a later failure of theirs does not go again.
++    given_up: HashSet<String>,
++}
++
++impl Failed {
++    /// Takes in the deliveries since the last call, newest first. The deliveries to send again,
++    /// by `guid`.
++    fn take(&mut self, deliveries: &[HookDelivery]) -> Vec<(String, u64)> {
++        for d in deliveries.iter().rev() {
++            if d.delivered() {
++                self.pending.remove(&d.guid);
++            } else if !self.given_up.contains(&d.guid) {
++                let tries = self.pending.get(&d.guid).map_or(0, |(_, tries)| *tries);
++                self.pending.insert(d.guid.clone(), (d.id, tries));
++            }
++        }
++        if let Some(newest) = deliveries.first() {
++            self.last = Some(newest.id);
++        }
++        let given_up = &mut self.given_up;
++        self.pending.retain(|guid, (id, tries)| {
++            if *tries >= TRIES {
++                tracing::warn!(
++                    guid,
++                    delivery = *id,
++                    "a webhook delivery keeps failing, giving up"
++                );
++                given_up.insert(guid.clone());
++            }
++            *tries < TRIES
++        });
++        let mut ids: Vec<(String, u64)> = self
++            .pending
++            .iter()
++            .map(|(guid, (id, _))| (guid.clone(), *id))
++            .collect();
++        ids.sort_by_key(|(_, id)| *id);
++        ids
++    }
++
++    /// GitHub took the redelivery: one try.
++    fn sent(&mut self, guid: &str) {
++        if let Some((_, tries)) = self.pending.get_mut(guid) {
++            *tries += 1;
++        }
++    }
++}
++
++pub async fn redeliver(ctx: Arc<Ctx>) {
++    let mut failed = Failed::default();
++    loop {
++        if let Err(e) = redeliver_once(&ctx, &mut failed).await {
++            tracing::warn!(error = %format!("{e:#}"), "could not redeliver failed webhooks");
++        }
++        tokio::time::sleep(REDELIVER_EVERY).await;
++    }
++}
++
++async fn redeliver_once(ctx: &Ctx, failed: &mut Failed) -> Result<()> {
++    let (Some(creds), true) = (app_credentials(ctx).await?, webhooks(ctx).await?) else {
++        return Ok(());
++    };
++    let app = App::from_credentials(&creds)?;
++    let deliveries = app.hook_deliveries(failed.last).await?;
++    for (guid, id) in failed.take(&deliveries) {
++        tracing::info!(delivery = id, "redelivering a failed webhook");
++        match app.redeliver(id).await {
++            Ok(()) => failed.sent(&guid),
++            Err(e) => {
++                tracing::warn!(delivery = id, error = %format!("{e:#}"), "could not redeliver a webhook")
++            }
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn delivery(id: u64, guid: &str, status_code: u16) -> HookDelivery {
++        HookDelivery {
++            id,
++            guid: guid.into(),
++            status_code,
++            event: "push".into(),
++        }
++    }
++
++    /// The ids to send again, each sent: `ok` says which GitHub took.
++    fn redeliver(
++        failed: &mut Failed,
++        deliveries: &[HookDelivery],
++        ok: impl Fn(u64) -> bool,
++    ) -> Vec<u64> {
++        let mut ids = Vec::new();
++        for (guid, id) in failed.take(deliveries) {
++            ids.push(id);
++            if ok(id) {
++                failed.sent(&guid);
++            }
++        }
++        ids
++    }
++
++    #[test]
++    fn a_failed_delivery_goes_again_until_it_succeeds() {
++        let mut failed = Failed::default();
++        let all = |_| true;
++        // Newest first: `b` failed, then succeeded on its own redelivery.
++        let first = [
++            delivery(4, "b", 204),
++            delivery(3, "c", 0),
++            delivery(2, "b", 502),
++            delivery(1, "a", 500),
++        ];
++        assert_eq!(redeliver(&mut failed, &first, all), [1, 3]);
++        assert_eq!(failed.last, Some(4));
++        // `a`'s redelivery succeeds, `c`'s fails again.
++        let second = [delivery(6, "a", 204), delivery(5, "c", 503)];
++        assert_eq!(redeliver(&mut failed, &second, all), [5]);
++        assert_eq!(redeliver(&mut failed, &[], all), [5]);
++        assert!(
++            redeliver(&mut failed, &[], all).is_empty(),
++            "three tries at most"
++        );
++        // The last try's failure shows late.
++        assert!(redeliver(&mut failed, &[delivery(7, "c", 502)], all).is_empty());
++    }
++
++    #[test]
++    fn a_redelivery_github_did_not_take_is_no_try() {
++        let mut failed = Failed::default();
++        let first = [delivery(2, "b", 500), delivery(1, "a", 500)];
++        // GitHub refuses `a`'s, and takes `b`'s.
++        for _ in 0..3 {
++            assert_eq!(redeliver(&mut failed, &first, |id| id != 1), [1, 2]);
++        }
++        assert_eq!(redeliver(&mut failed, &[], |id| id != 1), [1]);
++    }
++}
+diff --git a/crates/store/src/github.rs b/crates/store/src/github.rs
+index 5055d6e..1e368e2 100644
+--- a/crates/store/src/github.rs
++++ b/crates/store/src/github.rs
+@@ -135,6 +135,9 @@ pub trait ReadCache: Send + Sync {
+         changes: i64,
+         value: &Value,
+     ) -> Result<()>;
++    /// Deletes the reads the queue has not made for `age`, as of a repo turned off or a commit
++    /// long merged: how many.
++    async fn prune_github_reads(&self, age: Duration) -> Result<u64>;
+ }
+ 
+ #[async_trait]
+@@ -407,6 +410,31 @@ impl ReadCache for PgStore {
+         .await?;
+         Ok(())
+     }
++
++    async fn prune_github_reads(&self, age: Duration) -> Result<u64> {
++        let secs = age.as_secs_f64();
++        let values = sqlx::query(
++            "DELETE FROM github_values
++             WHERE coalesce(read_at, changed_at, 'epoch') < now() - make_interval(secs => $1)",
++        )
++        .bind(secs)
++        .execute(&self.pool)
++        .await?
++        .rows_affected();
++        // A repo's PRs and other reads go with it.
++        let repos = sqlx::query(
++            "DELETE FROM github_repos r
++             WHERE coalesce(greatest(config_read_at, repository_read_at), 'epoch')
++                 < now() - make_interval(secs => $1)
++             AND NOT EXISTS (SELECT 1 FROM github_values v
++                 WHERE v.installation_id = r.installation_id AND v.repo = r.repo)",
++        )
++        .bind(secs)
++        .execute(&self.pool)
++        .await?
++        .rows_affected();
++        Ok(values + repos)
++    }
+ }
+ 
+ /// Holds the repo's row until the transaction ends. Not `FOR UPDATE`, which would hold off the
+@@ -666,4 +694,35 @@ mod tests {
+             .unwrap();
+         read.commit().await.unwrap();
+     }
++
++    #[sqlx::test(migrations = false)]
++    async fn reads_not_made_for_a_while_are_pruned(pool: PgPool) {
++        let store = PgStore::migrate(pool.clone()).await.unwrap();
++        let other = RepoName::parse("o/other").unwrap();
++        store.github_reads(1, &repo()).await.unwrap();
++        store.save_config_read(1, &repo(), 0, None).await.unwrap();
++        store.github_reads(1, &other).await.unwrap();
++        store.save_config_read(1, &other, 0, None).await.unwrap();
++        for key in ["checks:old", "checks:new"] {
++            store.github_value(1, &repo(), key).await.unwrap();
++            store
++                .save_github_value(1, &repo(), key, 0, &json!(true))
++                .await
++                .unwrap();
++        }
++        for aged in [
++            "UPDATE github_values SET read_at = now() - interval '2 days' WHERE key = 'checks:old'",
++            "UPDATE github_repos SET config_read_at = now() - interval '2 days'",
++        ] {
++            sqlx::query(aged).execute(&pool).await.unwrap();
++        }
++        // `o/other`, and the old commit's checks. `o/r` stays, for its other read.
++        let pruned = store
++            .prune_github_reads(Duration::from_secs(24 * 60 * 60))
++            .await
++            .unwrap();
++        assert_eq!(pruned, 2);
++        let reads = store.github_value(1, &repo(), "checks:new").await.unwrap();
++        assert!(reads.read.is_some());
++    }
+ }
