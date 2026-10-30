@@ -20,7 +20,16 @@
       property="og:description"
       content="Label a pull request. Mergepatrol rebases it, tests it with the PRs around it, and merges it. When a rebase conflicts, an LLM resolves it."
     />
-    <meta name="twitter:card" content="summary" />
+    <meta property="og:image" content="__PUBLIC_URL__/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Mergepatrol: a merge queue for GitHub, with an agent on conflicts"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="__PUBLIC_URL__/og.png" />
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
@@ -36,6 +45,7 @@
       }
     </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="32x32" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <script>
       // Sets the theme before the first paint, so a dark page never flashes white. theme.ts
