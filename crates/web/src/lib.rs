@@ -784,6 +784,32 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn crawlers_see_the_servers_own_address(pool: PgPool) {
+        let (router, _) = signed_in(pool).await;
+        assert!(
+            body(&router, "/robots.txt", "")
+                .await
+                .contains("Sitemap: http://localhost:8080/sitemap.xml")
+        );
+        assert!(
+            body(&router, "/sitemap.xml", "")
+                .await
+                .contains("<loc>http://localhost:8080/</loc>")
+        );
+        assert_eq!(get(&router, "/og.png", None).await, StatusCode::NOT_FOUND);
+        let page = body(&router, "/ada/queue", "").await;
+        // CI builds ui/ before the tests. Without the build there is no page to fill in.
+        if !page.contains("not built") {
+            assert!(page.contains(r#"<link rel="canonical" href="http://localhost:8080/""#));
+            assert!(!page.contains("__PUBLIC_URL__"));
+            // A link preview fetches og:image by its absolute URL; a 404 there is a blank card.
+            let card = "/og/mergepatrol-og-1200x630.png";
+            assert!(page.contains(&format!(r#"content="http://localhost:8080{card}""#)));
+            assert_eq!(get(&router, card, None).await, StatusCode::OK);
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn signed_out_gets_nothing(pool: PgPool) {
         let (router, _) = signed_in(pool).await;
         assert_eq!(
