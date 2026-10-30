@@ -525,6 +525,8 @@ enum Outcome {
     Held(String),
     /// The label was removed while the job ran.
     Cancelled,
+    /// It was merged or closed outside the queue while the job ran.
+    Left,
     /// A stack gained or lost a PR while the job ran: it runs again, in its place.
     Restarted(String),
     /// A fork PR's author pushed after it was queued: it leaves the queue, for a maintainer to
@@ -1297,6 +1299,10 @@ async fn finish(
             lane.remove(unit.number);
             exit_all(ctx, key, &prs, "cancelled", "the label was removed", None).await?;
         }
+        Outcome::Left => {
+            lane.remove(unit.number);
+            exit_once(ctx, key, &prs, "dequeued", "left the queue").await?;
+        }
         Outcome::Restarted(why) => {
             lane.stop();
             record_all(ctx, key, &prs, "restarted", &why).await?;
@@ -1931,6 +1937,9 @@ async fn run_job(
         let mut now = unit.refreshed(gh, repo).await?;
         if !now.has_label(&settings.label) {
             return Ok(Outcome::Cancelled);
+        }
+        if !now.layers.iter().all(PullRequest::is_open) {
+            return Ok(Outcome::Left);
         }
         if let Some(why) = now.reshaped(gh, repo).await? {
             return Ok(Outcome::Restarted(why));

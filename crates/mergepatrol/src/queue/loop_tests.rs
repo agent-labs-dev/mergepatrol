@@ -109,6 +109,7 @@ impl State {
             number,
             PullRequest {
                 number,
+                state: "OPEN".into(),
                 title: format!("PR {number}"),
                 body: String::new(),
                 is_draft: false,
@@ -1174,6 +1175,24 @@ async fn the_trunk_moving_twice_outside_the_queue_ejects() {
         ]
     );
     assert_eq!(run.labels(1), [FAILED]);
+    assert!(run.lane().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_merged_by_hand_while_queued_leaves_without_a_rebase() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
+        s.prs.get_mut(&1).unwrap().state = "MERGED".into();
+        s.trunk = "merged-by-hand".into();
+    });
+    run.tick().await;
+    assert_eq!(run.rebase.count(), 1);
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "dequeued"]
+    );
     assert!(run.lane().is_empty());
 }
 
