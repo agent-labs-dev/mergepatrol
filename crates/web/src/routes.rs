@@ -13,7 +13,7 @@ use axum::http::Method;
 use axum::routing::{MethodFilter, MethodRouter, on};
 use serde_json::{Map, Value, json};
 
-use crate::{AppState, api, auth, billing, changelog, mcp, oauth, v1, webhook};
+use crate::{AppState, api, auth, billing, changelog, mcp, oauth, review, v1, webhook};
 
 pub(crate) struct Route {
     pub method: Method,
@@ -213,6 +213,19 @@ pub(crate) static ROUTES: &[Route] = &[
         arg("verdict", Ty::OneOf(&["approve", "request_changes", "comment"]), "What the review says."),
         arg("body", Ty::Str, "The review's text. May be empty for an approval."),
         arg("queue", Ty::Bool, "Queue the PR after the review."))),
+    route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review", review::agent_review, tool!("get_agent_review", Reads,
+        "The agent's review of a queued PR, the queue's first gate: its newest, of whatever head, or null before its first. Each finding says what the agent saw, how sure it was, and whether it asks a human about it (`asked`); `status` is `asks` while it waits for a human's answers.")),
+    route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/answers", review::answer_agent_review, tool!("answer_agent_review", Writes,
+        "Answers what the agent's review asks: posts your review of the PR on GitHub, with each change you ask for on its line. All fine approves it, and it takes its place in the queue; a change holds it for the author's next push. Needs write access to the repo, as a user: a workflow's token names none.",
+        arg("answers", Ty::Body, "`{ head_sha, answers, note, request_changes }`: the head the review is of, as `get_agent_review` returns it; one answer per finding it asks about, `{ finding, call: \"fine\" | \"change\", note }`, with what to change in `note`; optionally a note for the author; and `request_changes: true` to ask for changes to a PR the agent could not review, which asks about no finding."))),
+    route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/questions", review::ask_agent, tool!("ask_agent_about_review", Writes,
+        "Asks the agent a question about one finding of its review. It reads the code again to answer: the answer shows in `get_agent_review`'s `questions` in a minute or two. Needs write access to the repo.",
+        arg("head_sha", Ty::Str, "The head the review is of."),
+        arg("finding", Ty::Str, "The finding's id."),
+        arg("question", Ty::Str, "What to ask."))),
+    route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/reviewers", review::ask_reviewers, tool!("ask_agent_review_reviewers", Writes,
+        "Asks others to answer the agent's review, in place of those it asked: requests their reviews on GitHub, as you.",
+        arg("reviewers", Ty::Strs, "Their GitHub logins."))),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/seen", api::seen_pull, tool!("mark_pull_seen", Writes,
         "Marks what was said on a PR so far as read, in your inbox. Needs a Mergepatrol sign-in.")),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/snooze", api::snooze_pull, tool!("snooze_pull", Writes,
@@ -241,6 +254,11 @@ pub(crate) static ROUTES: &[Route] = &[
         "Removes the workspace's ChatGPT login. Needs a Mergepatrol sign-in.")),
     route!(POST "/api/w/{id}/settings/chatgpt/poll", api::poll_chatgpt_login, tool!("poll_chatgpt_login", Writes,
         "Asks once whether the user entered the ChatGPT code, and keeps the login once they have. Call it no more often than the sign-in's `interval_secs`. Needs a Mergepatrol sign-in.")),
+    route!(GET "/api/w/{id}/settings/review", review::review_settings, tool!("get_review_settings", Reads,
+        "The workspace's settings for the agent's review, the queue's first gate: whether it is on, and how sure the agent must be to clear each kind of finding alone. With the defaults, and each kind's findings of the last 90 days by confidence, with how often a human overruled the agent. Needs a Mergepatrol sign-in.")),
+    route!(PUT "/api/w/{id}/settings/review", review::set_review_settings, tool!("set_review_settings", Writes,
+        "Sets the workspace's settings for the agent's review. A repo's config file can set its own, in `review`. Needs a Mergepatrol sign-in.",
+        arg("settings", Ty::Body, "`{ enabled, bars }`: whether the repos' queues review queued PRs first, and each kind's bar, `[{ kind, bar }]`, with kind `security`, `migrations`, `dependencies`, `public_api` or `other`, and bar a percent from 50 to 100, or `\"always_ask\"`. A kind left out keeps its default."))),
     route!(GET "/api/w/{id}/billing", billing::billing, tool!("get_billing", Reads,
         "The workspace's plan: trial or subscription, its seats, and the price. Null when self-hosted. Needs a Mergepatrol sign-in.")),
     route!(POST "/api/w/{id}/billing/checkout", billing::checkout, tool!("start_checkout", Writes,

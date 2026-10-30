@@ -139,6 +139,12 @@ pub enum HoldReasonView {
     NoSubscription,
     /// The account's public repos are over Mergepatrol's fair-use limit for the hour.
     FairUseLimit,
+    /// The agent is reviewing it, the queue's first gate.
+    Reviewing,
+    /// The agent's review asks a human about what it was not sure of.
+    ReviewAsks,
+    /// A human answering the agent's review asked for changes: it waits for a push.
+    ReviewChanges,
 }
 
 #[derive(Clone, Serialize, TS)]
@@ -183,6 +189,9 @@ impl From<&Hold> for HoldView {
             Hold::NoQueue { .. } => HoldReasonView::NoQueue,
             Hold::NoSubscription => HoldReasonView::NoSubscription,
             Hold::FairUseLimit => HoldReasonView::FairUseLimit,
+            Hold::Reviewing => HoldReasonView::Reviewing,
+            Hold::ReviewAsks => HoldReasonView::ReviewAsks,
+            Hold::ReviewChanges => HoldReasonView::ReviewChanges,
             Hold::Layer { .. } => unreachable!("innermost is no layer"),
         };
         HoldView {

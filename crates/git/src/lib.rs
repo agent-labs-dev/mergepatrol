@@ -414,6 +414,34 @@ impl Git {
         ))
     }
 
+    /// One file's changes from `from` to `to`, with `context` lines around each hunk.
+    pub async fn diff_file(
+        &self,
+        wt: &Path,
+        from: &str,
+        to: &str,
+        path: &str,
+        context: u32,
+    ) -> Result<String> {
+        let unified = format!("-U{context}");
+        let out = self
+            .output(
+                wt,
+                &["diff", "--no-renames", &unified, from, to, "--", path],
+            )
+            .await?;
+        Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// A file's text at `rev`, or `None` when it has no such file.
+    pub async fn show_file(&self, wt: &Path, rev: &str, path: &str) -> Result<Option<String>> {
+        let spec = format!("{rev}:{path}");
+        match self.output(wt, &["show", &spec]).await {
+            Ok(out) => Ok(Some(String::from_utf8_lossy(&out).into_owned())),
+            Err(_) => Ok(None),
+        }
+    }
+
     pub async fn read_blob(&self, wt: &Path, sha: &str) -> Result<Vec<u8>> {
         self.output(wt, &["cat-file", "blob", sha]).await
     }

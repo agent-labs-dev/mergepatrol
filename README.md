@@ -23,6 +23,12 @@ When a rebase has conflicts, an agent resolves them. Claude is the default. A pl
 
 When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
 
+### Automatic review
+
+With **Automatic review** on in **Settings**, an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it accepts and is sure enough of, it clears alone. Anything else, it asks a human about: it requests a review from the code owners of the lines in question, comments on the PR, and lists only those findings on the dashboard, each with its code, why the agent was unsure, and what it already checked. The human answers each one, fine as is or needs a change, or asks the agent to dig further. All fine approves the PR, as the human's review on GitHub. A change asked for is a review with the change on its line: the PR keeps its place, and the agent reviews it again on the next push, knowing what was answered. The agent never approves on GitHub itself, and never sends a PR back alone.
+
+How sure is sure enough depends on the kind of change. The defaults: 90% for security, 85% for dependencies and for public APIs, 80% for everything else, and migrations always go to a human. **Settings** shows how the agent's confidence has held up against the humans' answers, to set each bar by. Automatic review is off until a workspace turns it on, since it runs the agent on the workspace's key. It does not review PRs from forks: a human reviews those. A rebase or a fix by the queue keeps the approval.
+
 Required checks that have not finished 3 hours after a rebase or a fix also eject the PR, with no fix: a required check that no workflow runs would hold the queue forever. In a batch, it counts as a failure.
 
 An error outside the PR's job does not eject it. That covers GitHub being down, or slow to answer, as well as a rate limit. The PR keeps its place at the head of the queue, and its job runs again. Only after 30 minutes of such errors is it ejected.
@@ -163,6 +169,11 @@ fix_ci:
   attempts: 2      # 1 to 5 fixes, before the PR is ejected
 branches:          # queues besides the default branch's: exact names
   - release
+review:            # over the workspace's automatic review settings
+  enabled: true
+  bars:            # how sure the agent must be to clear a kind alone: 50 to 100, or always_ask
+    security: always_ask
+    dependencies: 95
 ```
 
 The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too.
@@ -219,6 +230,10 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
 | `close_pull` | Closes a PR | |
 | `review_pull` | Approves a PR, asks for changes, or comments, then queues it if asked | |
+| `get_agent_review` | The agent's review of a queued PR: what it found, and what it asks a human | |
+| `answer_agent_review` | Answers what the agent's review asks, as your review on GitHub | |
+| `ask_agent_about_review` | Asks the agent a question about one of its findings | |
+| `ask_agent_review_reviewers` | Asks others to answer the agent's review | |
 | `mark_pull_seen` | Marks a PR read in your inbox | Yes |
 | `snooze_pull` | Puts a PR out of your inbox for a while | Yes |
 | `unsnooze_pull` | Puts a snoozed PR back in your inbox | Yes |
@@ -231,6 +246,8 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `start_chatgpt_login` | Starts a ChatGPT sign-in: a code for the user to enter | Yes |
 | `delete_chatgpt_login` | Removes the ChatGPT login | Yes |
 | `poll_chatgpt_login` | Finishes the ChatGPT sign-in once the user entered the code | Yes |
+| `get_review_settings` | The agent's review settings, and its track record | Yes |
+| `set_review_settings` | Turns the agent's review on or off, and sets how sure it must be | Yes |
 | `get_billing` | The workspace's plan and seats | Yes |
 | `start_checkout` | A Stripe page to subscribe | Yes |
 | `open_billing_portal` | A Stripe page to manage the subscription | Yes |

@@ -41,10 +41,15 @@ pub struct EntryView {
     pub state: EntryStateView,
     /// Why the PR is held.
     pub detail: Option<String>,
+    /// Why the PR is held, typed.
+    pub hold: Option<crate::v1::HoldView>,
     #[serde(flatten)]
     pub pull: PullView,
     /// A stack's PRs, bottom to top: `number` is the stack's. Empty for a PR.
     pub layers: Vec<u32>,
+    /// The agent's review of the PR, or of the stack's layer it is held for, else its top: the
+    /// newest, of whatever head.
+    pub review: Option<crate::review::ReviewBriefView>,
 }
 
 /// An open PR that is not in the queue.
@@ -123,7 +128,7 @@ impl From<Person> for PersonView {
 }
 
 impl EntryView {
-    fn new(e: Entry) -> Self {
+    fn new(e: Entry, review: Option<crate::review::ReviewBriefView>) -> Self {
         let Entry {
             number,
             priority,
@@ -132,18 +137,24 @@ impl EntryView {
             layers,
             heads: _,
         } = e;
-        let (state, detail) = match state {
-            EntryState::Waiting => (EntryStateView::Waiting, None),
-            EntryState::Held(reason) => (EntryStateView::Held, Some(reason.to_string())),
-            EntryState::Active => (EntryStateView::Active, None),
+        let (state, detail, hold) = match state {
+            EntryState::Waiting => (EntryStateView::Waiting, None, None),
+            EntryState::Held(reason) => (
+                EntryStateView::Held,
+                Some(reason.to_string()),
+                Some((&reason).into()),
+            ),
+            EntryState::Active => (EntryStateView::Active, None, None),
         };
         EntryView {
             number: number as u32,
             priority,
             state,
             detail,
+            hold,
             pull: pr.into(),
             layers: layers.into_iter().map(|n| n as u32).collect(),
+            review,
         }
     }
 }
@@ -315,6 +326,7 @@ pub struct SpendView {
 pub enum SpendTaskView {
     Rebase,
     Fix,
+    Review,
 }
 
 impl From<SpendTask> for SpendTaskView {
@@ -322,6 +334,7 @@ impl From<SpendTask> for SpendTaskView {
         match t {
             SpendTask::Rebase => SpendTaskView::Rebase,
             SpendTask::Fix => SpendTaskView::Fix,
+            SpendTask::Review => SpendTaskView::Review,
         }
     }
 }
@@ -381,6 +394,8 @@ pub struct LlmStatsView {
     pub rebase: LlmRunsView,
     /// Fixing failed checks.
     pub fix: LlmRunsView,
+    /// Reviewing PRs, and answering questions about the reviews.
+    pub review: LlmRunsView,
 }
 
 #[derive(Default, Serialize, TS)]
@@ -426,6 +441,7 @@ fn llm_stats(spends: Vec<Spend>) -> Vec<LlmStatsView> {
                     effort: s.effort.clone(),
                     rebase: LlmRunsView::default(),
                     fix: LlmRunsView::default(),
+                    review: LlmRunsView::default(),
                 });
                 by.len() - 1
             }
@@ -433,9 +449,10 @@ fn llm_stats(spends: Vec<Spend>) -> Vec<LlmStatsView> {
         match s.task {
             SpendTask::Rebase => by[i].rebase.add(&s),
             SpendTask::Fix => by[i].fix.add(&s),
+            SpendTask::Review => by[i].review.add(&s),
         }
     }
-    let cost = |l: &LlmStatsView| l.rebase.cost_usd + l.fix.cost_usd;
+    let cost = |l: &LlmStatsView| l.rebase.cost_usd + l.fix.cost_usd + l.review.cost_usd;
     by.sort_by(|a, b| cost(b).total_cmp(&cost(a)));
     by
 }
@@ -594,6 +611,9 @@ pub struct RepoSettingsView {
     pub fix_ci_attempts: u32,
     /// The branches with a queue besides the default branch.
     pub branches: Vec<String>,
+    /// The agent's review, over the workspace's settings.
+    #[serde(default)]
+    pub review: crate::review::RepoReviewView,
 }
 
 impl From<RepoSettings> for RepoSettingsView {
@@ -608,6 +628,7 @@ impl From<RepoSettings> for RepoSettingsView {
             fix_ci: s.fix_ci.enabled,
             fix_ci_attempts: s.fix_ci.attempts,
             branches: s.branches,
+            review: s.review.into(),
         }
     }
 }
@@ -638,6 +659,7 @@ impl From<RepoSettingsView> for RepoSettings {
                 .map(|b| b.trim().to_owned())
                 .filter(|b| !b.is_empty())
                 .collect(),
+            review: v.review.into(),
         }
     }
 }
@@ -772,22 +794,48 @@ pub(crate) async fn lanes(
         Some(repo) => caller.repo(&app, id, repo).await?,
         None => caller.workspace(id)?,
     };
-    let lanes = app.store.lanes(id).await?;
+    let lanes: Vec<(LaneKey, Lane)> = app
+        .store
+        .lanes(id)
+        .await?
+        .into_iter()
+        .filter(|(key, _)| repo.as_ref().is_none_or(|r| key.repo == *r))
+        .collect();
+    let mut reviews: HashMap<(RepoName, u64), crate::review::ReviewBriefView> = HashMap::new();
+    let repos: HashSet<&RepoName> = lanes.iter().map(|(key, _)| &key.repo).collect();
+    for r in repos {
+        for review in app.store.latest_reviews(id, r).await? {
+            reviews.insert((r.clone(), review.number), (&review).into());
+        }
+    }
     Ok(Json(
         lanes
             .into_iter()
-            .filter(|(key, _)| repo.as_ref().is_none_or(|r| key.repo == *r))
             .map(|(key, lane)| LaneView {
                 repo: key.repo.to_string(),
                 trunk: key.trunk,
                 batch: lane.batch_pr.map(|n| n as u32),
                 entries: in_merge_order(lane.entries)
                     .into_iter()
-                    .map(EntryView::new)
+                    .map(|e| {
+                        let shown = review_layer(&e);
+                        let review = reviews.get(&(key.repo.clone(), shown)).cloned();
+                        EntryView::new(e, review)
+                    })
                     .collect(),
             })
             .collect(),
     ))
+}
+
+/// The PR whose review an entry shows: the stack's layer its hold is on, else its top.
+fn review_layer(e: &Entry) -> u64 {
+    match &e.state {
+        EntryState::Held(hold) => hold.layer(),
+        _ => None,
+    }
+    .or(e.layers.last().copied())
+    .unwrap_or(e.number)
 }
 
 /// The order the queue takes them in, as `Lane::next` picks: the job, then waiting priority PRs,
@@ -1783,7 +1831,7 @@ fn as_user<T>(result: anyhow::Result<T>, repo: &RepoName) -> Result<T, ApiError>
 
 /// The repo of a URL's `{owner}/{name}`. Each is one path segment, but `%2F` decodes to a
 /// slash: a repo stored with one would break every read of the repos.
-fn repo_name(owner: String, name: String) -> Result<RepoName, ApiError> {
+pub(crate) fn repo_name(owner: String, name: String) -> Result<RepoName, ApiError> {
     RepoName::parse(&format!("{owner}/{name}")).ok_or_else(|| ApiError::bad_request("not a repo"))
 }
 
@@ -2203,8 +2251,23 @@ mod tests {
     }
 
     #[test]
+    fn a_stack_shows_the_review_of_the_layer_it_waits_for() {
+        let held = EntryState::Held(mergepatrol_core::Hold::Layer {
+            number: 8,
+            hold: Box::new(mergepatrol_core::Hold::ReviewAsks),
+        });
+        let stack = |state| Entry {
+            layers: vec![7, 8, 9],
+            ..entry(10, false, state)
+        };
+        assert_eq!(review_layer(&stack(held)), 8);
+        assert_eq!(review_layer(&stack(EntryState::Waiting)), 9);
+        assert_eq!(review_layer(&entry(5, false, EntryState::Waiting)), 5);
+    }
+
+    #[test]
     fn an_entry_has_its_pull_request_fields_at_the_top() {
-        let view = EntryView::new(entry(1, true, EntryState::Waiting));
+        let view = EntryView::new(entry(1, true, EntryState::Waiting), None);
         let json = serde_json::to_value(view).unwrap();
         assert_eq!(json["number"], 1);
         assert_eq!(json["title"], "");

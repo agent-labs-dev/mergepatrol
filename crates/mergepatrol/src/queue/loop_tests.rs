@@ -15,8 +15,8 @@ use mergepatrol_github::{
 use mergepatrol_store::{
     BillingStore, Change, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse,
     InboxStale, InboxStore, InboxWrite, LoginCode, PrWrite, ReadCache, RepoReads, RepoState,
-    SecretRecord, Session, Slice, StepStats, Subscription, Unsynced, UserInbox, ValueRead,
-    Workspace,
+    ReviewAnswers, ReviewDone, ReviewRecord, ReviewStore, SecretRecord, Session, Slice, StepStats,
+    Subscription, Unsynced, UserInbox, ValueRead, Workspace,
 };
 
 use super::*;
@@ -560,6 +560,8 @@ impl GitHub for Fake {
 /// `<head>-f<n>`, whose checks pass if `fix_works`.
 struct Scripted {
     gh: Arc<Fake>,
+    /// Where approvals carry over the heads it makes, as the real sandbox's publish does.
+    store: Arc<Mem>,
     rebases: Mutex<u32>,
     fail: Option<String>,
     fixes: Mutex<Vec<Vec<String>>>,
@@ -568,9 +570,10 @@ struct Scripted {
 }
 
 impl Scripted {
-    fn new(gh: &Arc<Fake>) -> Self {
+    fn new(gh: &Arc<Fake>, store: &Arc<Mem>) -> Self {
         Self {
             gh: gh.clone(),
+            store: store.clone(),
             rebases: Mutex::new(0),
             fail: None,
             fixes: Mutex::new(Vec::new()),
@@ -611,16 +614,23 @@ impl Sandbox for Scripted {
         if let Some(reason) = &self.fail {
             return Ok(Event::RebaseFailed(reason.clone()));
         }
-        let mut s = self.gh.state.lock().unwrap();
-        let mut head = String::new();
-        for pr in &unit.layers {
-            head = format!("{}-r{n}", pr.head_ref_name);
-            s.push(pr.number, &head);
+        let mut moved = Vec::new();
+        let (head, base) = {
+            let mut s = self.gh.state.lock().unwrap();
+            let mut head = String::new();
+            for pr in &unit.layers {
+                head = format!("{}-r{n}", pr.head_ref_name);
+                moved.push((pr.number, s.head(pr.number), head.clone()));
+                s.push(pr.number, &head);
+            }
+            (head, s.trunk_of(&key.trunk))
+        };
+        for (number, before, after) in moved {
+            self.store
+                .carry_review(key.installation_id, &key.repo, number, &before, &after)
+                .await?;
         }
-        Ok(Event::Rebased {
-            head,
-            base: s.trunk_of(&key.trunk),
-        })
+        Ok(Event::Rebased { head, base })
     }
 
     async fn fix(
@@ -668,6 +678,161 @@ struct Mem {
     config_error: Mutex<Option<String>>,
     /// The head each PR had when the trigger label went on, as the webhook told.
     label_heads: Mutex<HashMap<PrNumber, String>>,
+    /// The agent's reviews, oldest first.
+    reviews: Mutex<Vec<ReviewRecord>>,
+    review_settings: Mutex<Option<ReviewSettings>>,
+}
+
+impl Mem {
+    /// The agent finished the PR's newest review.
+    fn finish_review(&self, number: PrNumber, status: ReviewStatus) {
+        let mut reviews = self.reviews.lock().unwrap();
+        let r = reviews
+            .iter_mut()
+            .rev()
+            .find(|r| r.number == number)
+            .unwrap();
+        r.status = status;
+    }
+}
+
+/// The reviews a tick starts and reads. The review worker is not run here.
+#[async_trait]
+impl ReviewStore for Mem {
+    async fn review(&self, _: i64) -> Result<Option<ReviewRecord>> {
+        unreachable!()
+    }
+    async fn latest_review(
+        &self,
+        _: u64,
+        _: &RepoName,
+        pr: PrNumber,
+    ) -> Result<Option<ReviewRecord>> {
+        let reviews = self.reviews.lock().unwrap();
+        Ok(reviews.iter().rev().find(|r| r.number == pr).cloned())
+    }
+    async fn latest_reviews(&self, _: u64, _: &RepoName) -> Result<Vec<ReviewRecord>> {
+        unreachable!()
+    }
+    async fn reviews_of(
+        &self,
+        _: u64,
+        _: &RepoName,
+        _: PrNumber,
+        _: u32,
+    ) -> Result<Vec<ReviewRecord>> {
+        unreachable!()
+    }
+    async fn start_review(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        head: &str,
+    ) -> Result<ReviewRecord> {
+        let mut reviews = self.reviews.lock().unwrap();
+        if let Some(r) = reviews
+            .iter_mut()
+            .find(|r| r.number == pr && r.head_sha == head)
+        {
+            if r.status == ReviewStatus::Stale {
+                r.status = ReviewStatus::Pending;
+            }
+            return Ok(r.clone());
+        }
+        let r = ReviewRecord {
+            id: reviews.len() as i64 + 1,
+            installation_id,
+            repo: repo.clone(),
+            number: pr,
+            head_sha: head.to_owned(),
+            status: ReviewStatus::Pending,
+            error: None,
+            attempts: 0,
+            summary: String::new(),
+            findings: Vec::new(),
+            asked: Vec::new(),
+            answers: Default::default(),
+            answered_by: None,
+            note: String::new(),
+            questions: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        reviews.push(r.clone());
+        Ok(r)
+    }
+    async fn claim_review(&self, _: Duration) -> Result<Option<ReviewRecord>> {
+        unreachable!()
+    }
+    async fn finish_review(&self, _: i64, _: &ReviewDone) -> Result<bool> {
+        unreachable!()
+    }
+    async fn retry_review(&self, _: i64, _: &str, _: Duration) -> Result<()> {
+        unreachable!()
+    }
+    async fn stale_review(&self, _: i64) -> Result<()> {
+        unreachable!()
+    }
+    async fn carry_review(
+        &self,
+        _: u64,
+        _: &RepoName,
+        pr: PrNumber,
+        before: &str,
+        after: &str,
+    ) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        let approved = reviews
+            .iter()
+            .find(|r| r.number == pr && r.head_sha == before && r.status == ReviewStatus::Approved)
+            .cloned();
+        if let Some(r) = approved {
+            reviews.push(ReviewRecord {
+                head_sha: after.to_owned(),
+                ..r
+            });
+        }
+        Ok(())
+    }
+    async fn set_asked(&self, _: i64, _: &[String]) -> Result<()> {
+        unreachable!()
+    }
+    async fn answer_review(&self, _: i64, _: &ReviewAnswers) -> Result<bool> {
+        unreachable!()
+    }
+    async fn add_question(
+        &self,
+        _: i64,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<mergepatrol_core::Question> {
+        unreachable!()
+    }
+    async fn claim_question(
+        &self,
+        _: Duration,
+    ) -> Result<Option<(ReviewRecord, mergepatrol_core::Question)>> {
+        unreachable!()
+    }
+    async fn answer_question(
+        &self,
+        _: i64,
+        _: &str,
+        _: std::result::Result<String, String>,
+    ) -> Result<()> {
+        unreachable!()
+    }
+    async fn reviews_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
+        unreachable!()
+    }
+    async fn review_settings(&self, _: u64) -> Result<Option<ReviewSettings>> {
+        Ok(self.review_settings.lock().unwrap().clone())
+    }
+    async fn set_review_settings(&self, _: u64, _: &ReviewSettings) -> Result<()> {
+        unreachable!()
+    }
 }
 
 /// The queue loop reads GitHub past the cache.
@@ -981,6 +1146,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                 verify: Vec::new(),
                 fix_ci: Default::default(),
                 branches: Vec::new(),
+                review: Default::default(),
             },
             data_dir: PathBuf::new(),
             poll: Duration::from_secs(60),
@@ -1009,6 +1175,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         job_errors: Default::default(),
         unpinned: Default::default(),
         billing: None,
+        reviews: Default::default(),
     }
 }
 
@@ -1024,7 +1191,7 @@ impl Run {
         let store = Arc::new(Mem::default());
         Self {
             ctx: ctx(store.clone()),
-            rebase: Scripted::new(&gh),
+            rebase: Scripted::new(&gh, &store),
             store,
             gh,
         }
@@ -1099,6 +1266,94 @@ async fn a_labeled_pr_is_rebased_checked_and_merged() {
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
     assert!(run.lane().is_empty());
     assert!(matches!(run.tick().await, Ran::Idle));
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_the_review_on_a_pr_keeps_its_place_until_the_agent_or_a_human_approves() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+    }));
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(
+        run.lane(),
+        [(1, "Held(Reviewing)".into()), (2, "Held(Reviewing)".into())]
+    );
+    assert_eq!(run.kinds(1), ["enqueued", "held"]);
+    // No comment for a review starting: the agent's own review says what it found.
+    assert!(run.gh.with(|s| !s.comments.iter().any(|(n, _)| *n == 1)));
+
+    run.store.finish_review(2, ReviewStatus::Asks);
+    run.store.finish_review(1, ReviewStatus::Asks);
+    run.tick().await;
+    assert_eq!(
+        run.lane(),
+        [
+            (1, "Held(ReviewAsks)".into()),
+            (2, "Held(ReviewAsks)".into())
+        ]
+    );
+    // A human answers #2 first: it goes, and #1 keeps its place ahead of it once answered.
+    run.store.finish_review(2, ReviewStatus::Approved);
+    run.drain().await;
+    assert_eq!(run.merged(), [2]);
+    run.store.finish_review(1, ReviewStatus::Changes);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(ReviewChanges)".into())]);
+
+    // The worker read GitHub before it caught up with the head: the review runs again.
+    run.store.finish_review(1, ReviewStatus::Stale);
+    run.tick().await;
+    let status = |n| {
+        let reviews = run.store.reviews.lock().unwrap();
+        reviews.iter().rev().find(|r| r.number == n).unwrap().status
+    };
+    assert_eq!(status(1), ReviewStatus::Pending);
+    run.store.finish_review(1, ReviewStatus::Changes);
+
+    // The author pushes: a new head, a new review.
+    run.gh.with_mut(|s| s.push(1, "pushed"));
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.drain().await;
+    assert_eq!(run.merged(), [2, 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_author_push_during_its_checks_waits_for_a_review_before_the_merge() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    run.tick().await;
+    run.store.finish_review(1, ReviewStatus::Approved);
+    // The author pushes while the rebased head's checks run.
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
+        s.push(1, "author-push");
+    });
+    run.tick().await;
+    assert!(run.merged().is_empty(), "the push was never reviewed");
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+    // Reviewed and approved: it merges.
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_the_review_off_nothing_waits_for_it() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert!(run.store.reviews.lock().unwrap().is_empty());
 }
 
 #[tokio::test(start_paused = true)]

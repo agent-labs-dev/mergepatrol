@@ -2,6 +2,7 @@ import { useMutation, useMutationState, useQuery, useQueryClient } from "@tansta
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 import { Activity } from "./Activity";
+import { AgentReviewScreen, Gate, reviewBadge, reviewedPr, reviewLine } from "./AgentReview";
 import {
   closePull,
   dequeuePull,
@@ -24,12 +25,16 @@ const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 /** Three panes: the lanes, the selected lane's PRs in merge order, the selected PR. A narrow
  * screen shows the lanes and the PRs until a PR is picked, then the PR alone. */
 export function Queue({ workspace }: { workspace: number }) {
-  const { lane: laneId, pr, ...filter } = useSearch({ from: "/$account/queue" });
+  const { lane: laneId, pr, answer, ...filter } = useSearch({ from: "/$account/queue" });
   const navigate = useNavigate({ from: "/$account/queue" });
-  const setPr = (pr?: number) => navigate({ search: (s) => ({ ...s, pr }) });
+  const setPr = (pr?: number) => navigate({ search: (s) => ({ ...s, pr, answer: undefined }) });
+  const setAnswer = (answer?: boolean) => navigate({ search: (s) => ({ ...s, answer }) });
   // Replaced, not pushed: each keystroke of the search changes it.
   const setFilter = (f: OpenFilter) =>
-    navigate({ search: (s) => ({ lane: s.lane, pr: s.pr, ...f }), replace: true });
+    navigate({
+      search: (s) => ({ lane: s.lane, pr: s.pr, answer: s.answer, ...f }),
+      replace: true,
+    });
   const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login;
   const lanes = useQuery({
     queryKey: ["lanes", workspace],
@@ -75,11 +80,27 @@ export function Queue({ workspace }: { workspace: number }) {
   );
   const unqueued = [...leaving, ...notQueued.filter(matches(filter, me)).map(asItem)];
   const items: Item[] = [...queued, ...unqueued];
-  const entry = items.find((e) => e.number === pr) ?? items[0];
+  // A link to a stack's layer, as the agent's review gives, picks its stack.
+  const entry =
+    items.find((e) => e.number === pr) ??
+    items.find((e) => pr && e.layers.includes(pr)) ??
+    items[0];
   // The queue lists the active PRs first, so the batch is the head of the lane.
   const batched = lane.batch === null ? [] : queued.filter((e) => e.state === "active");
   const rest = queued.slice(batched.length);
-  const picked = entry !== undefined && entry.number === pr;
+  const picked =
+    entry !== undefined && (entry.number === pr || (!!pr && entry.layers.includes(pr)));
+  if (answer && picked && entry.state !== "open")
+    return (
+      <AgentReviewScreen
+        workspace={workspace}
+        repo={lane.repo}
+        pr={reviewedPr({ ...entry, state: entry.state })}
+        title={titleOf(entry)}
+        author={entry.author?.login}
+        onExit={() => setAnswer(undefined)}
+      />
+    );
   const row = (e: Item) => (
     <div
       className={`group flex items-stretch border-b border-line-soft hover:bg-page ${
@@ -256,6 +277,7 @@ export function Queue({ workspace }: { workspace: number }) {
               lane={lane}
               entry={entry}
               onSelect={setPr}
+              onReview={() => setAnswer(true)}
               onBack={() => setPr()}
             />
           )
@@ -274,6 +296,8 @@ const asItem = (p: OpenPullView): Item => ({
   priority: false,
   state: "open",
   layers: [],
+  hold: null,
+  review: null,
   detail: p.draft
     ? "A draft: the queue holds it until it is ready."
     : p.review_decision === "changes_requested"
@@ -544,7 +568,9 @@ const stateBadge: Record<Item["state"], [string, string]> = {
 };
 
 function State({ entry }: { entry: Item }) {
-  const [label, style] = stateBadge[entry.state];
+  const [label, style] =
+    (entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
+    stateBadge[entry.state];
   return (
     <span
       className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}
@@ -615,6 +641,8 @@ function Row({
                   ? "Queueing…"
                   : "Changing its priority…"}
           </span>
+        ) : e.state !== "open" && reviewLine({ ...e, state: e.state }) ? (
+          <span className="mt-1 block text-xs">{reviewLine({ ...e, state: e.state })}</span>
         ) : (
           e.detail && <span className="mt-1 block text-warn">{e.detail}</span>
         )}
@@ -655,12 +683,15 @@ function Detail({
   lane,
   entry: e,
   onSelect,
+  onReview,
   onBack,
 }: {
   workspace: number;
   lane: LaneView;
   entry: Item;
   onSelect: (pr: number) => void;
+  /** Opens the screen that answers the agent's review. */
+  onReview: () => void;
   /** Back to the PRs, on a screen too narrow to show them beside it. */
   onBack: () => void;
 }) {
@@ -692,11 +723,19 @@ function Detail({
           Open on GitHub
         </a>
       </div>
-      {e.state === "held" && (
+      {e.state === "held" && !reviewBadge({ ...e, state: e.state }) && (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">
           <p className="font-medium">Held</p>
           <p className="mt-0.5">{e.detail}</p>
         </div>
+      )}
+      {e.state !== "open" && e.review && (
+        <Gate
+          workspace={workspace}
+          repo={lane.repo}
+          entry={{ ...e, state: e.state }}
+          onAnswer={onReview}
+        />
       )}
       {e.url && (
         <dl className="mt-6 grid grid-cols-[110px_1fr] gap-x-4 gap-y-3">

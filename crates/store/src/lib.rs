@@ -3,11 +3,13 @@
 mod billing;
 mod github;
 mod inbox;
+mod review;
 mod vault;
 
 pub use billing::{BillingStore, FairUse, Subscription, Unsynced};
 pub use github::{Change, PrRead, PrWrite, Read, ReadCache, RepoReads, ValueRead};
 pub use inbox::{InboxRead, InboxRow, InboxStale, InboxStore, InboxWrite, UserInbox};
+pub use review::{ReviewAnswers, ReviewDone, ReviewRecord, ReviewStore};
 pub use vault::{
     ANTHROPIC_API_KEY, CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, GITHUB_APP, SecretStatus, Vault,
     api_key_secret,
@@ -131,7 +133,7 @@ pub struct SecretRecord {
 }
 
 #[async_trait]
-pub trait Store: ReadCache + InboxStore {
+pub trait Store: ReadCache + InboxStore + ReviewStore {
     async fn load_lane(&self, key: &LaneKey) -> Result<Lane>;
     async fn save_lane(&self, key: &LaneKey, lane: &Lane) -> Result<()>;
     /// The lanes of one workspace.

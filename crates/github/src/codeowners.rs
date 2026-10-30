@@ -48,7 +48,7 @@ impl CodeOwners {
     }
 
     /// The owners of a path: empty when it has none.
-    fn owners(&self, path: &str) -> &[String] {
+    pub fn owners(&self, path: &str) -> &[String] {
         self.lines
             .iter()
             .rev()

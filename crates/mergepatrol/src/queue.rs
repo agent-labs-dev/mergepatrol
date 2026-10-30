@@ -15,7 +15,7 @@ use mergepatrol_billing::Billing;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Hold, Job,
     Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH,
-    RepoName, RepoSettings, Transition,
+    RepoName, RepoSettings, ReviewSettings, ReviewStatus, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -96,6 +96,8 @@ pub struct Ctx {
     pub unpinned: Unpinned,
     /// Hosted: holds PRs over the plan's limits, and bills private repos. `None` self-hosted.
     pub billing: Option<Arc<Billing>>,
+    /// Wakes the review worker: a tick started a review.
+    pub reviews: Notify,
 }
 
 /// Fork PRs waiting for their pin: the `labeled` webhook, or for their pull ref to show it.
@@ -183,6 +185,11 @@ impl Wakers {
         map.entry((installation, repo.clone())).or_default().clone()
     }
 
+    /// Has the repo's queue tick now, as a webhook does.
+    pub(crate) fn wake_repo(&self, installation: u64, repo: &RepoName) {
+        self.get(installation, repo).notify_one();
+    }
+
     /// Waits `timeout`, or less if a webhook arrives for the repo meanwhile, or arrived since
     /// the last wait.
     async fn wait(&self, installation: u64, repo: &RepoName, timeout: Duration) {
@@ -216,6 +223,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                     Spawned::spawn(crate::redeliver::redeliver(ctx.clone()), &alive),
                     Spawned::spawn(crate::inbox::read_changed(ctx.clone()), &alive),
                     Spawned::spawn(crate::inbox::index(ctx.clone()), &alive),
+                    Spawned::spawn(crate::review::run(ctx.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -306,7 +314,7 @@ async fn sync_seats(ctx: Arc<Ctx>) {
     }
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -583,6 +591,8 @@ async fn tick(ctx: &Ctx, gh: &dyn GitHub, sandbox: &dyn Sandbox, repo: &RepoName
 /// What a tick reads of a repo once, for all its lanes.
 struct RepoRead {
     settings: RepoSettings,
+    /// The agent's review, as the workspace and the config file set it.
+    review: ReviewSettings,
     snap: RepoSnapshot,
     units: Vec<Unit>,
     /// The repo's lanes as saved, each with its trunk.
@@ -675,8 +685,15 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
         }
         None => None,
     };
+    let review = ctx
+        .store
+        .review_settings(installation)
+        .await?
+        .unwrap_or_default()
+        .with(&settings.review);
     Ok(Some(RepoRead {
         settings,
+        review,
         snap,
         units,
         lanes,
@@ -692,6 +709,63 @@ fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> Hold {
         base: base.to_owned(),
         queues: queues.map(str::to_owned).collect(),
     }
+}
+
+/// Why a unit waits for the agent's review, the queue's first gate: each PR's review of its
+/// head, which a tick starts. `heads` are each layer's, bottom to top, as (PR, head).
+async fn review_hold(
+    ctx: &Ctx,
+    key: &LaneKey,
+    review: &ReviewSettings,
+    stacked: bool,
+    heads: &[(PrNumber, &str)],
+) -> Result<Option<Hold>> {
+    if !review.enabled {
+        return Ok(None);
+    }
+    for &(number, head) in heads {
+        let latest = ctx
+            .store
+            .latest_review(key.installation_id, &key.repo, number)
+            .await?;
+        let status = match latest {
+            // A stale review of the head the lane sees: the worker read GitHub before it
+            // caught up. It runs again.
+            Some(r) if r.head_sha == head && r.status != ReviewStatus::Stale => r.status,
+            _ => {
+                let r = ctx
+                    .store
+                    .start_review(key.installation_id, &key.repo, number, head)
+                    .await?;
+                ctx.reviews.notify_one();
+                r.status
+            }
+        };
+        let hold = match status {
+            ReviewStatus::Approved => continue,
+            ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale => Hold::Reviewing,
+            ReviewStatus::Asks => Hold::ReviewAsks,
+            ReviewStatus::Changes => Hold::ReviewChanges,
+        };
+        return Ok(Some(match stacked {
+            true => Hold::Layer {
+                number,
+                hold: Box::new(hold),
+            },
+            false => hold,
+        }));
+    }
+    Ok(None)
+}
+
+/// The queue moved PRs to heads it made, as (PR, before, after): their approvals hold.
+async fn carry_reviews(ctx: &Ctx, key: &LaneKey, moved: &[(PrNumber, &str, &str)]) -> Result<()> {
+    for (number, before, after) in moved {
+        ctx.store
+            .carry_review(key.installation_id, &key.repo, *number, before, after)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Syncs the lane of `trunk` with GitHub, and runs its next job, if it has one.
@@ -761,6 +835,20 @@ async fn tick_lane(
             Some(gate.reason.clone())
         } else if unit.base != trunk {
             Some(no_queue(&unit.base, &read.snap.default_branch, &settings))
+        } else if let Some(draft) = unit.hold_reason().filter(|h| *h.innermost() == Hold::Draft) {
+            Some(draft)
+        } else if let Some(reason) = {
+            let heads: Vec<(PrNumber, &str)> = unit
+                .layers
+                .iter()
+                .map(|pr| match pr.number == top.number {
+                    true => (pr.number, top.head_ref_oid.as_str()),
+                    false => (pr.number, pr.head_ref_oid.as_str()),
+                })
+                .collect();
+            review_hold(ctx, &key, &read.review, unit.stacked, &heads).await?
+        } {
+            Some(reason)
         } else if let Some(reason) = unit.hold_reason() {
             Some(reason)
         } else if unit.fork() {
@@ -807,10 +895,18 @@ async fn tick_lane(
             }
             LaneChange::Held { number, reason } => {
                 let comment = match &gate {
-                    Some(g) if g.reason == reason => g.comment.clone(),
-                    _ => on_hold(&reason),
+                    Some(g) if g.reason == reason => Some(g.comment.clone()),
+                    // The agent's review, and a human's answer to it, are on the PR already.
+                    _ if matches!(
+                        reason.innermost(),
+                        Hold::Reviewing | Hold::ReviewAsks | Hold::ReviewChanges
+                    ) =>
+                    {
+                        None
+                    }
+                    _ => Some(on_hold(&reason)),
                 };
-                (number, "held", reason.to_string(), Some(comment))
+                (number, "held", reason.to_string(), comment)
             }
             LaneChange::Released(n) => (
                 n,
@@ -873,7 +969,18 @@ async fn tick_lane(
     lane.activate(number);
     ctx.store.save_lane(&key, &lane).await?;
 
-    let outcome = match run_job(ctx, &settings, gh, sandbox, &key, &snap, &mut lane, &unit).await {
+    let job = run_job(
+        ctx,
+        &settings,
+        &read.review,
+        gh,
+        sandbox,
+        &key,
+        &snap,
+        &mut lane,
+        &unit,
+    );
+    let outcome = match job.await {
         Ok(o) => o,
         // Not the PR's fault, and likely to pass: it stays active, so the next tick runs it again.
         Err(e) if ctx.job_errors.failed(&key, number) < JOB_ERRORS_FOR => {
@@ -1827,7 +1934,7 @@ async fn merge_retrying(
 }
 
 /// A queue event: shown on the dashboard, logged, and counted for its PR's author and workspace.
-async fn record(
+pub(crate) async fn record(
     ctx: &Ctx,
     key: &LaneKey,
     number: PrNumber,
@@ -1922,6 +2029,7 @@ async fn eject(
 async fn run_job(
     ctx: &Ctx,
     settings: &RepoSettings,
+    review: &ReviewSettings,
     gh: &dyn GitHub,
     sandbox: &dyn Sandbox,
     key: &LaneKey,
@@ -2079,7 +2187,19 @@ async fn run_job(
                 event
             }
             Phase::Merging { head } => {
+                // An author's push during the job made heads the review never saw: what
+                // merges is what was reviewed, or what the queue made of it.
+                let reviewed: Vec<(PrNumber, &str)> = now
+                    .layers
+                    .iter()
+                    .zip(&heads)
+                    .map(|(pr, head)| (pr.number, head.as_str()))
+                    .collect();
                 if let Some(reason) = now.hold_reason() {
+                    Event::OnHold(reason)
+                } else if let Some(reason) =
+                    review_hold(ctx, key, review, now.stacked, &reviewed).await?
+                {
                     Event::OnHold(reason)
                 } else {
                     let top = now.top().number;
@@ -2264,7 +2384,7 @@ fn clone_url(repo: &RepoName) -> String {
 
 /// Where a job on a stack layer starts from: the layer below's branch, which holds what it goes
 /// onto, and the commit the layer's own changes start from. `None` for a PR or a stack's bottom.
-struct Below<'a> {
+pub(crate) struct Below<'a> {
     branch: &'a str,
     upstream: &'a str,
 }
@@ -2272,7 +2392,7 @@ struct Below<'a> {
 /// The spec of a job on the PR at `head`, which sits on, or goes onto, `onto`. Its model API
 /// token works until the `Granted` is dropped: keep it for as long as the job runs.
 #[allow(clippy::too_many_arguments)]
-async fn job_spec(
+pub(crate) async fn job_spec(
     ctx: &Ctx,
     gh: &Installation,
     key: &LaneKey,
@@ -2433,7 +2553,12 @@ async fn fix_and_publish(
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
-        publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await
+        let published =
+            publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await?;
+        if let Ok(sha) = &published {
+            carry_reviews(ctx, key, &[(pr.number, head, sha)]).await?;
+        }
+        anyhow::Ok(published)
     };
     Ok(match fixed.await {
         Ok(Ok(sha)) => Event::Fixed { head: sha },
@@ -2505,7 +2630,12 @@ async fn rebase_and_publish(
                 base: trunk,
             });
         }
-        return publish_to_fork(gh, &git, &cache, key, pr, &heads[0], &rebased[0], trunk).await;
+        let event =
+            publish_to_fork(gh, &git, &cache, key, pr, &heads[0], &rebased[0], trunk).await?;
+        if matches!(event, Event::Rebased { .. }) {
+            carry_reviews(ctx, key, &[(pr.number, &heads[0], &rebased[0])]).await?;
+        }
+        return Ok(event);
     }
 
     // Every layer, so that the update also fails if an author pushed to one left as it is: a
@@ -2525,6 +2655,17 @@ async fn rebase_and_publish(
         }
         bail!("publishing failed: {e:#}");
     }
+    let carried: Vec<(PrNumber, &str, &str)> = moved
+        .iter()
+        .map(|&i| {
+            (
+                unit.layers[i].number,
+                heads[i].as_str(),
+                rebased[i].as_str(),
+            )
+        })
+        .collect();
+    carry_reviews(ctx, key, &carried).await?;
     Ok(Event::Rebased {
         head: rebased.pop().expect("a unit has a PR"),
         base: trunk,

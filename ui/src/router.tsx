@@ -64,11 +64,13 @@ const you = createRoute({
 const queue = createRoute({
   getParentRoute: () => workspace,
   path: "queue",
-  /** The lane in view, as `owner/repo:trunk`, and the PR in it, both the first by default, and
-   * the filters on its open PRs. */
-  validateSearch: (search): { lane?: string; pr?: number } & OpenFilter => ({
+  /** The lane in view, as `owner/repo:trunk`, and the PR in it, both the first by default,
+   * whether the agent's review of the PR is being answered, and the filters on its open PRs. */
+  validateSearch: (search): { lane?: string; pr?: number; answer?: boolean } & OpenFilter => ({
     lane: optional(search.lane, "string"),
     pr: optional(search.pr, "number"),
+    // Answering the agent's review of the PR.
+    answer: search.answer === true || undefined,
     author: optional(search.author, "string"),
     status: oneOf(STATUSES, search.status),
     review: oneOf(REVIEWS, search.review),

@@ -1,11 +1,15 @@
 //! What crosses the sandbox boundary. The orchestrator writes a `JobSpec` to the job's stdin.
 //! The job writes `result.json`, and on success `result.bundle`, to its output directory.
 
-use mergepatrol_core::{CheckFailure, Provider};
+use mergepatrol_core::{Answered, CheckFailure, Finding, Provider};
 use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
 pub const BUNDLE_FILE: &str = "result.bundle";
+/// What a review job found, as a `ReviewOutput`.
+pub const REVIEW_FILE: &str = "review.json";
+/// A follow-up's answer, as text.
+pub const ANSWER_FILE: &str = "answer.md";
 /// The largest bundle a job may return.
 pub const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 
@@ -47,6 +51,31 @@ pub enum Task {
     Rebase,
     /// Commit a fix for `failures` on top of `head_sha`, which already sits on `trunk_sha`.
     FixChecks { failures: Vec<CheckFailure> },
+    /// Review what the PR changes since it left `trunk_sha`, and write `REVIEW_FILE`. Changes
+    /// nothing. `answered` are what humans said about an earlier head.
+    Review {
+        #[serde(default)]
+        answered: Vec<Answered>,
+    },
+    /// Answer a human's question about a finding of the review, and write `ANSWER_FILE`.
+    Question {
+        finding: Box<Finding>,
+        question: String,
+    },
+}
+
+impl Task {
+    /// Whether the job returns code: a review or a question returns only what it wrote.
+    pub fn returns_code(&self) -> bool {
+        matches!(self, Task::Rebase | Task::FixChecks { .. })
+    }
+}
+
+/// What a review job found: its summary, and each finding with its code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewOutput {
+    pub summary: String,
+    pub findings: Vec<Finding>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

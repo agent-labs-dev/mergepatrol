@@ -5,6 +5,7 @@ mod hold;
 mod job;
 mod lane;
 mod repo_config;
+mod review;
 mod spend;
 mod steps;
 
@@ -16,6 +17,10 @@ pub use lane::{
 };
 pub use repo_config::{
     EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
+};
+pub use review::{
+    Answer, Answered, Bar, CodeLine, Finding, Judged, Kind, Lean, LineKind, Question, Related,
+    ReviewOverrides, ReviewSettings, ReviewStatus,
 };
 pub use spend::{Spend, SpendTask};
 pub use steps::{Step, StepTimes, step_times};

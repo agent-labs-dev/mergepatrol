@@ -7,6 +7,7 @@ mod job;
 mod publish;
 mod queue;
 mod redeliver;
+mod review;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,6 +185,7 @@ async fn orchestrator() -> Result<()> {
         job_errors: Default::default(),
         unpinned: Default::default(),
         billing: billing.clone(),
+        reviews: Default::default(),
         config,
     });
 
