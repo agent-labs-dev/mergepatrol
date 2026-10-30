@@ -13,8 +13,8 @@ use mergepatrol_github::{
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
-    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats, LaneKey,
-    RepoState, Scope, Slice, Store, api_key_secret,
+    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
+    LaneKey, RepoState, Scope, Slice, Store, api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -2027,7 +2027,11 @@ mod tests {
         stack.layers = vec![7, 8, 9];
         let lane = Lane {
             entries: vec![
-                entry(1, false, EntryState::Held("waiting for a required review".into())),
+                entry(
+                    1,
+                    false,
+                    EntryState::Held("waiting for a required review".into()),
+                ),
                 stack,
                 entry(3, true, EntryState::Waiting),
                 entry(4, false, EntryState::Active),
@@ -2047,7 +2051,10 @@ mod tests {
         assert_eq!(spot(7).place, 3);
         assert_eq!(spot(8).state, EntryStateView::Waiting);
         assert_eq!(spot(1).state, EntryStateView::Held);
-        assert_eq!(spot(1).detail.as_deref(), Some("waiting for a required review"));
+        assert_eq!(
+            spot(1).detail.as_deref(),
+            Some("waiting for a required review")
+        );
         assert!(spots.values().all(|s| s.of == 4));
         assert!(!spots.contains_key(&(repo, 2)));
     }
