@@ -347,6 +347,186 @@ impl AsUser {
     }
 }
 
+/// What the inbox reads of a PR: the dashboard's summary, and what it finds the PR by.
+const INBOX_FIELDS: &str = concat!(
+    summary_fields!(),
+    " updatedAt closedAt mergedAt repository { nameWithOwner }
+  teamRequests: reviewRequests(first: 20) { nodes { requestedReviewer { ... on Team { slug } } } }
+  activity: timelineItems(last: 50, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW]) {
+    nodes { ... on IssueComment { createdAt author { login } } ... on PullRequestReview { createdAt author { login } } }
+  }"
+);
+
+/// The PRs the inbox reads in one query.
+const INBOX_PAGE: usize = 25;
+
+/// A PR as the inbox keeps it.
+#[derive(Debug, Clone)]
+pub struct InboxPull {
+    pub repo: RepoName,
+    pub pr: PullRequest,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+    pub updated_at: String,
+    /// When it merged or closed.
+    pub closed_at: Option<String>,
+    /// The teams asked to review, by slug.
+    pub requested_teams: Vec<String>,
+    /// Who commented or reviewed, and when, oldest first.
+    pub activity: Vec<(String, String)>,
+}
+
+impl InboxPull {
+    /// A PR node of [`Installation::inbox_pulls`] or [`Installation::open_inbox_pulls`].
+    pub fn from_node(node: &Value) -> Result<Self> {
+        let repo = node["repository"]["nameWithOwner"]
+            .as_str()
+            .and_then(RepoName::parse)
+            .context("a PR without its repo")?;
+        let str_at = |v: &Value| v.as_str().map(str::to_owned);
+        let nodes = |v: &Value| v["nodes"].as_array().cloned().unwrap_or_default();
+        Ok(InboxPull {
+            repo,
+            pr: serde_json::from_value(node.clone())?,
+            state: node["state"].as_str().unwrap_or("OPEN").to_lowercase(),
+            updated_at: str_at(&node["updatedAt"]).unwrap_or_default(),
+            closed_at: str_at(&node["mergedAt"]).or_else(|| str_at(&node["closedAt"])),
+            requested_teams: nodes(&node["teamRequests"])
+                .iter()
+                .filter_map(|r| str_at(&r["requestedReviewer"]["slug"]))
+                .collect(),
+            activity: nodes(&node["activity"])
+                .iter()
+                .filter_map(|a| Some((str_at(&a["author"]["login"])?, str_at(&a["createdAt"])?)))
+                .collect(),
+        })
+    }
+}
+
+impl Installation {
+    /// These PRs of the repo, as the inbox keeps them. `None` for one that is gone.
+    pub async fn inbox_pulls(
+        &self,
+        repo: &RepoName,
+        numbers: &[PrNumber],
+    ) -> Result<Vec<(PrNumber, Option<Value>)>> {
+        let mut out = Vec::new();
+        for chunk in numbers.chunks(INBOX_PAGE) {
+            let pulls: Vec<String> = chunk
+                .iter()
+                .map(|n| format!("p{n}: pullRequest(number: {n}) {{ {INBOX_FIELDS} }}"))
+                .collect();
+            let query = format!(
+                "query($owner: String!, $name: String!) {{
+                  repository(owner: $owner, name: $name) {{ {} }}
+                }}",
+                pulls.join("\n")
+            );
+            let data = self
+                .graphql_missing_ok(
+                    "inbox pulls",
+                    &query,
+                    json!({ "owner": repo.owner, "name": repo.name }),
+                )
+                .await?;
+            for &n in chunk {
+                let node = &data["repository"][format!("p{n}")];
+                out.push((n, (!node.is_null()).then(|| node.clone())));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every open PR of the repo, as the inbox keeps them.
+    pub async fn open_inbox_pulls(&self, repo: &RepoName) -> Result<Vec<Value>> {
+        let query = format!(
+            "query($owner: String!, $name: String!, $page: Int!, $after: String) {{
+              repository(owner: $owner, name: $name) {{
+                pullRequests(states: OPEN, first: $page, after: $after) {{
+                  nodes {{ {INBOX_FIELDS} }}
+                  pageInfo {{ hasNextPage endCursor }}
+                }}
+              }}
+            }}"
+        );
+        let mut pulls = Vec::new();
+        let mut after = Value::Null;
+        loop {
+            let data: Value = self
+                .graphql(
+                    "open inbox pulls",
+                    &query,
+                    json!({ "owner": repo.owner, "name": repo.name, "page": INBOX_PAGE, "after": after }),
+                )
+                .await?;
+            let page = &data["repository"]["pullRequests"];
+            pulls.extend(page["nodes"].as_array().cloned().unwrap_or_default());
+            if page["pageInfo"]["hasNextPage"] != true {
+                return Ok(pulls);
+            }
+            after = page["pageInfo"]["endCursor"].clone();
+        }
+    }
+
+    /// Each team of the organization, by slug, with its members' logins, child teams' too.
+    /// It takes the App's `members: read`: GitHub refuses without it.
+    pub async fn org_teams(&self, org: &str) -> Result<Vec<(String, Vec<String>)>> {
+        const TEAMS: &str = "query($org: String!, $after: String) {
+          organization(login: $org) {
+            teams(first: 50, after: $after) {
+              nodes { slug members(first: 100, membership: ALL) { nodes { login } pageInfo { hasNextPage endCursor } } }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        }";
+        const MEMBERS: &str = "query($org: String!, $slug: String!, $after: String) {
+          organization(login: $org) {
+            team(slug: $slug) { members(first: 100, after: $after, membership: ALL) { nodes { login } pageInfo { hasNextPage endCursor } } }
+          }
+        }";
+        let logins = |members: &Value| -> Vec<String> {
+            members["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["login"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let mut teams = Vec::new();
+        let mut after = Value::Null;
+        loop {
+            let data: Value = self
+                .graphql("org teams", TEAMS, json!({ "org": org, "after": after }))
+                .await?;
+            let page = &data["organization"]["teams"];
+            for team in page["nodes"].as_array().into_iter().flatten() {
+                let Some(slug) = team["slug"].as_str() else {
+                    continue;
+                };
+                let mut members = logins(&team["members"]);
+                let mut info = team["members"]["pageInfo"].clone();
+                while info["hasNextPage"] == true {
+                    let more: Value = self
+                        .graphql(
+                            "team members",
+                            MEMBERS,
+                            json!({ "org": org, "slug": slug, "after": info["endCursor"] }),
+                        )
+                        .await?;
+                    let page = &more["organization"]["team"]["members"];
+                    members.extend(logins(page));
+                    info = page["pageInfo"].clone();
+                }
+                teams.push((slug.to_owned(), members));
+            }
+            if page["pageInfo"]["hasNextPage"] != true {
+                return Ok(teams);
+            }
+            after = page["pageInfo"]["endCursor"].clone();
+        }
+    }
+}
+
 /// A snapshot as GraphQL returns it, before it is read: what the queue keeps between reads.
 #[derive(Debug, Clone)]
 pub struct SnapshotParts {
@@ -1078,6 +1258,46 @@ mod tests {
         format!(
             r#"{{"number":{number},"state":"OPEN","title":"t","body":"","isDraft":false,"isCrossRepository":false,"reviewDecision":null,"baseRefName":"main","headRefName":"b{number}","headRefOid":"h{number}","labels":{{"nodes":[{{"name":"mp"}}]}},"files":{{"nodes":[]}},"stack":null,"url":"u","createdAt":"2026-10-01T00:00:00Z","additions":0,"deletions":0,"changedFiles":0,"author":null,"latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[]}}}}"#
         )
+    }
+
+    #[test]
+    fn an_inbox_pull_has_its_repo_state_teams_and_activity() {
+        let mut node: Value = serde_json::from_str(&pr_node(7)).unwrap();
+        node["state"] = json!("MERGED");
+        node["updatedAt"] = json!("u");
+        node["closedAt"] = json!("c");
+        node["mergedAt"] = json!("m");
+        node["repository"] = json!({ "nameWithOwner": "o/r" });
+        node["teamRequests"] = json!({ "nodes": [{ "requestedReviewer": { "slug": "core" } }, { "requestedReviewer": {} }] });
+        node["activity"] = json!({ "nodes": [
+            { "createdAt": "1", "author": { "login": "ann" } },
+            { "createdAt": "2", "author": null },
+        ] });
+        let p = InboxPull::from_node(&node).unwrap();
+        assert_eq!(p.repo.to_string(), "o/r");
+        assert_eq!(p.pr.number, 7);
+        assert_eq!(
+            (p.state.as_str(), p.closed_at.as_deref()),
+            ("merged", Some("m"))
+        );
+        assert_eq!(p.requested_teams, ["core"]);
+        assert_eq!(p.activity, [("ann".to_owned(), "1".to_owned())]);
+        assert!(InboxPull::from_node(&json!({})).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_inbox_reads_pull_requests_in_one_query_and_a_missing_one_is_none() {
+        let (gh, requests) = fake::serve(vec![(
+            200,
+            "",
+            r#"{"data":{"repository":{"p1":{"number":1},"p2":null}},"errors":[{"type":"NOT_FOUND"}]}"#,
+        )])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let pulls = gh.inbox_pulls(&repo, &[1, 2]).await.unwrap();
+        assert_eq!(pulls[0].1.as_ref().unwrap()["number"], 1);
+        assert_eq!(pulls[1], (2, None));
+        assert_eq!(requests.lock().unwrap().len(), 1);
     }
 
     fn snapshot_page(numbers: std::ops::Range<u64>, next: Option<&str>) -> &'static str {

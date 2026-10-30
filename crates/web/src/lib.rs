@@ -133,6 +133,7 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route("/oauth/authorize", get(oauth::authorize))
         .route("/oauth/token", post(oauth::token))
         // A workspace is one installation of the App: `{id}` is its installation ID.
+        .route("/api/you", get(api::you))
         .route("/api/w/{id}/lanes", get(api::lanes))
         .route("/api/w/{id}/events", get(api::events))
         .route("/api/w/{id}/fix", get(api::fix))
@@ -159,6 +160,18 @@ pub fn router(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> Ro
         .route(
             "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/close",
             post(api::close_pull),
+        )
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/review",
+            post(api::review_pull),
+        )
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/seen",
+            put(api::seen_pull),
+        )
+        .route(
+            "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/nudge",
+            post(api::nudge_pull),
         )
         .route(
             "/api/w/{id}/repos/{owner}/{name}/config",
@@ -1355,6 +1368,122 @@ mod tests {
             .body(Body::from(body.to_owned()))
             .unwrap();
         router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    async fn deliver_event(router: &Router, event: &str, body: &str) -> StatusCode {
+        let req = Request::post("/webhooks/github")
+            .header("x-github-event", event)
+            .header(
+                "x-hub-signature-256",
+                webhook::sign("hush", body.as_bytes()),
+            )
+            .body(Body::from(body.to_owned()))
+            .unwrap();
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// A PR as the inbox reads it, by `author`, asked of the team `core`, with a comment by
+    /// `ann`.
+    fn inbox_node(number: u64, author: &str) -> serde_json::Value {
+        serde_json::json!({
+            "number": number, "state": "OPEN", "title": "t", "body": "", "isDraft": false,
+            "isCrossRepository": false, "reviewDecision": "REVIEW_REQUIRED", "baseRefName": "main",
+            "headRefName": "b", "headRefOid": "h", "labels": { "nodes": [] }, "stack": null,
+            "url": "u", "createdAt": "2026-10-01T00:00:00Z", "updatedAt": "2026-10-02T00:00:00Z", "additions": 1, "deletions": 1,
+            "changedFiles": 1, "author": { "__typename": "User", "login": author, "avatarUrl": "a" },
+            "latestOpinionatedReviews": { "nodes": [] }, "reviewRequests": { "nodes": [] },
+            "commits": { "nodes": [] }, "repository": { "nameWithOwner": "o/r" },
+            "teamRequests": { "nodes": [{ "requestedReviewer": { "slug": "core" } }] },
+            "activity": { "nodes": [{ "createdAt": "2026-10-02T00:00:00Z", "author": { "login": "ann" } }] },
+        })
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn webhooks_keep_the_inbox_and_the_you_tab_reads_it(pool: PgPool) {
+        use mergepatrol_store::{InboxRead, InboxWrite};
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
+        let (router, cookie) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;
+        let repo = mergepatrol_core::RepoName::parse("o/r").unwrap();
+
+        // A comment on a PR marks it; one on an issue does not.
+        let on_pr = r#"{"action":"created","installation":{"id":1},"repository":{"full_name":"o/r"},"issue":{"number":5,"pull_request":{"url":"u"}}}"#;
+        let on_issue = r#"{"action":"created","installation":{"id":1},"repository":{"full_name":"o/r"},"issue":{"number":6}}"#;
+        deliver_event(&router, "issue_comment", on_pr).await;
+        deliver_event(&router, "issue_comment", on_issue).await;
+        let stale = store
+            .inbox_stale(std::time::Duration::ZERO, 10)
+            .await
+            .unwrap();
+        assert_eq!(stale.iter().map(|s| s.number).collect::<Vec<_>>(), [5]);
+        // Ada joins the team the PR asks.
+        let joined = r#"{"action":"added","installation":{"id":1},"team":{"slug":"core"},"member":{"login":"Ada"}}"#;
+        assert_eq!(
+            deliver_event(&router, "membership", joined).await,
+            StatusCode::NO_CONTENT
+        );
+        let node = inbox_node(5, "bo");
+        let read = InboxRead {
+            state: "open".into(),
+            author: Some("bo".into()),
+            requested_users: Vec::new(),
+            requested_teams: vec!["core".into()],
+            reviewers: Vec::new(),
+            closed_at: None,
+            node,
+        };
+        let write = InboxWrite {
+            number: 5,
+            changes: stale[0].changes,
+            read: Some(read),
+            settled: true,
+        };
+        store.save_inbox_reads(1, &repo, &[write]).await.unwrap();
+
+        let you = |cookie: String| {
+            let router = router.clone();
+            async move {
+                let req = Request::get("/api/you")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap();
+                let res = router.oneshot(req).await.unwrap();
+                assert_eq!(res.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+            }
+        };
+        let view = you(cookie.clone()).await;
+        let asked = &view["review_requested"][0];
+        assert_eq!(
+            (asked["repo"].as_str(), asked["number"].as_u64()),
+            (Some("o/r"), Some(5))
+        );
+        assert_eq!(
+            (asked["workspace"].as_u64(), asked["unread"].as_u64()),
+            (Some(1), Some(1))
+        );
+        assert_eq!(view["authored"], serde_json::json!([]));
+
+        // Opened here: read.
+        let seen = Request::put("/api/w/1/repos/o/r/pulls/5/seen")
+            .header("cookie", cookie.clone())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            router.clone().oneshot(seen).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            you(cookie.clone()).await["review_requested"][0]["unread"],
+            0
+        );
+
+        // Left the team: no longer asked.
+        let left = joined.replace("added", "removed");
+        deliver_event(&router, "membership", &left).await;
+        assert_eq!(you(cookie).await["review_requested"], serde_json::json!([]));
     }
 
     fn push(r#ref: &str, commits: &str) -> String {

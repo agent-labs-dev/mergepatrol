@@ -74,6 +74,8 @@ const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
 const GITHUB_READS_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often each subscription's seats are brought in line with Stripe.
 const SYNC_SEATS_EVERY: Duration = Duration::from_secs(60);
+/// How long the inbox keeps a PR once it merged or closed. The You tab lists a week of them.
+const INBOX_CLOSED_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 pub struct Ctx {
     pub config: Config,
@@ -213,6 +215,8 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                     Spawned::spawn(prune(ctx.clone()), &alive),
                     Spawned::spawn(sync_seats(ctx.clone()), &alive),
                     Spawned::spawn(crate::redeliver::redeliver(ctx.clone()), &alive),
+                    Spawned::spawn(crate::inbox::read_changed(ctx.clone()), &alive),
+                    Spawned::spawn(crate::inbox::index(ctx.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -267,6 +271,10 @@ async fn prune(ctx: Arc<Ctx>) {
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "could not delete old GitHub reads")
             }
+        }
+        match ctx.store.prune_inbox(INBOX_CLOSED_FOR).await {
+            Ok(n) => tracing::info!(prs = n, "deleted PRs closed long ago from the inbox"),
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "could not prune the inbox"),
         }
         let jobs = ctx.config.data_dir.join("jobs");
         match prune_job_outputs(&jobs, JOB_OUTPUTS_FOR).await {

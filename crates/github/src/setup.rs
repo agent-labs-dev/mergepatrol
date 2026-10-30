@@ -31,10 +31,15 @@ impl AppCredentials {
     }
 }
 
-/// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves.
-pub const WEBHOOK_EVENTS: [&str; 9] = [
+/// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves. And
+/// what the You tab keeps of each PR: its comments, and who is on which team.
+pub const WEBHOOK_EVENTS: [&str; 13] = [
     "pull_request",
     "pull_request_review",
+    "pull_request_review_comment",
+    "issue_comment",
+    "membership",
+    "team",
     "push",
     "check_suite",
     "check_run",
@@ -76,6 +81,8 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
             // The logs of failed GitHub Actions jobs, for the agent that fixes them.
             "actions": "read",
             "metadata": "read",
+            // Who is on which team, for the reviews asked of a team.
+            "members": "read",
         },
     })
 }
@@ -403,6 +410,71 @@ pub async fn close_pull_as(token: &str, repo: &str, number: u64) -> Result<()> {
     Ok(())
 }
 
+/// What a review says of a PR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+/// Comments on a PR as the user.
+pub async fn comment_as(token: &str, repo: &str, number: u64, body: &str) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/issues/{number}/comments");
+    let req = client()?.post(url).json(&json!({ "body": body }));
+    user_write(token, req).await?.error_for_status()?;
+    Ok(())
+}
+
+/// GitHub turned the user's change down, for the reason it gives: approving their own PR, say.
+#[derive(Debug)]
+pub struct Rejected(pub String);
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Rejected {}
+
+/// Reviews a PR as the user. `Rejected` for a review GitHub will not take: of their own PR, or
+/// a change request without a comment.
+pub async fn review_as(
+    token: &str,
+    repo: &str,
+    number: u64,
+    verdict: Verdict,
+    body: &str,
+) -> Result<()> {
+    let url = format!("{API}/repos/{repo}/pulls/{number}/reviews");
+    let event = match verdict {
+        Verdict::Approve => "APPROVE",
+        Verdict::RequestChanges => "REQUEST_CHANGES",
+        Verdict::Comment => "COMMENT",
+    };
+    let req = client()?
+        .post(url)
+        .json(&json!({ "event": event, "body": body }));
+    let res = user_write(token, req).await?;
+    if res.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+        return Err(Rejected(rejection(&res.json().await.unwrap_or_default())).into());
+    }
+    res.error_for_status()?;
+    Ok(())
+}
+
+/// GitHub's reason in a 422: its first error, which is a string for reviews, or its message.
+fn rejection(body: &Value) -> String {
+    let first = &body["errors"][0];
+    first
+        .as_str()
+        .or_else(|| first["message"].as_str())
+        .or_else(|| body["message"].as_str())
+        .unwrap_or("GitHub turned the review down.")
+        .to_owned()
+}
+
 /// Whether GitHub takes the token, of any kind: `/rate_limit` answers every token, and costs
 /// none of its rate limit.
 pub async fn token_works(token: &str) -> Result<bool> {
@@ -451,6 +523,20 @@ fn client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_review_says_why() {
+        let own = json!({ "message": "Unprocessable Entity",
+            "errors": ["Review Can not approve your own pull request"] });
+        assert_eq!(
+            rejection(&own),
+            "Review Can not approve your own pull request"
+        );
+        let field = json!({ "message": "Validation Failed", "errors": [{ "message": "body is required" }] });
+        assert_eq!(rejection(&field), "body is required");
+        assert_eq!(rejection(&json!({ "message": "No" })), "No");
+        assert_eq!(rejection(&Value::Null), "GitHub turned the review down.");
+    }
 
     #[test]
     fn reads_an_expiring_token_and_a_lasting_one() {

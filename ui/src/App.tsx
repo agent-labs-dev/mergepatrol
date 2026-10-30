@@ -9,7 +9,7 @@ import {
 } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { resetAnalytics, useAnalytics, useWorkspaceAnalytics } from "./analytics";
-import { fetchSession, fetchSettings, logout } from "./api";
+import { fetchSession, fetchSettings, fetchYou, logout } from "./api";
 import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 import { Landing } from "./Landing";
@@ -70,6 +70,7 @@ function Screen({ session, ...theme }: { session: SessionView } & ThemeProps) {
 }
 
 const tabs = [
+  ["You", "/$account/you"],
   ["Queue", "/$account/queue"],
   ["History", "/$account/history"],
   ["Repos", "/$account/repos"],
@@ -185,11 +186,12 @@ function Dashboard({ session, theme, setTheme }: { session: SessionView } & Them
               key={to}
               to={to}
               params={{ account: current.account }}
-              className="-mb-px border-b-2 pb-2.5"
+              className="-mb-px flex items-center gap-1.5 border-b-2 pb-2.5"
               activeProps={{ className: "border-fg text-fg" }}
               inactiveProps={{ className: "border-transparent text-muted hover:text-fg" }}
             >
               {label}
+              {to === "/$account/you" && <NeedsYouCount />}
             </Link>
           ))}
         </nav>
@@ -231,5 +233,17 @@ function NoKeyBanner({ workspace, account }: { workspace: number; account: strin
         </Link>
       )}
     </div>
+  );
+}
+
+/** How many PRs ask for the user's review, on the You tab. */
+function NeedsYouCount() {
+  const you = useQuery({ queryKey: ["you"], queryFn: fetchYou, refetchInterval: 30_000 });
+  const n = you.data?.review_requested.length ?? 0;
+  if (!n) return null;
+  return (
+    <span className="rounded-full bg-hot px-1.5 text-[11px] leading-[18px] font-semibold text-white tabular-nums">
+      {n}
+    </span>
   );
 }

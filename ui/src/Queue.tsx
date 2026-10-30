@@ -17,7 +17,7 @@ import type { LaneView } from "./api/LaneView";
 import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
 import { PullDetail } from "./PullDetail";
-import { Avatar, secondary, timeAgo } from "./ui";
+import { Avatar, primary, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 
@@ -226,8 +226,27 @@ export function Queue({ workspace }: { workspace: number }) {
               ...entry,
               draft: open.data?.find((o) => o.number === entry.number)?.draft ?? false,
             }}
-            busy={pending.has(entry.number)}
-            onQueue={(priority) => actions.queue(entry, priority)}
+            actions={
+              <>
+                <button
+                  type="button"
+                  disabled={pending.has(entry.number)}
+                  onClick={() => actions.queue(entry, false)}
+                  className={`${primary} h-8 px-3`}
+                >
+                  Queue
+                </button>
+                <button
+                  type="button"
+                  disabled={pending.has(entry.number)}
+                  onClick={() => actions.queue(entry, true)}
+                  title="Queue at the front"
+                  className={`${secondary} h-8 px-3 text-hot!`}
+                >
+                  ↑ Priority
+                </button>
+              </>
+            }
             onBack={() => setPr()}
           />
         ) : (
