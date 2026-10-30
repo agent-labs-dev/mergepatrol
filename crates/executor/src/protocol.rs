@@ -1,5 +1,6 @@
 //! What crosses the sandbox boundary. The orchestrator writes a `JobSpec` to the job's stdin.
-//! The job writes `result.json`, and on success `result.bundle`, to its output directory.
+//! The job writes `result.json`, and on success `result.bundle` (a review, `review.json`; an
+//! answer, `answer.md`), to its output directory.
 
 use mergepatrol_core::{Answered, CheckFailure, Finding, Provider};
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,8 @@ pub const BUNDLE_FILE: &str = "result.bundle";
 pub const REVIEW_FILE: &str = "review.json";
 /// A follow-up's answer, as text.
 pub const ANSWER_FILE: &str = "answer.md";
+/// Every file a job may leave in its output directory: all of them cross the sandbox boundary.
+pub const OUTPUT_FILES: [&str; 4] = [BUNDLE_FILE, RESULT_FILE, REVIEW_FILE, ANSWER_FILE];
 /// The largest bundle a job may return.
 pub const MAX_BUNDLE_BYTES: u64 = 200 * 1024 * 1024;
 
