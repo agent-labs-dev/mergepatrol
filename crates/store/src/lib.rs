@@ -1718,7 +1718,8 @@ mod tests {
 
         let steps = store.step_stats(1, Slice::default(), 30).await.unwrap();
         assert_eq!(steps.iter().map(|s| s.step).collect::<Vec<_>>(), Step::ALL);
-        assert_eq!(steps[0].p50_secs, waited);
+        // The percentile comes back from Postgres, which can round the last digit differently.
+        assert!((steps[0].p50_secs - waited).abs() < 1e-6, "{} vs {waited}", steps[0].p50_secs);
         assert!(store.step_stats(1, repo(&b), 30).await.unwrap().is_empty());
         let repo_a = ExitQuery {
             slice: repo(&a),
