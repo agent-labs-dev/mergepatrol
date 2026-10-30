@@ -10,8 +10,20 @@ RUN pnpm install --frozen-lockfile
 COPY ui/ ./
 RUN pnpm build
 
-FROM rust:1-slim-bookworm AS build
+# cargo-chef splits the dependencies into their own layer, so a source change only recompiles
+# the workspace's crates.
+FROM rust:1-slim-bookworm AS chef
+RUN cargo install cargo-chef@0.1.78 --locked
 WORKDIR /src
+
+FROM chef AS plan
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS build
+COPY rust-toolchain.toml ./
+COPY --from=plan /src/recipe.json recipe.json
+RUN cargo chef cook --release --locked -p mergepatrol --recipe-path recipe.json
 COPY . .
 COPY --from=ui /src/ui/dist ui/dist
 RUN cargo build --release --locked -p mergepatrol
@@ -29,16 +41,19 @@ ENTRYPOINT ["mergepatrol"]
 
 FROM node:24-bookworm-slim AS job
 # The default job image: git, the Claude and Codex CLIs, and common toolchains for verify commands.
+# The CLIs come last, so a new CLI release reuses the toolchain layers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates build-essential pkg-config python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code @openai/codex \
     && corepack enable
 COPY --from=golang:1-bookworm /usr/local/go /usr/local/go
 COPY --from=rust:1-slim-bookworm /usr/local/rustup /usr/local/rustup
 COPY --from=rust:1-slim-bookworm /usr/local/cargo /usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/home/node/.cargo \
     PATH=/usr/local/cargo/bin:/usr/local/go/bin:/home/node/go/bin:$PATH
+# Deploys pass the versions npm calls latest, so a cached layer never holds an old CLI.
+ARG CLAUDE_CODE_VERSION=latest CODEX_VERSION=latest
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} @openai/codex@${CODEX_VERSION}
 COPY --from=build /src/target/release/mergepatrol /usr/local/bin/mergepatrol
 RUN mkdir /out && chown node /out
 USER node
