@@ -12,43 +12,39 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: E2_HIGHCPU_8
-  env: [DOCKER_BUILDKIT=1]
 steps:
-  - id: orchestrator
-    name: gcr.io/cloud-builders/docker
-    waitFor: ["-"]
+  # The CLI versions npm calls latest, so the job image's CLI layer rebuilds only on a release.
+  - id: cli-versions
+    name: node:24-bookworm-slim
+    entrypoint: bash
     args:
-      - build
-      - --target=orchestrator
-      - --tag=${_REPO}/orchestrator:${BUILD_ID}
-      - .
-  - id: job
+      - -c
+      - |
+        set -euo pipefail
+        claude=$$(npm view @anthropic-ai/claude-code version)
+        codex=$$(npm view @openai/codex version)
+        printf 'CLAUDE_CODE_VERSION=%s\nCODEX_VERSION=%s\n' "$$claude" "$$codex" | tee cli-versions.env
+  # Builds and pushes both images. The docker-container builder is what can read and write the
+  # layer cache in the registry.
+  - id: images
     name: gcr.io/cloud-builders/docker
-    waitFor: ["-"]
+    waitFor: [cli-versions]
+    entrypoint: bash
     args:
-      - build
-      - --target=job
-      - --tag=${_REPO}/job:${BUILD_ID}
-      - .
-  - id: push
-    name: gcr.io/cloud-builders/docker
-    waitFor: [orchestrator, job]
-    args:
-      - push
-      - --all-tags
-      - ${_REPO}/orchestrator
-  - id: push-job
-    name: gcr.io/cloud-builders/docker
-    waitFor: [orchestrator, job]
-    args:
-      - push
-      - --all-tags
-      - ${_REPO}/job
+      - -c
+      - |
+        set -euo pipefail
+        set -a && . ./cli-versions.env && set +a
+        docker buildx create --use --driver docker-container
+        docker buildx bake --file deploy/gcp/docker-bake.hcl --push
+    env:
+      - REPO=${_REPO}
+      - TAG=${BUILD_ID}
 
   # The full image: it has kubectl, which the slim one does not.
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    waitFor: [push, push-job]
+    waitFor: [images]
     entrypoint: bash
     args: [deploy/gcp/deploy.sh]
     env:
