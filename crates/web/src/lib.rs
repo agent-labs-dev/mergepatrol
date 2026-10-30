@@ -1285,6 +1285,26 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn a_label_change_from_the_dashboard_marks_its_prs_for_the_queue(pool: PgPool) {
+        let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool).await.unwrap());
+        let woken = Woken::default();
+        let repo = mergepatrol_core::RepoName::parse("o/r").unwrap();
+        store.github_reads(7, &repo).await.unwrap();
+
+        api::relabeled(&*store, &woken, 7, repo.clone(), &[3, 4]).await;
+        let reads = store.github_reads(7, &repo).await.unwrap();
+        assert_eq!(
+            reads
+                .prs
+                .iter()
+                .map(|p| (p.number, p.changes))
+                .collect::<Vec<_>>(),
+            [(3, 1), (4, 1)]
+        );
+        assert_eq!(*woken.0.lock().unwrap(), [(7, "o/r".to_string())]);
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn a_webhook_marks_the_reads_it_changed(pool: PgPool) {
         let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());
         let (router, _) = with_app(pool, Some(app(Some("hush"))), Arc::default()).await;

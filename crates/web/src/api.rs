@@ -13,15 +13,15 @@ use mergepatrol_github::{
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
-    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
-    RepoState, Scope, Slice, api_key_secret,
+    CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, ExitQuery, ExitRecord, ExitStats,
+    RepoState, Scope, Slice, Store, api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::auth::SignedIn;
-use crate::{ApiError, AppState};
+use crate::{ApiError, AppState, Wake};
 
 #[derive(Serialize, TS)]
 #[ts(export)]
@@ -1292,6 +1292,7 @@ pub(crate) async fn queue(
 ) -> Result<(), ApiError> {
     let (labels, _) = repo_labels(app, gh, repo).await?;
     let mut add = vec![labels.trigger.as_str()];
+    let mut changed = vec![number];
     if priority {
         add.push(&labels.priority);
     } else {
@@ -1301,13 +1302,14 @@ pub(crate) async fn queue(
                 setup::remove_label_as(token, &repo.to_string(), n, &labels.priority).await,
                 repo,
             )?;
+            changed.push(n);
         }
     }
     as_user(
         setup::add_labels_as(token, &repo.to_string(), number, &add).await,
         repo,
     )?;
-    app.wake.wake(gh.id, repo.clone());
+    relabeled(&*app.store, &*app.wake, gh.id, repo.clone(), &changed).await;
     Ok(())
 }
 
@@ -1320,7 +1322,8 @@ pub(crate) async fn dequeue(
     number: u64,
 ) -> Result<(), ApiError> {
     let (labels, _) = repo_labels(app, gh, repo).await?;
-    for n in layers(gh, repo, number).await? {
+    let layers = layers(gh, repo, number).await?;
+    for &n in &layers {
         for label in [&labels.trigger, &labels.priority] {
             as_user(
                 setup::remove_label_as(token, &repo.to_string(), n, label).await,
@@ -1328,8 +1331,25 @@ pub(crate) async fn dequeue(
             )?;
         }
     }
-    app.wake.wake(gh.id, repo.clone());
+    relabeled(&*app.store, &*app.wake, gh.id, repo.clone(), &layers).await;
     Ok(())
+}
+
+/// These PRs' labels changed from the dashboard or MCP. The queue wakes to read them again now,
+/// before the label webhooks come to mark its reads of them stale.
+pub(crate) async fn relabeled(
+    store: &dyn Store,
+    wake: &dyn Wake,
+    id: u64,
+    repo: RepoName,
+    prs: &[u64],
+) {
+    for &n in prs {
+        if let Err(e) = store.github_changed(id, &repo, &Change::Pr(n)).await {
+            tracing::warn!(installation = id, %repo, pr = n, error = %format!("{e:#}"), "marking a relabeled PR");
+        }
+    }
+    wake.wake(id, repo);
 }
 
 /// Closes an open PR, as the user. The queue lists only the open PRs it does not have, so
