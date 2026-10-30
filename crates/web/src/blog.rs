@@ -152,7 +152,13 @@ fn is_iso_date(s: &str) -> bool {
 /// `<url>` entries for the sitemap: the index, then each article.
 pub fn sitemap_entries(public_url: &str) -> String {
     let all = articles();
-    let mut out = format!("  <url><loc>{public_url}/blog</loc></url>\n");
+    // The index changes whenever an article does, so its lastmod is the newest article's.
+    let mut out = match all.iter().map(Article::last_modified).max() {
+        Some(newest) => {
+            format!("  <url><loc>{public_url}/blog</loc><lastmod>{newest}</lastmod></url>\n")
+        }
+        None => format!("  <url><loc>{public_url}/blog</loc></url>\n"),
+    };
     for a in &all {
         out.push_str(&format!(
             "  <url><loc>{public_url}/blog/{}</loc><lastmod>{}</lastmod></url>\n",
@@ -167,6 +173,13 @@ fn article_page(a: &Article, public_url: &str, analytics: Analytics) -> String {
     let mut body = String::new();
     pulldown_cmark::html::push_html(&mut body, Parser::new_ext(&a.body, Options::all()));
     let url = format!("{public_url}/blog/{}", a.slug);
+    // The articles are written by the team, not signed by a person, so the site is the author too.
+    let publisher = serde_json::json!({
+        "@type": "Organization",
+        "name": "Mergepatrol",
+        "url": format!("{public_url}/"),
+        "logo": { "@type": "ImageObject", "url": format!("{public_url}/apple-touch-icon.png") },
+    });
     let json_ld = serde_json::json!({
         "@context": "https://schema.org",
         "@type": "BlogPosting",
@@ -176,7 +189,9 @@ fn article_page(a: &Article, public_url: &str, analytics: Analytics) -> String {
         "dateModified": a.last_modified(),
         "url": url,
         "image": format!("{public_url}/og/mergepatrol-og-1200x630.png"),
-        "publisher": { "@type": "Organization", "name": "Mergepatrol", "url": format!("{public_url}/") },
+        "mainEntityOfPage": url,
+        "author": publisher.clone(),
+        "publisher": publisher,
     });
     let head = format!(
         "<meta property=\"og:type\" content=\"article\" />\n\
@@ -258,6 +273,8 @@ fn page(
 <meta property="og:image:width" content="1200" />
 <meta property="og:image:height" content="630" />
 <meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="{title}" />
+<meta name="twitter:description" content="{description}" />
 <meta name="twitter:image" content="{image}" />
 {head}
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -378,6 +395,26 @@ mod tests {
         let html = article_page(&a, "https://mergepatrol.ai", None);
         assert!(html.contains("<title>&lt;b&gt;&quot;T&quot; | Mergepatrol</title>"));
         assert!(html.contains("<link rel=\"canonical\" href=\"https://mergepatrol.ai/blog/x\" />"));
+    }
+
+    #[test]
+    fn structured_data_names_author_and_publisher() {
+        let a = parse(
+            "x",
+            "---\ntitle: T\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
+        )
+        .unwrap();
+        let html = article_page(&a, "https://mergepatrol.ai", None);
+        let json = html
+            .split("<script type=\"application/ld+json\">")
+            .nth(1)
+            .and_then(|rest| rest.split("</script>").next())
+            .unwrap();
+        let ld: serde_json::Value = serde_json::from_str(json).unwrap();
+        for key in ["author", "publisher"] {
+            assert_eq!(ld[key]["name"], "Mergepatrol", "{key} in {json}");
+        }
+        assert_eq!(ld["datePublished"], "2026-10-30");
     }
 
     #[test]
