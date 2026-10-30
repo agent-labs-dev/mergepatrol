@@ -2,11 +2,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useState } from "react";
 import { Activity } from "./Activity";
-import { dequeuePull, fetchEvents, fetchLanes, fetchOpenPulls, queuePull } from "./api";
+import {
+  dequeuePull,
+  fetchEvents,
+  fetchLanes,
+  fetchOpenPulls,
+  fetchSession,
+  queuePull,
+} from "./api";
 import type { ChecksView } from "./api/ChecksView";
 import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
 import type { OpenPullView } from "./api/OpenPullView";
+import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
 import { Avatar, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
@@ -14,9 +22,13 @@ const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 /** Three panes: the lanes, the selected lane's PRs in merge order, the selected PR. A narrow
  * screen shows the lanes and the PRs until a PR is picked, then the PR alone. */
 export function Queue({ workspace }: { workspace: number }) {
-  const { lane: laneId, pr } = useSearch({ from: "/$account/queue" });
+  const { lane: laneId, pr, ...filter } = useSearch({ from: "/$account/queue" });
   const navigate = useNavigate({ from: "/$account/queue" });
   const setPr = (pr?: number) => navigate({ search: (s) => ({ ...s, pr }) });
+  // Replaced, not pushed: each keystroke of the search changes it.
+  const setFilter = (f: OpenFilter) =>
+    navigate({ search: (s) => ({ lane: s.lane, pr: s.pr, ...f }), replace: true });
+  const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login;
   const lanes = useQuery({
     queryKey: ["lanes", workspace],
     queryFn: () => fetchLanes(workspace),
@@ -49,8 +61,10 @@ export function Queue({ workspace }: { workspace: number }) {
 
   const lane = current ?? lanes.data[0];
   const { pending } = actions;
+  // What the filters narrow: the open PRs, without any the lane has already.
+  const notQueued = (open.data ?? []).filter((p) => !entryOf(lane, p.number));
   const unqueued = [
-    ...(open.data ?? []).map(asItem),
+    ...notQueued.filter(matches(filter, me)).map(asItem),
     // Queued, gone from the open PRs, and not in the lane yet: a poll of each came between.
     ...[...pending.values()].flatMap((p) =>
       p.kind === "queueing" && !open.data?.some((o) => o.number === p.item.number) ? [p.item] : [],
@@ -92,7 +106,8 @@ export function Queue({ workspace }: { workspace: number }) {
           <button
             key={laneKey(l)}
             type="button"
-            onClick={() => navigate({ search: { lane: laneKey(l) } })}
+            // The filters stay: the same author's PRs, say, in each repo.
+            onClick={() => navigate({ search: (s) => ({ ...s, lane: laneKey(l), pr: undefined }) })}
             className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left max-lg:w-auto max-lg:shrink-0 ${
               l === lane ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
             }`}
@@ -161,14 +176,31 @@ export function Queue({ workspace }: { workspace: number }) {
             Could not load the open PRs: {open.error.message}
           </p>
         )}
-        {unqueued.length > 0 && (
+        {(notQueued.length > 0 || unqueued.length > 0) && (
           <>
             <p className="mt-6 flex items-center justify-between border-y border-line bg-sunken px-4 py-2 text-xs text-muted">
               <span>
                 <span className="font-medium text-fg-2">Open</span> · not queued
               </span>
-              <span className="tabular-nums">{unqueued.length}</span>
+              <span className="tabular-nums">
+                {narrows(filter) ? `${unqueued.length} of ${notQueued.length}` : unqueued.length}
+              </span>
             </p>
+            <OpenFilters pulls={notQueued} me={me} filter={filter} onChange={setFilter} />
+            {unqueued.length === 0 && (
+              <p className="px-4 py-6 text-center text-faint">
+                {narrows(filter) ? "No open PRs match." : "Only drafts are open."}{" "}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setFilter(narrows(filter) ? { drafts: filter.drafts } : { drafts: true })
+                  }
+                  className="text-muted underline underline-offset-2 hover:text-fg"
+                >
+                  {narrows(filter) ? "Clear the filters" : "Show them"}
+                </button>
+              </p>
+            )}
             <ol>
               {unqueued.map((e) => (
                 <li key={e.number}>{row(e)}</li>
