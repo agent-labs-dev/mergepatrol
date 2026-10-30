@@ -9,6 +9,22 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+/// Sends `cmd`'s calls to `url` around the job's egress proxy. Claude Code sends plain HTTP
+/// through `HTTPS_PROXY` too, and the proxy only lets out the hosts on its allowlist.
+pub(crate) fn bypass_proxy(cmd: &mut Command, url: &str) {
+    let Some(host) = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+    else {
+        return;
+    };
+    let hosts = match std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")) {
+        Ok(hosts) if !hosts.is_empty() => format!("{hosts},{host}"),
+        _ => host,
+    };
+    cmd.env("NO_PROXY", &hosts).env("no_proxy", hosts);
+}
+
 /// How a CLI run ended, once it started.
 pub(crate) enum Ended {
     /// The CLI exited by itself, with its stderr.

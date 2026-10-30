@@ -51,6 +51,7 @@ impl ClaudeResolver {
         cmd.env("ANTHROPIC_API_KEY", key);
         if let Some(url) = &self.base_url {
             cmd.env("ANTHROPIC_BASE_URL", url);
+            cli::bypass_proxy(&mut cmd, url);
         }
         cmd.arg("-p")
             .arg(prompt)
@@ -214,5 +215,7 @@ mod tests {
             env(&cmd, "ANTHROPIC_BASE_URL").as_deref(),
             Some("http://orchestrator/anthropic")
         );
+        assert_eq!(env(&cmd, "NO_PROXY").as_deref(), Some("orchestrator"));
+        assert_eq!(env(&cmd, "no_proxy").as_deref(), Some("orchestrator"));
     }
 }

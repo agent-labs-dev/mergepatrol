@@ -72,7 +72,7 @@ spec:
         - name: job
           image: __JOB_IMAGE__
           args: [job, --serve, "8080"]
-          # The orchestrator is plain HTTP, so it stays direct; HTTPS goes through the proxy.
+          # Everything goes through the proxy but the orchestrator, which the resolver adds to NO_PROXY.
           env:
             - name: HTTPS_PROXY
               value: http://34.118.224.100:3128
