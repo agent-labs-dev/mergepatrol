@@ -5,7 +5,7 @@ mod github;
 mod vault;
 
 pub use billing::{BillingStore, FairUse, Subscription, Unsynced};
-pub use github::{PrRead, PrWrite, Read, ReadCache, RepoReads};
+pub use github::{Change, PrRead, PrWrite, Read, ReadCache, RepoReads, ValueRead};
 pub use vault::{
     ANTHROPIC_API_KEY, CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, GITHUB_APP, SecretStatus, Vault,
     api_key_secret,

@@ -351,10 +351,10 @@ impl RepoSnapshot {
             .filter(|pr| queued(pr, &labels.trigger))
             .collect();
         kept.sort_by_key(|pr| (pr["createdAt"].as_str(), pr["number"].as_u64()));
-        let mut labeled: Vec<PullRequest> = kept
+        let labeled: Vec<PullRequest> = kept
             .into_iter()
-            .map(|pr| serde_json::from_value(pr.clone()))
-            .collect::<Result<_, _>>()?;
+            .map(|pr| PullRequest::from_node(pr, r))
+            .collect::<Result<_>>()?;
         let missing_labels = [
             ("trigger", &labels.trigger),
             ("priority", &labels.priority),
@@ -364,10 +364,6 @@ impl RepoSnapshot {
         .filter(|(alias, _)| r[alias].is_null())
         .map(|(_, name)| name.clone())
         .collect();
-        let owners = CodeOwners::from_repository(r);
-        for pr in &mut labeled {
-            pr.check_code_owners(owners.as_ref());
-        }
         Ok(RepoSnapshot {
             id: r["id"].as_str().context("repository.id")?.to_owned(),
             default_branch: r["defaultBranchRef"]["name"]
@@ -386,6 +382,16 @@ impl RepoSnapshot {
             labeled,
             missing_labels,
         })
+    }
+}
+
+impl PullRequest {
+    /// A PR node, as `pull_request_node` returns it, with the code owners of the repository, as
+    /// `snapshot_parts` returns it.
+    pub fn from_node(node: &Value, repository: &Value) -> Result<Self> {
+        let mut pr: PullRequest = serde_json::from_value(node.clone())?;
+        pr.check_code_owners(CodeOwners::from_repository(repository).as_ref());
+        Ok(pr)
     }
 }
 

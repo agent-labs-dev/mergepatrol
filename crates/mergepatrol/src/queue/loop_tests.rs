@@ -13,9 +13,9 @@ use mergepatrol_github::{
     BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
 };
 use mergepatrol_store::{
-    BillingStore, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse,
+    BillingStore, Change, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse,
     LoginCode, PrWrite, ReadCache, RepoReads, RepoState, SecretRecord, Session, Slice, StepStats,
-    Subscription, Unsynced, Workspace,
+    Subscription, Unsynced, ValueRead, Workspace,
 };
 
 use super::*;
@@ -655,7 +655,7 @@ struct Mem {
 /// The queue loop reads GitHub past the cache.
 #[async_trait]
 impl ReadCache for Mem {
-    async fn github_changed(&self, _: u64, _: &RepoName, _: Option<PrNumber>) -> Result<()> {
+    async fn github_changed(&self, _: u64, _: &RepoName, _: &Change) -> Result<()> {
         unreachable!()
     }
     async fn github_reads(&self, _: u64, _: &RepoName) -> Result<RepoReads> {
@@ -675,6 +675,19 @@ impl ReadCache for Mem {
         unreachable!()
     }
     async fn save_pr_reads(&self, _: u64, _: &RepoName, _: &[PrWrite]) -> Result<()> {
+        unreachable!()
+    }
+    async fn github_value(&self, _: u64, _: &RepoName, _: &str) -> Result<ValueRead> {
+        unreachable!()
+    }
+    async fn save_github_value(
+        &self,
+        _: u64,
+        _: &RepoName,
+        _: &str,
+        _: i64,
+        _: &serde_json::Value,
+    ) -> Result<()> {
         unreachable!()
     }
 }

@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use reqwest::{Method, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use mergepatrol_core::{CheckFailure, RepoName};
 
 use crate::Installation;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckState {
     Pending,
     Passed,
@@ -16,7 +17,7 @@ pub enum CheckState {
 }
 
 /// The checks on one commit, by name. Check runs and commit statuses both count.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Checks {
     pub by_name: BTreeMap<String, CheckState>,
 }
@@ -57,7 +58,7 @@ impl Checks {
 }
 
 /// The status checks that a branch requires before a merge.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiredChecks {
     pub names: Vec<String>,
     /// The PR must also be up to date with the branch: GitHub merges only a PR that has every

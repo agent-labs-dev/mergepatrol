@@ -27,7 +27,7 @@ use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
     RateLimited, RepoSnapshot,
 };
-use mergepatrol_store::{GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
+use mergepatrol_store::{Change, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
 use secrecy::ExposeSecret;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -476,12 +476,13 @@ async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
         let webhooks = webhooks(&ctx).await.unwrap_or(false);
         let github: &dyn GitHub = if webhooks { &cached } else { &gh };
         let ran = tick(&ctx, github, &sandbox, &repo).await;
-        // A job publishes past the cache, and a failed tick may have written part of its work.
-        if webhooks
-            && !matches!(ran, Ok(Ran::Idle))
-            && let Err(e) = cached.reader.changed(&repo, None).await
-        {
-            tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "could not mark the repo changed");
+        // A failed tick may have written part of its work.
+        if webhooks && !matches!(ran, Ok(Ran::Idle)) {
+            for change in [Change::Repo, Change::ValuesUnder(String::new())] {
+                if let Err(e) = cached.reader.changed(&repo, change).await {
+                    tracing::error!(installation = gh.id, %repo, error = %format!("{e:#}"), "could not mark the repo changed");
+                }
+            }
         }
         match ran {
             // The lane may have a next PR: start it now, not a poll later.
@@ -1952,19 +1953,21 @@ struct JobSandbox<'a> {
     gh: &'a Installation,
 }
 
-#[async_trait]
-impl Sandbox for JobSandbox<'_> {
-    async fn rebase(
-        &self,
-        key: &LaneKey,
-        snap: &RepoSnapshot,
-        unit: &Unit,
-        settings: &RepoSettings,
-    ) -> Result<Event> {
-        rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await
+impl JobSandbox<'_> {
+    /// A job publishes past the cache: the branches and pull refs it may have moved read again.
+    async fn published(&self, key: &LaneKey, event: Result<Event>) -> Result<Event> {
+        for prefix in ["ref:", "pull:"] {
+            let change = Change::ValuesUnder(prefix.into());
+            self.ctx
+                .store
+                .github_changed(key.installation_id, &key.repo, &change)
+                .await?;
+        }
+        event
     }
 
-    async fn fix(
+    #[allow(clippy::too_many_arguments)]
+    async fn fix_and_restack(
         &self,
         key: &LaneKey,
         snap: &RepoSnapshot,
@@ -1992,6 +1995,37 @@ impl Sandbox for JobSandbox<'_> {
                 event => event,
             },
         )
+    }
+}
+
+#[async_trait]
+impl Sandbox for JobSandbox<'_> {
+    async fn rebase(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        settings: &RepoSettings,
+    ) -> Result<Event> {
+        let event = rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await;
+        self.published(key, event).await
+    }
+
+    async fn fix(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        head: &str,
+        base: &str,
+        failures: &[CheckFailure],
+    ) -> Result<Event> {
+        let event = self
+            .fix_and_restack(key, snap, unit, layer, settings, head, base, failures)
+            .await;
+        self.published(key, event).await
     }
 }
 
