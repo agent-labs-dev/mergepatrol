@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use axum::http::{StatusCode, header};
+use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use pulldown_cmark::{Options, Parser};
 use rust_embed::{EmbeddedFile, Filenames, RustEmbed};
@@ -76,8 +76,9 @@ impl Article {
 pub type Analytics<'a> = Option<(&'a str, &'a str)>;
 
 impl Collection {
-    /// Answers `/<prefix>` and `/<prefix>/<slug>`. `None` for any other path, so the caller
-    /// serves the app.
+    /// Answers `/<prefix>` and `/<prefix>/<slug>` for a page that exists. `None` for any other
+    /// path, so the caller serves the app: a GitHub account named like the prefix keeps its
+    /// dashboard pages, such as `/compare/queue`, and a dead link lands on the app's home.
     pub fn serve(&self, path: &str, public_url: &str, analytics: Analytics) -> Option<Response> {
         let rest = path.strip_prefix(self.prefix)?;
         let slug = match rest.trim_end_matches('/') {
@@ -85,11 +86,9 @@ impl Collection {
             s => s.strip_prefix('/')?,
         };
         if slug.contains('/') {
-            return Some(StatusCode::NOT_FOUND.into_response());
+            return None;
         }
-        let Some(article) = self.load(slug) else {
-            return Some(StatusCode::NOT_FOUND.into_response());
-        };
+        let article = self.load(slug)?;
         Some(
             (
                 [(header::CONTENT_TYPE, "text/html; charset=utf-8")],

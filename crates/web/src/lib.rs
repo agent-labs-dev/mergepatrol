@@ -1337,9 +1337,11 @@ mod tests {
                 .contains("(http://localhost:8080/compare/github-merge-queue)")
         );
         assert_eq!(get(&router, "/compare", None).await, StatusCode::OK);
-        assert_eq!(
-            get(&router, "/compare/nope", None).await,
-            StatusCode::NOT_FOUND
+        // A workspace named `compare` keeps its dashboard: only the pages that exist are taken.
+        let app = body(&router, "/compare/queue", "").await;
+        assert!(
+            app.contains("id=\"root\"") || app.contains("not built"),
+            "{app}"
         );
         assert_eq!(get(&router, "/og.png", None).await, StatusCode::NOT_FOUND);
         let page = body(&router, "/ada/queue", "").await;
