@@ -176,6 +176,20 @@ impl PullRequest {
         }
     }
 
+    /// Whether GitHub waits for an approval before it merges: a branch rule's, or a code
+    /// owner's.
+    pub fn awaits_approval(&self) -> bool {
+        self.review_decision() == Some("REVIEW_REQUIRED")
+    }
+
+    /// Whether `login` opened the PR. GitHub's logins ignore case.
+    pub fn authored_by(&self, login: &str) -> bool {
+        self.details
+            .author
+            .as_ref()
+            .is_some_and(|a| a.login.eq_ignore_ascii_case(login))
+    }
+
     /// Why GitHub would not merge this PR yet, if it would not.
     pub fn hold_reason(&self) -> Option<Hold> {
         if self.is_draft {
@@ -1468,6 +1482,31 @@ mod tests {
             pr.summary().review_decision.as_deref(),
             Some("REVIEW_REQUIRED")
         );
+    }
+
+    /// Whether the author's own approval may stand: GitHub takes none from them, so it stands
+    /// only while GitHub asks no approval before it merges.
+    #[tokio::test]
+    async fn an_authors_own_approval_stands_only_where_none_is_required() {
+        let by_ada = UNREVIEWED.replace(
+            r#""author":null"#,
+            r#""author":{"__typename":"User","login":"Ada","avatarUrl":"a"}"#,
+        );
+        let unowned = by_ada.replace(
+            r#""codeowners0":{"text":"/.github/ @joaquim-verges @jnsdls\n"}"#,
+            r#""codeowners0":null"#,
+        );
+        let required = unowned.replace(
+            r#""reviewDecision":null"#,
+            r#""reviewDecision":"REVIEW_REQUIRED""#,
+        );
+        let repo = RepoName::parse("o/r").unwrap();
+        for (body, awaits) in [(&unowned, false), (&required, true), (&by_ada, true)] {
+            let (gh, _) = fake::serve(vec![(200, "", body.clone().leak())]).await;
+            let pr = gh.pull_request(&repo, 11186).await.unwrap();
+            assert!(pr.authored_by("ada") && !pr.authored_by("bo"));
+            assert_eq!(pr.awaits_approval(), awaits, "{body}");
+        }
     }
 
     #[tokio::test]

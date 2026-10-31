@@ -1113,7 +1113,7 @@ pub(crate) async fn repos(
     Ok(Json(views))
 }
 
-async fn installation(app: &AppState, id: u64) -> Result<Installation, ApiError> {
+pub(crate) async fn installation(app: &AppState, id: u64) -> Result<Installation, ApiError> {
     Ok(github_app(app).await?.installation(id))
 }
 
@@ -1748,12 +1748,79 @@ pub(crate) async fn review_pull(
     let repo = repo_name(owner, name)?;
     let id = caller.repo(&app, id, &repo).await?;
     let token = caller.github_token(&app)?;
-    let verdict = match body.verdict {
-        VerdictView::Approve => setup::Verdict::Approve,
-        VerdictView::RequestChanges => setup::Verdict::RequestChanges,
-        VerdictView::Comment => setup::Verdict::Comment,
+    let gh = installation(&app, id).await?;
+    let text = body.body.trim();
+    let review = match body.verdict {
+        VerdictView::Approve => {
+            let login = match &caller {
+                Caller::User(user) => user.login().to_owned(),
+                Caller::Token(_) => as_user(setup::user(&token).await, &repo)?.login,
+            };
+            approval(&gh, &repo, number, &login).await?
+        }
+        VerdictView::RequestChanges => Some(setup::Verdict::RequestChanges),
+        VerdictView::Comment => Some(setup::Verdict::Comment),
     };
-    setup::review_as(&token, &repo.to_string(), number, verdict, body.body.trim())
+    match review {
+        Some(verdict) => post_review(&token, &repo, number, verdict, text).await?,
+        // GitHub takes no empty comment, and the author's approval has nothing else to post.
+        None if !text.is_empty() => {
+            post_review(&token, &repo, number, setup::Verdict::Comment, text).await?;
+        }
+        None => {}
+    }
+    tracing::info!(installation = id, %repo, number, review = ?review, "reviewed from the dashboard");
+    // The inbox shows the review now; GitHub's reads, a moment later, settle it.
+    match &caller {
+        Caller::User(user) if review != Some(setup::Verdict::Comment) => {
+            app.store
+                .inbox_reviewed(id, &repo, number, user.login())
+                .await?;
+        }
+        _ => app.store.inbox_changed(id, &repo, number).await?,
+    }
+    if body.queue {
+        queue(&app, &gh, &token, &repo, number, false).await?;
+        tracing::info!(installation = id, %repo, number, "queued from the dashboard");
+    } else {
+        relabeled(&*app.store, &*app.wake, id, repo, &[number]).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// What `login`'s approval posts: `None` for a PR they opened, which GitHub lets no author
+/// approve. The author's approval stands only where GitHub asks for none before it merges, so
+/// it posts no review; where GitHub asks for one, it is someone else's to give.
+pub(crate) async fn approval(
+    gh: &Installation,
+    repo: &RepoName,
+    number: u64,
+    login: &str,
+) -> Result<Option<setup::Verdict>, ApiError> {
+    let pr = gh.pull_request(repo, number).await?;
+    if !pr.authored_by(login) {
+        return Ok(Some(setup::Verdict::Approve));
+    }
+    if pr.awaits_approval() {
+        return Err(ApiError::Status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "GitHub won't let you approve your own PR, and {repo} needs an approval to merge it. Ask a reviewer."
+            ),
+        ));
+    }
+    Ok(None)
+}
+
+/// Reviews the PR as the user, with GitHub's refusal theirs to read.
+async fn post_review(
+    token: &str,
+    repo: &RepoName,
+    number: u64,
+    verdict: setup::Verdict,
+    body: &str,
+) -> Result<(), ApiError> {
+    setup::review_as(token, &repo.to_string(), number, verdict, body)
         .await
         .map_err(|e| {
             if let Some(setup::Rejected(why)) = e.downcast_ref() {
@@ -1768,25 +1835,7 @@ pub(crate) async fn review_pull(
             } else {
                 e.into()
             }
-        })?;
-    tracing::info!(installation = id, %repo, number, verdict = ?verdict, "reviewed from the dashboard");
-    // The inbox shows the review now; GitHub's reads, a moment later, settle it.
-    match &caller {
-        Caller::User(user) if verdict != setup::Verdict::Comment => {
-            app.store
-                .inbox_reviewed(id, &repo, number, user.login())
-                .await?;
-        }
-        _ => app.store.inbox_changed(id, &repo, number).await?,
-    }
-    let gh = installation(&app, id).await?;
-    if body.queue {
-        queue(&app, &gh, &token, &repo, number, false).await?;
-        tracing::info!(installation = id, %repo, number, "queued from the dashboard");
-    } else {
-        relabeled(&*app.store, &*app.wake, id, repo, &[number]).await;
-    }
-    Ok(StatusCode::NO_CONTENT)
+        })
 }
 
 /// The repo's queue labels, and its default branch, as the config file there sets them.
