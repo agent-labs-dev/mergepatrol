@@ -1753,10 +1753,14 @@ pub(crate) async fn review_pull(
     let review = match body.verdict {
         VerdictView::Approve => {
             let login = match &caller {
-                Caller::User(user) => user.login().to_owned(),
-                Caller::Token(_) => as_user(setup::user(&token).await, &repo)?.login,
+                Caller::User(user) => Some(user.login().to_owned()),
+                Caller::Token(_) => as_user(setup::login_of(&token).await, &repo)?,
             };
-            approval(&gh, &repo, number, &login).await?
+            match login {
+                Some(login) => approval(&gh, &repo, number, &login).await?,
+                // A workflow's token is no user's, so no PR's author.
+                None => Some(setup::Verdict::Approve),
+            }
         }
         VerdictView::RequestChanges => Some(setup::Verdict::RequestChanges),
         VerdictView::Comment => Some(setup::Verdict::Comment),

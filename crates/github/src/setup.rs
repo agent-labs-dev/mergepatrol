@@ -313,6 +313,17 @@ pub async fn user(token: &str) -> Result<GithubUser> {
         .await?)
 }
 
+/// The login of the user a token acts as. `None` for an installation token, as a workflow's
+/// `GITHUB_TOKEN` is: GitHub refuses it `/user`, as it names no user.
+pub async fn login_of(token: &str) -> Result<Option<String>> {
+    let res = user_get(token, "/user").await?;
+    if res.status() == reqwest::StatusCode::FORBIDDEN {
+        return Ok(None);
+    }
+    let user: GithubUser = res.error_for_status()?.json().await?;
+    Ok(Some(user.login))
+}
+
 /// An installation of the App that a signed-in user can access.
 #[derive(Clone, Debug)]
 pub struct UserInstallation {
