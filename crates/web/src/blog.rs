@@ -1,17 +1,58 @@
-//! Articles at `/blog/<slug>`, rendered on the server from `content/blog/<slug>.md`.
+//! Articles at `/blog/<slug>` and comparisons at `/compare/<slug>`, rendered on the server from
+//! `content/blog/<slug>.md` and `content/compare/<slug>.md`.
 //!
 //! The dashboard is a single-page app, so every other URL returns the same `index.html`. A crawler
-//! that runs no JavaScript sees each article only if the server sends it as its own HTML page with
+//! that runs no JavaScript sees each page only if the server sends it as its own HTML page with
 //! its own title, description and canonical link. That is what this module does.
 
-use axum::http::{StatusCode, header};
+use std::borrow::Cow;
+
+use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use pulldown_cmark::{Options, Parser};
+use rust_embed::{EmbeddedFile, Filenames, RustEmbed};
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../../content/blog"]
 #[allow_missing = true]
 struct Articles;
+
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../content/compare"]
+#[allow_missing = true]
+struct Comparisons;
+
+/// A folder of Markdown pages served under one path, with one index page listing them.
+pub struct Collection {
+    /// The path the pages are under, and the folder under `content/` they come from.
+    pub prefix: &'static str,
+    pub heading: &'static str,
+    pub description: &'static str,
+    /// The schema.org type of each page's structured data.
+    schema: &'static str,
+    get: fn(&str) -> Option<EmbeddedFile>,
+    files: fn() -> Filenames,
+}
+
+pub const BLOG: Collection = Collection {
+    prefix: "blog",
+    heading: "Blog",
+    description: "Merge queues, rebases and CI, from the people who build Mergepatrol.",
+    schema: "BlogPosting",
+    get: <Articles as RustEmbed>::get,
+    files: <Articles as RustEmbed>::iter,
+};
+
+pub const COMPARE: Collection = Collection {
+    prefix: "compare",
+    heading: "Compare",
+    description: "How Mergepatrol compares with GitHub's merge queue and the other merge queues for GitHub.",
+    schema: "Article",
+    get: <Comparisons as RustEmbed>::get,
+    files: <Comparisons as RustEmbed>::iter,
+};
+
+pub const COLLECTIONS: [&Collection; 2] = [&BLOG, &COMPARE];
 
 #[derive(Debug, PartialEq)]
 pub struct Article {
@@ -34,55 +75,60 @@ impl Article {
 /// The PostHog project key and ingestion host, when product analytics are on.
 pub type Analytics<'a> = Option<(&'a str, &'a str)>;
 
-/// Answers `/blog` and `/blog/<slug>`. `None` for any other path, so the caller serves the app.
-pub fn serve(path: &str, public_url: &str, analytics: Analytics) -> Option<Response> {
-    let rest = path.strip_prefix("blog")?;
-    let slug = match rest.trim_end_matches('/') {
-        "" => return Some(Html(index_page(&articles(), public_url, analytics)).into_response()),
-        s => s.strip_prefix('/')?,
-    };
-    if slug.contains('/') {
-        return Some(StatusCode::NOT_FOUND.into_response());
-    }
-    let Some(article) = load(slug) else {
-        return Some(StatusCode::NOT_FOUND.into_response());
-    };
-    Some(
-        (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            article_page(&article, public_url, analytics),
+impl Collection {
+    /// Answers `/<prefix>` and `/<prefix>/<slug>` for a page that exists. `None` for any other
+    /// path, so the caller serves the app with a 404: a GitHub account named like the prefix keeps
+    /// its dashboard pages, such as `/compare/queue`, and a crawler still sees a dead link as one.
+    pub fn serve(&self, path: &str, public_url: &str, analytics: Analytics) -> Option<Response> {
+        let rest = path.strip_prefix(self.prefix)?;
+        let slug = match rest.trim_end_matches('/') {
+            "" => return Some(Html(self.index_page(public_url, analytics)).into_response()),
+            s => s.strip_prefix('/')?,
+        };
+        if slug.contains('/') {
+            return None;
+        }
+        let article = self.load(slug)?;
+        Some(
+            (
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                self.article_page(&article, public_url, analytics),
+            )
+                .into_response(),
         )
-            .into_response(),
-    )
-}
-
-/// Every published article, newest first. A malformed file is logged and left out; the
-/// `every_article_parses` test keeps one from reaching `main`.
-pub fn articles() -> Vec<Article> {
-    let mut all: Vec<Article> = slugs().filter_map(|slug| load(&slug)).collect();
-    all.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.slug.cmp(&b.slug)));
-    all
-}
-
-/// The file names of the articles, without `.md`. The folder's README is not one.
-fn slugs() -> impl Iterator<Item = String> {
-    Articles::iter().filter_map(|file| {
-        let slug = file.strip_suffix(".md")?;
-        (slug != "README").then(|| slug.to_owned())
-    })
-}
-
-fn load(slug: &str) -> Option<Article> {
-    if slug == "README" {
-        return None;
     }
-    let file = Articles::get(&format!("{slug}.md"))?;
-    let source = String::from_utf8_lossy(&file.data);
-    match parse(slug, &source) {
-        Ok(article) => Some(article),
-        Err(e) => {
-            tracing::error!(slug, error = %e, "blog article is malformed, not serving it");
-            None
+
+    /// Every published page, newest first. A malformed file is logged and left out; the
+    /// `every_article_parses` test keeps one from reaching `main`.
+    pub fn articles(&self) -> Vec<Article> {
+        let mut all: Vec<Article> = self.slugs().filter_map(|slug| self.load(&slug)).collect();
+        all.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.slug.cmp(&b.slug)));
+        all
+    }
+
+    /// The file names of the pages, without `.md`. The folder's README is not one.
+    fn slugs(&self) -> impl Iterator<Item = String> {
+        (self.files)().filter_map(|file: Cow<'static, str>| {
+            let slug = file.strip_suffix(".md")?;
+            (slug != "README").then(|| slug.to_owned())
+        })
+    }
+
+    fn source(&self, slug: &str) -> Option<String> {
+        let file = (self.get)(&format!("{slug}.md"))?;
+        Some(String::from_utf8_lossy(&file.data).into_owned())
+    }
+
+    fn load(&self, slug: &str) -> Option<Article> {
+        if slug == "README" {
+            return None;
+        }
+        match parse(slug, &self.source(slug)?) {
+            Ok(article) => Some(article),
+            Err(e) => {
+                tracing::error!(collection = self.prefix, slug, error = %e, "page is malformed, not serving it");
+                None
+            }
         }
     }
 }
@@ -149,99 +195,114 @@ fn is_iso_date(s: &str) -> bool {
             .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
 }
 
-/// `<url>` entries for the sitemap: the index, then each article.
-pub fn sitemap_entries(public_url: &str) -> String {
-    let all = articles();
-    // The index changes whenever an article does, so its lastmod is the newest article's.
-    let mut out = match all.iter().map(Article::last_modified).max() {
-        Some(newest) => {
-            format!("  <url><loc>{public_url}/blog</loc><lastmod>{newest}</lastmod></url>\n")
+impl Collection {
+    /// `<url>` entries for the sitemap: the index, then each page.
+    pub fn sitemap_entries(&self, public_url: &str) -> String {
+        let (all, prefix) = (self.articles(), self.prefix);
+        // The index changes whenever a page does, so its lastmod is the newest page's.
+        let mut out = match all.iter().map(Article::last_modified).max() {
+            Some(newest) => format!(
+                "  <url><loc>{public_url}/{prefix}</loc><lastmod>{newest}</lastmod></url>\n"
+            ),
+            None => format!("  <url><loc>{public_url}/{prefix}</loc></url>\n"),
+        };
+        for a in &all {
+            out.push_str(&format!(
+                "  <url><loc>{public_url}/{prefix}/{}</loc><lastmod>{}</lastmod></url>\n",
+                a.slug,
+                a.last_modified()
+            ));
         }
-        None => format!("  <url><loc>{public_url}/blog</loc></url>\n"),
-    };
-    for a in &all {
-        out.push_str(&format!(
-            "  <url><loc>{public_url}/blog/{}</loc><lastmod>{}</lastmod></url>\n",
-            a.slug,
-            a.last_modified()
-        ));
+        out
     }
-    out
-}
 
-fn article_page(a: &Article, public_url: &str, analytics: Analytics) -> String {
-    let mut body = String::new();
-    pulldown_cmark::html::push_html(&mut body, Parser::new_ext(&a.body, Options::all()));
-    let url = format!("{public_url}/blog/{}", a.slug);
-    // The articles are written by the team, not signed by a person, so the site is the author too.
-    let publisher = serde_json::json!({
-        "@type": "Organization",
-        "name": "Mergepatrol",
-        "url": format!("{public_url}/"),
-        "logo": { "@type": "ImageObject", "url": format!("{public_url}/apple-touch-icon.png") },
-    });
-    let json_ld = serde_json::json!({
-        "@context": "https://schema.org",
-        "@type": "BlogPosting",
-        "headline": a.title,
-        "description": a.description,
-        "datePublished": a.date,
-        "dateModified": a.last_modified(),
-        "url": url,
-        "image": format!("{public_url}/og/mergepatrol-og-1200x630.png"),
-        "mainEntityOfPage": url,
-        "author": publisher.clone(),
-        "publisher": publisher,
-    });
-    let head = format!(
-        "<meta property=\"og:type\" content=\"article\" />\n\
-         <meta property=\"article:published_time\" content=\"{}\" />\n\
-         <script type=\"application/ld+json\">{}</script>",
-        a.date,
-        json_ld.to_string().replace("</", "<\\/"),
-    );
-    let main = format!(
-        "<article><h1>{}</h1><p class=\"meta\"><time datetime=\"{}\">{}</time></p>{body}</article>",
-        escape(&a.title),
-        a.date,
-        a.date,
-    );
-    page(
-        &a.title,
-        &a.description,
-        &url,
-        &head,
-        &main,
-        public_url,
-        analytics,
-    )
-}
+    /// The collection's section of `/llms.txt`: a heading, then a link and summary per page.
+    pub fn llms_section(&self, public_url: &str) -> String {
+        let mut out = format!("\n## {}\n\n", self.heading);
+        for a in self.articles() {
+            out.push_str(&format!(
+                "- [{}]({public_url}/{}/{}): {}\n",
+                a.title, self.prefix, a.slug, a.description
+            ));
+        }
+        out
+    }
 
-fn index_page(all: &[Article], public_url: &str, analytics: Analytics) -> String {
-    let mut list = String::from("<h1>Blog</h1><ul class=\"posts\">");
-    for a in all {
-        list.push_str(&format!(
-            "<li><a href=\"/blog/{}\">{}</a><p>{}</p><time datetime=\"{}\">{}</time></li>",
-            a.slug,
-            escape(&a.title),
-            escape(&a.description),
+    fn article_page(&self, a: &Article, public_url: &str, analytics: Analytics) -> String {
+        let mut body = String::new();
+        pulldown_cmark::html::push_html(&mut body, Parser::new_ext(&a.body, Options::all()));
+        let url = format!("{public_url}/{}/{}", self.prefix, a.slug);
+        // The pages are written by the team, not signed by a person, so the site is the author too.
+        let publisher = serde_json::json!({
+            "@type": "Organization",
+            "name": "Mergepatrol",
+            "url": format!("{public_url}/"),
+            "logo": { "@type": "ImageObject", "url": format!("{public_url}/apple-touch-icon.png") },
+        });
+        let json_ld = serde_json::json!({
+            "@context": "https://schema.org",
+            "@type": self.schema,
+            "headline": a.title,
+            "description": a.description,
+            "datePublished": a.date,
+            "dateModified": a.last_modified(),
+            "url": url,
+            "image": format!("{public_url}/og/mergepatrol-og-1200x630.png"),
+            "mainEntityOfPage": url,
+            "author": publisher.clone(),
+            "publisher": publisher,
+        });
+        let head = format!(
+            "<meta property=\"og:type\" content=\"article\" />\n\
+             <meta property=\"article:published_time\" content=\"{}\" />\n\
+             <script type=\"application/ld+json\">{}</script>",
             a.date,
-            a.date
-        ));
+            json_ld.to_string().replace("</", "<\\/"),
+        );
+        let main = format!(
+            "<article><h1>{}</h1><p class=\"meta\"><time datetime=\"{}\">{}</time></p>{body}</article>",
+            escape(&a.title),
+            a.date,
+            a.date,
+        );
+        page(
+            &a.title,
+            &a.description,
+            &url,
+            &head,
+            &main,
+            public_url,
+            analytics,
+        )
     }
-    list.push_str("</ul>");
-    page(
-        "Blog",
-        "Merge queues, rebases and CI, from the people who build Mergepatrol.",
-        &format!("{public_url}/blog"),
-        "<meta property=\"og:type\" content=\"website\" />",
-        &list,
-        public_url,
-        analytics,
-    )
+
+    fn index_page(&self, public_url: &str, analytics: Analytics) -> String {
+        let mut list = format!("<h1>{}</h1><ul class=\"posts\">", self.heading);
+        for a in self.articles() {
+            list.push_str(&format!(
+                "<li><a href=\"/{}/{}\">{}</a><p>{}</p><time datetime=\"{}\">{}</time></li>",
+                self.prefix,
+                a.slug,
+                escape(&a.title),
+                escape(&a.description),
+                a.date,
+                a.date
+            ));
+        }
+        list.push_str("</ul>");
+        page(
+            self.heading,
+            self.description,
+            &format!("{public_url}/{}", self.prefix),
+            "<meta property=\"og:type\" content=\"website\" />",
+            &list,
+            public_url,
+            analytics,
+        )
+    }
 }
 
-/// The public pages' shell: the blog's and the changelog's. `head` goes at the end of `<head>`.
+/// The public pages' shell: the blog's, the comparisons' and the changelog's. `head` goes at the end of `<head>`.
 pub(crate) fn page(
     title: &str,
     description: &str,
@@ -285,7 +346,7 @@ pub(crate) fn page(
 {tracking}
 </head>
 <body>
-<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
+<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/compare">Compare</a><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
 <main>{main}</main>
 {FOOTER}
 </body>
@@ -353,10 +414,11 @@ mod tests {
 
     #[test]
     fn every_article_parses() {
-        for slug in slugs() {
-            let data = Articles::get(&format!("{slug}.md")).unwrap().data;
-            if let Err(e) = parse(&slug, &String::from_utf8_lossy(&data)) {
-                panic!("content/blog/{slug}.md: {e}");
+        for c in COLLECTIONS {
+            for slug in c.slugs() {
+                if let Err(e) = parse(&slug, &c.source(&slug).unwrap()) {
+                    panic!("content/{}/{slug}.md: {e}", c.prefix);
+                }
             }
         }
     }
@@ -396,7 +458,7 @@ mod tests {
             "---\ntitle: <b>\"T\"\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        let html = article_page(&a, "https://mergepatrol.ai", None);
+        let html = BLOG.article_page(&a, "https://mergepatrol.ai", None);
         assert!(html.contains("<title>&lt;b&gt;&quot;T&quot; | Mergepatrol</title>"));
         assert!(html.contains("<link rel=\"canonical\" href=\"https://mergepatrol.ai/blog/x\" />"));
     }
@@ -408,7 +470,7 @@ mod tests {
             "---\ntitle: T\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        let html = article_page(&a, "https://mergepatrol.ai", None);
+        let html = BLOG.article_page(&a, "https://mergepatrol.ai", None);
         let json = html
             .split("<script type=\"application/ld+json\">")
             .nth(1)
@@ -428,7 +490,11 @@ mod tests {
             "---\ntitle: T\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        assert!(!article_page(&a, "https://mergepatrol.ai", None).contains("posthog"));
+        assert!(
+            !BLOG
+                .article_page(&a, "https://mergepatrol.ai", None)
+                .contains("posthog")
+        );
         for (host, script) in [
             (
                 "https://us.i.posthog.com",
@@ -439,7 +505,7 @@ mod tests {
                 "https://ph.example.com/static/array.js",
             ),
         ] {
-            let html = article_page(&a, "https://mergepatrol.ai", Some(("phc_x", host)));
+            let html = BLOG.article_page(&a, "https://mergepatrol.ai", Some(("phc_x", host)));
             assert!(html.contains(&format!("src=\"{script}\"")), "{html}");
             assert!(html.contains("posthog.init(&quot;phc_x&quot;"), "{html}");
         }

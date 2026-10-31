@@ -452,6 +452,8 @@ GitHub's [merge queue](https://docs.github.com/en/repositories/configuring-branc
 | CI | Runs on the repo's `pull_request` workflows, on a draft PR per batch. No `merge_group` trigger to add |
 | Queueing a PR | A label, so people and coding agents queue the same way |
 
+For Mergify, Graphite, Aviator and Trunk as well, see [mergepatrol.ai/compare](https://mergepatrol.ai/compare).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes.

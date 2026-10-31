@@ -1326,6 +1326,28 @@ mod tests {
                 .contains("<loc>http://localhost:8080/changelog</loc>")
         );
         assert_eq!(get(&router, "/changelog", None).await, StatusCode::OK);
+        assert!(
+            body(&router, "/sitemap.xml", "")
+                .await
+                .contains("<loc>http://localhost:8080/compare/github-merge-queue</loc>")
+        );
+        assert!(
+            body(&router, "/llms.txt", "")
+                .await
+                .contains("(http://localhost:8080/compare/github-merge-queue)")
+        );
+        assert_eq!(get(&router, "/compare", None).await, StatusCode::OK);
+        // A workspace named `compare` keeps its dashboard: only the pages that exist are taken.
+        // The path is still a 404, so a crawler does not index a dead link as a page.
+        assert_eq!(
+            get(&router, "/compare/queue", None).await,
+            StatusCode::NOT_FOUND
+        );
+        let app = body(&router, "/compare/queue", "").await;
+        assert!(
+            app.contains("id=\"root\"") || app.contains("not built"),
+            "{app}"
+        );
         assert_eq!(get(&router, "/og.png", None).await, StatusCode::NOT_FOUND);
         let page = body(&router, "/ada/queue", "").await;
         // CI builds ui/ before the tests. Without the build there is no page to fill in.
