@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
-    Answered, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings, ReviewStatus,
+    Answered, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings, ReviewStatus, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
@@ -371,25 +371,14 @@ async fn codeowners(gh: &Installation, repo: &RepoName) -> Option<CodeOwners> {
     None
 }
 
-/// Where the PR's review is on the dashboard.
-pub fn review_url(public_url: &str, key: &LaneKey, number: PrNumber) -> String {
-    format!(
-        "{}/{}/queue?lane={}:{}&pr={number}&answer=true",
-        public_url.trim_end_matches('/'),
-        key.repo.owner,
-        key.repo,
-        key.trunk,
-    )
-}
-
 /// The review as GitHub shows it: what the agent asks, and what it cleared.
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
-    let url = review_url(&ctx.config.public_url, key, number);
+    let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
     let cleared: Vec<&Judged> = done.findings.iter().filter(|f| !f.asked).collect();
     let mut body = String::from("**Mergepatrol's review**");
     if let Some(why) = &done.error {
         body.push_str(&format!(
-            "\n\nThe agent could not review this PR: {why}\n\nA human reviews it instead: [approve it, or ask for changes]({url})."
+            "\n\nThe agent could not review this PR: {why}\n\nA human reviews it instead: [approve it, or ask for changes]({url}), or approve it here on GitHub."
         ));
         return body;
     }
@@ -430,7 +419,7 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
                 .join(", "),
         };
         body.push_str(&format!(
-            "\n\n{who}: [answer them in Mergepatrol]({url}). The PR keeps its place in the queue meanwhile."
+            "\n\n{who}: [answer them in Mergepatrol]({url}), or approve the PR here on GitHub if they are all fine as they are. A comment doesn't answer them. The PR keeps its place in the queue meanwhile."
         ));
     }
     if !cleared.is_empty() {

@@ -20,7 +20,7 @@ pub use repo_config::{
 };
 pub use review::{
     Answer, Answered, Bar, CodeLine, Finding, Judged, Kind, Lean, LineKind, Question, Related,
-    ReviewOverrides, ReviewSettings, ReviewStatus,
+    ReviewOverrides, ReviewSettings, ReviewStatus, review_url,
 };
 pub use spend::{Spend, SpendTask};
 pub use steps::{Step, StepTimes, step_times};

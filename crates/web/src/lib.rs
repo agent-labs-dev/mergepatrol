@@ -8,6 +8,7 @@ mod blog;
 mod changelog;
 mod mcp;
 mod oauth;
+mod pr_reply;
 mod review;
 mod routes;
 mod ui;
