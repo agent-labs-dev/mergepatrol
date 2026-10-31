@@ -1,0 +1,307 @@
+/*
+  The public pages' footer (footer.html): the landing page's, the blog's and the changelog's. A
+  sheet of paper with San Francisco etched across it from the water, the Golden Gate in orange
+  and a boat crossing the bay, ported from nebula.gg's footer. The line and the copyright stand on
+  the left, over the trees; the links stand in columns on the right, in the etching's sky.
+
+  The blog and the changelog are plain HTML with no Tailwind, so this sets every margin and list
+  style itself rather than leaning on a reset. The sheet keeps its paper in the dark theme too: it
+  is its own ground. Its layout follows the sheet's width, not the window's, since the pages put
+  it in columns of different widths.
+*/
+.site-footer {
+  --bay-ink: #24303f;
+  padding: 0 1.25rem 1.5rem;
+  color: var(--bay-ink);
+  font-size: 16px;
+  line-height: 24px;
+}
+
+.site-footer-sheet {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto 1fr;
+  width: min(100%, 61rem);
+  margin: 0 auto;
+  overflow: hidden;
+  border-radius: 20px;
+  background: #fafbf6;
+  box-shadow:
+    0 0 0 1px rgba(36, 48, 63, 0.08),
+    0 40px 100px -48px rgba(20, 28, 60, 0.35);
+  container-type: inline-size;
+}
+
+.site-footer p,
+.site-footer h2,
+.site-footer ul {
+  margin: 0;
+  padding: 0;
+}
+
+.site-footer-lead {
+  position: relative;
+  z-index: 1;
+  grid-row: 1;
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 2.5rem 1.5rem 1rem 2.5rem;
+}
+
+.site-footer-home {
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 32px;
+}
+
+.site-footer-brand {
+  color: rgba(36, 48, 63, 0.84);
+  font-size: 14px;
+}
+
+/* The groups as columns, down into the etching's sky: on the right it is empty for its top
+   fifth, more than the columns reach into it. */
+.site-footer-groups {
+  position: relative;
+  z-index: 1;
+  grid-row: 1 / 3;
+  grid-column: 2;
+  display: flex;
+  align-self: start;
+  gap: 1.5rem 3rem;
+  padding: 2.5rem 2.5rem 0 0;
+}
+
+.site-footer-groups nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.site-footer-groups h2 {
+  font-size: 16px;
+  letter-spacing: normal;
+  font-weight: 500;
+  line-height: 24px;
+}
+
+.site-footer-groups ul {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  list-style: none;
+}
+
+.site-footer-groups a {
+  color: rgba(36, 48, 63, 0.72);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.site-footer-groups a:hover {
+  color: var(--bay-ink);
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+/* The etching, as wide as the sheet (never narrower than 720px: on a phone it keeps its size and
+   is cropped round the Palace and the bridge). */
+.site-bay {
+  --bay-width: max(100cqw, 720px);
+  position: relative;
+  grid-row: 2;
+  grid-column: 1 / -1;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.site-bay-canvas {
+  position: relative;
+  width: var(--bay-width);
+  aspect-ratio: 1536 / 780;
+  margin-left: clamp(100cqw - var(--bay-width), 50cqw - 0.62 * var(--bay-width), 0px);
+}
+
+.site-bay-canvas img {
+  display: block;
+  max-width: none;
+}
+
+.site-bay-drawing,
+.site-bay-front {
+  width: 100%;
+  height: auto;
+}
+
+/* Light catching the water: three sets over the water band (the etching's y 470 to 780), each
+   brightening and fading in turn. */
+.site-bay-glints {
+  position: absolute;
+  top: 60.26%;
+  left: 0;
+  width: 100%;
+  height: 39.74%;
+  opacity: 0;
+  animation: site-bay-glint 5.4s ease-in-out infinite;
+}
+
+.site-bay-glints[data-set="b"] {
+  animation-delay: -1.8s;
+}
+
+.site-bay-glints[data-set="c"] {
+  animation-delay: -3.6s;
+}
+
+/* The boat's lane is the etching's width, so moving it by its own width moves the boat by the
+   etching's. It sets out hidden behind Fort Mason's pier shed and sails off the right edge. */
+.site-bay-lane {
+  position: absolute;
+  inset: 0;
+  animation: site-bay-sail 70s linear -30s infinite;
+  will-change: transform;
+}
+
+.site-bay-boat {
+  position: absolute;
+  top: 56.89%;
+  left: 34.83%;
+  width: 5.21%;
+  aspect-ratio: 64 / 96;
+}
+
+.site-bay-hull {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 62.5%;
+  transform-origin: 50% 95%;
+  animation: site-bay-rock 6.4s ease-in-out infinite;
+}
+
+.site-bay-water {
+  position: absolute;
+  top: 57.29%;
+  left: 0;
+  width: 100%;
+  height: 41.67%;
+  transform-origin: 50% 5%;
+  animation: site-bay-ripple 3.2s ease-in-out infinite;
+}
+
+/* Fort Mason's pier, the etching again cut to the shed and the pier, over the boat: the boat
+   passes behind it. */
+.site-bay-front {
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(
+    0% 46.15%,
+    34.51% 46.15%,
+    35.16% 53.33%,
+    40.17% 57.95%,
+    40.17% 62.82%,
+    44.73% 62.82%,
+    44.73% 75%,
+    0% 75%
+  );
+}
+
+@keyframes site-bay-sail {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(66%);
+  }
+}
+
+@keyframes site-bay-rock {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1.2deg);
+  }
+  50% {
+    transform: translateY(2%) rotate(1.4deg);
+  }
+}
+
+@keyframes site-bay-ripple {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scaleX(1.06);
+  }
+}
+
+@keyframes site-bay-glint {
+  0%,
+  100% {
+    opacity: 0;
+    transform: translateX(0);
+  }
+  40% {
+    opacity: 0.9;
+  }
+  70% {
+    opacity: 0;
+    transform: translateX(0.4%);
+  }
+}
+
+/* Less motion: the water still, the boat at anchor mid-bay. */
+@media (prefers-reduced-motion: reduce) {
+  .site-bay :is(.site-bay-lane, .site-bay-hull, .site-bay-water, .site-bay-glints) {
+    animation: none;
+  }
+
+  .site-bay-lane {
+    transform: translateX(30%);
+  }
+}
+
+/* A narrow sheet: the line, then the links in a row, then the etching. */
+@container (max-width: 799px) {
+  .site-footer-lead,
+  .site-footer-groups,
+  .site-bay {
+    grid-column: 1 / -1;
+  }
+
+  .site-footer-groups {
+    grid-row: 2;
+    flex-wrap: wrap;
+    padding: 0 2.5rem;
+  }
+
+  .site-bay {
+    grid-row: 3;
+  }
+}
+
+/* A phone: a tighter sheet, the groups two to a row, and the etching tucked up under them. */
+@container (max-width: 559px) {
+  .site-footer-lead {
+    padding: 1.5rem 1.25rem 1rem;
+  }
+
+  .site-footer-groups {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem 1.25rem;
+    padding: 0 1.25rem;
+  }
+
+  .site-bay {
+    margin-top: calc(var(--bay-width) * -0.15);
+  }
+}
