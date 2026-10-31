@@ -15,7 +15,7 @@ use mergepatrol_store::{ReviewAnswers, ReviewRecord};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::api::repo_name;
+use crate::api::{approval, installation, repo_name};
 use crate::auth::Caller;
 use crate::{ApiError, AppState};
 
@@ -540,9 +540,15 @@ pub(crate) async fn answer_agent_review(
     }
     text.push_str(&unplaced);
     text.push_str("\n\n<sub>Answered Mergepatrol's review.</sub>");
+    // The author's own approval goes as a comment: GitHub takes none from them.
     let verdict = match changes {
         true => Verdict::RequestChanges,
-        false => Verdict::Approve,
+        false => {
+            let gh = installation(&app, id).await?;
+            approval(&gh, &repo, number, &by)
+                .await?
+                .unwrap_or(Verdict::Comment)
+        }
     };
     setup::review_lines_as(
         &token,
