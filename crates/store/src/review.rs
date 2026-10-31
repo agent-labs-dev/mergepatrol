@@ -126,6 +126,8 @@ pub trait ReviewStore: Send + Sync {
     /// Marks the review as having told the PR, on GitHub, to answer it on the dashboard. False
     /// if it told it already, or it no longer asks.
     async fn nudge_review(&self, id: i64) -> Result<bool>;
+    /// Undoes `nudge_review`, as when posting the note failed, so a later reply tries again.
+    async fn release_nudge(&self, id: i64) -> Result<()>;
     /// A human's question for the agent. Returns it, with its id.
     async fn add_question(
         &self,
@@ -425,6 +427,14 @@ impl ReviewStore for PgStore {
         Ok(updated.rows_affected() == 1)
     }
 
+    async fn release_nudge(&self, id: i64) -> Result<()> {
+        sqlx::query("UPDATE agent_reviews SET nudged_at = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn add_question(
         &self,
         id: i64,
@@ -643,6 +653,9 @@ mod tests {
         // A PR is told once per review where its answers go.
         assert!(store.nudge_review(r.id).await.unwrap());
         assert!(!store.nudge_review(r.id).await.unwrap(), "told once");
+        // A note that failed to post is tried again.
+        store.release_nudge(r.id).await.unwrap();
+        assert!(store.nudge_review(r.id).await.unwrap());
 
         let answers = ReviewAnswers {
             answers: BTreeMap::from([(

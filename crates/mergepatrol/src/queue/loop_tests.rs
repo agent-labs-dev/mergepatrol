@@ -809,6 +809,9 @@ impl ReviewStore for Mem {
     async fn nudge_review(&self, _: i64) -> Result<bool> {
         unreachable!()
     }
+    async fn release_nudge(&self, _: i64) -> Result<()> {
+        unreachable!()
+    }
     async fn add_question(
         &self,
         _: i64,

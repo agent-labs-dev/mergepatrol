@@ -97,53 +97,100 @@ pub(crate) async fn heard(
         .context("no GitHub App is set up")?;
     let gh = App::from_credentials(&creds)?.installation(installation);
     // The dashboard takes answers only from those who may push; so does this.
-    let approves = match &reply.kind {
-        ReplyKind::Approved { commit } if *commit == review.head_sha => {
-            gh.can_write(repo, &reply.login).await?
-        }
-        ReplyKind::Approved { .. } | ReplyKind::Said => false,
+    let missed = match &reply.kind {
+        ReplyKind::Said => Missed::Said,
+        ReplyKind::Approved { commit } if *commit != review.head_sha => Missed::OtherCommit {
+            commit: commit.clone(),
+        },
+        ReplyKind::Approved { .. } => match gh.can_write(repo, &reply.login).await? {
+            true => return approve(app, installation, repo, &review, &reply).await,
+            false => Missed::NoWrite,
+        },
     };
-    if approves {
-        let answered = ReviewAnswers {
-            answers: review
-                .asks()
-                .map(|f| (f.finding.id.clone(), Answer::Fine))
-                .collect(),
-            by: reply.login.clone(),
-            note: String::new(),
-            status: ReviewStatus::Approved,
-        };
-        if app.store.answer_review(review.id, &answered).await? {
-            tracing::info!(installation, %repo, number = reply.number, by = %reply.login, "approved on GitHub: the agent's review is answered");
-            app.store
-                .inbox_reviewed(installation, repo, reply.number, &reply.login)
-                .await?;
-            app.wake.wake(installation, repo.clone());
-        }
-        return Ok(());
-    }
     if !app.store.nudge_review(review.id).await? {
         return Ok(());
     }
-    let pr = gh.pull_request(repo, reply.number).await?;
-    let url = review_url(&app.public_url, repo, pr.merges_into(), reply.number);
-    gh.comment(repo, reply.number, &nudge(&review, &reply.login, &url))
-        .await?;
+    let posted = async {
+        let pr = gh.pull_request(repo, reply.number).await?;
+        let url = review_url(&app.public_url, repo, pr.merges_into(), reply.number);
+        let body = nudge(&review, &reply.login, &missed, &url);
+        gh.comment(repo, reply.number, &body).await
+    };
+    if let Err(e) = posted.await {
+        // Not told after all: a later reply tries again.
+        app.store.release_nudge(review.id).await?;
+        return Err(e);
+    }
     tracing::info!(installation, %repo, number = reply.number, by = %reply.login, "told the PR to answer the agent's review in Mergepatrol");
     Ok(())
 }
 
-/// What the PR is told: that its review still holds it, and how to clear it.
-fn nudge(review: &ReviewRecord, login: &str, url: &str) -> String {
+/// Approves the review for an approval of its head on GitHub: every ask is fine.
+async fn approve(
+    app: &AppState,
+    installation: u64,
+    repo: &RepoName,
+    review: &ReviewRecord,
+    reply: &Reply,
+) -> Result<()> {
+    let answered = ReviewAnswers {
+        answers: review
+            .asks()
+            .map(|f| (f.finding.id.clone(), Answer::Fine))
+            .collect(),
+        by: reply.login.clone(),
+        note: String::new(),
+        status: ReviewStatus::Approved,
+    };
+    if app.store.answer_review(review.id, &answered).await? {
+        tracing::info!(installation, %repo, number = reply.number, by = %reply.login, "approved on GitHub: the agent's review is answered");
+        app.store
+            .inbox_reviewed(installation, repo, reply.number, &reply.login)
+            .await?;
+        app.wake.wake(installation, repo.clone());
+    }
+    Ok(())
+}
+
+/// Why a reply did not answer the review.
+enum Missed {
+    /// A comment, or a review that does not approve.
+    Said,
+    /// An approval of another commit than the one the agent reviewed.
+    OtherCommit { commit: String },
+    /// An approval from someone who may not push to the repo.
+    NoWrite,
+}
+
+/// What the PR is told: that its review still holds it, why the reply did not clear it, and
+/// how to.
+fn nudge(review: &ReviewRecord, login: &str, missed: &Missed, url: &str) -> String {
     let what = match review.asks().count() {
         // The agent could not review: a human approves the whole PR instead.
         0 => "the agent could not review it, so it waits for a human's approval".to_owned(),
         1 => "it asks a human about 1 thing".to_owned(),
         n => format!("it asks a human about {n} things"),
     };
+    let how = match missed {
+        Missed::Said => format!(
+            "Comments on GitHub don't reach it. [Answer in Mergepatrol]({url}), or, if everything it asks about is fine as it is, approve the PR here on GitHub."
+        ),
+        Missed::OtherCommit { commit } => format!(
+            "Your approval is of `{}`, but the agent reviewed `{}`, so it doesn't answer the review. [Answer in Mergepatrol]({url}), or approve the PR's newest commit here on GitHub.",
+            short(commit),
+            short(&review.head_sha),
+        ),
+        Missed::NoWrite => format!(
+            "Your approval doesn't answer it: only someone who can push to the repo may. [Answer in Mergepatrol]({url}) if you can push, or ask someone who can to approve."
+        ),
+    };
     format!(
-        "@{login}, Mergepatrol's review still holds this PR: {what}. Comments on GitHub don't reach it. [Answer in Mergepatrol]({url}), or, if everything it asks about is fine as it is, approve the PR here on GitHub. The PR keeps its place in the queue meanwhile."
+        "@{login}, Mergepatrol's review still holds this PR: {what}. {how} The PR keeps its place in the queue meanwhile."
     )
+}
+
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
 }
 
 #[cfg(test)]
