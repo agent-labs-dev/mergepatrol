@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Hold, PrNumber};
+use crate::{Hold, PrNumber, ReviewStatus};
 
 /// A labeled pull request, or a stack with a labeled layer, as GitHub shows it now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,6 +119,37 @@ impl Entry {
         } else {
             self.layers.clone()
         }
+    }
+
+    /// The entry with the review hold its PR's newest review, by `status`, holds it for now. A
+    /// tick sets holds, and one that runs a job saves no other PR's until the job ends: an
+    /// answer to the review, or the agent finishing it, would show only then.
+    pub fn with_review(mut self, status: impl Fn(PrNumber) -> Option<ReviewStatus>) -> Self {
+        let EntryState::Held(hold) = &self.state else {
+            return self;
+        };
+        if !matches!(
+            hold.innermost(),
+            Hold::Reviewing | Hold::ReviewAsks | Hold::ReviewChanges
+        ) {
+            return self;
+        }
+        let layer = hold.layer();
+        let Some(now) = status(layer.unwrap_or(self.number)) else {
+            return self;
+        };
+        self.state = match (now.hold(), layer) {
+            (Some(hold), Some(number)) => EntryState::Held(Hold::Layer {
+                number,
+                hold: Box::new(hold),
+            }),
+            (Some(hold), None) => EntryState::Held(hold),
+            // Another layer may hold the stack: the next tick tells.
+            (None, Some(_)) => return self,
+            // Its other gates come after the review's: the next tick holds it for one, if any.
+            (None, None) => EntryState::Waiting,
+        };
+        self
     }
 }
 
@@ -613,5 +644,47 @@ mod tests {
         lane.activate(2);
         lane.stop();
         assert_eq!(lane.next(8), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_review_hold_shows_the_review_as_it_is_now() {
+        use EntryState::{Held, Waiting};
+        use Hold::{Draft, ReviewAsks, ReviewChanges, Reviewing};
+        use ReviewStatus::{Approved, Asks, Changes, Running};
+        let layer = |hold| Hold::Layer {
+            number: 7,
+            hold: Box::new(hold),
+        };
+        let cases = [
+            // An answer while the lane runs another PR's job.
+            (Held(ReviewAsks), Some(Approved), Waiting),
+            (Held(ReviewAsks), Some(Changes), Held(ReviewChanges)),
+            (Held(Reviewing), Some(Asks), Held(ReviewAsks)),
+            (Held(ReviewAsks), None, Held(ReviewAsks)),
+            (Held(Draft), Some(Running), Held(Draft)),
+            (
+                Held(layer(ReviewAsks)),
+                Some(Changes),
+                Held(layer(ReviewChanges)),
+            ),
+            // Another layer may hold the stack.
+            (
+                Held(layer(ReviewAsks)),
+                Some(Approved),
+                Held(layer(ReviewAsks)),
+            ),
+        ];
+        for (state, status, shown) in cases {
+            let e = Entry {
+                number: 9,
+                priority: false,
+                state: state.clone(),
+                summary: PrSummary::default(),
+                layers: Vec::new(),
+                heads: Vec::new(),
+            };
+            let reviewed = e.with_review(|n| status.filter(|_| n == 7 || n == 9));
+            assert_eq!(reviewed.state, shown, "{state:?} with {status:?}");
+        }
     }
 }

@@ -741,11 +741,8 @@ async fn review_hold(
                 r.status
             }
         };
-        let hold = match status {
-            ReviewStatus::Approved => continue,
-            ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale => Hold::Reviewing,
-            ReviewStatus::Asks => Hold::ReviewAsks,
-            ReviewStatus::Changes => Hold::ReviewChanges,
+        let Some(hold) = status.hold() else {
+            continue;
         };
         return Ok(Some(match stacked {
             true => Hold::Layer {
