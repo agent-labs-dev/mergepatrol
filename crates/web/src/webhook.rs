@@ -90,6 +90,13 @@ pub(crate) async fn receive(
                     .await;
             }
         }
+        if let Some(reply) = crate::pr_reply::reply(event, &payload)
+            && let Err(e) = crate::pr_reply::heard(&state, installation, &repo, reply).await
+        {
+            // A reply is read once: a failure here loses only the note, or the approval,
+            // which the dashboard still takes.
+            tracing::warn!(installation, %repo, error = %format!("{e:#}"), "could not act on a reply to the agent's review");
+        }
         // The queue reads the rest from GitHub, so it wakes even when the write failed. The
         // error still goes back, so the delivery shows as failed on GitHub, to send again.
         state.wake.wake(installation, repo);

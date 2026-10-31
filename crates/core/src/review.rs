@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Hold;
+use crate::{Hold, PrNumber, RepoName};
 
 /// What a finding is about. Some kinds hurt more when they are wrong, so each has its own bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -299,6 +299,15 @@ impl ReviewStatus {
             ReviewStatus::Changes => Some(Hold::ReviewChanges),
         }
     }
+}
+
+/// Where a PR's review is on the dashboard, to answer it: the PR in its lane into `trunk`.
+pub fn review_url(public_url: &str, repo: &RepoName, trunk: &str, number: PrNumber) -> String {
+    format!(
+        "{}/{}/queue?lane={repo}:{trunk}&pr={number}&answer=true",
+        public_url.trim_end_matches('/'),
+        repo.owner,
+    )
 }
 
 /// A human's answer about one finding.
