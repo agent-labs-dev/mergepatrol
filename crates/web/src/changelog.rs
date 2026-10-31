@@ -393,7 +393,7 @@ img.shot,.entry img,.card img{display:block;margin:.75rem 0;max-height:28rem;bor
 .card h2{margin:.4rem 0;font-size:1.125rem}.card h2 a{text-decoration:none}.card p{margin:.25rem 0}\
 details summary{cursor:pointer}.card summary{color:var(--fg2);font-size:.875rem}\
 .fixes h3{margin:.5rem 0;font-size:1rem}.fixes ul{padding-left:1.1rem;margin:0}\
-body:has(.day) :is(header,main,footer){max-width:52rem}\
+body:has(.day) :is(header,main){max-width:52rem}\
 @media(max-width:640px){.day{grid-template-columns:1fr;gap:.5rem}.rail{position:static}.col{border:0;padding:0}}";
 
 #[cfg(test)]

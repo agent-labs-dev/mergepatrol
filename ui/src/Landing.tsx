@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
+import footer from "./footer.html?raw";
+import "./footer.css";
 import type { PricingView } from "./api/PricingView";
 import type { ThemeProps } from "./theme";
-import { Mark, primary, repoUrl, StarButton, secondary, ThemeToggle } from "./ui";
+import { Mark, primary, StarButton, secondary, ThemeToggle } from "./ui";
 
 const steps: [string, ReactNode][] = [
   [
@@ -197,16 +199,11 @@ export function Landing({
         </section>
       </main>
 
-      <footer className="border-t border-line py-6 text-center text-xs text-muted">
-        Mergepatrol · Apache-2.0 ·{" "}
-        <a className="hover:text-fg" href={repoUrl}>
-          GitHub
-        </a>{" "}
-        ·{" "}
-        <a className="hover:text-fg" href="/changelog">
-          Changelog
-        </a>
-      </footer>
+      <div
+        className="mt-8"
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: our own static file, which the blog and changelog also render
+        dangerouslySetInnerHTML={{ __html: footer }}
+      />
     </div>
   );
 }

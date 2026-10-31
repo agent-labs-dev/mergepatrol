@@ -281,24 +281,28 @@ pub(crate) fn page(
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="icon" href="/favicon.ico" sizes="32x32" />
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-<style>{STYLE}</style>
+<style>{STYLE}{FOOTER_STYLE}</style>
 {tracking}
 </head>
 <body>
 <header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
 <main>{main}</main>
-<footer><a href="/">Mergepatrol</a>: a merge queue for GitHub, with an agent on conflicts. <a href="/auth/login">Sign in with GitHub</a></footer>
+{FOOTER}
 </body>
 </html>
 "#
     )
 }
 
+/// The landing page's footer, shared with the dashboard's build so the two cannot drift.
+const FOOTER: &str = include_str!("../../../ui/src/footer.html");
+const FOOTER_STYLE: &str = include_str!("../../../ui/src/footer.css");
+
 const STYLE: &str = "\
 :root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#525252;--line:#e5e5e5;--sunken:#f5f5f5}\
 @media(prefers-color-scheme:dark){:root{--bg:#0a0a0a;--fg:#fafafa;--fg2:#a3a3a3;--line:#262626;--sunken:#171717}}\
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.7 ui-sans-serif,system-ui,sans-serif}\
-header,main,footer{max-width:42rem;margin:0 auto;padding:0 1.25rem}\
+header,main{max-width:42rem;margin:0 auto;padding:0 1.25rem}\
 header{display:flex;justify-content:space-between;align-items:center;height:3.5rem;border-bottom:1px solid var(--line)}\
 .brand{display:flex;gap:.5rem;align-items:center;font-weight:600}nav{display:flex;gap:1rem}\
 a{color:inherit}header a{text-decoration:none}\
@@ -308,8 +312,7 @@ main{padding-top:2rem;padding-bottom:3rem}h1,h2,h3{font-weight:600;letter-spacin
 .posts a{font-weight:600;font-size:1.125rem}.posts p{margin:.25rem 0}\
 pre{background:var(--sunken);padding:1rem;overflow-x:auto;border-radius:.5rem}\
 code{font:.875em ui-monospace,monospace}img{max-width:100%}\
-table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:.25rem .5rem}\
-footer{border-top:1px solid var(--line);padding-top:1rem;padding-bottom:2rem;color:var(--fg2);font-size:.875rem}";
+table{border-collapse:collapse}td,th{border:1px solid var(--line);padding:.25rem .5rem}";
 
 /// PostHog's browser library, configured as `ui/src/analytics.ts` configures the dashboard's. The
 /// articles are plain HTML with no app bundle, so without this a reader who arrives from a search
