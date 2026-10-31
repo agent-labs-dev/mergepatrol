@@ -19,6 +19,18 @@ Public repos are free. Private repos cost $15 a seat a month, after a free trial
 
 ## How it works
 
+### What a queued PR needs
+
+A labeled PR keeps its place in line, on hold, until GitHub would merge it and the queue can take it:
+
+- It is not a draft.
+- It has the reviews its branch protection or rulesets require, and no requested changes from a required reviewer. Mergepatrol reads GitHub's review decision, so a repo that requires no review needs none.
+- It targets the default branch, or a branch in `branches` of the config file.
+- With **Automatic review** on, the agent's review cleared it, or a human answered what it asked.
+- On the hosted Mergepatrol, a private repo has a subscription, and a public repo's workspace is under the [fair-use limit](#pricing).
+
+Then it runs, rebased alone or tested in a [batch](#batches), and merges once its checks pass. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
+
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
 When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
@@ -125,6 +137,26 @@ GitHub webhooks wake a queue as soon as something changes, but GitHub only deliv
 
 Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own model API keys. A user sees the workspaces that GitHub lets them access. A session reads them from GitHub again every hour, so a new installation shows up, and a lost one goes, within the hour. A session lasts 30 days from its last use, and ends when GitHub stops taking the user's token: when they revoke it, or after 6 months, when GitHub's refresh token expires.
 
+### Environment variables
+
+If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
+| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64. To rotate it, see [Rotate the secret key](#rotate-the-secret-key) |
+| `MERGEPATROL_SECRET_KEY_FILE` | | A file that holds the secret key, instead of `MERGEPATROL_SECRET_KEY`. Compose uses one |
+| `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
+| `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
+| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
+| `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
+| `MERGEPATROL_MAX_JOBS` | `4` | The most rebase and fix jobs that run at once, across every queue |
+| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
+| `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
+| `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
+| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
+| `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
+
 ## Run it with an App you made yourself
 
 The hosted Mergepatrol uses one public GitHub App, which we create by hand on GitHub, rather than with the setup in the dashboard. A self-hosted Mergepatrol can do the same. Set the App's credentials, and the setup token and the App creation are skipped:
@@ -152,7 +184,7 @@ On GCP, a deploy runs the old revision beside the new one for a while, and each 
 
 ## Repo settings
 
-Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. Mergepatrol reads the file from there, so a PR cannot change its own settings. A setting the file leaves out takes the default from the table above.
+Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. Mergepatrol reads the file from there, so a PR cannot change its own settings. A setting the file leaves out takes the instance's default: on a self-hosted Mergepatrol, the `MERGEPATROL_*` variables in [Environment variables](#environment-variables).
 
 ```yaml
 version: 1
@@ -310,7 +342,7 @@ The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the 
 | `mergepatrol.state` | `on`, `off` (no App on the repo, no config file, or turned off), or `paused` (the config file does not parse: `config_error` says why) |
 | `mergepatrol.override` | `on` or `off` when turned so in the dashboard, whatever the config file says. `null` follows the file |
 | `queue` | `null` unless queued. `state` is `waiting`, `running` or `held`. `position` counts from 1 in the order the queue takes PRs. `stack` is `{ number, layers }` for a stack. `batch_pr` is the draft PR testing it, while it runs in a batch |
-| `queue.hold.reason` | `draft`, `review_required`, `changes_requested`, `workflow_approval` (a fork PR's runs wait for approval), `fork_edits_off` (a fork PR behind its trunk that does not allow edits by maintainers), `no_queue` (it targets a branch without a queue), `no_subscription` or `fair_use_limit`. `layer` is the stack's PR that holds it |
+| `queue.hold.reason` | `draft`, `review_required`, `changes_requested`, `workflow_approval` (a fork PR's runs wait for approval), `fork_edits_off` (a fork PR behind its trunk that does not allow edits by maintainers), `no_queue` (it targets a branch without a queue), `no_subscription`, `fair_use_limit`, `reviewing` (the agent's automatic review runs), `review_asks` (that review waits for a human's answers) or `review_changes` (a human answering it asked for changes, and it waits for a push). `layer` is the stack's PR that holds it |
 | `merged`, `ejected` | How it last left the queue: `{ at, sha }` or `{ at, reason }`. Both `null` while it is queued, and when it left otherwise |
 
 Every response has an `ETag`: send it back as `If-None-Match` for a `304` when nothing changed. Each caller, by its token, has 5,000 calls an hour, a `304` included, which `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-used` and `x-ratelimit-reset` (Unix seconds) report. Past the limit, a `429` has a `retry-after`, in seconds. So does a `503` when GitHub's own rate limit is used up.
@@ -381,24 +413,6 @@ A workspace's first subscription starts with Stripe's trial, without a card. One
 | `MERGEPATROL_STRIPE_SECRET_KEY` | A secret or restricted key: Checkout sessions, customer portal sessions, and subscriptions (write) |
 | `MERGEPATROL_STRIPE_WEBHOOK_SECRET` | The webhook endpoint's signing secret, `whsec_…` |
 | `MERGEPATROL_STRIPE_PRICE` | The price, `price_…` |
-
-If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `MERGEPATROL_DATABASE_URL` | (required) | Postgres. Compose runs one |
-| `MERGEPATROL_SECRET_KEY` | (required) | Encrypts the stored secrets. 32 bytes, base64. To rotate it, see below |
-| `MERGEPATROL_SECRET_KEY_FILE` | | A file that holds the secret key, instead of `MERGEPATROL_SECRET_KEY`. Compose uses one |
-| `MERGEPATROL_PUBLIC_URL` | `http://localhost:8080` | Where users reach the dashboard |
-| `MERGEPATROL_LABEL` | `mergepatrol` | The default trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed` |
-| `MERGEPATROL_POLL_SECS` | `60` | How often to poll GitHub, in case a webhook is lost |
-| `MERGEPATROL_BATCH_SIZE` | `8` | The default batch size: the most PRs tested together. `1` merges one PR at a time |
-| `MERGEPATROL_MAX_JOBS` | `4` | The most rebase and fix jobs that run at once, across every queue |
-| `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
-| `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
-| `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
-| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
-| `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
 
 ### Analytics
 
