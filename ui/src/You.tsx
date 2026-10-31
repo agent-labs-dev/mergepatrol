@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useReducer, useRef, useState } from "react";
+import { AgentReviewScreen, reviewedPr } from "./AgentReview";
 import {
   closePull,
   closeUrl,
   dequeuePull,
+  fetchLanes,
   fetchSession,
   fetchYou,
   nudgePull,
@@ -19,6 +21,7 @@ import type { InboxPullView } from "./api/InboxPullView";
 import type { ReviewPull } from "./api/ReviewPull";
 import type { VerdictView } from "./api/VerdictView";
 import { PullDetail } from "./PullDetail";
+import { entryOf, QueueActivity, QueueGate } from "./Queue";
 import { Countdown, toasts } from "./Toasts";
 import { Avatar, RepoIcon, timeAgo } from "./ui";
 
@@ -66,7 +69,7 @@ type Held = {
 /** Three panes, as the Queue page: the folders, the PRs in one, the selected PR with the review
  * box or its author's moves under it. Every repo of every workspace, as webhooks keep them. */
 export function You() {
-  const { folder = "needs", pr } = useSearch({ from: "/$account/you" });
+  const { folder = "needs", pr, answer } = useSearch({ from: "/$account/you" });
   const navigate = useNavigate({ from: "/$account/you" });
   const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login ?? "";
   // Read from Mergepatrol's own database, not GitHub: cheap to read often.
@@ -311,7 +314,26 @@ export function You() {
     );
   }, [pullKey, unread]);
 
-  const select = (p?: InboxPullView) => navigate({ search: (s) => ({ ...s, pr: p && keyOf(p) }) });
+  // The queue's own view of a queued PR, shared with the Queue page: its hold and review.
+  const lanes = useQuery({
+    queryKey: ["lanes", pull?.workspace],
+    queryFn: () => fetchLanes(pull?.workspace ?? 0),
+    enabled: !!pull?.queue,
+    refetchInterval: 3000,
+  });
+  const lane = pull?.queue
+    ? lanes.data?.find((l) => l.repo === pull.repo && l.trunk === pull.base)
+    : undefined;
+  const entry = pull && lane && entryOf(lane, pull.number);
+
+  const select = (p?: InboxPullView) =>
+    navigate({ search: (s) => ({ ...s, pr: p && keyOf(p), answer: undefined }) });
+  /** A PR the queue's events name: here when it is in a folder, else on GitHub. */
+  const selectNamed = (repo: string, n: number) => {
+    const f = FOLDERS.find((f) => lists[f].some((p) => p.repo === repo && p.number === n));
+    if (f) navigate({ search: { folder: f, pr: `${repo}#${n}` } });
+    else window.open(`https://github.com/${repo}/pull/${n}`, "_blank", "noreferrer");
+  };
   const open = (f: Folder) => {
     last.current = 0;
     navigate({ search: { folder: f } });
@@ -320,29 +342,44 @@ export function You() {
   const [snoozing, setSnoozing] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the menu is for the PR it opened on.
   useEffect(() => setSnoozing(false), [pullKey]);
-  useKeys({
-    j: () => select(list[Math.min(i + 1, list.length - 1)]),
-    k: () => select(list[Math.max(i - 1, 0)]),
-    a: () =>
-      pull &&
-      folder === "needs" &&
-      hold(pull, {
-        kind: "review",
-        review: { verdict: "approve", body: drafts.get(keyOf(pull)) ?? "", queue: false },
-      }),
-    r: () => pull && folder === "needs" && document.getElementById("review-body")?.focus(),
-    u: () => newest && undo(newest),
-    q: () =>
-      pull &&
-      folder !== "needs" &&
-      stepOf(pull, clickOf(pull)).ready &&
-      queue.mutate({ p: pull, priority: false }),
-    s: () => pull && folder !== "merged" && setSnoozing(true),
-    ...Object.fromEntries(FOLDERS.map((f, n) => [String(n + 1), () => open(f)])),
-  });
+  useKeys(
+    answer
+      ? {}
+      : {
+          j: () => select(list[Math.min(i + 1, list.length - 1)]),
+          k: () => select(list[Math.max(i - 1, 0)]),
+          a: () =>
+            pull &&
+            folder === "needs" &&
+            hold(pull, {
+              kind: "review",
+              review: { verdict: "approve", body: drafts.get(keyOf(pull)) ?? "", queue: false },
+            }),
+          r: () => pull && folder === "needs" && document.getElementById("review-body")?.focus(),
+          u: () => newest && undo(newest),
+          q: () =>
+            pull &&
+            folder !== "needs" &&
+            stepOf(pull, clickOf(pull)).ready &&
+            queue.mutate({ p: pull, priority: false }),
+          s: () => pull && folder !== "merged" && setSnoozing(true),
+          ...Object.fromEntries(FOLDERS.map((f, n) => [String(n + 1), () => open(f)])),
+        },
+  );
 
   if (you.isError)
     return <p className="p-6 text-bad">Could not load your PRs: {you.error.message}</p>;
+  if (answer && pull && lane && entry)
+    return (
+      <AgentReviewScreen
+        workspace={pull.workspace}
+        repo={pull.repo}
+        pr={reviewedPr(entry)}
+        title={pull.title}
+        author={pull.author?.login}
+        onExit={() => navigate({ search: (s) => ({ ...s, answer: undefined }) })}
+      />
+    );
   return (
     <div className="flex h-full flex-col lg:grid lg:grid-cols-[220px_minmax(360px,1fr)_minmax(400px,1.1fr)]">
       <nav
@@ -489,6 +526,28 @@ export function You() {
             repo={pull.repo}
             trunk={pull.base}
             pull={pull}
+            gate={
+              lane &&
+              entry && (
+                <QueueGate
+                  workspace={pull.workspace}
+                  lane={lane}
+                  entry={entry}
+                  onReview={() => navigate({ search: (s) => ({ ...s, answer: true }) })}
+                />
+              )
+            }
+            activity={
+              lane &&
+              entry && (
+                <QueueActivity
+                  workspace={pull.workspace}
+                  lane={lane}
+                  entry={entry}
+                  onSelect={(n) => selectNamed(pull.repo, n)}
+                />
+              )
+            }
             onBack={() => select()}
             footer={(() => {
               const later = (

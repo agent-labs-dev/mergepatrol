@@ -1,6 +1,6 @@
 import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
-import { type ReactNode, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Activity } from "./Activity";
 import { AgentReviewScreen, Gate, reviewBadge, reviewedPr, reviewLine } from "./AgentReview";
 import {
@@ -18,7 +18,7 @@ import type { LaneView } from "./api/LaneView";
 import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
 import { PullDetail } from "./PullDetail";
-import { Avatar, primary, secondary, timeAgo } from "./ui";
+import { Avatar, primary, secondary } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 
@@ -237,50 +237,65 @@ export function Queue({ workspace }: { workspace: number }) {
         )}
       </div>
       <div className={`min-h-0 flex-1 overflow-y-auto ${picked ? "" : "max-lg:hidden"}`}>
-        {entry?.state === "open" ? (
+        {entry && (
           <PullDetail
             key={entry.number}
             workspace={workspace}
             repo={lane.repo}
             trunk={lane.trunk}
-            pull={{
-              ...entry,
-              draft: open.data?.find((o) => o.number === entry.number)?.draft ?? false,
-            }}
+            pull={
+              entry.state === "open"
+                ? {
+                    ...entry,
+                    draft: open.data?.find((o) => o.number === entry.number)?.draft ?? false,
+                  }
+                : queuedPull(lane.repo, { ...entry, state: entry.state })
+            }
+            gate={
+              entry.state !== "open" && (
+                <QueueGate
+                  workspace={workspace}
+                  lane={lane}
+                  entry={{ ...entry, state: entry.state }}
+                  onReview={() => setAnswer(true)}
+                />
+              )
+            }
+            activity={
+              entry.state !== "open" && (
+                <QueueActivity
+                  workspace={workspace}
+                  lane={lane}
+                  entry={{ ...entry, state: entry.state }}
+                  onSelect={setPr}
+                />
+              )
+            }
             actions={
-              <>
-                <button
-                  type="button"
-                  disabled={pending.has(entry.number)}
-                  onClick={() => actions.queue(entry, false)}
-                  className={`${primary} h-8 px-3`}
-                >
-                  Queue
-                </button>
-                <button
-                  type="button"
-                  disabled={pending.has(entry.number)}
-                  onClick={() => actions.queue(entry, true)}
-                  title="Queue at the front"
-                  className={`${secondary} h-8 px-3 text-hot!`}
-                >
-                  ↑ Priority
-                </button>
-              </>
+              entry.state === "open" && (
+                <>
+                  <button
+                    type="button"
+                    disabled={pending.has(entry.number)}
+                    onClick={() => actions.queue(entry, false)}
+                    className={`${primary} h-8 px-3`}
+                  >
+                    Queue
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pending.has(entry.number)}
+                    onClick={() => actions.queue(entry, true)}
+                    title="Queue at the front"
+                    className={`${secondary} h-8 px-3 text-hot!`}
+                  >
+                    ↑ Priority
+                  </button>
+                </>
+              )
             }
             onBack={() => setPr()}
           />
-        ) : (
-          entry && (
-            <Detail
-              workspace={workspace}
-              lane={lane}
-              entry={entry}
-              onSelect={setPr}
-              onReview={() => setAnswer(true)}
-              onBack={() => setPr()}
-            />
-          )
         )}
       </div>
     </div>
@@ -313,10 +328,6 @@ type PendingKind = Pending["kind"] | "prioritizing" | "closing";
 
 /** The queue looks at a repo within seconds of a label change. Past this, stop waiting. */
 const PENDING_MS = 60_000;
-
-/** The lane's entry for `n`: a PR's, or its stack's. */
-const entryOf = (lane: LaneView, n: number) =>
-  lane.entries.find((e) => e.number === n || e.layers.includes(n));
 
 const pendingKey = (repo: string, n: number) => `${repo}#${n}`;
 
@@ -678,117 +689,91 @@ function Diff({ entry: e }: { entry: Item }) {
   );
 }
 
-function Detail({
+/** A queued PR's place in the queue, over its summary: why it is held, or the agent's review
+ * and what it asks a human. The Queue and You pages show the same. */
+export function QueueGate({
+  workspace,
+  lane,
+  entry: e,
+  onReview,
+}: {
+  workspace: number;
+  lane: LaneView;
+  entry: EntryView;
+  /** Opens the screen that answers the agent's review. */
+  onReview: () => void;
+}) {
+  return (
+    <div className="mb-6">
+      <p className="flex items-center gap-2 text-sm">
+        <span className="text-muted">In the queue</span>
+        <State entry={e} />
+        {e.priority && <span className="text-xs font-medium text-hot">↑ Priority</span>}
+        {e.fork && <span className="text-xs text-muted">From a fork</span>}
+        {e.layers.length > 0 && <span className="text-xs text-muted">{refsOf(e)}</span>}
+      </p>
+      {e.state === "held" && !reviewBadge(e) && (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">
+          <p className="font-medium">Held</p>
+          <p className="mt-0.5">{e.detail}</p>
+        </div>
+      )}
+      {e.review && <Gate workspace={workspace} repo={lane.repo} entry={e} onAnswer={onReview} />}
+    </div>
+  );
+}
+
+/** What the queue did with a queued PR: its runs, their cost, and its events. */
+export function QueueActivity({
   workspace,
   lane,
   entry: e,
   onSelect,
-  onReview,
-  onBack,
 }: {
   workspace: number;
   lane: LaneView;
-  entry: Item;
+  entry: EntryView;
+  /** Selects a PR the events name, when it is queued. */
   onSelect: (pr: number) => void;
-  /** Opens the screen that answers the agent's review. */
-  onReview: () => void;
-  /** Back to the PRs, on a screen too narrow to show them beside it. */
-  onBack: () => void;
 }) {
   const events = useQuery({
     queryKey: ["events", workspace, lane.repo, prOf(e)],
     queryFn: () => fetchEvents(workspace, lane.repo, prOf(e)),
     refetchInterval: 3000,
   });
-  const url = e.url || `https://github.com/${lane.repo}/pull/${prOf(e)}`;
+  if (events.isPending) return <p className="text-faint">Loading…</p>;
+  if (events.isError) return <p className="text-bad">{events.error.message}</p>;
+  if (events.data.length === 0) return <p className="text-faint">Nothing yet.</p>;
   return (
-    <div className="p-4 sm:p-6">
-      <button type="button" onClick={onBack} className="mb-3 text-muted hover:text-fg lg:hidden">
-        ← {lane.repo.split("/")[1]}
-      </button>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-        <div className="min-w-0">
-          <h2 className="text-lg font-semibold tracking-tight">{titleOf(e)}</h2>
-          <p className="mt-0.5 text-muted">
-            {lane.repo} {refsOf(e)}
-            {e.author && e.created_at && (
-              <>
-                {" "}
-                · opened {timeAgo(e.created_at)} by {e.author.login}
-              </>
-            )}
-          </p>
-        </div>
-        <a href={url} target="_blank" rel="noreferrer" className={`${secondary} shrink-0`}>
-          Open on GitHub
-        </a>
-      </div>
-      {e.state === "held" && !reviewBadge({ ...e, state: e.state }) && (
-        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">
-          <p className="font-medium">Held</p>
-          <p className="mt-0.5">{e.detail}</p>
-        </div>
-      )}
-      {e.state !== "open" && e.review && (
-        <Gate
-          workspace={workspace}
-          repo={lane.repo}
-          entry={{ ...e, state: e.state }}
-          onAnswer={onReview}
-        />
-      )}
-      {e.url && (
-        <dl className="mt-6 grid grid-cols-[110px_1fr] gap-x-4 gap-y-3">
-          <Field label="Status">
-            <span className="flex items-center gap-2">
-              <State entry={e} />
-              {e.priority && <span className="text-xs font-medium text-hot">↑ Priority</span>}
-              {e.fork && <span className="text-xs text-muted">From a fork</span>}
-            </span>
-          </Field>
-          <Field label="Branch">
-            <span className="font-mono text-xs">
-              {e.head_ref} <span className="text-faint">→ {lane.trunk}</span>
-            </span>
-          </Field>
-          <Field label="Checks">
-            <Checks checks={e.checks} label />
-          </Field>
-          <Field label="Reviews">
-            <Reviews entry={e} />
-          </Field>
-          <Field label="Changes">
-            <span>
-              <Diff entry={e} />
-              <span className="ml-2 text-muted">
-                {e.changed_files} {e.changed_files === 1 ? "file" : "files"}
-              </span>
-            </span>
-          </Field>
-        </dl>
-      )}
-      <h3 className="mt-8 mb-3 text-xs font-medium text-muted">Activity</h3>
-      {events.data?.length === 0 && <p className="text-faint">Nothing yet.</p>}
-      {!!events.data?.length && (
-        <Activity
-          workspace={workspace}
-          events={events.data}
-          repo={lane.repo}
-          renderMessage={(message) =>
-            message.split(/(#\d+)/).map((part, i) =>
-              i % 2 ? (
-                // biome-ignore lint/suspicious/noArrayIndexKey: the parts of a message never move.
-                <PrLink key={i} lane={lane} number={Number(part.slice(1))} onSelect={onSelect} />
-              ) : (
-                part
-              ),
-            )
-          }
-        />
-      )}
-    </div>
+    <Activity
+      workspace={workspace}
+      events={events.data}
+      repo={lane.repo}
+      renderMessage={(message) =>
+        message.split(/(#\d+)/).map((part, i) =>
+          i % 2 ? (
+            // biome-ignore lint/suspicious/noArrayIndexKey: the parts of a message never move.
+            <PrLink key={i} lane={lane} number={Number(part.slice(1))} onSelect={onSelect} />
+          ) : (
+            part
+          ),
+        )
+      }
+    />
   );
 }
+
+/** The queued PR as `PullDetail` reads it from GitHub: a stack's top layer, as its events. */
+const queuedPull = (repo: string, e: EntryView): OpenPullView => ({
+  ...e,
+  number: prOf(e),
+  url: e.url || `https://github.com/${repo}/pull/${prOf(e)}`,
+  draft: false,
+});
+
+/** The lane's entry for a PR, or for the stack it is a layer of. */
+export const entryOf = (lane: LaneView, n: number) =>
+  lane.entries.find((e) => e.number === n || e.layers.includes(n));
 
 /** A `#n` in an event: selects a queued PR, with its details on hover. Any other PR, such as a
  * batch's draft or one already merged, opens on GitHub. */
@@ -860,59 +845,5 @@ function PrLink({
         </span>
       )}
     </>
-  );
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted">{label}</dt>
-      <dd className="min-w-0">{children}</dd>
-    </>
-  );
-}
-
-const decision: Record<NonNullable<EntryView["review_decision"]>, [string, string]> = {
-  approved: ["Approved", "text-ok"],
-  review_required: ["Review required", "text-warn"],
-  changes_requested: ["Changes requested", "text-bad"],
-};
-
-function Reviews({ entry: e }: { entry: Item }) {
-  const [text, color] = e.review_decision
-    ? decision[e.review_decision]
-    : ["Not required", "text-muted"];
-  return (
-    <div className="space-y-2">
-      <p className={color}>{text}</p>
-      {(e.reviews.length > 0 || e.requested.length > 0) && (
-        <ul className="flex flex-wrap gap-x-4 gap-y-1.5">
-          {e.reviews.map((r) => (
-            <li key={r.reviewer.login} className="flex items-center gap-1.5">
-              <Avatar src={r.reviewer.avatar_url} alt={r.reviewer.login} size="size-4" />
-              {r.reviewer.login}
-              {r.approved ? (
-                <span className="text-ok" title="Approved">
-                  ✓
-                </span>
-              ) : (
-                <span className="text-bad" title="Requested changes">
-                  ✕
-                </span>
-              )}
-            </li>
-          ))}
-          {e.requested.map((p) => (
-            <li key={p.login} className="flex items-center gap-1.5 text-muted">
-              <Avatar src={p.avatar_url} alt={p.login} size="size-4" />
-              {p.login}
-              <span className="text-xs" title="Review requested">
-                pending
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }

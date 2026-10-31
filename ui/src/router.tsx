@@ -53,10 +53,12 @@ const workspaceHome = createRoute({
 const you = createRoute({
   getParentRoute: () => workspace,
   path: "you",
-  /** The folder in view, Needs you by default, and the PR in it as `owner/repo#n`. */
-  validateSearch: (search): { folder?: Folder; pr?: string } => ({
+  /** The folder in view, Needs you by default, the PR in it as `owner/repo#n`, and whether the
+   * agent's review of the PR is being answered. */
+  validateSearch: (search): { folder?: Folder; pr?: string; answer?: boolean } => ({
     folder: oneOf(FOLDERS, search.folder),
     pr: optional(search.pr, "string"),
+    answer: search.answer === true || undefined,
   }),
   component: You,
 });

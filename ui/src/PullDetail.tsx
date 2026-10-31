@@ -9,18 +9,22 @@ import { Avatar, timeAgo } from "./ui";
 
 const PullCode = lazy(() => import("./PullCode"));
 
-const tabs = ["summary", "timeline", "code"] as const;
+const tabs = ["summary", "timeline", "code", "activity"] as const;
 type Tab = (typeof tabs)[number];
 
-/** An open PR as a reviewer looks at it: its summary, timeline and code, read from GitHub as
- * the user. The caller's `actions` sit by its title, and its `footer` under it all. With
- * `version`, it reads GitHub again only when that changes, rather than every 30s. */
+/** A PR as a reviewer looks at it, on the Queue and You pages alike: its summary, timeline and
+ * code, read from GitHub as the user. A queued PR has its `gate` over the summary and the
+ * queue's `activity` in a tab of its own. The caller's `actions` sit by its title, and its
+ * `footer` under it all. With `version`, it reads GitHub again only when that changes, rather
+ * than every 30s. */
 export function PullDetail({
   workspace,
   repo,
   trunk,
   pull: p,
   version,
+  gate,
+  activity,
   actions,
   footer,
   onBack,
@@ -31,6 +35,10 @@ export function PullDetail({
   pull: OpenPullView;
   /** What the caller knows of the PR from webhooks, which changes when the PR does. */
   version?: string;
+  /** Where the queue has the PR, and what its review asks: `QueueGate`. */
+  gate?: ReactNode;
+  /** What the queue did with the PR: `QueueActivity`. */
+  activity?: ReactNode;
   actions?: ReactNode;
   footer?: ReactNode;
   /** Back to the PRs, on a screen too narrow to show them beside it. */
@@ -96,20 +104,22 @@ export function PullDetail({
         </div>
         <div className="mt-3 flex items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg bg-sunken p-1">
-            {tabs.map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={`rounded-md px-3 py-1 text-sm capitalize ${
-                  tab === t
-                    ? "bg-surface font-medium shadow-xs ring-1 ring-line"
-                    : "text-muted hover:text-fg"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+            {tabs
+              .filter((t) => t !== "activity" || activity)
+              .map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setTab(t)}
+                  className={`rounded-md px-3 py-1 text-sm capitalize ${
+                    tab === t
+                      ? "bg-surface font-medium shadow-xs ring-1 ring-line"
+                      : "text-muted hover:text-fg"
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
           </div>
           {d && ran(d.checks) > 0 && (
             <button
@@ -131,8 +141,11 @@ export function PullDetail({
         <Suspense fallback={<p className="px-4 py-6 text-faint sm:px-6">Loading the changes…</p>}>
           <PullCode workspace={workspace} repo={repo} number={p.number} commits={commits} />
         </Suspense>
+      ) : tab === "activity" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">{activity}</div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+          {tab === "summary" && gate}
           {detail.isPending && <p className="text-faint">Loading…</p>}
           {detail.isError && <p className="text-bad">{detail.error.message}</p>}
           {d && tab === "summary" && (
