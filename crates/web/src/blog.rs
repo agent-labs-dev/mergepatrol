@@ -77,8 +77,8 @@ pub type Analytics<'a> = Option<(&'a str, &'a str)>;
 
 impl Collection {
     /// Answers `/<prefix>` and `/<prefix>/<slug>` for a page that exists. `None` for any other
-    /// path, so the caller serves the app: a GitHub account named like the prefix keeps its
-    /// dashboard pages, such as `/compare/queue`, and a dead link lands on the app's home.
+    /// path, so the caller serves the app with a 404: a GitHub account named like the prefix keeps
+    /// its dashboard pages, such as `/compare/queue`, and a crawler still sees a dead link as one.
     pub fn serve(&self, path: &str, public_url: &str, analytics: Analytics) -> Option<Response> {
         let rest = path.strip_prefix(self.prefix)?;
         let slug = match rest.trim_end_matches('/') {

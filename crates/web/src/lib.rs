@@ -1338,6 +1338,11 @@ mod tests {
         );
         assert_eq!(get(&router, "/compare", None).await, StatusCode::OK);
         // A workspace named `compare` keeps its dashboard: only the pages that exist are taken.
+        // The path is still a 404, so a crawler does not index a dead link as a page.
+        assert_eq!(
+            get(&router, "/compare/queue", None).await,
+            StatusCode::NOT_FOUND
+        );
         let app = body(&router, "/compare/queue", "").await;
         assert!(
             app.contains("id=\"root\"") || app.contains("not built"),

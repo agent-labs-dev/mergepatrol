@@ -57,10 +57,26 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
     {
         return StatusCode::NOT_FOUND.into_response();
     }
+    // A path under a public section that names no page of it is a 404 to a crawler, but still
+    // gets the app, so a workspace whose account is named like the section keeps its dashboard.
+    let section = path.split('/').next();
+    let status = if crate::blog::COLLECTIONS
+        .iter()
+        .any(|c| section == Some(c.prefix))
+    {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::OK
+    };
     match UiAssets::get("index.html") {
         Some(f) => {
             let html = String::from_utf8_lossy(&f.data).replace(PUBLIC_URL, &state.public_url);
-            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
+            (
+                status,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html,
+            )
+                .into_response()
         }
         None => (
             StatusCode::NOT_FOUND,
