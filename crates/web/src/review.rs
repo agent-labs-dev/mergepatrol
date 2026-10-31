@@ -540,15 +540,16 @@ pub(crate) async fn answer_agent_review(
     }
     text.push_str(&unplaced);
     text.push_str("\n\n<sub>Answered Mergepatrol's review.</sub>");
-    // The author's own approval goes as a comment: GitHub takes none from them.
+    // GitHub takes neither an approval nor a request for changes from the PR's author, so
+    // theirs goes as a comment. The gate holds a PR sent back by its `Changes` status, not by
+    // GitHub's review, so the author's request holds it for their next push all the same.
+    let gh = installation(&app, id).await?;
     let verdict = match changes {
+        true if gh.pull_request(&repo, number).await?.authored_by(&by) => Verdict::Comment,
         true => Verdict::RequestChanges,
-        false => {
-            let gh = installation(&app, id).await?;
-            approval(&gh, &repo, number, &by)
-                .await?
-                .unwrap_or(Verdict::Comment)
-        }
+        false => approval(&gh, &repo, number, &by)
+            .await?
+            .unwrap_or(Verdict::Comment),
     };
     setup::review_lines_as(
         &token,
