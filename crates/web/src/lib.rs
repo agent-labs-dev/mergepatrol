@@ -1326,6 +1326,21 @@ mod tests {
                 .contains("<loc>http://localhost:8080/changelog</loc>")
         );
         assert_eq!(get(&router, "/changelog", None).await, StatusCode::OK);
+        assert!(
+            body(&router, "/sitemap.xml", "")
+                .await
+                .contains("<loc>http://localhost:8080/compare/github-merge-queue</loc>")
+        );
+        assert!(
+            body(&router, "/llms.txt", "")
+                .await
+                .contains("(http://localhost:8080/compare/github-merge-queue)")
+        );
+        assert_eq!(get(&router, "/compare", None).await, StatusCode::OK);
+        assert_eq!(
+            get(&router, "/compare/nope", None).await,
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(get(&router, "/og.png", None).await, StatusCode::NOT_FOUND);
         let page = body(&router, "/ada/queue", "").await;
         // CI builds ui/ before the tests. Without the build there is no page to fill in.
