@@ -824,16 +824,20 @@ pub(crate) async fn lanes(
 }
 
 /// The lanes with each held PR's review hold as its newest review has it now, which a lane only
-/// saves at its next tick (`Entry::with_review`), and those reviews.
+/// saves at its next tick (`Entry::with_review`), and the newest review of each PR in them.
 pub(crate) async fn reviewed(
     app: &AppState,
     id: u64,
     lanes: Vec<(LaneKey, Lane)>,
 ) -> anyhow::Result<(Vec<(LaneKey, Lane)>, HashMap<(RepoName, u64), ReviewRecord>)> {
+    let mut queued: HashMap<&RepoName, Vec<u64>> = HashMap::new();
+    for (key, lane) in &lanes {
+        let prs = lane.entries.iter().flat_map(Entry::prs);
+        queued.entry(&key.repo).or_default().extend(prs);
+    }
     let mut reviews = HashMap::new();
-    let repos: HashSet<&RepoName> = lanes.iter().map(|(key, _)| &key.repo).collect();
-    for r in repos {
-        for review in app.store.latest_reviews(id, r).await? {
+    for (r, prs) in queued {
+        for review in app.store.latest_reviews(id, r, &prs).await? {
             reviews.insert((r.clone(), review.number), review);
         }
     }

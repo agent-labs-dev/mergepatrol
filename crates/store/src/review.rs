@@ -76,11 +76,12 @@ pub trait ReviewStore: Send + Sync {
         repo: &RepoName,
         pr: PrNumber,
     ) -> Result<Option<ReviewRecord>>;
-    /// Each PR's newest review in the repo.
+    /// The newest review of each of these PRs that has one.
     async fn latest_reviews(
         &self,
         installation_id: u64,
         repo: &RepoName,
+        prs: &[PrNumber],
     ) -> Result<Vec<ReviewRecord>>;
     /// The PR's reviews, newest first, up to `limit`.
     async fn reviews_of(
@@ -219,15 +220,19 @@ impl ReviewStore for PgStore {
         &self,
         installation_id: u64,
         repo: &RepoName,
+        prs: &[PrNumber],
     ) -> Result<Vec<ReviewRecord>> {
+        let prs: Vec<i64> = prs.iter().map(|&n| n as i64).collect();
         let rows = sqlx::query(concat!(
             "SELECT DISTINCT ON (number) ",
             columns!(),
             " FROM agent_reviews
-             WHERE installation_id = $1 AND repo = $2 ORDER BY number, id DESC"
+             WHERE installation_id = $1 AND repo = $2 AND number = ANY($3)
+             ORDER BY number, id DESC"
         ))
         .bind(installation_id as i64)
         .bind(repo.to_string())
+        .bind(&prs)
         .fetch_all(&self.pool)
         .await?;
         records(&rows)
@@ -658,13 +663,9 @@ mod tests {
         // A push: a new head, a new review, which the latest one is.
         let next = store.start_review(1, &repo(), 7, "bbb").await.unwrap();
         assert_ne!(next.id, r.id);
-        let latest = store.latest_reviews(1, &repo()).await.unwrap();
-        let of_7: Vec<i64> = latest
-            .iter()
-            .filter(|r| r.number == 7)
-            .map(|r| r.id)
-            .collect();
-        assert_eq!(of_7, [next.id]);
+        let latest = store.latest_reviews(1, &repo(), &[7]).await.unwrap();
+        let ids: Vec<i64> = latest.iter().map(|r| r.id).collect();
+        assert_eq!(ids, [next.id], "#7's newest, and not #9's");
         assert_eq!(store.reviews_of(1, &repo(), 7, 10).await.unwrap().len(), 2);
         assert_eq!(
             store.reviews_since(1, 30).await.unwrap().len(),

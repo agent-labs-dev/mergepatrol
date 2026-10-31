@@ -711,7 +711,12 @@ impl ReviewStore for Mem {
         let reviews = self.reviews.lock().unwrap();
         Ok(reviews.iter().rev().find(|r| r.number == pr).cloned())
     }
-    async fn latest_reviews(&self, _: u64, _: &RepoName) -> Result<Vec<ReviewRecord>> {
+    async fn latest_reviews(
+        &self,
+        _: u64,
+        _: &RepoName,
+        _: &[PrNumber],
+    ) -> Result<Vec<ReviewRecord>> {
         unreachable!()
     }
     async fn reviews_of(
