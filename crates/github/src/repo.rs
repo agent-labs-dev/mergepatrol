@@ -1245,6 +1245,35 @@ impl Installation {
         Ok(())
     }
 
+    /// Comments on the PR as the App.
+    pub async fn comment(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/issues/{number}/comments"),
+                Some(json!({ "body": body })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Whether `login` may push to the repo: GitHub's `write` or `admin`, which `maintain`
+    /// reads as. Someone who is no collaborator may not.
+    pub async fn can_write(&self, repo: &RepoName, login: &str) -> Result<bool> {
+        let path = format!("/repos/{repo}/collaborators/{login}/permission");
+        let res = self.request(Method::GET, &path, None).await?;
+        if res.status == StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !res.status.is_success() {
+            anyhow::bail!("GET {path}: {} {}", res.status, res.body);
+        }
+        Ok(matches!(
+            res.body["permission"].as_str(),
+            Some("write" | "admin")
+        ))
+    }
+
     /// Writes the status comment: edits the one Mergepatrol posted before, or posts it.
     pub async fn sticky_comment(
         &self,
