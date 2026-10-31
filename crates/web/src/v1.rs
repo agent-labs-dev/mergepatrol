@@ -10,7 +10,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mergepatrol_core::{EntryState, Hold, PrNumber, RepoName};
-use mergepatrol_store::{ExitRecord, RepoState};
+use mergepatrol_store::{ExitRecord, LaneKey, RepoState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -234,7 +234,22 @@ pub(crate) async fn statuses(
     let (state, lanes, exits) = match installation {
         Some(id) => (
             app.store.repo_state(id, repo).await?,
-            app.store.repo_lanes(id, repo).await?,
+            {
+                let lanes = app.store.repo_lanes(id, repo).await?;
+                let keyed = lanes.into_iter().map(|(trunk, lane)| {
+                    let key = LaneKey {
+                        installation_id: id,
+                        repo: repo.clone(),
+                        trunk,
+                    };
+                    (key, lane)
+                });
+                let (lanes, _) = crate::api::reviewed(app, id, keyed.collect()).await?;
+                lanes
+                    .into_iter()
+                    .map(|(key, lane)| (key.trunk, lane))
+                    .collect()
+            },
             app.store.last_exits(id, repo, numbers).await?,
         ),
         None => (None, Vec::new(), Vec::new()),

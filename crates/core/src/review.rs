@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::Hold;
+
 /// What a finding is about. Some kinds hurt more when they are wrong, so each has its own bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -283,6 +285,19 @@ impl ReviewStatus {
         ]
         .into_iter()
         .find(|s2| s2.as_str() == s)
+    }
+
+    /// What the queue's first gate holds a PR for while its review is here, or `None` once the
+    /// review lets it on.
+    pub fn hold(self) -> Option<Hold> {
+        match self {
+            ReviewStatus::Approved => None,
+            ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale => {
+                Some(Hold::Reviewing)
+            }
+            ReviewStatus::Asks => Some(Hold::ReviewAsks),
+            ReviewStatus::Changes => Some(Hold::ReviewChanges),
+        }
     }
 }
 

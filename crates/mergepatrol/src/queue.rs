@@ -741,19 +741,9 @@ async fn review_hold(
                 r.status
             }
         };
-        let hold = match status {
-            ReviewStatus::Approved => continue,
-            ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale => Hold::Reviewing,
-            ReviewStatus::Asks => Hold::ReviewAsks,
-            ReviewStatus::Changes => Hold::ReviewChanges,
-        };
-        return Ok(Some(match stacked {
-            true => Hold::Layer {
-                number,
-                hold: Box::new(hold),
-            },
-            false => hold,
-        }));
+        if let Some(hold) = Hold::of_reviews(stacked, [(number, status)]) {
+            return Ok(Some(hold));
+        }
     }
     Ok(None)
 }
@@ -897,13 +887,7 @@ async fn tick_lane(
                 let comment = match &gate {
                     Some(g) if g.reason == reason => Some(g.comment.clone()),
                     // The agent's review, and a human's answer to it, are on the PR already.
-                    _ if matches!(
-                        reason.innermost(),
-                        Hold::Reviewing | Hold::ReviewAsks | Hold::ReviewChanges
-                    ) =>
-                    {
-                        None
-                    }
+                    _ if reason.of_review() => None,
                     _ => Some(on_hold(&reason)),
                 };
                 (number, "held", reason.to_string(), comment)

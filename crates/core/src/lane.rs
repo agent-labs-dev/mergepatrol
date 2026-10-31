@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Hold, PrNumber};
+use crate::{Hold, PrNumber, ReviewStatus};
 
 /// A labeled pull request, or a stack with a labeled layer, as GitHub shows it now.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,6 +119,30 @@ impl Entry {
         } else {
             self.layers.clone()
         }
+    }
+
+    /// The entry as its PRs' newest reviews, by `status`, hold it now. A tick sets holds, and
+    /// one that runs a job saves no other PR's until the job ends: an answer to a review, or the
+    /// agent finishing one, would show only then. Only an entry the review holds changes: the
+    /// tick that held it found the gate on, and every gate before it open.
+    pub fn with_review(mut self, status: impl Fn(PrNumber) -> Option<ReviewStatus>) -> Self {
+        let EntryState::Held(hold) = &self.state else {
+            return self;
+        };
+        if !hold.of_review() {
+            return self;
+        }
+        // A layer without a review gets one at the next tick.
+        let layers = self
+            .prs()
+            .into_iter()
+            .map(|n| (n, status(n).unwrap_or(ReviewStatus::Pending)));
+        self.state = match Hold::of_reviews(!self.layers.is_empty(), layers) {
+            Some(hold) => EntryState::Held(hold),
+            // On to the gates after the review's: the next tick holds it for one, if any.
+            None => EntryState::Waiting,
+        };
+        self
     }
 }
 
@@ -613,5 +637,61 @@ mod tests {
         lane.activate(2);
         lane.stop();
         assert_eq!(lane.next(8), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_review_hold_shows_the_reviews_as_they_are_now() {
+        use EntryState::{Held, Waiting};
+        use Hold::{Draft, ReviewAsks, ReviewChanges, ReviewRequired, Reviewing};
+        use ReviewStatus::{Approved, Asks, Changes, Running};
+        let on = |number, hold| {
+            Held(Hold::Layer {
+                number,
+                hold: Box::new(hold),
+            })
+        };
+        // Each case: the saved state, the newest review's status of each PR (#9 alone, or the
+        // stack #7 then #8), and the state shown.
+        let cases = [
+            // An answer while the lane runs another PR's job.
+            (Held(ReviewAsks), vec![(9, Approved)], Waiting),
+            (Held(ReviewAsks), vec![(9, Changes)], Held(ReviewChanges)),
+            (Held(Reviewing), vec![(9, Asks)], Held(ReviewAsks)),
+            (Held(ReviewAsks), vec![(9, Asks)], Held(ReviewAsks)),
+            // Gates other than the review's are the tick's to change.
+            (Held(Draft), vec![(9, Running)], Held(Draft)),
+            (Held(ReviewRequired), vec![(9, Asks)], Held(ReviewRequired)),
+            (Waiting, vec![(9, Asks)], Waiting),
+            // A stack: the first layer, bottom to top, whose review holds it.
+            (on(7, ReviewAsks), vec![(7, Changes)], on(7, ReviewChanges)),
+            (
+                on(7, ReviewAsks),
+                vec![(7, Approved), (8, Asks)],
+                on(8, ReviewAsks),
+            ),
+            (on(7, ReviewAsks), vec![(7, Approved)], on(8, Reviewing)),
+            (
+                on(8, ReviewAsks),
+                vec![(7, Approved), (8, Approved)],
+                Waiting,
+            ),
+        ];
+        for (state, statuses, shown) in cases {
+            let stacked = matches!(&state, Held(Hold::Layer { .. }));
+            let e = Entry {
+                number: if stacked { 8 } else { 9 },
+                priority: false,
+                state: state.clone(),
+                summary: PrSummary::default(),
+                layers: if stacked { vec![7, 8] } else { Vec::new() },
+                heads: Vec::new(),
+            };
+            let status = |n| statuses.iter().find(|(m, _)| *m == n).map(|(_, s)| *s);
+            assert_eq!(
+                e.with_review(status).state,
+                shown,
+                "{state:?} with {statuses:?}"
+            );
+        }
     }
 }

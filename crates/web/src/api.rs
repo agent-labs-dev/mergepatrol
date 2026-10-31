@@ -14,7 +14,8 @@ use mergepatrol_github::{
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
     CHATGPT_DEVICE_LOGIN, CHATGPT_LOGIN, Change, DeveloperStats, EventRecord, ExitQuery,
-    ExitRecord, ExitStats, InboxRow, LaneKey, RepoState, Scope, Slice, Store, api_key_secret,
+    ExitRecord, ExitStats, InboxRow, LaneKey, RepoState, ReviewRecord, Scope, Slice, Store,
+    api_key_secret,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -801,13 +802,7 @@ pub(crate) async fn lanes(
         .into_iter()
         .filter(|(key, _)| repo.as_ref().is_none_or(|r| key.repo == *r))
         .collect();
-    let mut reviews: HashMap<(RepoName, u64), crate::review::ReviewBriefView> = HashMap::new();
-    let repos: HashSet<&RepoName> = lanes.iter().map(|(key, _)| &key.repo).collect();
-    for r in repos {
-        for review in app.store.latest_reviews(id, r).await? {
-            reviews.insert((r.clone(), review.number), (&review).into());
-        }
-    }
+    let (lanes, reviews) = reviewed(&app, id, lanes).await?;
     Ok(Json(
         lanes
             .into_iter()
@@ -819,13 +814,45 @@ pub(crate) async fn lanes(
                     .into_iter()
                     .map(|e| {
                         let shown = review_layer(&e);
-                        let review = reviews.get(&(key.repo.clone(), shown)).cloned();
+                        let review = reviews.get(&(key.repo.clone(), shown)).map(Into::into);
                         EntryView::new(e, review)
                     })
                     .collect(),
             })
             .collect(),
     ))
+}
+
+/// The lanes with each held PR's review hold as its newest review has it now, which a lane only
+/// saves at its next tick (`Entry::with_review`), and the newest review of each PR in them.
+pub(crate) async fn reviewed(
+    app: &AppState,
+    id: u64,
+    lanes: Vec<(LaneKey, Lane)>,
+) -> anyhow::Result<(Vec<(LaneKey, Lane)>, HashMap<(RepoName, u64), ReviewRecord>)> {
+    let mut queued: HashMap<&RepoName, Vec<u64>> = HashMap::new();
+    for (key, lane) in &lanes {
+        let prs = lane.entries.iter().flat_map(Entry::prs);
+        queued.entry(&key.repo).or_default().extend(prs);
+    }
+    let mut reviews = HashMap::new();
+    for (r, prs) in queued {
+        for review in app.store.latest_reviews(id, r, &prs).await? {
+            reviews.insert((r.clone(), review.number), review);
+        }
+    }
+    let lanes = lanes
+        .into_iter()
+        .map(|(key, mut lane)| {
+            lane.entries = lane
+                .entries
+                .into_iter()
+                .map(|e| e.with_review(|n| reviews.get(&(key.repo.clone(), n)).map(|r| r.status)))
+                .collect();
+            (key, lane)
+        })
+        .collect();
+    Ok((lanes, reviews))
 }
 
 /// The PR whose review an entry shows: the stack's layer its hold is on, else its top.
@@ -1583,7 +1610,8 @@ pub(crate) async fn you(
         .collect();
     let mut spots = HashMap::new();
     for &id in ids {
-        spots.extend(queue_spots(app.store.lanes(id).await?));
+        let (lanes, _) = reviewed(&app, id, app.store.lanes(id).await?).await?;
+        spots.extend(queue_spots(lanes));
     }
     let view = |rows: Vec<InboxRow>| -> Vec<InboxPullView> {
         rows.into_iter()

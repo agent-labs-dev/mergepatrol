@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{PrNumber, REPO_CONFIG_PATH};
+use crate::{PrNumber, REPO_CONFIG_PATH, ReviewStatus};
 
 /// Why a queued PR keeps its place instead of merging. Its text is what the PR's comment and
 /// event say.
@@ -50,6 +50,41 @@ impl Hold {
             Hold::Layer { hold, .. } => hold.innermost(),
             hold => hold,
         }
+    }
+
+    /// Held by the agent's review, the queue's first gate of a PR's own.
+    pub fn of_review(&self) -> bool {
+        match self.innermost() {
+            Hold::Reviewing | Hold::ReviewAsks | Hold::ReviewChanges => true,
+            Hold::Draft
+            | Hold::ReviewRequired
+            | Hold::ChangesRequested
+            | Hold::WorkflowApproval
+            | Hold::ForkEditsOff { .. }
+            | Hold::NoQueue { .. }
+            | Hold::NoSubscription
+            | Hold::FairUseLimit => false,
+            Hold::Layer { .. } => unreachable!("innermost is no layer"),
+        }
+    }
+
+    /// What the agent's review holds a unit for: the first of its layers, bottom to top, whose
+    /// newest review does not let it on, each layer with that review's status. A stack's hold
+    /// names the layer; one PR's is the review's own.
+    pub fn of_reviews(
+        stacked: bool,
+        layers: impl IntoIterator<Item = (PrNumber, ReviewStatus)>,
+    ) -> Option<Hold> {
+        layers.into_iter().find_map(|(number, status)| {
+            let hold = status.hold()?;
+            Some(match stacked {
+                true => Hold::Layer {
+                    number,
+                    hold: Box::new(hold),
+                },
+                false => hold,
+            })
+        })
     }
 
     /// The stack layer it is on, if a layer holds the stack.
