@@ -40,6 +40,9 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
             return page;
         }
     }
+    if let Some(page) = crate::docs::serve(path, &state.public_url, state.analytics.browser()) {
+        return page;
+    }
     if let Some(page) = crate::changelog::serve(path, &state.public_url, state.analytics.browser())
     {
         return page;
@@ -60,9 +63,10 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
     // A path under a public section that names no page of it is a 404 to a crawler, but still
     // gets the app, so a workspace whose account is named like the section keeps its dashboard.
     let section = path.split('/').next();
-    let status = if crate::blog::COLLECTIONS
-        .iter()
-        .any(|c| section == Some(c.prefix))
+    let status = if section == Some("docs")
+        || crate::blog::COLLECTIONS
+            .iter()
+            .any(|c| section == Some(c.prefix))
     {
         StatusCode::NOT_FOUND
     } else {
@@ -86,7 +90,7 @@ pub async fn serve(State(state): State<AppState>, uri: Uri) -> Response {
     }
 }
 
-/// The landing page, the blog, the comparisons and the changelog are public. The rest is the API, sign-in and webhooks.
+/// The landing page, the docs, the blog, the comparisons and the changelog are public. The rest is the API, sign-in and webhooks.
 fn robots(public_url: &str) -> String {
     format!(
         "User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /auth/\nDisallow: /setup/\nDisallow: /webhooks/\n\nSitemap: {public_url}/sitemap.xml\n"
@@ -99,7 +103,8 @@ fn sitemap(public_url: &str) -> String {
         .map(|c| c.sitemap_entries(public_url))
         .collect();
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url><loc>{public_url}/</loc></url>\n{pages}{}</urlset>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n  <url><loc>{public_url}/</loc></url>\n{pages}{}{}</urlset>\n",
+        crate::docs::sitemap_entries(public_url),
         crate::changelog::sitemap_entries(public_url)
     )
 }
@@ -113,8 +118,9 @@ fn llms(public_url: &str) -> String {
         .map(|c| c.llms_section(public_url))
         .collect();
     format!(
-        "{}{pages}\n## More\n\n- [Changelog]({public_url}/changelog): what changed, newest first\n- [Source and self-hosting](https://github.com/agent-labs-dev/mergepatrol): the README covers setup, the config file, the MCP server and the API\n",
-        LLMS_INTRO.replace("{public_url}", public_url)
+        "{}{}{pages}\n## More\n\n- [Changelog]({public_url}/changelog): what changed, newest first\n- [Source](https://github.com/agent-labs-dev/mergepatrol): Apache-2.0, on GitHub\n",
+        LLMS_INTRO.replace("{public_url}", public_url),
+        crate::docs::llms_section(public_url)
     )
 }
 

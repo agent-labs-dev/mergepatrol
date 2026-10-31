@@ -4,6 +4,8 @@ Mergepatrol is a merge queue for GitHub. Add a label to a pull request, and Merg
 
 Status: early. Expect rough edges, and [tell us](https://github.com/agent-labs-dev/mergepatrol/issues/new/choose) what breaks.
 
+This README is also the website's docs, at [mergepatrol.ai/docs](https://mergepatrol.ai/docs). `DOCS` in `crates/web/src/docs.rs` picks its `##` sections by heading, and a test fails when one is renamed.
+
 ## Try it
 
 The hosted Mergepatrol at https://mergepatrol.ai runs the public GitHub App `Mergepatrol`. You bring your own model API key.

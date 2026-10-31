@@ -57,8 +57,8 @@ held: the queue cannot tell it is part of a stack.
    gh pr edit <number> --add-label mergepatrol
    ```
 
-   A coding agent connected to Mergepatrol's MCP server can call `queue_pull` on any layer instead,
-   which queues the stack.
+   A coding agent connected to Mergepatrol's [MCP server](/docs/mcp-and-api) can call `queue_pull`
+   on any layer instead, which queues the stack.
 
 To take the stack out, use the dashboard's Queue page, or call `dequeue_pull` on any layer: it takes the
 whole stack out.
