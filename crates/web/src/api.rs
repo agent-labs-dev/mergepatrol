@@ -8,8 +8,8 @@ use mergepatrol_core::{
     REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
 };
 use mergepatrol_github::{
-    App, AsUser, BranchFile, CheckRunState, InboxPull, Installation, Proposal, PullDetail, PullRef,
-    TimelineEvent, setup,
+    App, AsUser, BranchFile, CheckRunState, GitObject, InboxPull, Installation, Proposal,
+    PullDetail, PullRef, SYMLINK_MODE, TimelineEvent, setup,
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
@@ -2005,6 +2005,181 @@ pub(crate) async fn propose_repo_config(
     Ok(Json(pr.into()))
 }
 
+/// Mergepatrol's branch for the PR that updates a repo's skill.
+const SKILL_BRANCH: &str = "mergepatrol/skill";
+
+/// Where a repo's copy of the skill is against the one Mergepatrol ships.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SkillStateView {
+    /// Every copy is the current skill.
+    Current,
+    /// A copy is older, or edited, or one skills dir lacks it.
+    Outdated,
+    /// No copy at all.
+    Missing,
+}
+
+/// A repo's `mergepatrol` skill on its default branch.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SkillView {
+    pub state: SkillStateView,
+    /// The copies an update writes.
+    pub paths: Vec<String>,
+    pub default_branch: String,
+    /// Mergepatrol's open PR that updates it.
+    pub pull_request: Option<PullRequestRef>,
+    /// The open PR already writes the current skill to every copy an update writes: updating
+    /// it changes nothing.
+    pub pull_request_current: bool,
+}
+
+/// The state of the skill's copies, by path, and the paths an update writes.
+fn skill_plan(copies: &[(String, Option<String>)]) -> (SkillStateView, Vec<String>) {
+    let stale: Vec<String> = copies
+        .iter()
+        .filter(|(_, text)| text.as_deref() != Some(SKILL))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let state = if stale.is_empty() {
+        SkillStateView::Current
+    } else if copies.iter().all(|(_, text)| text.is_none()) {
+        SkillStateView::Missing
+    } else {
+        SkillStateView::Outdated
+    };
+    (state, stale)
+}
+
+/// What a lookup of the skill reads for each skills dir: each step of its path, which must be
+/// a dir and not a link, the skill on the default branch, and the skill on the update's branch.
+fn skill_lookups(dir: &str) -> [(String, String); 5] {
+    let top = dir.split('/').next().unwrap_or(dir);
+    let skill = format!("{dir}/mergepatrol");
+    let file = format!("{skill}/SKILL.md");
+    [
+        ("HEAD".into(), top.into()),
+        ("HEAD".into(), dir.into()),
+        ("HEAD".into(), skill),
+        ("HEAD".into(), file.clone()),
+        (format!("refs/heads/{SKILL_BRANCH}"), file),
+    ]
+}
+
+/// One skills dir's copy, from its `skill_lookups`: `None` when a step of its path is a link
+/// to elsewhere, as `.claude/skills` to `.agents/skills`, since a commit cannot write through
+/// it and the link shows the skill there already. Else its text on the default branch, and on
+/// the update's branch.
+fn skill_copy(objects: &[Option<GitObject>]) -> Option<(Option<String>, Option<String>)> {
+    let [top, dir, skill, file, branch] = objects else {
+        return None;
+    };
+    let link = |o: &Option<GitObject>| matches!(o, Some(GitObject::Blob(_)));
+    let file_link = matches!(skill, Some(GitObject::Tree(entries))
+        if entries.iter().any(|(name, mode)| name == "SKILL.md" && *mode == SYMLINK_MODE));
+    if link(top) || link(dir) || link(skill) || file_link {
+        return None;
+    }
+    let text = |o: &Option<GitObject>| match o {
+        Some(GitObject::Blob(t)) => Some(t.clone()),
+        _ => None,
+    };
+    Some((text(file), text(branch)))
+}
+
+/// The skill as the repo has it, in one read: its state, the paths an update writes, whether
+/// the open update PR has the current skill there already, and the default branch's head.
+async fn repo_skill(
+    gh: &Installation,
+    repo: &RepoName,
+) -> Result<(SkillView, BranchFile), ApiError> {
+    let lookups: Vec<(String, String)> = SKILL_DIRS.iter().flat_map(|d| skill_lookups(d)).collect();
+    let refs: Vec<(&str, &str)> = lookups
+        .iter()
+        .map(|(r, p)| (r.as_str(), p.as_str()))
+        .collect();
+    let found = gh.objects_at(repo, &refs, SKILL_BRANCH).await?;
+    let mut copies = Vec::new();
+    let mut on_branch = Vec::new();
+    for (dir, objects) in SKILL_DIRS.iter().zip(found.objects.chunks(5)) {
+        if let Some((text, branch)) = skill_copy(objects) {
+            let path = format!("{dir}/mergepatrol/SKILL.md");
+            on_branch.push((path.clone(), branch));
+            copies.push((path, text));
+        }
+    }
+    let (state, paths) = skill_plan(&copies);
+    let pull_request_current = found.pull_request.is_some()
+        && on_branch
+            .iter()
+            .filter(|(p, _)| paths.contains(p))
+            .all(|(_, text)| text.as_deref() == Some(SKILL));
+    let view = SkillView {
+        state,
+        paths,
+        default_branch: found.head.branch.clone(),
+        pull_request: found.pull_request.map(PullRequestRef::from),
+        pull_request_current,
+    };
+    Ok((view, found.head))
+}
+
+/// Whether the repo's copy of the `mergepatrol` skill is the one Mergepatrol ships now.
+pub(crate) async fn repo_skill_view(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name)): Path<(u64, String, String)>,
+) -> Result<Json<SkillView>, ApiError> {
+    let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let gh = installation(&app, id).await?;
+    Ok(Json(repo_skill(&gh, &repo).await?.0))
+}
+
+/// Opens a PR that writes the current skill over the repo's older copies, or updates the one
+/// open.
+pub(crate) async fn update_repo_skill(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name)): Path<(u64, String, String)>,
+) -> Result<Json<PullRequestRef>, ApiError> {
+    let id = caller.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let gh = installation(&app, id).await?;
+    let (SkillView { state, paths, .. }, base) = repo_skill(&gh, &repo).await?;
+    if state == SkillStateView::Current || paths.is_empty() {
+        return Err(ApiError::Status(
+            StatusCode::CONFLICT,
+            format!("`{}` already has the current skill.", base.branch),
+        ));
+    }
+    let files: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), SKILL)).collect();
+    let list: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
+    let body = format!(
+        "This PR writes the current `mergepatrol` agent skill to {}, so coding agents in this repo follow how Mergepatrol works now: they queue their PRs, then work every review comment to resolved. Once it merges into `{}`, agents read the new skill.
+
+It replaces the copy that is there, so a change made to the skill in this repo is lost: carry it over in this PR if you want to keep it.",
+        list.join(" and "),
+        base.branch
+    );
+    let pr = gh
+        .propose_file(
+            &repo,
+            Proposal {
+                base: &base,
+                files: &files,
+                branch: SKILL_BRANCH,
+                title: "Update the Mergepatrol skill",
+                body: &body,
+            },
+        )
+        .await?;
+    tracing::info!(installation = id, %repo, pr = pr.number, "proposed the current skill");
+    Ok(Json(pr.into()))
+}
+
 /// The skill's path in each skills dir, but one that links to the other: a commit cannot write
 /// through a symlink, and the link already shows the skill there.
 async fn skill_paths(gh: &Installation, repo: &RepoName) -> Result<Vec<String>, ApiError> {
@@ -2277,6 +2452,60 @@ pub(crate) async fn delete_api_key(
 mod tests {
     use super::*;
     use mergepatrol_core::PrSummary;
+
+    #[test]
+    fn a_skill_update_writes_each_copy_that_is_not_the_current_skill() {
+        let (a, c) = (
+            ".agents/skills/mergepatrol/SKILL.md",
+            ".claude/skills/mergepatrol/SKILL.md",
+        );
+        let copy = |p: &str, t: Option<&str>| (p.to_owned(), t.map(str::to_owned));
+        assert_eq!(
+            skill_plan(&[copy(a, Some(SKILL)), copy(c, Some(SKILL))]),
+            (SkillStateView::Current, vec![])
+        );
+        assert_eq!(
+            skill_plan(&[copy(a, Some("old")), copy(c, Some(SKILL))]),
+            (SkillStateView::Outdated, vec![a.to_owned()])
+        );
+        assert_eq!(
+            skill_plan(&[copy(a, Some(SKILL)), copy(c, None)]),
+            (SkillStateView::Outdated, vec![c.to_owned()])
+        );
+        assert_eq!(
+            skill_plan(&[copy(a, None), copy(c, None)]),
+            (SkillStateView::Missing, vec![a.to_owned(), c.to_owned()])
+        );
+        // Both dirs link elsewhere: nothing to write.
+        assert_eq!(skill_plan(&[]), (SkillStateView::Current, vec![]));
+    }
+
+    #[test]
+    fn a_skills_dir_that_links_elsewhere_at_any_step_is_left_alone() {
+        let dir = || Some(GitObject::Tree(Vec::new()));
+        let link = || Some(GitObject::Blob("../.agents/skills".into()));
+        let text = |t: &str| Some(GitObject::Blob(t.into()));
+        // A real copy, and the update's branch with the current skill.
+        assert_eq!(
+            skill_copy(&[dir(), dir(), dir(), text("old"), text(SKILL)]),
+            Some((Some("old".into()), Some(SKILL.into())))
+        );
+        // No copy yet.
+        assert_eq!(
+            skill_copy(&[dir(), None, None, None, None]),
+            Some((None, None))
+        );
+        // A link at the top, at `skills`, at `mergepatrol`, or the file itself.
+        assert_eq!(skill_copy(&[link(), None, None, None, None]), None);
+        assert_eq!(skill_copy(&[dir(), link(), None, None, None]), None);
+        assert_eq!(skill_copy(&[dir(), dir(), link(), None, None]), None);
+        let file_link = Some(GitObject::Tree(vec![("SKILL.md".into(), SYMLINK_MODE)]));
+        assert_eq!(
+            skill_copy(&[dir(), dir(), file_link, text("../../x/SKILL.md"), None]),
+            None
+        );
+        assert_eq!(skill_lookups(".claude/skills")[0].1, ".claude");
+    }
 
     /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
     #[test]

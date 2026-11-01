@@ -47,6 +47,27 @@ const DEFAULT_BRANCH_FILE: &str = "query($owner: String!, $name: String!, $path:
     }
   }";
 
+/// What [`Installation::objects_at`] found.
+#[derive(Debug, Clone)]
+pub struct ObjectsAt {
+    /// The default branch and its head. No text.
+    pub head: BranchFile,
+    pub pull_request: Option<PullRef>,
+    /// One per lookup, in order.
+    pub objects: Vec<Option<GitObject>>,
+}
+
+/// A git object: a blob's text (a symlink's is its target), or a tree's entries as
+/// (name, mode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitObject {
+    Blob(String),
+    Tree(Vec<(String, u32)>),
+}
+
+/// A tree entry's mode for a symlink, as GraphQL gives it: `0o120000`.
+pub const SYMLINK_MODE: u32 = 0o120000;
+
 /// The default branch's file, from a `DEFAULT_BRANCH_FILE` answer.
 fn branch_file(data: &Value) -> Result<BranchFile> {
     let r = &data["repository"]["defaultBranchRef"];
@@ -109,6 +130,92 @@ impl Installation {
         Ok(data["repository"]["object"]["text"]
             .as_str()
             .map(str::to_owned))
+    }
+
+    /// The objects at `lookups`, as (git ref, path), in one query, with the default branch's
+    /// head and the open PR from `pr_branch`. `HEAD` is the default branch. A missing ref or
+    /// path is `None`.
+    pub async fn objects_at(
+        &self,
+        repo: &RepoName,
+        lookups: &[(&str, &str)],
+        pr_branch: &str,
+    ) -> Result<ObjectsAt> {
+        let fields: Vec<String> = lookups
+            .iter()
+            .enumerate()
+            .map(|(i, (rev, path))| {
+                format!(
+                    "o{i}: object(expression: {}) {{ __typename ... on Blob {{ text }} ... on Tree {{ entries {{ name mode }} }} }}",
+                    json!(format!("{rev}:{path}"))
+                )
+            })
+            .collect();
+        let query = format!(
+            "query($owner: String!, $name: String!, $head: String!) {{ repository(owner: $owner, name: $name) {{
+              defaultBranchRef {{ name target {{ oid }} }}
+              pullRequests(headRefName: $head, states: OPEN, first: 10) {{ nodes {{ number url isCrossRepository }} }}
+              {} }} }}",
+            fields.join("\n")
+        );
+        let data = self
+            .graphql_missing_ok(
+                "objects at",
+                &query,
+                json!({ "owner": repo.owner, "name": repo.name, "head": pr_branch }),
+            )
+            .await?;
+        let r = &data["repository"];
+        let head = BranchFile {
+            branch: r["defaultBranchRef"]["name"]
+                .as_str()
+                .context("the repo has no default branch")?
+                .to_owned(),
+            sha: r["defaultBranchRef"]["target"]["oid"]
+                .as_str()
+                .context("trunk sha")?
+                .to_owned(),
+            text: None,
+        };
+        // A fork's PR may have a branch of the same name: only the repo's own is Mergepatrol's,
+        // as `open_pr_from` finds it.
+        let pull_request = r["pullRequests"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["isCrossRepository"] == false)
+            .and_then(|p| {
+                Some(PullRef {
+                    number: p["number"].as_u64()?,
+                    url: p["url"].as_str().unwrap_or_default().to_owned(),
+                })
+            });
+        let objects = (0..lookups.len())
+            .map(|i| {
+                let o = &r[format!("o{i}")];
+                match o["__typename"].as_str() {
+                    Some("Blob") => Some(GitObject::Blob(
+                        o["text"].as_str().unwrap_or_default().to_owned(),
+                    )),
+                    Some("Tree") => Some(GitObject::Tree(
+                        o["entries"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|e| {
+                                Some((e["name"].as_str()?.to_owned(), e["mode"].as_u64()? as u32))
+                            })
+                            .collect(),
+                    )),
+                    _ => None,
+                }
+            })
+            .collect();
+        Ok(ObjectsAt {
+            head,
+            pull_request,
+            objects,
+        })
     }
 
     /// Which of `repos` have `path` on their default branch, in order. A repo GitHub cannot

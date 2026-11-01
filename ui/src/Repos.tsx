@@ -1,7 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useState } from "react";
-import { fetchRepoConfig, fetchRepos, proposeRepoConfig, setRepo } from "./api";
+import {
+  fetchRepoConfig,
+  fetchRepoSkill,
+  fetchRepos,
+  proposeRepoConfig,
+  setRepo,
+  updateRepoSkill,
+} from "./api";
 import type { AppView } from "./api/AppView";
 import type { PullRequestRef } from "./api/PullRequestRef";
 import type { RepoView } from "./api/RepoView";
@@ -42,6 +49,7 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
               </span>
               <span className="flex shrink-0 gap-2">
                 {!r.has_config && <SetUp workspace={workspace} repo={r.repo} />}
+                {r.has_config && <UpdateSkill workspace={workspace} repo={r.repo} />}
                 <button
                   type="button"
                   onClick={() => navigate({ search: open === r.repo ? {} : { repo: r.repo } })}
@@ -133,6 +141,66 @@ function Status({ repo }: { repo: RepoView }) {
   if (!repo.has_config)
     return <span className="mt-0.5 block text-xs text-faint">No config file</span>;
   return null;
+}
+
+/**
+ * The repo's `mergepatrol` agent skill: up to date, or a button that opens a PR writing the
+ * current one, or the PR open for it.
+ */
+function UpdateSkill({ workspace, repo }: { workspace: number; repo: string }) {
+  const queryClient = useQueryClient();
+  const key = ["repo-skill", workspace, repo];
+  const skill = useQuery({
+    queryKey: key,
+    queryFn: () => fetchRepoSkill(workspace, repo),
+    staleTime: 5 * 60_000,
+  });
+  const update = useMutation({
+    mutationFn: () => updateRepoSkill(workspace, repo),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: key }),
+  });
+  const s = skill.data;
+  if (!s) return null;
+  const link = s.pull_request && (
+    <a href={s.pull_request.url} target="_blank" rel="noreferrer" className={secondary}>
+      Skill PR #{s.pull_request.number}
+    </a>
+  );
+  // The open PR has the current skill: merging it is all that is left.
+  if (link && s.pull_request_current) return link;
+  if (s.state === "current")
+    return (
+      <span className="self-center text-xs text-faint" title="The agent skill is current">
+        Skill up to date
+      </span>
+    );
+  return (
+    <>
+      {link}
+      <button
+        type="button"
+        onClick={() => update.mutate()}
+        disabled={update.isPending}
+        title={
+          update.error?.message ??
+          (s.state === "missing"
+            ? "The repo has no mergepatrol agent skill: open a PR that adds it"
+            : "The repo's agent skill is older than Mergepatrol's: open a PR that updates it")
+        }
+        className={primary}
+      >
+        {update.isPending
+          ? "Opening PR…"
+          : update.error
+            ? "Retry"
+            : s.state === "missing"
+              ? "Add skill"
+              : link
+                ? "Update PR"
+                : "Update skill"}
+      </button>
+    </>
+  );
 }
 
 /** Opens a PR that adds the config file with the defaults. */
