@@ -1219,6 +1219,31 @@ pub struct PullDetailView {
     pub checks: Vec<CheckRunView>,
     /// Oldest first, up to the last 100 events.
     pub timeline: Vec<TimelineItemView>,
+    /// Its review comments: how many threads are open, of how many.
+    pub review_threads: ReviewThreadsView,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ReviewThreadsView {
+    /// Unresolved, of the first 100.
+    pub open: u32,
+    pub total: u32,
+    /// The unresolved ones, in the PR's order.
+    pub open_threads: Vec<ReviewThreadView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ReviewThreadView {
+    pub path: String,
+    pub line: Option<u32>,
+    pub author: Option<String>,
+    /// The first line of its first comment.
+    pub title: String,
+    pub url: String,
+    /// Its comments, replies too.
+    pub comments: u32,
 }
 
 #[derive(Serialize, TS)]
@@ -1311,7 +1336,25 @@ impl From<mergepatrol_github::Label> for LabelView {
 
 impl From<PullDetail> for PullDetailView {
     fn from(d: PullDetail) -> Self {
+        let open_threads: Vec<ReviewThreadView> = d
+            .threads
+            .into_iter()
+            .filter(|t| !t.resolved)
+            .map(|t| ReviewThreadView {
+                path: t.path,
+                line: t.line,
+                author: t.author,
+                title: t.title,
+                url: t.url,
+                comments: t.comments,
+            })
+            .collect();
         PullDetailView {
+            review_threads: ReviewThreadsView {
+                open: open_threads.len() as u32,
+                total: d.thread_count,
+                open_threads,
+            },
             body_html: d.body_html,
             labels: d.labels.into_iter().map(LabelView::from).collect(),
             checks: d

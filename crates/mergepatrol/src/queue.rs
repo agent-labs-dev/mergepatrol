@@ -934,8 +934,13 @@ async fn tick_lane(
             LaneChange::Held { number, reason } => {
                 let comment = match &gate {
                     Some(g) if g.reason == reason => Some(g.comment.clone()),
-                    // The agent's review, and a human's answer to it, are on the PR already.
-                    _ if reason.of_review() => None,
+                    // The agent's review, and a human's answer to it, are on the PR already. How
+                    // many comments are unresolved is not: it says so as the count changes.
+                    _ if reason.of_review()
+                        && !matches!(reason.innermost(), Hold::UnresolvedThreads { .. }) =>
+                    {
+                        None
+                    }
                     _ => Some(on_hold(&reason)),
                 };
                 (number, "held", reason.to_string(), comment)
