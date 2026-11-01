@@ -132,7 +132,7 @@ GitHub webhooks wake a queue as soon as something changes, but GitHub only deliv
    1. Enter the setup token from the logs.
    2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
    3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
-   4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file (below). Merge it, and the repo queues.
+   4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file: see [Repo settings](#repo-settings). Merge it, and the repo queues.
    5. In **Settings**, add your Anthropic or OpenAI API key. Mergepatrol checks it with the provider, then stores it encrypted. Create a key for Mergepatrol alone, with a spend limit (for Anthropic, in a workspace with one), so a leaked key costs at most the limit. For OpenAI, you can **Sign in with ChatGPT** instead, and Codex runs on your ChatGPT plan. Mergepatrol signs in the way the Codex CLI does, which OpenAI does not support for other apps and could stop at any time: keep an API key to switch back to.
 
 4. Add the `mergepatrol` label to a PR to queue it. Mergepatrol creates the queue labels on each repo it queues.
@@ -362,7 +362,7 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `agent-sandbox` runs it in a GKE sandbox (below). `local` runs it as a process, without isolation, for development |
+| `MERGEPATROL_EXECUTOR` | `local` | `docker` runs each job in a container. `agent-sandbox` runs it in a GKE sandbox: see [On GCP](#on-gcp). `local` runs it as a process, without isolation, for development |
 | `MERGEPATROL_JOB_IMAGE` | `mergepatrol-job:latest` | The job image (`docker build --target job`) |
 | `MERGEPATROL_JOB_RUNTIME` | Docker's default | `runsc` for gVisor |
 | `MERGEPATROL_JOB_NETWORK` | Docker's default | `mergepatrol-jobs`, from `deploy/sandbox-host.sh` |
