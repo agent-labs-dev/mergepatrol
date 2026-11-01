@@ -2,7 +2,7 @@
 //! The job writes `result.json`, and on success `result.bundle` (a review, `review.json`; an
 //! answer, `answer.md`), to its output directory.
 
-use mergepatrol_core::{Answered, CheckFailure, Finding, Provider};
+use mergepatrol_core::{Answered, CheckFailure, Finding, Provider, SentBack};
 use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
@@ -55,15 +55,21 @@ pub enum Task {
     /// Commit a fix for `failures` on top of `head_sha`, which already sits on `trunk_sha`.
     FixChecks { failures: Vec<CheckFailure> },
     /// Review what the PR changes since it left `trunk_sha`, and write `REVIEW_FILE`. Changes
-    /// nothing. `answered` are what humans said about an earlier head.
+    /// nothing. `answered` are what humans said about an earlier head; `sent_back` what the
+    /// agent sent back to the author on the last one, to check the fix of.
     Review {
         #[serde(default)]
         answered: Vec<Answered>,
+        #[serde(default)]
+        sent_back: Vec<SentBack>,
     },
-    /// Answer a human's question about a finding of the review, and write `ANSWER_FILE`.
+    /// Answer a question about a finding of the review, and write `ANSWER_FILE`. `sent_back`:
+    /// the finding went back to the author, and this is their reply, which it may withdraw on.
     Question {
         finding: Box<Finding>,
         question: String,
+        #[serde(default)]
+        sent_back: bool,
     },
 }
 

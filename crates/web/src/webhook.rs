@@ -207,7 +207,9 @@ fn changed(event: Option<&str>, payload: &Value) -> Vec<Change> {
                 Some(Change::ValuesUnder("stack:".into())),
             ]
         }
-        Some("pull_request_review") => vec![pr["number"].as_u64().map(Change::Pr)],
+        Some("pull_request_review" | "pull_request_review_thread") => {
+            vec![pr["number"].as_u64().map(Change::Pr)]
+        }
         Some("check_run") => vec![value("checks", &payload["check_run"]["head_sha"])],
         Some("status") => vec![value("checks", &payload["sha"])],
         Some("check_suite") => {

@@ -17,7 +17,7 @@ head_sha: string,
  */
 error: string | null, summary: string, 
 /**
- * What the agent asks about first, then what it cleared.
+ * What the agent asks about first, then what it sent back to the author, then the rest.
  */
 findings: Array<FindingView>, 
 /**

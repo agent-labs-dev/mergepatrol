@@ -13,7 +13,11 @@ enabled: boolean,
 /**
  * Every kind's bar.
  */
-bars: Array<BarView>, defaults: Array<BarView>, 
+bars: Array<BarView>, 
+/**
+ * Whether the gate waits for every review thread on a PR to be resolved.
+ */
+require_resolved: boolean, defaults: Array<BarView>, 
 /**
  * Each kind's findings over `days`, by confidence.
  */

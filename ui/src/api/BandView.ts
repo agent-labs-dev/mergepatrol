@@ -6,6 +6,11 @@ export type BandView = {
  */
 from: number, findings: number, 
 /**
+ * Of them, the ones the agent leaned to change: at or over the bar, they go back to the
+ * author.
+ */
+changes: number, 
+/**
  * Of them, the ones a human answered.
  */
 answered: number, 

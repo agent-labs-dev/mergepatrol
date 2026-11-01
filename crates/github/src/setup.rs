@@ -33,10 +33,12 @@ impl AppCredentials {
 
 /// The webhook events that wake a repo's queue: its PRs, reviews, checks, and trunk moves. And
 /// what the You tab keeps of each PR: its comments, and who is on which team.
-pub const WEBHOOK_EVENTS: [&str; 13] = [
+pub const WEBHOOK_EVENTS: [&str; 14] = [
     "pull_request",
     "pull_request_review",
     "pull_request_review_comment",
+    // A review thread resolved, or opened again: the review's gate waits for them all.
+    "pull_request_review_thread",
     "issue_comment",
     "membership",
     "team",

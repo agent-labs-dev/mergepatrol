@@ -19,7 +19,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{Answer, Answered, CheckFailure, Finding};
+use mergepatrol_core::{Answer, Answered, CheckFailure, Finding, SentBack};
 
 pub struct ResolveRequest<'a> {
     pub workdir: &'a Path,
@@ -53,6 +53,9 @@ pub struct ReviewRequest<'a> {
     pub trunk: &'a str,
     /// What humans said about findings on an earlier head.
     pub answered: &'a [Answered],
+    /// What the agent sent back to the author on the last head, to check the fix of, with the
+    /// author's replies.
+    pub sent_back: &'a [SentBack],
     pub transcript: &'a Path,
 }
 
@@ -62,6 +65,8 @@ pub struct QuestionRequest<'a> {
     pub pr_title: &'a str,
     pub finding: &'a Finding,
     pub question: &'a str,
+    /// The finding went back to the author, and the question is their reply.
+    pub sent_back: bool,
     pub transcript: &'a Path,
 }
 
@@ -212,6 +217,20 @@ pull request means. Then stop and reply with one line: `{GIVE_UP} <the reason>`.
     )
 }
 
+/// How an answer to the author's reply to a finding sent back ends: the agent withdraws it, or
+/// it stands.
+pub const WITHDRAWN: &str = "VERDICT: withdrawn";
+pub const STANDS: &str = "VERDICT: stands";
+
+/// Whether an answer to the author's reply withdraws the finding: its last line says so.
+pub fn withdraws(answer: &str) -> bool {
+    answer
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.trim().trim_matches('`').eq_ignore_ascii_case(WITHDRAWN))
+}
+
 /// The JSON a review answers with, as `review_prompt` describes it.
 pub(crate) const REVIEW_SHAPE: &str = r#"{
   "summary": "One or two sentences: what the PR does, and how it holds up.",
@@ -228,6 +247,7 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "checked": ["What you verified, so a human need not"],
       "would_clear": "What would have let you decide alone",
       "suggestion": "The change you would ask the author for. Empty when there is none.",
+      "needs_human": false,
       "related": [{ "file": "path", "line": 41, "why": "What this code told you" }]
     }
   ]
@@ -260,13 +280,45 @@ raise them again unless the lines they are about changed since; if a change was 
 check whether it was made.\n{items}\n"
         )
     };
+    let sent_back = if req.sent_back.is_empty() {
+        String::new()
+    } else {
+        let items = req
+            .sent_back
+            .iter()
+            .map(|s| {
+                let f = &s.finding;
+                let place = match (&f.file, f.line) {
+                    (Some(file), Some(l)) => format!(" ({file}:{l})"),
+                    (Some(file), None) => format!(" ({file})"),
+                    _ => String::new(),
+                };
+                let reply = match (s.resolved, s.reply.trim()) {
+                    (true, "") => " The author resolved it.".to_owned(),
+                    (true, r) => format!(" The author resolved it, replying: {r}"),
+                    (false, "") => String::new(),
+                    (false, r) => format!(" The author replied: {r}"),
+                };
+                format!("- {}{place}: {}{reply}", f.title, f.suggestion)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\nYou sent these findings back to the author on the last version of this PR. Check \
+each against the code now. One that was fixed, report as a `fine` finding with the same title, \
+saying how it was fixed. One the author answered instead of changing: if their reply holds up in \
+the code, report it as `fine` with the same title; if it does not, report it again with the same \
+title and say why the reply does not hold. One that was neither fixed nor answered, report again \
+with the same title, so the author can tell it is the same one, and say what is still missing.\n{items}\n"
+        )
+    };
     format!(
         "You are reviewing a pull request before a merge queue merges it into `{trunk}`.
 
 Pull request: {title}
 
 {body}
-{answered}
+{answered}{sent_back}
 Its changes are `git diff {base}..HEAD`. Read them, and read the code around them that you need \
 to judge them: callers, tests, config, deploy files, earlier migrations, docs. Use `git log`, \
 `git show` and `git diff`, and read files. Change nothing.
@@ -281,8 +333,13 @@ For each finding give `lean`: `fine` if it can merge as it is, `change` if the a
 change it. Give `confidence`, 50 to 100: how sure you are that your lean is right, such that a \
 careful senior reviewer who knows this project would agree. Below 100 when it rests on something \
 the code does not show you: a policy, how production is set up, what the author meant. Say what \
-in `unsure`. Do not inflate it; a human reads every finding under the team's bar, and a finding \
-cleared wrongly costs far more than one asked about.
+in `unsure`. Do not inflate it: a change you are sure enough of goes back to the author, often \
+the agent that wrote the PR, who must fix it before the PR can merge.
+
+Set `needs_human` to true only for a change the author cannot make from the PR and its \
+description: a call on scope, product or design that the PR does not settle, access or \
+credentials it does not have, or a change outside this repo. A human is asked about those. \
+Anything the author can fix in the code, however hard, is not one.
 
 `kind` says what the finding is about: `security` (auth, secrets, crypto, untrusted input), \
 `migrations` (schema or data migrations), `dependencies` (new or bumped packages, lockfiles), \
@@ -307,6 +364,32 @@ pub(crate) fn question_prompt(req: &QuestionRequest<'_>) -> String {
         (Some(file), None) => file.clone(),
         _ => "the whole PR".into(),
     };
+    if req.sent_back {
+        return format!(
+            "You reviewed a pull request, {title}, and sent one finding back to its author to \
+change. The author, or the agent that wrote the PR, replies instead of changing it.
+
+Your finding, about {place}: {ftitle}
+{finding}
+The change you asked for: {suggestion}
+
+Their reply: {question}
+
+The PR's changes are `git diff {base}..HEAD`. Read whatever code helps you judge the reply: use \
+`git log`, `git show`, `git diff`, and read files. Change nothing.
+
+Stay adversarial: the reply wants the finding gone, and you hold it to the code, not to how \
+sure it sounds. Answer in a short paragraph of plain text: what you found. Then end with one \
+line, alone: `{WITHDRAWN}` if the reply shows the finding was wrong or does not apply, so it \
+no longer holds the PR, else `{STANDS}`.",
+            title = req.pr_title,
+            ftitle = f.title,
+            finding = f.finding,
+            suggestion = f.suggestion,
+            question = req.question,
+            base = req.base,
+        );
+    }
     format!(
         "You reviewed a pull request, {title}, and were not sure enough about one finding to \
 decide it alone. A human reviewing it has a question for you.
@@ -329,4 +412,22 @@ code cannot tell.",
         question = req.question,
         base = req.base,
     )
+}
+
+#[cfg(test)]
+mod withdraw_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_last_line_that_withdraws_withdraws() {
+        assert!(withdraws(
+            "The caller holds the lock.\n\nVERDICT: withdrawn\n"
+        ));
+        assert!(withdraws("Fine.\n`verdict: withdrawn`"));
+        assert!(!withdraws("It still races.\nVERDICT: stands"));
+        assert!(!withdraws(
+            "VERDICT: withdrawn\nBut on second look it races."
+        ));
+        assert!(!withdraws(""));
+    }
 }

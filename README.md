@@ -28,7 +28,7 @@ A labeled PR keeps its place in line, on hold, until GitHub would merge it and t
 - It is not a draft.
 - It has the reviews its branch protection or rulesets require, and no requested changes from a required reviewer. Mergepatrol reads GitHub's review decision, so a repo that requires no review needs none.
 - It targets the default branch, or a branch in `branches` of the config file.
-- With **Automatic review** on, the agent's review cleared it, or a human answered what it asked.
+- With **Automatic review** on, the agent's review holds nothing, and every review thread on the PR is resolved: its author fixed or answered each comment, and a human answered anything the review asked.
 - On the hosted Mergepatrol, a private repo has a subscription, and a public repo's workspace is under the [fair-use limit](#pricing).
 
 Then it runs, rebased alone or tested in a [batch](#batches), and merges once its checks pass. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
@@ -39,9 +39,15 @@ When a PR's required checks fail, an agent fixes them too. It reads what GitHub 
 
 ### Automatic review
 
-With **Automatic review** on in **Settings**, an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it accepts and is sure enough of, it clears alone. Anything else, it asks a human about: it requests a review from the code owners of the lines in question, comments on the PR, and lists only those findings on the dashboard, each with its code, why the agent was unsure, and what it already checked. The human answers each one, fine as is or needs a change, or asks the agent to dig further. All fine approves the PR, as the human's review on GitHub. A change asked for is a review with the change on its line: the PR keeps its place, and the agent reviews it again on the next push, knowing what was answered. The agent never approves on GitHub itself, and never sends a PR back alone.
+Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. The author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
 
-How sure is sure enough depends on the kind of change. The defaults: 90% for security, 85% for dependencies and for public APIs, 80% for everything else, and migrations always go to a human. **Settings** shows how the agent's confidence has held up against the humans' answers, to set each bar by. Automatic review is off until a workspace turns it on, since it runs the agent on the workspace's key. It does not review PRs from forks: a human reviews those. A rebase or a fix by the queue keeps the approval.
+A push gets a new review, which checks each finding sent back, with the author's replies in front of it. A finding still there gets a reply in its own thread, which opens again, never a new comment. A thread whose finding is fixed, or whose reply holds up in the code, is resolved. After three rounds that still send findings back, the next review asks a human instead. An author can also reply to a finding with `ask_agent_about_review`: the agent reads the code again, and withdraws the finding if the reply holds up.
+
+A human is asked only about what the author cannot settle from the PR: a call on scope, product or design, access it lacks, a change outside the repo, or a kind the workspace always asks about. The agent then requests a review from the code owners of the lines in question, comments on the PR, and lists those findings on the dashboard, each with its code, why it needs a human, and what the agent already checked. The human answers each one, fine as is or needs a change, or asks the agent to dig further. A change asked for is a review with the change on its line: the PR keeps its place, and the agent reviews it again on the next push, knowing what was answered. The agent never approves on GitHub itself.
+
+Each kind of change has a bar: how sure the agent must be to send a change back to the author. A lower bar sends back more. The defaults: 60% for security, 70% for dependencies and for public APIs, 80% for everything else, and migrations always go to a human. A change under the bar shows as a note and holds nothing.
+
+**Require resolved comments**, on by default, makes the gate wait for every review thread on the PR to be resolved, whoever started it: the agent's, a human's or a bot's. It is the same rule as GitHub's "Require conversation resolution before merging", so a repo can turn that on in its branch protection too, to hold merges made outside the queue. A repo sets it in its config file as `review.require_resolved`. The App hears of a resolved thread from the `pull_request_review_thread` event: an App created before the event was added must subscribe to it on GitHub, or the queue sees the thread resolved only on its next read of the PR. **Settings** shows how the agent's confidence has held up against the humans' answers, to set each bar by. A workspace can turn automatic review off. It does not review PRs from forks: a human reviews those. A rebase or a fix by the queue keeps the approval.
 
 Required checks that have not finished 3 hours after a rebase or a fix also eject the PR, with no fix: a required check that no workflow runs would hold the queue forever. In a batch, it counts as a failure.
 
@@ -205,9 +211,10 @@ branches:          # queues besides the default branch's: exact names
   - release
 review:            # over the workspace's automatic review settings
   enabled: true
-  bars:            # how sure the agent must be to clear a kind alone: 50 to 100, or always_ask
+  bars:            # how sure the agent must be to send a change back to the author: 50 to 100, or always_ask
     security: always_ask
     dependencies: 95
+  require_resolved: true   # wait for every review thread to be resolved
 ```
 
 The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too.
@@ -264,9 +271,9 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
 | `close_pull` | Closes a PR | |
 | `review_pull` | Approves a PR, asks for changes, or comments, then queues it if asked | |
-| `get_agent_review` | The agent's review of a queued PR: what it found, and what it asks a human | |
+| `get_agent_review` | The agent's review of a queued PR: what it found, what it sent back to the author, and what it asks a human | |
 | `answer_agent_review` | Answers what the agent's review asks, as your review on GitHub | |
-| `ask_agent_about_review` | Asks the agent a question about one of its findings | |
+| `ask_agent_about_review` | Asks the agent about one of its findings, or replies to one it sent back | |
 | `ask_agent_review_reviewers` | Asks others to answer the agent's review | |
 | `mark_pull_seen` | Marks a PR read in your inbox | Yes |
 | `snooze_pull` | Puts a PR out of your inbox for a while | Yes |
@@ -344,7 +351,7 @@ The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the 
 | `mergepatrol.state` | `on`, `off` (no App on the repo, no config file, or turned off), or `paused` (the config file does not parse: `config_error` says why) |
 | `mergepatrol.override` | `on` or `off` when turned so in the dashboard, whatever the config file says. `null` follows the file |
 | `queue` | `null` unless queued. `state` is `waiting`, `running` or `held`. `position` counts from 1 in the order the queue takes PRs. `stack` is `{ number, layers }` for a stack. `batch_pr` is the draft PR testing it, while it runs in a batch |
-| `queue.hold.reason` | `draft`, `review_required`, `changes_requested`, `workflow_approval` (a fork PR's runs wait for approval), `fork_edits_off` (a fork PR behind its trunk that does not allow edits by maintainers), `no_queue` (it targets a branch without a queue), `no_subscription`, `fair_use_limit`, `reviewing` (the agent's automatic review runs), `review_asks` (that review waits for a human's answers) or `review_changes` (a human answering it asked for changes, and it waits for a push). `layer` is the stack's PR that holds it |
+| `queue.hold.reason` | `draft`, `review_required`, `changes_requested`, `workflow_approval` (a fork PR's runs wait for approval), `fork_edits_off` (a fork PR behind its trunk that does not allow edits by maintainers), `no_queue` (it targets a branch without a queue), `no_subscription`, `fair_use_limit`, `reviewing` (the agent's automatic review runs), `review_asks` (that review waits for a human's answers) `review_changes` (it sent findings back to the author, or a human answering it asked for changes, and it waits for the author) or `unresolved_threads` (review threads on it are unresolved, and the gate waits for them all). `layer` is the stack's PR that holds it |
 | `merged`, `ejected` | How it last left the queue: `{ at, sha }` or `{ at, reason }`. Both `null` while it is queued, and when it left otherwise |
 
 Every response has an `ETag`: send it back as `If-None-Match` for a `304` when nothing changed. Each caller, by its token, has 5,000 calls an hour, a `304` included, which `x-ratelimit-limit`, `x-ratelimit-remaining`, `x-ratelimit-used` and `x-ratelimit-reset` (Unix seconds) report. Past the limit, a `429` has a `retry-after`, in seconds. So does a `503` when GitHub's own rate limit is used up.

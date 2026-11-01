@@ -64,6 +64,10 @@ pub struct PullRequest {
     /// The repo the head branch is in: a fork's, for a PR from one. `None` once it is deleted.
     #[serde(default)]
     pub head_repository: Option<HeadRepository>,
+    /// How many of its review threads are unresolved, of the first 100. 0 when the query did
+    /// not ask.
+    #[serde(default, rename = "reviewThreads", deserialize_with = "unresolved")]
+    pub unresolved_threads: u32,
     #[serde(flatten)]
     pub details: PrDetails,
 }
@@ -256,6 +260,18 @@ fn file_paths<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::
     Ok(nodes::<D, File>(d)?.into_iter().map(|f| f.path).collect())
 }
 
+fn unresolved<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Thread {
+        is_resolved: bool,
+    }
+    Ok(nodes::<D, Thread>(d)?
+        .iter()
+        .filter(|t| !t.is_resolved)
+        .count() as u32)
+}
+
 fn label_names<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     #[derive(Deserialize)]
     struct Conn {
@@ -307,6 +323,34 @@ fn rejection(body: &Value) -> String {
         .to_owned()
 }
 
+/// A PR's review threads, each with its first comment and its last.
+const THREADS: &str = "query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+    reviewThreads(first: 100) { nodes { id isResolved
+      first: comments(first: 1) { nodes { databaseId body author { login } } }
+      last: comments(last: 1) { nodes { databaseId body author { login } } } } } } }
+}";
+
+/// A comment that starts a review thread: on `line` of `path`, or on the whole file.
+pub struct ThreadComment {
+    pub path: String,
+    pub line: Option<u32>,
+    pub body: String,
+}
+
+/// A review thread, as `threads_marked` finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewThread {
+    /// Its GraphQL id, to resolve it by.
+    pub id: String,
+    pub resolved: bool,
+    /// The comment that starts it, to reply to.
+    pub comment_id: u64,
+    pub body: String,
+    /// The last reply, if any, as (login, body).
+    pub reply: Option<(String, String)>,
+}
+
 /// What a PR shows on the dashboard. A macro, so `concat!` can build on it.
 macro_rules! summary_fields {
     () => {
@@ -319,8 +363,12 @@ macro_rules! summary_fields {
     };
 }
 
-/// A PR as the queue reads it: its files too, for the code owners.
-const PR_FIELDS: &str = concat!(summary_fields!(), " files(first: 100) { nodes { path } }");
+/// A PR as the queue reads it: its files too, for the code owners, and whether its review
+/// threads are resolved, for the review's gate.
+const PR_FIELDS: &str = concat!(
+    summary_fields!(),
+    " files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
+);
 
 /// The labeled PRs a snapshot reads at a time. GraphQL charges a point per 100 requests its lists
 /// could take, one per list on each PR: a page of 25 PRs costs 1 point, of 100 5, on every tick.
@@ -1214,6 +1262,165 @@ impl Installation {
                 &format!("/repos/{repo}/pulls/{number}/reviews"),
                 Some(json!({ "commit_id": head, "event": event, "body": body })),
             )
+            .await?;
+        Ok(())
+    }
+
+    /// Reviews the PR at `head` as the App, with `comments` on their lines. A comment with no
+    /// line is on its whole file. When GitHub turns a line down, as one outside the diff, the
+    /// comments go in the body instead.
+    pub async fn review_lines(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        head: &str,
+        body: &str,
+        comments: &[ThreadComment],
+    ) -> Result<()> {
+        let path = format!("/repos/{repo}/pulls/{number}/reviews");
+        let lines: Vec<Value> = comments
+            .iter()
+            .map(|c| match c.line {
+                Some(line) => {
+                    json!({ "path": c.path, "line": line, "side": "RIGHT", "body": c.body })
+                }
+                None => json!({ "path": c.path, "subject_type": "file", "body": c.body }),
+            })
+            .collect();
+        let review = |lines: &[Value], body: &str| json!({ "commit_id": head, "event": "COMMENT", "body": body, "comments": lines });
+        let res = self
+            .request(Method::POST, &path, Some(review(&lines, body)))
+            .await?;
+        if res.status.is_success() {
+            return Ok(());
+        }
+        if res.status != StatusCode::UNPROCESSABLE_ENTITY || comments.is_empty() {
+            anyhow::bail!("POST {path}: {} {}", res.status, res.body);
+        }
+        let mut all = body.to_owned();
+        for c in comments {
+            let place = match c.line {
+                Some(line) => format!("{}:{line}", c.path),
+                None => c.path.clone(),
+            };
+            all.push_str(&format!("\n\n**`{place}`**\n{}", c.body));
+        }
+        let _: Value = self
+            .rest(Method::POST, &path, Some(review(&[], all.trim())))
+            .await?;
+        Ok(())
+    }
+
+    /// The PR's review threads that start with a comment holding `mark`, up to 100: Mergepatrol's
+    /// own, as its reviews post them.
+    pub async fn threads_marked(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        mark: &str,
+    ) -> Result<Vec<ReviewThread>> {
+        #[derive(Deserialize)]
+        struct Data {
+            repository: Repo,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Repo {
+            pull_request: Pr,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Pr {
+            review_threads: Nodes<Thread>,
+        }
+        #[derive(Deserialize)]
+        struct Nodes<T> {
+            nodes: Vec<T>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Thread {
+            id: String,
+            is_resolved: bool,
+            first: Nodes<Comment>,
+            last: Nodes<Comment>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Comment {
+            database_id: u64,
+            body: String,
+            author: Option<Author>,
+        }
+        #[derive(Deserialize)]
+        struct Author {
+            login: String,
+        }
+        let data: Data = self
+            .graphql(
+                "review threads",
+                THREADS,
+                json!({
+                    "owner": repo.owner, "name": repo.name, "number": number,
+                }),
+            )
+            .await?;
+        Ok(data
+            .repository
+            .pull_request
+            .review_threads
+            .nodes
+            .into_iter()
+            .filter_map(|t| {
+                let first = t.first.nodes.into_iter().next()?;
+                if !first.body.contains(mark) {
+                    return None;
+                }
+                let last = t.last.nodes.into_iter().next();
+                let reply = last
+                    .filter(|l| l.database_id != first.database_id)
+                    .map(|l| (l.author.map(|a| a.login).unwrap_or_default(), l.body));
+                Some(ReviewThread {
+                    id: t.id,
+                    resolved: t.is_resolved,
+                    comment_id: first.database_id,
+                    body: first.body,
+                    reply,
+                })
+            })
+            .collect())
+    }
+
+    /// Replies in the thread a review comment starts.
+    pub async fn reply_in_thread(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::POST,
+                &format!("/repos/{repo}/pulls/{number}/comments/{comment_id}/replies"),
+                Some(json!({ "body": body })),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Resolves a review thread, or opens it again.
+    pub async fn resolve_thread(&self, id: &str, resolved: bool) -> Result<()> {
+        let mutation = match resolved {
+            true => {
+                "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }"
+            }
+            false => {
+                "mutation($id: ID!) { unresolveReviewThread(input: { threadId: $id }) { thread { id } } }"
+            }
+        };
+        let _: Value = self
+            .graphql("resolve thread", mutation, json!({ "id": id }))
             .await?;
         Ok(())
     }

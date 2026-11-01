@@ -85,6 +85,11 @@ pub struct RepoReviewView {
     pub enabled: Option<bool>,
     /// The kinds whose bar the repo sets. The others follow the workspace.
     pub bars: Vec<BarView>,
+    /// Whether its gate waits for every review thread to be resolved. Unset follows the
+    /// workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub require_resolved: Option<bool>,
 }
 
 impl From<ReviewOverrides> for RepoReviewView {
@@ -92,6 +97,7 @@ impl From<ReviewOverrides> for RepoReviewView {
         RepoReviewView {
             enabled: o.enabled,
             bars: bar_views(&o.bars),
+            require_resolved: o.require_resolved,
         }
     }
 }
@@ -101,6 +107,7 @@ impl From<RepoReviewView> for ReviewOverrides {
         ReviewOverrides {
             enabled: v.enabled,
             bars: bars_of(&v.bars),
+            require_resolved: v.require_resolved,
         }
     }
 }
@@ -113,6 +120,8 @@ pub struct ReviewSettingsView {
     pub enabled: bool,
     /// Every kind's bar.
     pub bars: Vec<BarView>,
+    /// Whether the gate waits for every review thread on a PR to be resolved.
+    pub require_resolved: bool,
     pub defaults: Vec<BarView>,
     /// Each kind's findings over `days`, by confidence.
     pub history: Vec<KindHistoryView>,
@@ -133,6 +142,9 @@ pub struct BandView {
     /// The band's lowest confidence: 50, 55, … 95. 95 holds 100 too.
     pub from: u32,
     pub findings: u32,
+    /// Of them, the ones the agent leaned to change: at or over the bar, they go back to the
+    /// author.
+    pub changes: u32,
     /// Of them, the ones a human answered.
     pub answered: u32,
     /// Of those, the ones the human decided otherwise than the agent leaned.
@@ -144,6 +156,10 @@ pub struct BandView {
 pub struct SetReviewSettings {
     pub enabled: bool,
     pub bars: Vec<BarView>,
+    /// Unset keeps what is saved.
+    #[serde(default)]
+    #[ts(optional)]
+    pub require_resolved: Option<bool>,
 }
 
 /// How far back the track record goes.
@@ -165,6 +181,7 @@ async fn settings_view(app: &AppState, id: u64) -> Result<Json<ReviewSettingsVie
     Ok(Json(ReviewSettingsView {
         enabled: full.enabled,
         bars: bar_views(&full.bars),
+        require_resolved: full.require_resolved,
         defaults: bar_views(&ReviewSettings::default().bars),
         history: history(&reviews),
         days: HISTORY_DAYS,
@@ -187,6 +204,9 @@ fn history(reviews: &[ReviewRecord]) -> Vec<KindHistoryView> {
                     let i = (j.finding.confidence.clamp(50, 99) as usize - 50) / 5;
                     let band = &mut bands[i];
                     band.findings += 1;
+                    if j.finding.lean == Lean::Change {
+                        band.changes += 1;
+                    }
                     let Some(answer) = r.answers.get(&j.finding.id) else {
                         continue;
                     };
@@ -215,8 +235,10 @@ pub(crate) async fn set_review_settings(
     Json(body): Json<SetReviewSettings>,
 ) -> Result<Json<ReviewSettingsView>, ApiError> {
     let id = caller.workspace(id)?;
+    let saved = app.store.review_settings(id).await?.unwrap_or_default();
     let mut settings = ReviewSettings {
         enabled: body.enabled,
+        require_resolved: body.require_resolved.unwrap_or(saved.require_resolved),
         ..ReviewSettings::default()
     };
     settings.bars.extend(bars_of(&body.bars));
@@ -264,7 +286,7 @@ pub struct AgentReviewView {
     /// Why the agent could not review: a human reviews the whole PR instead.
     pub error: Option<String>,
     pub summary: String,
-    /// What the agent asks about first, then what it cleared.
+    /// What the agent asks about first, then what it sent back to the author, then the rest.
     pub findings: Vec<FindingView>,
     /// Who the agent asks, by login. Empty: anyone who may approve the PR.
     pub asked: Vec<String>,
@@ -296,6 +318,14 @@ pub struct FindingView {
     pub related: Vec<RelatedView>,
     /// The agent asks a human about it.
     pub asked: bool,
+    /// Sent back to the PR's author: the PR waits for a push that fixes it.
+    pub sent_back: bool,
+    /// The agent withdrew it after the author's reply.
+    pub withdrawn: bool,
+    /// The change needs a call the author cannot make from the PR.
+    pub needs_human: bool,
+    /// It has a review thread on the PR, which its author resolves.
+    pub threaded: bool,
     #[ts(type = "number | \"always_ask\"")]
     pub bar: Bar,
 }
@@ -385,6 +415,7 @@ impl From<Judged> for FindingView {
             checked: f.checked,
             would_clear: f.would_clear,
             suggestion: f.suggestion,
+            needs_human: f.needs_human,
             code: code_view(f.code),
             related: f
                 .related
@@ -397,6 +428,9 @@ impl From<Judged> for FindingView {
                 })
                 .collect(),
             asked: j.asked,
+            sent_back: j.sent_back,
+            withdrawn: j.withdrawn,
+            threaded: j.threaded,
             bar: j.bar,
         }
     }
@@ -418,8 +452,8 @@ impl From<Question> for QuestionView {
 impl From<ReviewRecord> for AgentReviewView {
     fn from(r: ReviewRecord) -> Self {
         let mut findings = r.findings;
-        // What it asks first, then what it cleared, each as it reported them.
-        findings.sort_by_key(|f| !f.asked);
+        // What it asks first, then what it sent back, then the rest, each as it reported them.
+        findings.sort_by_key(|f| (!f.asked, !f.sent_back));
         AgentReviewView {
             status: r.status.into(),
             head_sha: r.head_sha,
@@ -512,6 +546,9 @@ pub(crate) async fn answer_agent_review(
     if changes && answers.is_empty() && body.note.trim().is_empty() {
         return Err(ApiError::bad_request("Say what to change."));
     }
+    // What the agent sent back to the author still holds the PR for their push: answering the
+    // asks approves it only when nothing is left.
+    let owed = review.findings.iter().any(|f| f.sent_back);
     let by = reviewer(&caller, &app, &repo).await?;
 
     let mut text = String::new();
@@ -550,6 +587,7 @@ pub(crate) async fn answer_agent_review(
     let verdict = match changes {
         true if gh.pull_request(&repo, number).await?.authored_by(&by) => Verdict::Comment,
         true => Verdict::RequestChanges,
+        false if owed => Verdict::Comment,
         false => approval(&gh, &repo, number, &by)
             .await?
             .unwrap_or(Verdict::Comment),
@@ -582,7 +620,7 @@ pub(crate) async fn answer_agent_review(
         answers,
         by: by.clone(),
         note: body.note.trim().to_owned(),
-        status: match changes {
+        status: match changes || owed {
             true => ReviewStatus::Changes,
             false => ReviewStatus::Approved,
         },
@@ -709,14 +747,19 @@ pub(crate) async fn ask_agent(
         return Err(ApiError::bad_request("Ask something."));
     }
     let review = current(&app, id, &repo, number, &body.head_sha).await?;
-    if review.status != ReviewStatus::Asks {
+    let Some(finding) = review
+        .findings
+        .iter()
+        .find(|f| f.finding.id == body.finding)
+    else {
+        return Err(ApiError::bad_request("No such finding."));
+    };
+    // A human's question while it asks, or the author's reply to a finding sent back to them.
+    if review.status != ReviewStatus::Asks && !finding.sent_back {
         return Err(ApiError::Status(
             StatusCode::CONFLICT,
-            "The review asks nothing now.".into(),
+            "The review asks nothing now, and holds nothing for the author.".into(),
         ));
-    }
-    if !review.findings.iter().any(|f| f.finding.id == body.finding) {
-        return Err(ApiError::bad_request("No such finding."));
     }
     let by = reviewer(&caller, &app, &repo).await?;
     let q = app
@@ -785,6 +828,8 @@ pub struct ReviewBriefView {
     pub status: AgentReviewStatusView,
     /// Findings the agent asks about.
     pub asks: u32,
+    /// Findings it sent back to the author, still to fix.
+    pub sent_back: u32,
     /// Findings it cleared alone.
     pub cleared: u32,
     pub asked: Vec<String>,
@@ -796,10 +841,12 @@ pub struct ReviewBriefView {
 impl From<&ReviewRecord> for ReviewBriefView {
     fn from(r: &ReviewRecord) -> Self {
         let asks = r.asks().count() as u32;
+        let sent_back = r.findings.iter().filter(|f| f.sent_back).count() as u32;
         ReviewBriefView {
             status: r.status.into(),
             asks,
-            cleared: r.findings.len() as u32 - asks,
+            sent_back,
+            cleared: r.findings.len() as u32 - asks - sent_back,
             asked: r.asked.clone(),
             answered_by: r.answered_by.clone(),
             failed: r.error.is_some() && r.status == ReviewStatus::Asks,
@@ -827,10 +874,14 @@ mod tests {
                 checked: Vec::new(),
                 would_clear: String::new(),
                 suggestion: String::new(),
+                needs_human: false,
                 code: Vec::new(),
                 related: Vec::new(),
             },
             asked,
+            sent_back: false,
+            withdrawn: false,
+            threaded: false,
             bar: Bar::From(90),
         }
     }
