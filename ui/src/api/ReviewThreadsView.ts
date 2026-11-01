@@ -3,9 +3,13 @@ import type { ReviewThreadView } from "./ReviewThreadView";
 
 export type ReviewThreadsView = { 
 /**
- * Unresolved, of the first 100.
+ * Unresolved, of the threads read.
  */
 open: number, total: number, 
+/**
+ * The threads read: the first 100. Under `total`, more may be open than `open` says.
+ */
+read: number, 
 /**
  * The unresolved ones, in the PR's order.
  */

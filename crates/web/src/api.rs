@@ -1226,9 +1226,11 @@ pub struct PullDetailView {
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct ReviewThreadsView {
-    /// Unresolved, of the first 100.
+    /// Unresolved, of the threads read.
     pub open: u32,
     pub total: u32,
+    /// The threads read: the first 100. Under `total`, more may be open than `open` says.
+    pub read: u32,
     /// The unresolved ones, in the PR's order.
     pub open_threads: Vec<ReviewThreadView>,
 }
@@ -1336,6 +1338,7 @@ impl From<mergepatrol_github::Label> for LabelView {
 
 impl From<PullDetail> for PullDetailView {
     fn from(d: PullDetail) -> Self {
+        let read = d.threads.len() as u32;
         let open_threads: Vec<ReviewThreadView> = d
             .threads
             .into_iter()
@@ -1352,7 +1355,8 @@ impl From<PullDetail> for PullDetailView {
         PullDetailView {
             review_threads: ReviewThreadsView {
                 open: open_threads.len() as u32,
-                total: d.thread_count,
+                total: d.thread_count.max(read),
+                read,
                 open_threads,
             },
             body_html: d.body_html,
@@ -2551,6 +2555,33 @@ mod tests {
     }
 
     /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
+    #[test]
+    fn the_open_comments_say_when_more_threads_exist_than_were_read() {
+        use mergepatrol_github::ThreadSummary;
+        let thread = |resolved| ThreadSummary {
+            resolved,
+            path: "a.rs".into(),
+            line: Some(1),
+            author: None,
+            title: "t".into(),
+            url: "u".into(),
+            comments: 1,
+        };
+        let detail = |threads, thread_count| PullDetail {
+            body_html: String::new(),
+            labels: Vec::new(),
+            checks: Vec::new(),
+            timeline: Vec::new(),
+            threads,
+            thread_count,
+        };
+        let v = PullDetailView::from(detail(vec![thread(true), thread(false)], 120)).review_threads;
+        assert_eq!((v.open, v.total, v.read), (1, 120, 2));
+        // GitHub's count never says fewer than were read.
+        let v = PullDetailView::from(detail(vec![thread(true)], 0)).review_threads;
+        assert_eq!((v.open, v.total, v.read), (0, 1, 1));
+    }
+
     #[test]
     fn this_repo_has_the_skill_every_repo_gets() {
         assert_eq!(

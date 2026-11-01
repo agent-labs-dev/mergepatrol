@@ -217,28 +217,36 @@ export function PullDetail({
   );
 }
 
-/** How many review comments are open, of all of them. */
+/** How many review comments are open, of all of them. Past the threads read, more may be. */
 function OpenComments({ threads: t }: { threads: ReviewThreadsView }) {
-  if (t.open === 0)
+  if (t.open === 0 && t.total <= t.read)
     return (
       <>
-        <span className="text-ok">✓</span> All {t.total} comments resolved
+        <span className="text-ok">✓</span>{" "}
+        {t.total === 1 ? "1 comment resolved" : `All ${t.total} comments resolved`}
       </>
     );
   return (
     <>
-      <span className="text-warn">●</span> {t.open} of {t.total}{" "}
-      {t.total === 1 ? "comment" : "comments"} open
+      <span className="text-warn">●</span> {openOf(t)}
     </>
   );
 }
 
+/** "2 of 5 comments open", or with more threads than were read, "2+ of 120 comments open". */
+const openOf = (t: ReviewThreadsView) =>
+  `${t.open}${t.total > t.read ? "+" : ""} of ${t.total} ${t.total === 1 ? "comment" : "comments"} open`;
+
 /** The review threads still open, each linked to its place on GitHub. */
 function ReviewComments({ threads: t }: { threads: ReviewThreadsView }) {
   return (
-    <Section id="review-comments" title={`Review comments · ${t.open} open of ${t.total}`}>
-      {t.open === 0 ? (
+    <Section id="review-comments" title={`Review comments · ${openOf(t)}`}>
+      {t.open === 0 && t.total <= t.read ? (
         <p className="text-muted">Every review comment is resolved.</p>
+      ) : t.open === 0 ? (
+        <p className="text-muted">
+          The first {t.read} are resolved. Open the PR on GitHub for the other {t.total - t.read}.
+        </p>
       ) : (
         <ol className="divide-y divide-line-soft rounded-lg border border-line bg-surface">
           {t.open_threads.map((c) => (
