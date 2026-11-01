@@ -2554,7 +2554,6 @@ mod tests {
         assert_eq!(skill_lookups(".claude/skills")[0].1, ".claude");
     }
 
-    /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
     #[test]
     fn the_open_comments_say_when_more_threads_exist_than_were_read() {
         use mergepatrol_github::ThreadSummary;
@@ -2582,6 +2581,7 @@ mod tests {
         assert_eq!((v.open, v.total, v.read), (0, 1, 1));
     }
 
+    /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
     #[test]
     fn this_repo_has_the_skill_every_repo_gets() {
         assert_eq!(
