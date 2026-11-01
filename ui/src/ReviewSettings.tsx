@@ -334,6 +334,7 @@ function RepoBars({
   const [staged, setStaged] = useState<Record<string, RepoReviewView>>({});
   const [opened, setOpened] = useState<Record<string, PullRequestRef>>({});
   const [reviewing, setReviewing] = useState(false);
+  const [open, setOpen] = useState<string | null>(null);
   const client = useQueryClient();
   const loaded = on.flatMap((repo, i) => {
     const c = configs[i].data;
@@ -374,120 +375,100 @@ function RepoBars({
       <div className="p-4 sm:p-5">
         <h2 className="font-semibold">Each repo's review</h2>
         <p className="mt-1 text-muted">
-          A dash follows the workspace. A repo's own bars live in its config file, so changing one
-          opens a PR there.
+          A repo follows the workspace unless it sets its own. A repo's own bars live in its config
+          file, so changing one opens a PR there.
         </p>
       </div>
-      <div className="overflow-x-auto border-t border-line">
-        <table className="w-full text-sm">
-          <thead className="text-xs text-muted">
-            <tr className="border-b border-line">
-              <th className="px-4 py-2 text-left font-medium">Kind</th>
-              <th className="px-3 py-2 text-left font-medium">Workspace</th>
-              {loaded.map(({ repo }) => (
-                <th key={repo} className="px-3 py-2 text-left font-medium whitespace-nowrap">
+      <ul className="divide-y divide-line-soft border-t border-line">
+        {loaded.map(({ repo, config }) => {
+          const r = view(repo, config);
+          const overrides = [
+            ...(r.enabled === null ? [] : [`Review ${r.enabled ? "on" : "off"}`]),
+            ...KINDS.flatMap((k) => {
+              const own = barOf(r.bars, k);
+              return own === undefined ? [] : [`${kindNames[k]} ${barText(own)}`];
+            }),
+          ];
+          const expanded = open === repo;
+          return (
+            <li key={repo}>
+              <button
+                type="button"
+                aria-expanded={expanded}
+                onClick={() => setOpen(expanded ? null : repo)}
+                className="flex w-full items-baseline gap-3 px-4 py-2.5 text-left text-sm hover:bg-page sm:px-5"
+              >
+                <span className="shrink-0 font-medium" title={repo}>
                   {repo.split("/")[1]}
-                  {opened[repo] && (
-                    <a
-                      href={opened[repo].url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="ml-1.5 font-normal text-ok"
-                    >
-                      PR #{opened[repo].number}
-                    </a>
-                  )}
-                  {staged[repo] && <span className="ml-1.5 font-normal text-warn">edited</span>}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-line-soft">
-            <tr>
-              <td className="px-4 py-2 font-medium">Review</td>
-              <td className="px-3 py-2 text-muted">{workspaceOn ? "On" : "Off"}</td>
-              {loaded.map(({ repo, config }) => {
-                const enabled = view(repo, config).enabled;
-                return (
-                  <td key={repo} className="px-3 py-1.5">
-                    <select
-                      aria-label={`${repo}: review`}
-                      value={enabled === null ? "inherit" : enabled ? "on" : "off"}
-                      onChange={(e) =>
-                        set(repo, config, {
-                          enabled: e.target.value === "inherit" ? null : e.target.value === "on",
-                        })
-                      }
-                      className={`h-7 rounded-md border bg-transparent pl-2 text-xs ${
-                        enabled === null
-                          ? "border-transparent text-faint hover:border-line"
-                          : "border-line text-fg-2"
-                      }`}
-                    >
-                      <option value="inherit">— {workspaceOn ? "On" : "Off"}</option>
-                      <option value="on">On</option>
-                      <option value="off">Off</option>
-                    </select>
-                  </td>
-                );
-              })}
-            </tr>
-            {KINDS.map((k) => {
-              const ws = barOf(workspaceBars, k);
-              return (
-                <tr key={k}>
-                  <td className="px-4 py-2 font-medium whitespace-nowrap">{kindNames[k]}</td>
-                  <td className="px-3 py-2">
-                    {ws !== undefined && (
-                      <span className="rounded-md bg-sunken px-2 py-0.5 text-xs font-medium text-fg-2 ring-1 ring-line ring-inset">
-                        {barText(ws)}
-                      </span>
-                    )}
-                  </td>
-                  {loaded.map(({ repo, config }) => {
-                    const own = barOf(view(repo, config).bars, k);
-                    const was = barOf(config.settings.review.bars, k);
+                </span>
+                <span
+                  className={`min-w-0 flex-1 truncate text-xs ${
+                    overrides.length ? "text-fg-2" : "text-faint"
+                  }`}
+                >
+                  {overrides.length ? overrides.join(" · ") : "Follows the workspace"}
+                </span>
+                {staged[repo] && <span className="shrink-0 text-xs text-warn">edited</span>}
+                {opened[repo] && (
+                  <a
+                    href={opened[repo].url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="shrink-0 text-xs text-ok"
+                  >
+                    PR #{opened[repo].number}
+                  </a>
+                )}
+                <span className="shrink-0 text-xs text-muted">{expanded ? "Done" : "Edit"}</span>
+              </button>
+              {expanded && (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 pt-1 pb-4 sm:grid-cols-3 sm:px-5">
+                  <RepoChoice
+                    label="Review"
+                    value={r.enabled === null ? "inherit" : r.enabled ? "on" : "off"}
+                    inherit={workspaceOn ? "On" : "Off"}
+                    changed={!!staged[repo] && r.enabled !== config.settings.review.enabled}
+                    choices={[
+                      ["on", "On"],
+                      ["off", "Off"],
+                    ]}
+                    onChange={(v) =>
+                      set(repo, config, { enabled: v === "inherit" ? null : v === "on" })
+                    }
+                  />
+                  {KINDS.map((k) => {
+                    const own = barOf(r.bars, k);
+                    const ws = barOf(workspaceBars, k);
                     return (
-                      <td key={repo} className="px-3 py-1.5">
-                        <select
-                          aria-label={`${repo}: ${kindNames[k]}`}
-                          value={own === undefined ? "inherit" : String(own)}
-                          onChange={(e) =>
-                            setBar(
-                              repo,
-                              config,
-                              k,
-                              e.target.value === "inherit"
-                                ? undefined
-                                : e.target.value === "always_ask"
-                                  ? "always_ask"
-                                  : Number(e.target.value),
-                            )
-                          }
-                          className={`h-7 rounded-md border bg-transparent pl-2 text-xs ${
-                            staged[repo] && own !== was
-                              ? "border-amber-500 text-fg"
-                              : own === undefined
-                                ? "border-transparent text-faint hover:border-line"
-                                : "border-line text-fg-2"
-                          }`}
-                        >
-                          <option value="inherit">— {ws === undefined ? "" : barText(ws)}</option>
-                          {CHOICES.map((c) => (
-                            <option key={c} value={String(c)}>
-                              {barText(c)}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
+                      <RepoChoice
+                        key={k}
+                        label={kindNames[k]}
+                        value={own === undefined ? "inherit" : String(own)}
+                        inherit={ws === undefined ? "" : barText(ws)}
+                        changed={!!staged[repo] && own !== barOf(config.settings.review.bars, k)}
+                        choices={CHOICES.map((c) => [String(c), barText(c)])}
+                        onChange={(v) =>
+                          setBar(
+                            repo,
+                            config,
+                            k,
+                            v === "inherit"
+                              ? undefined
+                              : v === "always_ask"
+                                ? "always_ask"
+                                : Number(v),
+                          )
+                        }
+                      />
                     );
                   })}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
       {changed.length > 0 && (
         <div className="flex items-center gap-3 border-t border-line px-4 py-3 sm:px-5">
           <span className="text-xs text-muted">
@@ -552,6 +533,47 @@ function RepoBars({
         </div>
       )}
     </section>
+  );
+}
+
+/** One setting of a repo's: the workspace's value, shown with a dash, or its own. */
+function RepoChoice({
+  label,
+  value,
+  inherit,
+  changed,
+  choices,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  inherit: string;
+  changed: boolean;
+  choices: [string, string][];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block text-xs text-muted">
+      {label}
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`mt-1 block h-8 w-full rounded-md border bg-transparent pl-2 text-sm ${
+          changed
+            ? "border-amber-500 text-fg"
+            : value === "inherit"
+              ? "border-line-soft text-faint"
+              : "border-line text-fg-2"
+        }`}
+      >
+        <option value="inherit">— {inherit}</option>
+        {choices.map(([v, text]) => (
+          <option key={v} value={v}>
+            {text}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
