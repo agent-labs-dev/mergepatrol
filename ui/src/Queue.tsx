@@ -1,5 +1,5 @@
 import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { Activity } from "./Activity";
 import { AgentReviewScreen, Gate, reviewBadge, reviewedPr, reviewLine } from "./AgentReview";
@@ -27,6 +27,7 @@ const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 export function Queue({ workspace }: { workspace: number }) {
   const { lane: laneId, pr, answer, ...filter } = useSearch({ from: "/$account/queue" });
   const navigate = useNavigate({ from: "/$account/queue" });
+  const { account } = useParams({ from: "/$account/queue" });
   const setPr = (pr?: number) => navigate({ search: (s) => ({ ...s, pr, answer: undefined }) });
   const setAnswer = (answer?: boolean) => navigate({ search: (s) => ({ ...s, answer }) });
   // Replaced, not pushed: each keystroke of the search changes it.
@@ -58,9 +59,12 @@ export function Queue({ workspace }: { workspace: number }) {
         <div>
           <p className="font-medium">No queues yet</p>
           <p className="mt-1 max-w-xs text-muted">
-            Set up a repo in Repos, then add the{" "}
+            Set up a repo, then add the{" "}
             <code className="rounded bg-sunken px-1 text-xs">mergepatrol</code> label to a PR.
           </p>
+          <Link to="/$account/repos" params={{ account }} className={`${primary} mt-4`}>
+            Set up a repo
+          </Link>
         </div>
       </div>
     );
