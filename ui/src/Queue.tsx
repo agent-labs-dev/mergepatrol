@@ -278,6 +278,15 @@ export function Queue({ workspace }: { workspace: number }) {
             }
             actions={
               <>
+                {entry.state === "open" && (
+                  <IconButton
+                    icon="close"
+                    label="Close pull request"
+                    disabled={actions.kinds.has(entry.number)}
+                    onClick={() => actions.close(entry)}
+                    className="size-8! text-bad/70 hover:bg-red-50! hover:text-bad dark:hover:bg-red-400/10!"
+                  />
+                )}
                 {draftOf(entry, open.data) !== null && (
                   <button
                     type="button"
@@ -561,24 +570,13 @@ function IconButton({
   );
 }
 
-/** Three slots at the end of every row, so every row lines up: close for an open PR, priority,
- * then queue or remove. A queued PR's are faint until hovered, but for a priority it has. */
+/** Two slots at the end of every row, so every row lines up: priority, then queue or remove. A
+ * queued PR's are faint until hovered, but for a priority it has. Close is on the PR's pane. */
 function RowActions({ item, actions, busy }: { item: Item; actions: Actions; busy: boolean }) {
   const quiet = "text-faint/60 group-hover:text-muted group-focus-within:text-muted";
   const open = item.state === "open";
   return (
     <span className="flex shrink-0 items-center gap-0.5 pr-3">
-      {open ? (
-        <IconButton
-          icon="close"
-          label="Close pull request"
-          disabled={busy}
-          onClick={() => actions.close(item)}
-          className="text-bad/70 hover:bg-red-50! hover:text-bad dark:hover:bg-red-400/10!"
-        />
-      ) : (
-        <span className="size-7" />
-      )}
       <IconButton
         icon="priority"
         label={open ? "Priority queue" : item.priority ? "Drop priority" : "Make priority"}

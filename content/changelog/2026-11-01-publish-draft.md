@@ -8,6 +8,7 @@ A draft PR now has a **Publish** button, in the You tab's **Drafts** folder and 
 the queue page. It marks the PR ready for review on GitHub, as you, so its reviewers are asked and
 the queue stops holding it.
 
-The close button is red now, on the queue page and in the You tab, so it reads as the action it is.
+The close button is red now, so it reads as the action it is. On the queue page it moves out of the
+list, onto the PR's pane beside **Queue**, so a stray click in the list can't reach it.
 
 ![Publish beside Queue on the queue page](/changelog/publish-draft/queue.png)
