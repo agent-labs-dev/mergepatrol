@@ -11,6 +11,7 @@ import {
   fetchYou,
   nudgePull,
   queuePull,
+  readyPull,
   reviewPull,
   reviewUrl,
   seenPull,
@@ -259,6 +260,15 @@ export function You() {
         type: "success",
         title: `Snoozed ${shortRef(p)} until ${untilText(Date.now() + minutes * MINUTE)}`,
       }),
+    onError: (e) => setError(e.message),
+  });
+  const publish = useMutation({
+    mutationFn: async (p: InboxPullView) => {
+      await readyPull(p.workspace, p.repo, p.number);
+      await client.refetchQueries({ queryKey: ["you"] });
+    },
+    onSuccess: (_, p) =>
+      toasts.add({ type: "success", title: `Published ${shortRef(p)} for review` }),
     onError: (e) => setError(e.message),
   });
   const unsnooze = useMutation({
@@ -616,6 +626,7 @@ export function You() {
                   onQueue={(priority) => queue.mutate({ p: pull, priority })}
                   onDequeue={() => dequeue.mutate(pull)}
                   onNudge={nudge.isPending ? undefined : () => nudge.mutate(pull)}
+                  onPublish={publish.isPending ? undefined : () => publish.mutate(pull)}
                   later={later}
                 />
               );
@@ -790,7 +801,7 @@ function Later({
         onClick={onClose}
         title="Close the PR on GitHub, as you"
         aria-label="Close the PR"
-        className={iconButton}
+        className={`${iconButton} text-bad/70! hover:bg-red-50! hover:text-bad! dark:hover:bg-red-400/10!`}
       >
         <Icon d={icons.close} />
       </button>
@@ -1257,6 +1268,7 @@ function OwnerBar({
   onQueue,
   onDequeue,
   onNudge,
+  onPublish,
   later,
 }: {
   pull: InboxPullView;
@@ -1266,6 +1278,8 @@ function OwnerBar({
   onDequeue: () => void;
   /** Mentions the reviewers who have not answered. `undefined` while it goes. */
   onNudge?: () => void;
+  /** Marks a draft ready for review. `undefined` while it goes. */
+  onPublish?: () => void;
   later: ReactNode;
 }) {
   return (
@@ -1284,6 +1298,17 @@ function OwnerBar({
           className={plain}
         >
           Nudge
+        </button>
+      )}
+      {p.draft && (
+        <button
+          type="button"
+          disabled={!onPublish}
+          onClick={onPublish}
+          title="Mark it ready for review on GitHub, as you"
+          className={solid}
+        >
+          Publish
         </button>
       )}
       {p.queue ? (

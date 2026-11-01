@@ -88,6 +88,9 @@ pub trait InboxStore: Send + Sync {
     /// it.
     async fn inbox_closed(&self, installation_id: u64, repo: &RepoName, pr: PrNumber)
     -> Result<()>;
+    /// The PR was marked ready for review from the dashboard: out of its author's drafts now,
+    /// before GitHub's reads show it.
+    async fn inbox_ready(&self, installation_id: u64, repo: &RepoName, pr: PrNumber) -> Result<()>;
     /// PRs that changed since they were read, oldest change first. A PR read since its last
     /// change waits for the change to settle.
     async fn inbox_stale(&self, settle: Duration, limit: u32) -> Result<Vec<InboxStale>>;
@@ -224,6 +227,21 @@ impl InboxStore for PgStore {
             "UPDATE inbox_pulls SET state = 'closed', closed_at = now(),
                  changes = changes + 1, changed_at = now()
              WHERE installation_id = $1 AND repo = $2 AND number = $3 AND state = 'open'",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(pr as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn inbox_ready(&self, installation_id: u64, repo: &RepoName, pr: PrNumber) -> Result<()> {
+        sqlx::query(
+            "UPDATE inbox_pulls SET node = jsonb_set(node, '{isDraft}', 'false'),
+                 changes = changes + 1, changed_at = now()
+             WHERE installation_id = $1 AND repo = $2 AND number = $3 AND state = 'open'
+                 AND node IS NOT NULL",
         )
         .bind(installation_id as i64)
         .bind(repo.to_string())
@@ -710,6 +728,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(numbers(&inbox.requested), ["\"ann\""]);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_draft_published_here_is_ready_at_once(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let draft = |state: &str| InboxRead {
+            node: json!({ "author": "me", "isDraft": true }),
+            ..read(state, "me", &[], &[])
+        };
+        store
+            .save_inbox_index(1, &repo(), &[write(1, 0, draft("open"))])
+            .await
+            .unwrap();
+        store
+            .save_inbox_reads(1, &repo(), &[write(2, 0, draft("closed"))])
+            .await
+            .unwrap();
+        store.inbox_ready(1, &repo(), 1).await.unwrap();
+        store.inbox_ready(1, &repo(), 2).await.unwrap();
+        // A PR the inbox lacks is no error.
+        store.inbox_ready(1, &repo(), 3).await.unwrap();
+        let changes = store.inbox_changes(1, &repo()).await.unwrap();
+        assert_eq!((changes[&1], changes[&2]), (1, 0));
+        let inbox = store
+            .inbox("me", &[1], Duration::from_secs(3600))
+            .await
+            .unwrap();
+        assert_eq!(inbox.authored[0].node["isDraft"], false);
     }
 
     #[sqlx::test(migrations = false)]

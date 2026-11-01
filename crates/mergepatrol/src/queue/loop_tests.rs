@@ -957,6 +957,9 @@ impl InboxStore for Mem {
     async fn inbox_closed(&self, _: u64, _: &RepoName, _: PrNumber) -> Result<()> {
         unreachable!()
     }
+    async fn inbox_ready(&self, _: u64, _: &RepoName, _: PrNumber) -> Result<()> {
+        unreachable!()
+    }
     async fn inbox_stale(&self, _: Duration, _: u32) -> Result<Vec<InboxStale>> {
         unreachable!()
     }

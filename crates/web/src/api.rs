@@ -1600,8 +1600,8 @@ pub(crate) async fn dequeue(
     Ok(())
 }
 
-/// These PRs' labels changed from the dashboard or MCP. The queue wakes to read them again now,
-/// before the label webhooks come to mark its reads of them stale.
+/// These PRs changed from the dashboard or MCP: their labels, or a draft made ready. The queue
+/// wakes to read them again now, before the webhooks come to mark its reads of them stale.
 pub(crate) async fn relabeled(
     store: &dyn Store,
     wake: &dyn Wake,
@@ -1634,6 +1634,44 @@ pub(crate) async fn close_pull(
     app.store.inbox_closed(id, &repo, number).await?;
     tracing::info!(installation = id, %repo, number, "closed from the dashboard");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Marks a draft PR ready for review, as the user. The queue holds a draft, so it wakes to read
+/// the PR again; the You tab moves it out of the drafts now.
+pub(crate) async fn ready_pull(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+) -> Result<StatusCode, ApiError> {
+    let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    let token = caller.github_token(&app)?;
+    match setup::ready_for_review_as(&token, &repo.to_string(), number).await {
+        Err(e) if e.is::<setup::Refused>() => {
+            return Err(ApiError::Status(
+                StatusCode::FORBIDDEN,
+                format!("You need write access to {repo}, or to have opened the PR, for that."),
+            ));
+        }
+        result => as_user(result, &repo)?,
+    }
+    published(&*app.store, &*app.wake, id, repo.clone(), number).await?;
+    tracing::info!(installation = id, %repo, number, "marked ready from the dashboard");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The draft PR was marked ready from the dashboard or MCP: out of the You tab's drafts now, and
+/// the queue, which holds drafts, wakes to read it again.
+pub(crate) async fn published(
+    store: &dyn Store,
+    wake: &dyn Wake,
+    id: u64,
+    repo: RepoName,
+    number: u64,
+) -> Result<(), ApiError> {
+    store.inbox_ready(id, &repo, number).await?;
+    relabeled(store, wake, id, repo, &[number]).await;
+    Ok(())
 }
 
 /// How long the You tab lists a merged PR.
