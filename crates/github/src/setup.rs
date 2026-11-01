@@ -423,6 +423,46 @@ pub async fn close_pull_as(token: &str, repo: &str, number: u64) -> Result<()> {
     Ok(())
 }
 
+/// Marks a draft PR ready for review as the user, so GitHub checks that they may: it takes write
+/// access, or being its author. `Refused` when they may not. A PR already ready is no error.
+pub async fn ready_for_review_as(token: &str, repo: &str, number: u64) -> Result<()> {
+    let pr: Value = user_get(token, &format!("/repos/{repo}/pulls/{number}"))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    if pr["draft"] != true {
+        return Ok(());
+    }
+    let id = pr["node_id"].as_str().context("a PR without its node id")?;
+    let mutation = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }";
+    let req = client()?
+        .post(format!("{API}/graphql"))
+        .json(&json!({ "query": mutation, "variables": { "id": id } }));
+    let body: Value = user_write(token, req)
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    graphql_errors(&body)
+}
+
+/// A GraphQL answer's errors: `Refused` for a user without the access, else GitHub's message.
+fn graphql_errors(body: &Value) -> Result<()> {
+    let Some(first) = body["errors"].as_array().and_then(|e| e.first()) else {
+        return Ok(());
+    };
+    if first["type"] == "FORBIDDEN" {
+        return Err(Refused.into());
+    }
+    bail!(
+        "{}",
+        first["message"]
+            .as_str()
+            .unwrap_or("GitHub turned the change down.")
+    )
+}
+
 /// Asks these users to review a PR, as the user. `Rejected` for a login GitHub will not ask, as
 /// one without access.
 pub async fn request_reviewers_as(
@@ -620,6 +660,18 @@ fn client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_graphql_refusal_is_refused_and_any_other_error_says_why() {
+        assert!(graphql_errors(&json!({ "data": {} })).is_ok());
+        let forbidden = json!({ "errors": [{ "type": "FORBIDDEN", "message": "no" }] });
+        assert!(graphql_errors(&forbidden).unwrap_err().is::<Refused>());
+        let other = json!({ "errors": [{ "message": "Pull request is not a draft" }] });
+        assert_eq!(
+            graphql_errors(&other).unwrap_err().to_string(),
+            "Pull request is not a draft"
+        );
+    }
 
     #[test]
     fn a_rejected_review_says_why() {

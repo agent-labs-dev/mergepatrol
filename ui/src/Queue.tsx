@@ -11,6 +11,7 @@ import {
   fetchOpenPulls,
   fetchSession,
   queuePull,
+  readyPull,
 } from "./api";
 import type { ChecksView } from "./api/ChecksView";
 import type { EntryView } from "./api/EntryView";
@@ -276,27 +277,49 @@ export function Queue({ workspace }: { workspace: number }) {
               )
             }
             actions={
-              entry.state === "open" && (
-                <>
+              <>
+                {entry.state === "open" && (
+                  <IconButton
+                    icon="close"
+                    label="Close pull request"
+                    disabled={actions.kinds.has(entry.number)}
+                    onClick={() => actions.close(entry)}
+                    className="size-8! text-bad/70 hover:bg-red-50! hover:text-bad dark:hover:bg-red-400/10!"
+                  />
+                )}
+                {draftOf(entry, open.data) !== null && (
                   <button
                     type="button"
-                    disabled={pending.has(entry.number)}
-                    onClick={() => actions.queue(entry, false)}
-                    className={`${primary} h-8 px-3`}
+                    disabled={actions.publishing.has(draftOf(entry, open.data) ?? 0)}
+                    onClick={() => actions.publish(draftOf(entry, open.data) ?? entry.number)}
+                    title="Mark it ready for review on GitHub, as you"
+                    className={`${entry.state === "open" ? secondary : primary} h-8 px-3`}
                   >
-                    Queue
+                    Publish
                   </button>
-                  <button
-                    type="button"
-                    disabled={pending.has(entry.number)}
-                    onClick={() => actions.queue(entry, true)}
-                    title="Queue at the front"
-                    className={`${secondary} h-8 px-3 text-hot!`}
-                  >
-                    ↑ Priority
-                  </button>
-                </>
-              )
+                )}
+                {entry.state === "open" && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={pending.has(entry.number)}
+                      onClick={() => actions.queue(entry, false)}
+                      className={`${primary} h-8 px-3`}
+                    >
+                      Queue
+                    </button>
+                    <button
+                      type="button"
+                      disabled={pending.has(entry.number)}
+                      onClick={() => actions.queue(entry, true)}
+                      title="Queue at the front"
+                      className={`${secondary} h-8 px-3 text-hot!`}
+                    >
+                      ↑ Priority
+                    </button>
+                  </>
+                )}
+              </>
             }
             onBack={() => setPr()}
           />
@@ -334,6 +357,17 @@ type PendingKind = Pending["kind"] | "prioritizing" | "closing";
 const PENDING_MS = 60_000;
 
 const pendingKey = (repo: string, n: number) => `${repo}#${n}`;
+
+/** The draft to publish for `item`: an open draft, or the layer of a queued stack that holds it
+ * as a draft. `null` for any other. */
+const draftOf = (item: Item, open: OpenPullView[] | undefined): number | null =>
+  item.state === "open"
+    ? open?.find((o) => o.number === item.number)?.draft
+      ? item.number
+      : null
+    : item.hold?.reason === "draft"
+      ? (item.hold.layer ?? prOf(item))
+      : null;
 
 /** Whether the open PRs have `item`, or a layer of its stack. */
 const inOpen = (open: OpenPullView[] | undefined, item: Item) =>
@@ -434,6 +468,18 @@ function useActions(
     onError: (e) => setError(e.message),
     onSuccess: () => client.invalidateQueries({ queryKey: ["open"] }),
   });
+  // A draft made ready: the open PRs, the lane and the PR read again to show it.
+  const publishing = useMutation({
+    mutationKey: ["ready", workspace],
+    mutationFn: ({ number, repo }: { number: number; repo: string }) =>
+      readyPull(workspace, repo, number),
+    onMutate: () => setError(null),
+    onError: (e) => setError(e.message),
+    onSuccess: () =>
+      Promise.all(
+        ["open", "lanes", "pull"].map((k) => client.invalidateQueries({ queryKey: [k] })),
+      ),
+  });
   const repo = lane?.repo ?? "";
   const kinds = new Map<number, PendingKind>(
     [...pending.values()]
@@ -450,6 +496,10 @@ function useActions(
     select: (m) => m.state.variables as Omit<Pending, "kind">,
   });
   for (const c of closingNow) if (c.repo === repo) kinds.set(c.item.number, "closing");
+  const publishingNow = useMutationState({
+    filters: { mutationKey: ["ready", workspace], status: "pending" },
+    select: (m) => m.state.variables as { number: number; repo: string },
+  });
   return {
     /** The lane's clicks still to show, by PR. */
     pending: new Map(
@@ -462,6 +512,9 @@ function useActions(
     queue: (item: Item, priority: boolean) =>
       mutation.mutate({ kind: "queueing", item: { ...item, priority }, repo }),
     remove: (item: Item) => mutation.mutate({ kind: "removing", item, repo }),
+    /** The drafts being published, by number. */
+    publishing: new Set(publishingNow.filter((p) => p.repo === repo).map((p) => p.number)),
+    publish: (number: number) => publishing.mutate({ number, repo }),
     close: (item: Item) => {
       if (window.confirm(`Close #${item.number} on GitHub?`)) closing.mutate({ item, repo });
     },
@@ -517,24 +570,13 @@ function IconButton({
   );
 }
 
-/** Three slots at the end of every row, so every row lines up: close for an open PR, priority,
- * then queue or remove. A queued PR's are faint until hovered, but for a priority it has. */
+/** Two slots at the end of every row, so every row lines up: priority, then queue or remove. A
+ * queued PR's are faint until hovered, but for a priority it has. Close is on the PR's pane. */
 function RowActions({ item, actions, busy }: { item: Item; actions: Actions; busy: boolean }) {
   const quiet = "text-faint/60 group-hover:text-muted group-focus-within:text-muted";
   const open = item.state === "open";
   return (
     <span className="flex shrink-0 items-center gap-0.5 pr-3">
-      {open ? (
-        <IconButton
-          icon="close"
-          label="Close pull request"
-          disabled={busy}
-          onClick={() => actions.close(item)}
-          className={`${quiet} hover:text-bad!`}
-        />
-      ) : (
-        <span className="size-7" />
-      )}
       <IconButton
         icon="priority"
         label={open ? "Priority queue" : item.priority ? "Drop priority" : "Make priority"}

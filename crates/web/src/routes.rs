@@ -208,6 +208,8 @@ pub(crate) static ROUTES: &[Route] = &[
         "Take a PR, and its stack if it is in one, out of the queue. Cancels its run. Needs triage access to the repo.")),
     route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/close", api::close_pull, tool!("close_pull", Destroys,
         "Closes an open PR.")),
+    route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/ready", api::ready_pull, tool!("ready_pull", Writes,
+        "Publishes a draft PR: marks it ready for review, so reviewers are asked and the queue no longer holds it. A PR already ready is left as it is. Needs write access to the repo, or to have opened the PR.")),
     route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/review", api::review_pull, tool!("review_pull", Writes,
         "Reviews a PR: approves it, asks for changes, or comments. Then queues it, if you ask. GitHub takes no approval from a PR's author: theirs posts its text as a comment, and is refused when GitHub requires an approval to merge.",
         arg("verdict", Ty::OneOf(&["approve", "request_changes", "comment"]), "What the review says."),

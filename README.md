@@ -270,6 +270,7 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front | |
 | `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
 | `close_pull` | Closes a PR | |
+| `ready_pull` | Publishes a draft PR: marks it ready for review | |
 | `review_pull` | Approves a PR, asks for changes, or comments, then queues it if asked | |
 | `get_agent_review` | The agent's review of a queued PR: what it found, what it sent back to the author, and what it asks a human | |
 | `answer_agent_review` | Answers what the agent's review asks, as your review on GitHub | |

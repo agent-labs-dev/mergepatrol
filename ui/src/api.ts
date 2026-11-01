@@ -193,6 +193,10 @@ export const closeUrl = (id: number, repo: string, pr: number) =>
 export const closePull = (id: number, repo: string, pr: number) =>
   call("POST", closeUrl(id, repo, pr));
 
+/** Publishes a draft PR on GitHub, as the user: marks it ready for review. */
+export const readyPull = (id: number, repo: string, pr: number) =>
+  call("POST", w(id, `/repos/${repo}/pulls/${pr}/ready`));
+
 export const reviewUrl = (id: number, repo: string, pr: number) =>
   w(id, `/repos/${repo}/pulls/${pr}/review`);
 
