@@ -835,6 +835,9 @@ impl ReviewStore for Mem {
     ) -> Result<()> {
         unreachable!()
     }
+    async fn withdraw_finding(&self, _: i64, _: &str) -> Result<Option<ReviewStatus>> {
+        unreachable!()
+    }
     async fn reviews_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
         unreachable!()
     }

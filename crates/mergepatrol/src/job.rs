@@ -154,11 +154,19 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             (&spec.head_sha, "fixed")
         }
         // These return what the agent said, not code.
-        Task::Review { answered } => {
-            return review(spec, &git, resolver, answered, dir, out, events).await;
+        Task::Review {
+            answered,
+            sent_back,
+        } => {
+            return review(spec, &git, resolver, answered, sent_back, dir, out, events).await;
         }
-        Task::Question { finding, question } => {
-            return answer(spec, &git, resolver, finding, question, dir, out, events).await;
+        Task::Question {
+            finding,
+            question,
+            sent_back,
+        } => {
+            let q = (finding.as_ref(), question.as_str(), *sent_back);
+            return answer(spec, &git, resolver, q, dir, out, events).await;
         }
     };
 
@@ -356,11 +364,13 @@ const CODE_CONTEXT: u32 = 3;
 const CODE_LINES: usize = 24;
 
 /// Has the agent review the PR, and writes what it found, each finding with its code.
+#[allow(clippy::too_many_arguments)]
 async fn review(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
     answered: &[Answered],
+    sent_back: &[Finding],
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
@@ -382,6 +392,7 @@ async fn review(
             pr_body: &spec.pr_body,
             trunk: &spec.trunk,
             answered,
+            sent_back,
             transcript: &transcript,
         })
         .await
@@ -420,8 +431,7 @@ async fn answer(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    finding: &Finding,
-    question: &str,
+    (finding, question, sent_back): (&Finding, &str, bool),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
@@ -437,6 +447,7 @@ async fn answer(
             pr_title: &spec.pr_title,
             finding,
             question,
+            sent_back,
             transcript: &transcript,
         })
         .await

@@ -1,7 +1,8 @@
 //! The agent's review of a queued PR, the queue's first gate: what it found, how sure it was,
-//! and which findings it asks a human about. A finding it leans to accept, and is sure enough
-//! of, it clears itself. Any other finding goes to a human: the agent approves alone, but never
-//! sends a PR back alone.
+//! and where each finding goes. A change it is sure enough of goes back to the PR's author, who
+//! is often the agent that built it, to fix and push; the next head's review checks the fix. A
+//! human is asked only about what the author cannot settle from the PR: a call on scope or
+//! product, access, a change outside the repo, or a kind the workspace always asks about.
 
 use std::collections::BTreeMap;
 
@@ -45,8 +46,8 @@ impl Kind {
     }
 }
 
-/// How sure the agent must be, in percent, to clear a finding of a kind alone. `Always` asks a
-/// human however sure it is.
+/// How sure the agent must be, in percent, to send a change of a kind back to the PR's author.
+/// A lower bar sends back more. `Always` asks a human about every finding of the kind instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "BarText", into = "BarText")]
 pub enum Bar {
@@ -58,8 +59,8 @@ impl Bar {
     /// The lowest bar: under it, a guess.
     pub const MIN: u8 = 50;
 
-    /// Whether a finding the agent is `confidence` percent sure of clears.
-    pub fn clears(self, confidence: u8) -> bool {
+    /// Whether a change the agent is `confidence` percent sure of goes back to the author.
+    pub fn sends(self, confidence: u8) -> bool {
         match self {
             Bar::From(bar) => confidence >= bar,
             Bar::Always => false,
@@ -107,12 +108,13 @@ pub struct ReviewSettings {
     pub bars: BTreeMap<Kind, Bar>,
 }
 
-/// Off until a workspace turns it on: a review runs the agent, on the workspace's own key.
-/// The bars ask about what hurts most when it is wrong, and let the rest through from 80%.
+/// On for every workspace: a review runs the agent, on the workspace's own key, and runs only
+/// once it has one. What hurts most when it is wrong goes back to the author on less certainty;
+/// migrations always ask a human.
 impl Default for ReviewSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             bars: Kind::ALL.map(|k| (k, default_bar(k))).into(),
         }
     }
@@ -120,9 +122,9 @@ impl Default for ReviewSettings {
 
 fn default_bar(kind: Kind) -> Bar {
     match kind {
-        Kind::Security => Bar::From(90),
+        Kind::Security => Bar::From(60),
         Kind::Migrations => Bar::Always,
-        Kind::Dependencies | Kind::PublicApi => Bar::From(85),
+        Kind::Dependencies | Kind::PublicApi => Bar::From(70),
         Kind::Other => Bar::From(80),
     }
 }
@@ -143,11 +145,28 @@ impl ReviewSettings {
         }
     }
 
-    /// Whether the agent asks a human about a finding: it leans to a change, or it is not sure
-    /// enough to clear it.
-    pub fn asks(&self, finding: &Finding) -> bool {
-        finding.lean == Lean::Change || !self.bar(finding.kind).clears(finding.confidence)
+    /// Where a finding goes. A human only for a kind that always asks, or a change the author
+    /// cannot make from the PR; a change the agent is sure enough of goes back to the author;
+    /// the rest it clears, a change under the bar as a note.
+    pub fn route(&self, finding: &Finding) -> Route {
+        let bar = self.bar(finding.kind);
+        match finding.lean {
+            _ if bar == Bar::Always => Route::Human,
+            Lean::Fine => Route::Cleared,
+            Lean::Change if finding.needs_human => Route::Human,
+            Lean::Change if bar.sends(finding.confidence) => Route::Author,
+            Lean::Change => Route::Cleared,
+        }
     }
+}
+
+/// Where a finding goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Cleared,
+    /// Back to the PR's author, to change and push.
+    Author,
+    Human,
 }
 
 /// What a repo's config file sets of the review, over the workspace's settings.
@@ -208,6 +227,10 @@ pub struct Finding {
     /// The change it would ask the author for.
     #[serde(default)]
     pub suggestion: String,
+    /// The change needs a call the author cannot make from the PR: scope, product or design,
+    /// access or credentials, or a change outside the repo.
+    #[serde(default)]
+    pub needs_human: bool,
     /// The lines it is about, from the PR's diff.
     #[serde(default)]
     pub code: Vec<CodeLine>,
@@ -256,7 +279,8 @@ pub enum ReviewStatus {
     /// Waiting for a human's answers.
     Asks,
     Approved,
-    /// A human asked for changes: it waits for a push.
+    /// The agent sent findings back to the author, or a human asked for changes: it waits for
+    /// a push.
     Changes,
     /// The PR moved on before the review finished: a newer head has its own.
     Stale,
@@ -327,31 +351,55 @@ pub struct Answered {
     pub by: String,
 }
 
-/// A finding as the review keeps it: whether the agent asks a human about it, and the bar it
-/// was held to.
+/// A finding as the review keeps it: whether the agent asks a human about it or sent it back
+/// to the author, and the bar it was held to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Judged {
     #[serde(flatten)]
     pub finding: Finding,
     pub asked: bool,
+    /// Sent back to the author, and not yet withdrawn: the PR waits for a push that fixes it.
+    #[serde(default)]
+    pub sent_back: bool,
+    /// The agent withdrew it after the author's reply.
+    #[serde(default)]
+    pub withdrawn: bool,
     pub bar: Bar,
 }
 
 impl ReviewSettings {
-    /// Each finding, with whether the agent asks about it.
+    /// Each finding, with where it goes.
     pub fn judge(&self, findings: Vec<Finding>) -> Vec<Judged> {
         findings
             .into_iter()
-            .map(|finding| Judged {
-                asked: self.asks(&finding),
-                bar: self.bar(finding.kind),
-                finding,
+            .map(|finding| {
+                let route = self.route(&finding);
+                Judged {
+                    asked: route == Route::Human,
+                    sent_back: route == Route::Author,
+                    withdrawn: false,
+                    bar: self.bar(finding.kind),
+                    finding,
+                }
             })
             .collect()
     }
 }
 
-/// A human's question to the agent about a finding, and its answer once it has one.
+/// How a review ends: a human is asked when anything goes to one or the agent could not review;
+/// else it waits for the author's push while anything is sent back; else it is approved.
+pub fn review_status(findings: &[Judged], failed: bool) -> ReviewStatus {
+    if failed || findings.iter().any(|f| f.asked) {
+        ReviewStatus::Asks
+    } else if findings.iter().any(|f| f.sent_back) {
+        ReviewStatus::Changes
+    } else {
+        ReviewStatus::Approved
+    }
+}
+
+/// A question to the agent about a finding, and its answer once it has one: a human's, or the
+/// author's reply to a finding sent back to them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
     /// `q1`, `q2`, … in the order asked.
@@ -392,21 +440,59 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: String::new(),
+            needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
         }
     }
 
     #[test]
-    fn the_agent_clears_alone_only_what_it_accepts_and_is_sure_enough_of() {
+    fn changes_go_back_to_the_author_and_only_calls_they_cannot_make_go_to_a_human() {
         let s = ReviewSettings::default();
-        assert!(!s.asks(&finding(Kind::Other, 80, Lean::Fine)));
-        assert!(s.asks(&finding(Kind::Other, 79, Lean::Fine)));
-        assert!(s.asks(&finding(Kind::Security, 89, Lean::Fine)));
-        assert!(!s.asks(&finding(Kind::Security, 90, Lean::Fine)));
-        // However sure: migrations always ask, and so does any change.
-        assert!(s.asks(&finding(Kind::Migrations, 100, Lean::Fine)));
-        assert!(s.asks(&finding(Kind::Other, 100, Lean::Change)));
+        assert!(s.enabled);
+        assert_eq!(
+            s.route(&finding(Kind::Other, 60, Lean::Fine)),
+            Route::Cleared
+        );
+        assert_eq!(
+            s.route(&finding(Kind::Other, 80, Lean::Change)),
+            Route::Author
+        );
+        // Under the bar, a change is a note.
+        assert_eq!(
+            s.route(&finding(Kind::Other, 79, Lean::Change)),
+            Route::Cleared
+        );
+        // What hurts more goes back on less certainty.
+        assert_eq!(
+            s.route(&finding(Kind::Security, 60, Lean::Change)),
+            Route::Author
+        );
+        let mut call = finding(Kind::Other, 100, Lean::Change);
+        call.needs_human = true;
+        assert_eq!(s.route(&call), Route::Human);
+        // However sure, and however it leans: migrations always ask.
+        assert_eq!(
+            s.route(&finding(Kind::Migrations, 100, Lean::Fine)),
+            Route::Human
+        );
+    }
+
+    #[test]
+    fn a_review_waits_for_a_human_then_the_author_then_lets_the_pr_on() {
+        let s = ReviewSettings::default();
+        let fine = s.judge(vec![finding(Kind::Other, 90, Lean::Fine)]);
+        assert_eq!(review_status(&fine, false), ReviewStatus::Approved);
+        assert_eq!(review_status(&fine, true), ReviewStatus::Asks);
+        let back = s.judge(vec![
+            finding(Kind::Other, 90, Lean::Fine),
+            finding(Kind::Other, 90, Lean::Change),
+        ]);
+        assert_eq!(review_status(&back, false), ReviewStatus::Changes);
+        let mut call = finding(Kind::Other, 90, Lean::Change);
+        call.needs_human = true;
+        let both = s.judge(vec![finding(Kind::Other, 90, Lean::Change), call]);
+        assert_eq!(review_status(&both, false), ReviewStatus::Asks);
     }
 
     #[test]
@@ -423,7 +509,7 @@ mod tests {
         assert!(s.enabled);
         assert_eq!(s.bar(Kind::Security), Bar::Always);
         assert_eq!(s.bar(Kind::Other), Bar::From(65));
-        assert_eq!(s.bar(Kind::Dependencies), Bar::From(85));
+        assert_eq!(s.bar(Kind::Dependencies), Bar::From(70));
         let off = ws.with(&ReviewOverrides {
             enabled: Some(false),
             ..Default::default()

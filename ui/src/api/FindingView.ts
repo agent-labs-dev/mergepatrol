@@ -12,4 +12,16 @@ confidence: number, lean: LeanView, finding: string, unsure: string, checked: Ar
 /**
  * The agent asks a human about it.
  */
-asked: boolean, bar: number | "always_ask", };
+asked: boolean, 
+/**
+ * Sent back to the PR's author: the PR waits for a push that fixes it.
+ */
+sent_back: boolean, 
+/**
+ * The agent withdrew it after the author's reply.
+ */
+withdrawn: boolean, 
+/**
+ * The change needs a call the author cannot make from the PR.
+ */
+needs_human: boolean, bar: number | "always_ask", };

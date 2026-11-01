@@ -34,7 +34,8 @@ pub enum Hold {
     Reviewing,
     /// The agent's review asks a human about what it was not sure of.
     ReviewAsks,
-    /// A human answering the agent's review asked for changes: it waits for a push.
+    /// The agent sent findings back to the author, or a human answering its review asked for
+    /// changes: it waits for a push.
     ReviewChanges,
     /// A layer of the stack is not ready.
     Layer {
@@ -125,9 +126,9 @@ impl fmt::Display for Hold {
             Hold::ReviewAsks => {
                 f.write_str("the agent's review asks a human about what it was not sure of")
             }
-            Hold::ReviewChanges => {
-                f.write_str("its review asked for changes: it is reviewed again on the next push")
-            }
+            Hold::ReviewChanges => f.write_str(
+                "its review sent changes back to the author: it is reviewed again on the next push",
+            ),
             Hold::Layer { number, hold } => write!(f, "#{number} is not ready: {hold}"),
         }
     }

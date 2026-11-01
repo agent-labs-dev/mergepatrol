@@ -10,6 +10,10 @@ export type ReviewBriefView = { status: AgentReviewStatusView,
  */
 asks: number, 
 /**
+ * Findings it sent back to the author, still to fix.
+ */
+sent_back: number, 
+/**
  * Findings it cleared alone.
  */
 cleared: number, asked: Array<string>, answered_by: string | null, 

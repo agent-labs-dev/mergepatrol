@@ -1,19 +1,22 @@
 //! The agent's review, the queue's first gate. A tick starts a review of each queued PR's head;
-//! this worker runs it in the sandbox, clears what the agent is sure of, and asks a human about
-//! the rest, on GitHub and on the dashboard. It also has the agent answer the humans' questions
-//! about its findings.
+//! this worker runs it in the sandbox, sends what the agent is sure should change back to the
+//! PR's author, and asks a human only about what the author cannot settle, on GitHub and on the
+//! dashboard. It also has the agent answer questions about its findings: a human's, or the
+//! author's reply to a finding sent back, which the agent may withdraw on.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
-    Answered, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings, ReviewStatus, review_url,
+    Answered, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings, ReviewStatus,
+    review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
 };
 use mergepatrol_github::{App, CodeOwners, Installation, PullRequest};
+use mergepatrol_resolver::withdraws;
 use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
 use tokio::task::JoinSet;
 
@@ -29,6 +32,9 @@ const STALE: Duration = Duration::from_secs(45 * 60);
 /// How many runs may fail on errors outside the PR before a human reviews it instead.
 const ATTEMPTS: u32 = 3;
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// How many reviews in a row may send findings back to the author before the next asks a human
+/// about them instead: the author and the agent disagree, or the fix keeps missing.
+const ROUNDS: usize = 3;
 /// Where GitHub looks for CODEOWNERS, in its order.
 const CODEOWNERS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
@@ -166,9 +172,11 @@ async fn run_review(
     settings: &RepoSettings,
     r: &ReviewRecord,
 ) -> std::result::Result<ReviewOutput, String> {
-    let answered = answered_before(ctx, r)
+    let earlier = earlier_reviews(ctx, r)
         .await
         .map_err(|e| format!("{e:#}"))?;
+    let answered = answered_before(&earlier);
+    let sent_back = sent_back_before(&earlier);
     let job_id = format!(
         "{}-{}-{}-review-{}",
         r.repo.owner,
@@ -178,7 +186,10 @@ async fn run_review(
     );
     let ran = async {
         let trunk = gh.branch_sha(&r.repo, pr.merges_into()).await?;
-        let task = Task::Review { answered };
+        let task = Task::Review {
+            answered,
+            sent_back,
+        };
         let (spec, granted) =
             job_spec(ctx, gh, key, pr, settings, &r.head_sha, &trunk, None, task).await?;
         if granted.is_none() {
@@ -228,35 +239,69 @@ async fn run_job(
     Ok(out)
 }
 
-/// What humans answered on the PR's last answered review, of an earlier head.
-async fn answered_before(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<Answered>> {
-    let earlier = ctx
+/// The PR's reviews of earlier heads that finished, newest first.
+async fn earlier_reviews(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<ReviewRecord>> {
+    let mut earlier = ctx
         .store
         .reviews_of(r.installation_id, &r.repo, r.number, 10)
         .await?;
-    let Some(last) = earlier
-        .into_iter()
-        .find(|e| e.id != r.id && !e.answers.is_empty())
-    else {
-        return Ok(Vec::new());
+    earlier.retain(|e| {
+        e.id != r.id
+            && e.head_sha != r.head_sha
+            && !matches!(
+                e.status,
+                ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale
+            )
+    });
+    Ok(earlier)
+}
+
+/// What humans answered on the PR's last answered review, of an earlier head.
+fn answered_before(earlier: &[ReviewRecord]) -> Vec<Answered> {
+    let Some(last) = earlier.iter().find(|e| !e.answers.is_empty()) else {
+        return Vec::new();
     };
     let by = last.answered_by.clone().unwrap_or_default();
-    Ok(last
-        .findings
-        .into_iter()
+    last.findings
+        .iter()
         .filter_map(|j| {
             let answer = last.answers.get(&j.finding.id)?.clone();
             Some(Answered {
-                finding: j.finding,
+                finding: j.finding.clone(),
                 answer,
                 by: by.clone(),
             })
         })
-        .collect())
+        .collect()
 }
 
-/// Ends the review: approved when it asks about nothing, else it asks the people who own the
-/// code in question. `Err` is why the agent could not review: a human reviews the whole PR.
+/// What the last review sent back to the author and still held the PR for: the next checks
+/// the fix.
+fn sent_back_before(earlier: &[ReviewRecord]) -> Vec<Finding> {
+    earlier
+        .first()
+        .map(|last| {
+            last.findings
+                .iter()
+                .filter(|j| j.sent_back)
+                .map(|j| j.finding.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the author has had their rounds: the last `ROUNDS` reviews each sent findings back,
+/// and no human stepped in.
+fn rounds_spent(earlier: &[ReviewRecord]) -> bool {
+    earlier.len() >= ROUNDS
+        && earlier[..ROUNDS]
+            .iter()
+            .all(|e| e.answered_by.is_none() && e.findings.iter().any(|j| j.sent_back))
+}
+
+/// Ends the review: approved when it holds nothing, sent back to the author when it found what
+/// they should fix, else it asks the people who own the code in question. `Err` is why the
+/// agent could not review: a human reviews the whole PR.
 #[allow(clippy::too_many_arguments)]
 async fn finish(
     ctx: &Ctx,
@@ -267,15 +312,20 @@ async fn finish(
     bars: &ReviewSettings,
     output: std::result::Result<ReviewOutput, String>,
 ) -> Result<()> {
-    let (summary, findings, error) = match output {
+    let (summary, mut findings, error) = match output {
         Ok(o) => (o.summary, bars.judge(o.findings), None),
         Err(why) => (String::new(), Vec::new(), Some(why)),
     };
+    // The author had their rounds and it still finds what to send back: a human decides.
+    if findings.iter().any(|f| f.sent_back) && rounds_spent(&earlier_reviews(ctx, r).await?) {
+        for f in findings.iter_mut().filter(|f| f.sent_back) {
+            f.sent_back = false;
+            f.asked = true;
+        }
+    }
     let asks = findings.iter().filter(|f| f.asked).count();
-    let status = match (asks, &error) {
-        (0, None) => ReviewStatus::Approved,
-        _ => ReviewStatus::Asks,
-    };
+    let sent = findings.iter().filter(|f| f.sent_back).count();
+    let status = review_status(&findings, error.is_some());
     let asked = match status {
         ReviewStatus::Asks => askees(gh, &r.repo, pr, &findings).await,
         _ => Vec::new(),
@@ -295,6 +345,13 @@ async fn finish(
         (None, ReviewStatus::Approved) => (
             "review-approved",
             format!("cleared {} things alone", done.findings.len()),
+        ),
+        (None, ReviewStatus::Changes) => (
+            "review-sent-back",
+            format!(
+                "sent {sent} of {} things back to the author",
+                done.findings.len()
+            ),
         ),
         (None, _) => (
             "review-asks",
@@ -371,10 +428,10 @@ async fn codeowners(gh: &Installation, repo: &RepoName) -> Option<CodeOwners> {
     None
 }
 
-/// The review as GitHub shows it: what the agent asks, and what it cleared.
+/// The review as GitHub shows it: what the agent sent back to the author, what it asks a
+/// human, and what it cleared. Each finding keeps its id, which a reply names.
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
     let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
-    let cleared: Vec<&Judged> = done.findings.iter().filter(|f| !f.asked).collect();
     let mut body = String::from("**Mergepatrol's review**");
     if let Some(why) = &done.error {
         body.push_str(&format!(
@@ -385,30 +442,38 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
     if !done.summary.is_empty() {
         body.push_str(&format!("\n\n{}", done.summary));
     }
+    let sent: Vec<&Judged> = done.findings.iter().filter(|f| f.sent_back).collect();
     let asks: Vec<&Judged> = done.findings.iter().filter(|f| f.asked).collect();
-    if asks.is_empty() {
+    let cleared: Vec<&Judged> = done
+        .findings
+        .iter()
+        .filter(|f| !f.asked && !f.sent_back)
+        .collect();
+    if sent.is_empty() && asks.is_empty() {
         body.push_str(&format!(
             "\n\nIt cleared all {} things it looked at. Next: the merge queue.",
             cleared.len()
         ));
-    } else {
+    }
+    if !sent.is_empty() {
         body.push_str(&format!(
-            "\n\nIt cleared {} things on its own, and asks a human about {}:\n",
-            cleared.len(),
-            asks.len()
+            "\n\n### Sent back to the author: {}\n",
+            sent.len()
         ));
-        for (i, f) in asks.iter().enumerate() {
-            let place = match (&f.finding.file, f.finding.line) {
-                (Some(file), Some(line)) => format!(" (`{file}:{line}`)"),
-                (Some(file), None) => format!(" (`{file}`)"),
-                _ => String::new(),
-            };
-            body.push_str(&format!(
-                "\n{}. **{}**{place}, {}% sure",
-                i + 1,
-                f.finding.title,
-                f.finding.confidence
-            ));
+        for f in &sent {
+            body.push_str(&format!("\n- {}", line(f)));
+            if !f.finding.suggestion.is_empty() {
+                body.push_str(&format!("\n  {}", f.finding.suggestion));
+            }
+        }
+        body.push_str(
+            "\n\nFix them and push: the next review checks each by its title, and the PR goes on to the merge queue once nothing is left, with no human approval. If one is wrong, reply to it with `ask_agent_about_review` and its id: the agent withdraws it when the reply holds up in the code.",
+        );
+    }
+    if !asks.is_empty() {
+        body.push_str(&format!("\n\n### For a human: {}\n", asks.len()));
+        for f in &asks {
+            body.push_str(&format!("\n- {}", line(f)));
         }
         let who = match done.asked.as_slice() {
             [] => "Anyone who may approve this PR".to_owned(),
@@ -425,8 +490,12 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
     if !cleared.is_empty() {
         body.push_str("\n\n<details><summary>What it cleared</summary>\n");
         for f in cleared {
+            let note = match f.finding.lean {
+                mergepatrol_core::Lean::Change => ", a note under the bar",
+                mergepatrol_core::Lean::Fine => "",
+            };
             body.push_str(&format!(
-                "\n- {} ({}%)",
+                "\n- {} ({}%{note})",
                 f.finding.title, f.finding.confidence
             ));
         }
@@ -435,7 +504,26 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
     body
 }
 
+/// A finding on one line: its id, title, place, and how sure the agent is.
+fn line(f: &Judged) -> String {
+    let place = match (&f.finding.file, f.finding.line) {
+        (Some(file), Some(line)) => format!(" (`{file}:{line}`)"),
+        (Some(file), None) => format!(" (`{file}`)"),
+        _ => String::new(),
+    };
+    format!(
+        "`{}` **{}**{place}, {}% sure",
+        f.finding.id, f.finding.title, f.finding.confidence
+    )
+}
+
 async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> Result<()> {
+    // A reply to a finding sent back to the author, which the agent may withdraw.
+    let sent_back = r
+        .findings
+        .iter()
+        .any(|f| f.finding.id == q.finding && f.sent_back);
+    let mut lane = None;
     let answer = async {
         let (gh, pr) = pull(ctx, &r).await?;
         if pr.head_ref_oid != r.head_sha {
@@ -449,11 +537,13 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
             .finding
             .clone();
         let key = lane_key(&r, &pr);
+        lane = Some(key.clone());
         let settings = settings(ctx, &gh, &r.repo).await?;
         let trunk = gh.branch_sha(&r.repo, pr.merges_into()).await?;
         let task = Task::Question {
             finding: Box::new(finding),
             question: q.question.clone(),
+            sent_back,
         };
         let (spec, granted) = job_spec(
             ctx,
@@ -485,5 +575,81 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
         anyhow::Ok(text)
     };
     let answer = answer.await.map_err(|e| format!("{e:#}"));
-    ctx.store.answer_question(r.id, &q.id, answer).await
+    let withdrawn = sent_back && answer.as_deref().is_ok_and(withdraws);
+    ctx.store.answer_question(r.id, &q.id, answer).await?;
+    if withdrawn && let Some(status) = ctx.store.withdraw_finding(r.id, &q.finding).await? {
+        tracing::info!(repo = %r.repo, pr = r.number, finding = %q.finding, status = status.as_str(), "the agent withdrew a finding");
+        if let Some(key) = &lane {
+            let message = format!("withdrew {} on the author's reply", q.finding);
+            record(ctx, key, r.number, "review-withdrew", &message).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mergepatrol_core::{Bar, Kind, Lean};
+
+    fn review(id: i64, sent_back: bool, answered_by: Option<&str>) -> ReviewRecord {
+        let finding = Finding {
+            id: "f1".into(),
+            kind: Kind::Other,
+            title: "t".into(),
+            file: None,
+            line: None,
+            confidence: 90,
+            lean: Lean::Change,
+            finding: String::new(),
+            unsure: String::new(),
+            checked: Vec::new(),
+            would_clear: String::new(),
+            suggestion: "fix it".into(),
+            needs_human: false,
+            code: Vec::new(),
+            related: Vec::new(),
+        };
+        ReviewRecord {
+            id,
+            installation_id: 1,
+            repo: RepoName::parse("o/r").unwrap(),
+            number: 7,
+            head_sha: format!("head{id}"),
+            status: ReviewStatus::Changes,
+            error: None,
+            attempts: 0,
+            summary: String::new(),
+            findings: vec![Judged {
+                finding,
+                asked: false,
+                sent_back,
+                withdrawn: false,
+                bar: Bar::From(80),
+            }],
+            asked: Vec::new(),
+            answers: Default::default(),
+            answered_by: answered_by.map(str::to_owned),
+            note: String::new(),
+            questions: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_author_gets_three_rounds_before_a_human_steps_in() {
+        let back = |id| review(id, true, None);
+        assert!(!rounds_spent(&[back(2), back(1)]));
+        assert!(rounds_spent(&[back(3), back(2), back(1)]));
+        // A round that sent nothing back, or that a human answered, starts the count over.
+        assert!(!rounds_spent(&[back(3), review(2, false, None), back(1)]));
+        assert!(!rounds_spent(&[
+            back(3),
+            review(2, true, Some("mona")),
+            back(1)
+        ]));
+        assert_eq!(sent_back_before(&[back(3)]).len(), 1);
+        assert!(sent_back_before(&[]).is_empty());
+    }
 }

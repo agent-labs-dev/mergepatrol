@@ -84,8 +84,10 @@ export function reviewLine(e: Gated): ReactNode {
       case "review_changes":
         return (
           <span className="text-muted">
-            {r.answered_by ? `@${r.answered_by}` : "A reviewer"} asked for changes · reviewed again
-            on the next push
+            {r.answered_by
+              ? `@${r.answered_by} asked for changes`
+              : `${r.sent_back} sent back to the author`}{" "}
+            · reviewed again on the next push
           </span>
         );
       default:
@@ -344,7 +346,8 @@ export function Gate({
   if (!r || r.status === "stale") return null;
   const reason = entry.state === "held" ? entry.hold?.reason : undefined;
   const asks = r.findings.filter((f) => f.asked);
-  const cleared = r.findings.filter((f) => !f.asked);
+  const back = r.findings.filter((f) => f.sent_back || f.withdrawn);
+  const cleared = r.findings.filter((f) => !f.asked && !f.sent_back && !f.withdrawn);
   const human = r.answered_by || r.status === "asks" ? "ask" : "skip";
   const at =
     reason === "reviewing"
@@ -359,8 +362,8 @@ export function Gate({
       <Stages at={at} human={human} />
       {reason === "reviewing" && (
         <p className="text-sm text-muted">
-          The agent is reviewing it, since {timeAgo(r.created_at)}. Nobody is asked anything unless
-          it finds something it isn't sure about.
+          The agent is reviewing it, since {timeAgo(r.created_at)}. What it finds to fix goes back
+          to the author; a human is asked only about a call the author can't make.
         </p>
       )}
       {reason === "review_asks" && (
@@ -370,12 +373,15 @@ export function Gate({
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-900 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
           <p className="font-medium">Sent back</p>
           <p className="mt-0.5">
-            {r.answered_by ? `@${r.answered_by}` : "A reviewer"} asked for changes, in a review on
-            GitHub. It keeps its place; on the next push the agent reviews it again, knowing the
-            answers so far.
+            {r.answered_by
+              ? `@${r.answered_by} asked for changes, in a review on GitHub.`
+              : "The agent sent what it found back to the author, in a review on GitHub."}{" "}
+            It keeps its place; on the next push the agent reviews it again, checking each fix.
+            Nobody needs to approve it once nothing is left.
           </p>
         </div>
       )}
+      {back.length > 0 && <SentBackList findings={back} />}
       {r.status === "approved" && r.answered_by && (
         <p className="text-sm text-muted">
           Approved by @{r.answered_by} on the agent's {asks.length}{" "}
@@ -390,6 +396,35 @@ export function Gate({
       {r.answers.length > 0 && <Answered review={r} />}
       <ClearedList findings={cleared} />
     </section>
+  );
+}
+
+/** What the agent sent back to the author: still to fix, or withdrawn on their reply. */
+function SentBackList({ findings }: { findings: FindingView[] }) {
+  return (
+    <ul className="space-y-2 text-sm">
+      {findings.map((f) => (
+        <li key={f.id} className="rounded-md bg-surface px-3 py-2 ring-1 ring-line">
+          <p className="flex items-center gap-2">
+            <span className={f.withdrawn ? "text-muted" : "text-bad"}>
+              {f.withdrawn ? "–" : "↩"}
+            </span>
+            <span className="font-mono text-xs text-faint">{f.id}</span>
+            <span className={f.withdrawn ? "text-muted line-through" : ""}>
+              <Md>{f.title}</Md>
+            </span>
+            <span className="ml-auto text-xs whitespace-nowrap text-faint">
+              {f.withdrawn ? "withdrawn on the author's reply" : `${f.confidence}% sure`}
+            </span>
+          </p>
+          {!f.withdrawn && f.suggestion && (
+            <p className="mt-1 pl-5 text-muted">
+              <Md>{f.suggestion}</Md>
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -436,6 +471,7 @@ function Asks({
   const [picking, setPicking] = useState(false);
   const [logins, setLogins] = useState("");
   const asks = r.findings.filter((f) => f.asked);
+  const sent = r.findings.filter((f) => f.sent_back).length;
   const reassign = useMutation({
     mutationFn: () =>
       askReviewers(
@@ -466,7 +502,11 @@ function Asks({
           <p className="font-medium">
             The agent wants a human on {asks.length} {asks.length === 1 ? "thing" : "things"}
           </p>
-          <p className="mt-0.5">It cleared the other {r.findings.length - asks.length} itself.</p>
+          <p className="mt-0.5">
+            {sent > 0
+              ? `It sent ${sent} back to the author to fix, and cleared the other ${r.findings.length - asks.length - sent} itself.`
+              : `It cleared the other ${r.findings.length - asks.length} itself.`}
+          </p>
           <ul className="mt-3 space-y-1.5">
             {asks.map((f) => (
               <li key={f.id} className="flex items-center gap-2">
@@ -593,7 +633,7 @@ function Answering({
 }) {
   const client = useQueryClient();
   const asks = r.findings.filter((f) => f.asked);
-  const cleared = r.findings.filter((f) => !f.asked);
+  const cleared = r.findings.filter((f) => !f.asked && !f.sent_back && !f.withdrawn);
   const [calls, setCalls] = useState<Record<string, Call>>({});
   const [at, setAt] = useState(0);
   const [note, setNote] = useState("");

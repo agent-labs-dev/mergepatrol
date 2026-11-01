@@ -18,7 +18,7 @@ import type { ReviewSettingsView } from "./api/ReviewSettingsView";
 import { ErrorText, primary, secondary } from "./ui";
 
 /*
- * How sure the agent must be to clear each kind of finding alone: the workspace's bars, set
+ * How sure the agent must be to send each kind of change back to the PR's author: the workspace's bars, set
  * against how the agent's confidence has held up, and each repo's own, from its config file.
  */
 
@@ -85,10 +85,10 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
   const bands = saved.history.find((h) => h.kind === kind)?.bands ?? [];
   const total = bands.reduce((t, b) => t + b.findings, 0);
   const max = Math.max(1, ...bands.map((b) => b.findings));
-  const below = bands.filter((b) => b.from < cut);
-  const asked = below.reduce((t, b) => t + b.findings, 0);
-  const answered = below.reduce((t, b) => t + b.answered, 0);
-  const overruled = below.reduce((t, b) => t + b.overruled, 0);
+  const changes = bands.reduce((t, b) => t + b.changes, 0);
+  const sentBack = bands.filter((b) => b.from >= cut).reduce((t, b) => t + b.changes, 0);
+  const answered = bands.reduce((t, b) => t + b.answered, 0);
+  const overruled = bands.reduce((t, b) => t + b.overruled, 0);
 
   return (
     <section className="rounded-lg border border-line bg-surface">
@@ -105,10 +105,12 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
           </label>
         </div>
         <p className="mt-1 text-muted">
-          The agent reviews every queued PR before it takes its place in line. It approves alone
-          when it's sure enough, and asks a human about only what it isn't. It runs on the
-          workspace's API key. Set how sure is sure enough for each kind of change; a repo can set
-          its own below.
+          The agent reviews every queued PR before it takes its place in line. A change it's sure
+          enough of goes back to the PR's author, often the agent that built it, to fix and push;
+          once nothing is left, the PR goes on with no human approval. It asks a human only about a
+          call the author can't make. It runs on the workspace's API key. Set how sure is sure
+          enough to send a change back for each kind: lower sends back more. A repo can set its own
+          below.
         </p>
       </div>
       <div className="flex border-t border-line max-sm:flex-col">
@@ -143,8 +145,9 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
             {kindHelp[kind] && <span className="text-muted"> · {kindHelp[kind]}</span>}
           </p>
           <p className="mt-0.5 text-xs text-muted">
-            The agent's findings of the last {saved.days} days, by how sure it was. Red: a human
-            answering it decided otherwise than the agent leaned.
+            The agent's findings of the last {saved.days} days, by how sure it was. A change from
+            the bar up goes back to the author; under it, it's a note. Red: a human answering it
+            decided otherwise than the agent leaned.
           </p>
           <div className="relative mt-8 flex h-32 items-end gap-1">
             {bands.map((b) => (
@@ -152,8 +155,8 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
                 key={b.from}
                 className={`flex flex-1 flex-col justify-end overflow-hidden rounded-t ${
                   b.from < cut
-                    ? "bg-amber-200 dark:bg-amber-400/30"
-                    : "bg-emerald-200 dark:bg-emerald-400/30"
+                    ? "bg-neutral-200 dark:bg-neutral-400/30"
+                    : "bg-amber-200 dark:bg-amber-400/30"
                 }`}
                 style={{ height: `${b.findings ? Math.sqrt(b.findings / max) * 120 + 4 : 2}px` }}
                 title={`${b.from}–${b.from + 5}% sure: ${b.findings} findings, ${b.overruled} overruled`}
@@ -174,7 +177,7 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
                     bar > 80 ? "right-1.5" : "left-1.5"
                   }`}
                 >
-                  decides alone from {bar}%
+                  sends back from {bar}%
                 </span>
               </div>
             ) : (
@@ -226,16 +229,24 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
           ) : (
             <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
               <Stat
-                label="A human sees"
-                value={`${Math.round((asked / total) * 100)}%`}
-                sub={`${asked} of ${total} findings`}
+                label="Sent back"
+                value={bar === "always_ask" ? "–" : String(sentBack)}
+                sub={
+                  bar === "always_ask"
+                    ? "a human sees each"
+                    : `of ${changes} changes the agent wanted`
+                }
               />
               <Stat
                 label="Overruled"
                 value={answered ? `${Math.round((overruled / answered) * 100)}%` : "–"}
                 sub={`of ${answered} answered`}
               />
-              <Stat label="Cleared alone" value={String(total - asked)} sub="no human asked" />
+              <Stat
+                label="Notes"
+                value={bar === "always_ask" ? "–" : String(changes - sentBack)}
+                sub="under the bar, holding nothing"
+              />
             </div>
           )}
         </div>
@@ -281,7 +292,7 @@ function Stat({ label, value, sub }: { label: string; value: string; sub: string
   );
 }
 
-const CHOICES: Bar[] = [65, 70, 75, 80, 85, 90, 95, "always_ask"];
+const CHOICES: Bar[] = [55, 60, 65, 70, 75, 80, 85, 90, 95, "always_ask"];
 
 /** Each queuing repo's own bars, from its config file. A change opens a PR there. */
 function RepoBars({

@@ -48,7 +48,7 @@ impl ReviewRecord {
 /// What a finished run of the agent found.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReviewDone {
-    /// `Asks` or `Approved`.
+    /// `Asks`, `Changes` or `Approved`.
     pub status: ReviewStatus,
     pub error: Option<String>,
     pub summary: String,
@@ -145,6 +145,10 @@ pub trait ReviewStore: Send + Sync {
         question: &str,
         answer: std::result::Result<String, String>,
     ) -> Result<()>;
+    /// The agent withdrew a finding it sent back to the author, on their reply. A review that
+    /// held the PR for the author alone, and now holds it for nothing, approves it. Returns the
+    /// review's status after, or `None` if the finding was not sent back.
+    async fn withdraw_finding(&self, id: i64, finding: &str) -> Result<Option<ReviewStatus>>;
     /// The workspace's reviews of the last `days`, newest first.
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>>;
     /// `None`: the workspace never saved any, and has the defaults.
@@ -471,7 +475,7 @@ impl ReviewStore for PgStore {
         let row = sqlx::query(concat!("UPDATE agent_reviews SET claimed_at = now()
              WHERE id = (
                  SELECT id FROM agent_reviews
-                 WHERE status = 'asks' AND jsonb_path_exists(questions, '$[*] ? (!exists(@.answer) && !exists(@.error))')
+                 WHERE status IN ('asks', 'changes') AND jsonb_path_exists(questions, '$[*] ? (!exists(@.answer) && !exists(@.error))')
                    AND (claimed_at IS NULL OR claimed_at < now() - make_interval(secs => $1))
                  ORDER BY updated_at LIMIT 1 FOR UPDATE SKIP LOCKED
              )
@@ -516,6 +520,46 @@ impl ReviewStore for PgStore {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn withdraw_finding(&self, id: i64, finding: &str) -> Result<Option<ReviewStatus>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT findings, status, answered_by FROM agent_reviews WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
+        let status: String = row.get("status");
+        let status =
+            ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?;
+        let answered_by: Option<String> = row.get("answered_by");
+        let Some(f) = findings
+            .iter_mut()
+            .find(|f| f.finding.id == finding && f.sent_back)
+        else {
+            return Ok(None);
+        };
+        f.sent_back = false;
+        f.withdrawn = true;
+        // Only the agent's own hold lifts: a human's request for changes stands.
+        let status = match status {
+            ReviewStatus::Changes if answered_by.is_none() => {
+                mergepatrol_core::review_status(&findings, false)
+            }
+            other => other,
+        };
+        sqlx::query(
+            "UPDATE agent_reviews SET findings = $2, status = $3, updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(serde_json::to_value(&findings)?)
+        .bind(status.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(status))
     }
 
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>> {
@@ -584,12 +628,59 @@ mod tests {
                 checked: vec!["c".into()],
                 would_clear: "w".into(),
                 suggestion: "s".into(),
+                needs_human: false,
                 code: Vec::new(),
                 related: Vec::new(),
             },
             asked,
+            sent_back: false,
+            withdrawn: false,
             bar: Bar::From(90),
         }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_withdrawn_finding_lets_the_pr_on_once_nothing_is_sent_back(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let r = store.start_review(1, &repo(), 8, "bbb").await.unwrap();
+        store.claim_review(Duration::from_secs(600)).await.unwrap();
+        let back = |id: &str| Judged {
+            sent_back: true,
+            ..judged(id, false)
+        };
+        let done = ReviewDone {
+            status: ReviewStatus::Changes,
+            error: None,
+            summary: "s".into(),
+            findings: vec![back("f1"), back("f2"), judged("f3", false)],
+            asked: Vec::new(),
+        };
+        assert!(store.finish_review(r.id, &done).await.unwrap());
+        // The author's reply to a finding sent back is taken like a human's question.
+        store
+            .add_question(r.id, "f1", "the caller holds the lock", "bot")
+            .await
+            .unwrap();
+        let (taken, q) = store
+            .claim_question(Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((taken.id, q.id.as_str()), (r.id, "q1"));
+        // Not sent back: nothing to withdraw.
+        assert_eq!(store.withdraw_finding(r.id, "f3").await.unwrap(), None);
+        assert_eq!(
+            store.withdraw_finding(r.id, "f1").await.unwrap(),
+            Some(ReviewStatus::Changes),
+            "f2 still holds it"
+        );
+        assert_eq!(
+            store.withdraw_finding(r.id, "f2").await.unwrap(),
+            Some(ReviewStatus::Approved)
+        );
+        let r = store.review(r.id).await.unwrap().unwrap();
+        assert_eq!(r.status, ReviewStatus::Approved);
+        assert!(r.findings[..2].iter().all(|f| f.withdrawn && !f.sent_back));
     }
 
     #[sqlx::test(migrations = false)]

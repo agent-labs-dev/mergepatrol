@@ -331,6 +331,7 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     });
     spec.task = Task::Review {
         answered: Vec::new(),
+        sent_back: Vec::new(),
     };
     let out = tmp.path().join("out");
     // The fake CLI echoes its answer, so one line: `echo` would break a `\n`.
@@ -365,6 +366,7 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     spec.task = Task::Question {
         finding: Box::new(f.clone()),
         question: "Why?".into(),
+        sent_back: false,
     };
     let tmp2 = tempfile::tempdir().unwrap();
     let out = tmp2.path().join("out");
@@ -392,6 +394,7 @@ async fn a_review_the_agent_cannot_give_fails_and_says_why() {
     });
     spec.task = Task::Review {
         answered: Vec::new(),
+        sent_back: Vec::new(),
     };
     let out = tmp.path().join("out");
     let result = with_fake_claude(tmp.path(), "Looks good to me!")

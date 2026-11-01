@@ -1187,6 +1187,7 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: String::new(),
+            needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
         };
@@ -1198,11 +1199,15 @@ mod tests {
                 Judged {
                     finding: finding("f1", 97),
                     asked: false,
+                    sent_back: false,
+                    withdrawn: false,
                     bar: Bar::From(90),
                 },
                 Judged {
                     finding: finding("f2", 52),
                     asked: true,
+                    sent_back: false,
+                    withdrawn: false,
                     bar: Bar::From(90),
                 },
             ],
@@ -1241,7 +1246,7 @@ mod tests {
         // Settings: the defaults, then saved.
         let (status, s) = json(&router, "GET", "/api/w/1/settings/review", &cookie, None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(s["enabled"], false);
+        assert_eq!(s["enabled"], true, "on by default");
         assert!(
             s["bars"]
                 .as_array()

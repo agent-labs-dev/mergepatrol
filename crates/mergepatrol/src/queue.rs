@@ -685,12 +685,21 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
         }
         None => None,
     };
-    let review = ctx
-        .store
-        .review_settings(installation)
-        .await?
-        .unwrap_or_default()
-        .with(&settings.review);
+    let saved = ctx.store.review_settings(installation).await?;
+    let mut review = saved.clone().unwrap_or_default().with(&settings.review);
+    // On by default, but a review needs the workspace's model key: without one, a workspace
+    // that never chose waits for no review, rather than for a human in its place.
+    if review.enabled && saved.is_none() && settings.review.enabled.is_none() {
+        review.enabled = ctx
+            .chatgpt
+            .credential(
+                &ctx.vault,
+                Scope::Installation(installation),
+                settings.resolver.provider,
+            )
+            .await?
+            .is_some();
+    }
     Ok(Some(RepoRead {
         settings,
         review,
