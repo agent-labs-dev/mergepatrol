@@ -13,4 +13,9 @@ paths: Array<string>, default_branch: string,
 /**
  * Mergepatrol's open PR that updates it.
  */
-pull_request: PullRequestRef | null, };
+pull_request: PullRequestRef | null, 
+/**
+ * The open PR already writes the current skill to every copy an update writes: updating
+ * it changes nothing.
+ */
+pull_request_current: boolean, };

@@ -161,12 +161,13 @@ function UpdateSkill({ workspace, repo }: { workspace: number; repo: string }) {
   });
   const s = skill.data;
   if (!s) return null;
-  if (s.pull_request)
-    return (
-      <a href={s.pull_request.url} target="_blank" rel="noreferrer" className={secondary}>
-        Skill PR #{s.pull_request.number}
-      </a>
-    );
+  const link = s.pull_request && (
+    <a href={s.pull_request.url} target="_blank" rel="noreferrer" className={secondary}>
+      Skill PR #{s.pull_request.number}
+    </a>
+  );
+  // The open PR has the current skill: merging it is all that is left.
+  if (link && s.pull_request_current) return link;
   if (s.state === "current")
     return (
       <span className="self-center text-xs text-faint" title="The agent skill is current">
@@ -174,26 +175,31 @@ function UpdateSkill({ workspace, repo }: { workspace: number; repo: string }) {
       </span>
     );
   return (
-    <button
-      type="button"
-      onClick={() => update.mutate()}
-      disabled={update.isPending}
-      title={
-        update.error?.message ??
-        (s.state === "missing"
-          ? "The repo has no mergepatrol agent skill: open a PR that adds it"
-          : "The repo's agent skill is older than Mergepatrol's: open a PR that updates it")
-      }
-      className={primary}
-    >
-      {update.isPending
-        ? "Opening PR…"
-        : update.error
-          ? "Retry"
-          : s.state === "missing"
-            ? "Add skill"
-            : "Update skill"}
-    </button>
+    <>
+      {link}
+      <button
+        type="button"
+        onClick={() => update.mutate()}
+        disabled={update.isPending}
+        title={
+          update.error?.message ??
+          (s.state === "missing"
+            ? "The repo has no mergepatrol agent skill: open a PR that adds it"
+            : "The repo's agent skill is older than Mergepatrol's: open a PR that updates it")
+        }
+        className={primary}
+      >
+        {update.isPending
+          ? "Opening PR…"
+          : update.error
+            ? "Retry"
+            : s.state === "missing"
+              ? "Add skill"
+              : link
+                ? "Update PR"
+                : "Update skill"}
+      </button>
+    </>
   );
 }
 
