@@ -24,7 +24,7 @@ pub const DOCS: &[Doc] = &[
     Doc {
         slug: "getting-started",
         title: "Get started with Mergepatrol",
-        description: "Install the GitHub App, merge the setup PR, add a model key and label a pull request: a merge queue for GitHub in five steps.",
+        description: "Sign in with GitHub, install the App, merge the setup PR, add a model key, and label a pull request to queue it.",
         sections: &["Try it"],
     },
     Doc {

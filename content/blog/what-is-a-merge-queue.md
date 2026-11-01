@@ -79,7 +79,7 @@ If none of these sound familiar, you probably do not need a queue yet. A team of
   See [Mergepatrol vs GitHub's merge queue](/compare/github-merge-queue).
 - **A hosted merge queue as a GitHub App**, which works on any plan. Mergepatrol is one; the
   [Compare](/compare) pages put it next to the others, and [Get started](/docs/getting-started)
-  sets it up in five steps.
+  walks through the setup.
 - **A self-hosted bot.** bors-ng was the classic one and is now archived: see [bors-ng
   alternative](/blog/bors-ng-alternative). Mergepatrol is Apache-2.0 and self-hostable too.
 
