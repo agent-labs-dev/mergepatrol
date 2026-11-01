@@ -284,6 +284,27 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn install_context_survives_sign_in_but_not_a_new_login(pool: PgPool) {
+        let (router, _) = with_app(pool, Some(app(None)), Arc::default()).await;
+        for (path, expected) in [
+            ("/auth/login?installation_id=42", "mp_install=42"),
+            ("/auth/login", "mp_install="),
+        ] {
+            let response = send(
+                &router,
+                Request::get(path)
+                    .header("cookie", "mp_install=99")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            let (location, cookies) = redirect(&response);
+            assert!(location.starts_with("https://github.com/login/oauth/authorize?"));
+            assert!(cookies.iter().any(|c| c == expected), "{cookies:?}");
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn a_sign_in_survives_a_restart(pool: PgPool) {
         let (before, _) = with_app(pool.clone(), Some(app(None)), Arc::default()).await;
         let res = send(

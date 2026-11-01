@@ -46,6 +46,8 @@ const TRAY_COOKIE: &str = "mp_tray";
 /// A sign-in for an MCP client, in the browser that started it: its `McpClient`, as base64url
 /// JSON.
 const MCP_COOKIE: &str = "mp_mcp";
+/// The newly installed workspace to open after the browser signs in again.
+const INSTALL_COOKIE: &str = "mp_install";
 /// From the session's last check: an active session does not end.
 const USER_SESSION: Duration = Duration::from_secs(30 * 24 * 3600);
 /// The session cookie outlives any session: the server's expiry is the one that counts.
@@ -655,8 +657,16 @@ pub(crate) async fn manifest_callback(
 
 /// GitHub sends the user here after they install the App. Signing in again adds the new
 /// workspace to the session.
-pub(crate) async fn installed() -> Redirect {
-    Redirect::to("/auth/login")
+#[derive(Deserialize)]
+pub(crate) struct InstallQuery {
+    installation_id: Option<u64>,
+}
+
+pub(crate) async fn installed(Query(q): Query<InstallQuery>) -> Redirect {
+    match q.installation_id {
+        Some(id) => Redirect::to(&format!("/auth/login?installation_id={id}")),
+        None => Redirect::to("/auth/login"),
+    }
 }
 
 /// The menu bar app signs in through the browser (RFC 8252): it listens on a loopback port and
@@ -664,6 +674,7 @@ pub(crate) async fn installed() -> Redirect {
 /// with a one-time code, which only the app, with the verifier, can trade for the session.
 #[derive(Deserialize)]
 pub(crate) struct LoginQuery {
+    installation_id: Option<u64>,
     tray_port: Option<u16>,
     tray_state: Option<String>,
     tray_challenge: Option<String>,
@@ -679,7 +690,7 @@ pub(crate) async fn login(State(state): State<AppState>, Query(q): Query<LoginQu
         }
         _ => return error_redirect("the menu bar app's sign-in link is malformed"),
     };
-    start_login(&state, tray, None).await
+    start_login(&state, tray, None, q.installation_id).await
 }
 
 /// An MCP client that signs in through the browser (OAuth's authorization code flow, with
@@ -694,12 +705,17 @@ pub(crate) struct McpClient {
 /// Signs in with GitHub for the MCP client, which gets a one-time code for the session.
 pub(crate) async fn mcp_login(state: &AppState, client: &McpClient) -> Response {
     let json = serde_json::to_vec(client).expect("serializes");
-    start_login(state, None, Some(BASE64URL.encode(json))).await
+    start_login(state, None, Some(BASE64URL.encode(json)), None).await
 }
 
 /// To GitHub. The cookies say where the sign-in goes back to: the browser, the menu bar app, or
 /// an MCP client. A sign-in for one clears another's left over from before.
-async fn start_login(state: &AppState, tray: Option<String>, mcp: Option<String>) -> Response {
+async fn start_login(
+    state: &AppState,
+    tray: Option<String>,
+    mcp: Option<String>,
+    installation_id: Option<u64>,
+) -> Response {
     let creds = match state.app_credentials().await {
         Ok(Some(c)) => c,
         Ok(None) => return Redirect::to("/").into_response(),
@@ -725,6 +741,10 @@ async fn start_login(state: &AppState, tray: Option<String>, mcp: Option<String>
             (header::SET_COOKIE, oauth),
             (header::SET_COOKIE, client(TRAY_COOKIE, tray)),
             (header::SET_COOKIE, client(MCP_COOKIE, mcp)),
+            (
+                header::SET_COOKIE,
+                client(INSTALL_COOKIE, installation_id.map(|id| id.to_string())),
+            ),
         ]),
         Redirect::to(&url),
     )
@@ -760,6 +780,7 @@ pub(crate) async fn login_callback(
         })
         // Anyone who can plant a cookie can plant this one: it sends the code to this machine only.
         .filter(|client| crate::oauth::loopback(&client.redirect_uri));
+    let mut destination = "/".to_owned();
     let result = async {
         if let Some(err) = q.error {
             anyhow::bail!("GitHub sign-in failed: {err}");
@@ -783,6 +804,7 @@ pub(crate) async fn login_callback(
         let user = setup::user(&user_token.access_token).await?;
         let installations = setup::user_installations(&user_token.access_token).await?;
         save_workspaces(&state, &installations).await?;
+        destination = install_destination(&headers, &installations);
         tracing::info!(login = %user.login, workspaces = installations.len(), "signed in");
         state.analytics.signed_in(
             &user.login,
@@ -860,11 +882,25 @@ pub(crate) async fn login_callback(
                     cookie(&state, SESSION_COOKIE, &token, SESSION_COOKIE_AGE),
                 ),
                 (header::SET_COOKIE, clear_oauth),
+                (
+                    header::SET_COOKIE,
+                    cookie(&state, INSTALL_COOKIE, "", Duration::ZERO),
+                ),
             ]),
-            Redirect::to("/"),
+            Redirect::to(&destination),
         )
             .into_response(),
         (Err(e), None) => error_redirect(&format!("{e:#}")),
+    }
+}
+
+/// The callback hint grants no access: only GitHub's fresh installation list can name a destination.
+fn install_destination(headers: &HeaderMap, installations: &[UserInstallation]) -> String {
+    let installation_id =
+        read_cookie(headers, INSTALL_COOKIE).and_then(|id| id.parse::<u64>().ok());
+    match installations.iter().find(|i| Some(i.id) == installation_id) {
+        Some(i) => format!("/{}/repos", percent_encode(&i.account)),
+        None => "/".to_owned(),
     }
 }
 
@@ -1220,6 +1256,63 @@ pub(crate) fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn install_return_keeps_the_new_workspace() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let router = axum::Router::new().route("/auth/installed", axum::routing::get(installed));
+        for (query, expected) in [
+            (
+                "?installation_id=42&setup_action=install",
+                "/auth/login?installation_id=42",
+            ),
+            ("", "/auth/login"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::get(format!("/auth/installed{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(response.headers()[header::LOCATION], expected);
+        }
+    }
+
+    #[test]
+    fn install_destination_requires_access_to_the_new_workspace() {
+        let installations = [
+            UserInstallation {
+                id: 1,
+                account: "old-org".into(),
+                account_type: "Organization".into(),
+                avatar_url: String::new(),
+            },
+            UserInstallation {
+                id: 42,
+                account: "new-org".into(),
+                account_type: "Organization".into(),
+                avatar_url: String::new(),
+            },
+        ];
+        for (cookie, expected) in [
+            ("mp_install=42", "/new-org/repos"),
+            ("mp_install=999", "/"),
+            ("mp_install=invalid", "/"),
+            ("mp_install=", "/"),
+            ("mp_session=token", "/"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, cookie.parse().unwrap());
+            assert_eq!(install_destination(&headers, &installations), expected);
+        }
+    }
 
     #[test]
     fn reads_the_right_cookie() {
