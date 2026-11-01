@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useReducer, useRef, useState } from "react";
 import { AgentReviewScreen, reviewedPr } from "./AgentReview";
 import {
@@ -1241,8 +1241,16 @@ function OwnerBar({
             Dequeue
           </button>
         </>
+      ) : !p.queues ? (
+        <Link
+          to="/$account/repos"
+          params={{ account: p.repo.split("/")[0] }}
+          search={{ repo: p.repo }}
+          className={solid}
+        >
+          Turn on Mergepatrol
+        </Link>
       ) : (
-        p.queues &&
         !p.draft && (
           <>
             <button
