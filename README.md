@@ -281,6 +281,8 @@ A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot te
 | `nudge_reviewers` | Mentions reviewers in a comment, asking them to review | |
 | `get_repo_config` | A repo's queue settings | |
 | `propose_repo_config` | Opens a PR that changes a repo's queue settings | Yes |
+| `get_repo_skill` | Whether a repo has the current `mergepatrol` agent skill | |
+| `update_repo_skill` | Opens a PR that updates a repo's `mergepatrol` agent skill | Yes |
 | `get_settings` | Which model API keys and ChatGPT login the workspace has | Yes |
 | `set_api_key` | Sets a model provider's API key | Yes |
 | `delete_api_key` | Removes a model provider's API key | Yes |

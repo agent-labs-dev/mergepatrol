@@ -31,6 +31,7 @@ import type { SetRepo } from "./api/SetRepo";
 import type { SetReviewSettings } from "./api/SetReviewSettings";
 import type { SetSecret } from "./api/SetSecret";
 import type { SettingsView } from "./api/SettingsView";
+import type { SkillView } from "./api/SkillView";
 import type { SnoozePull } from "./api/SnoozePull";
 import type { Unlock } from "./api/Unlock";
 import type { YouView } from "./api/YouView";
@@ -121,6 +122,14 @@ export const fetchRepoConfig = (id: number, repo: string) =>
 /** Opens a PR that writes the settings to the repo's config file, or updates the open one. */
 export const proposeRepoConfig = (id: number, repo: string, body: RepoSettingsView) =>
   send<PullRequestRef>("PUT", w(id, `/repos/${repo}/config`), body);
+
+/** Whether the repo has the current `mergepatrol` agent skill. */
+export const fetchRepoSkill = (id: number, repo: string) =>
+  get<SkillView>(w(id, `/repos/${repo}/skill`));
+
+/** Opens a PR that writes the current skill to the repo, or updates the open one. */
+export const updateRepoSkill = (id: number, repo: string) =>
+  send<PullRequestRef>("POST", w(id, `/repos/${repo}/skill`));
 
 export const fetchSettings = (id: number) => get<SettingsView>(w(id, "/settings"));
 
