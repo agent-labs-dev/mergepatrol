@@ -50,7 +50,7 @@ against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 
 ## Switching
 
-1. [Install Mergepatrol](https://mergepatrol.ai) on the repositories and merge its setup PR.
+1. [Install Mergepatrol](/docs/getting-started) on the repositories and merge its setup PR.
 2. Remove the repo's `queue_rules` from `.mergify.yml`, or uninstall Mergify there. Two queues on
    one branch race each other for merges.
 3. Set `batch_size` in `.mergepatrol/mergepatrol.yml` to what you used in Mergify, and `verify` to

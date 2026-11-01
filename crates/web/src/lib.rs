@@ -6,6 +6,7 @@ mod auth;
 mod billing;
 mod blog;
 mod changelog;
+mod docs;
 mod mcp;
 mod oauth;
 mod pr_reply;
@@ -1337,16 +1338,25 @@ mod tests {
                 .contains("(http://localhost:8080/compare/github-merge-queue)")
         );
         assert_eq!(get(&router, "/compare", None).await, StatusCode::OK);
-        // A workspace named `compare` keeps its dashboard: only the pages that exist are taken.
-        // The path is still a 404, so a crawler does not index a dead link as a page.
-        assert_eq!(
-            get(&router, "/compare/queue", None).await,
-            StatusCode::NOT_FOUND
-        );
-        let app = body(&router, "/compare/queue", "").await;
+        // A workspace named `compare` or `docs` keeps its dashboard: only pages that exist are
+        // taken. The path is still a 404, so a crawler does not index a dead link as a page.
+        for path in ["/compare/queue", "/docs/queue"] {
+            assert_eq!(
+                get(&router, path, None).await,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+            let app = body(&router, path, "").await;
+            assert!(
+                app.contains("id=\"root\"") || app.contains("not built"),
+                "{path}: {app}"
+            );
+        }
+        assert_eq!(get(&router, "/docs/pricing", None).await, StatusCode::OK);
         assert!(
-            app.contains("id=\"root\"") || app.contains("not built"),
-            "{app}"
+            body(&router, "/llms.txt", "")
+                .await
+                .contains("(http://localhost:8080/docs/configuration)")
         );
         assert_eq!(get(&router, "/og.png", None).await, StatusCode::NOT_FOUND);
         let page = body(&router, "/ada/queue", "").await;

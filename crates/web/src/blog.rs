@@ -346,7 +346,7 @@ pub(crate) fn page(
 {tracking}
 </head>
 <body>
-<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/compare">Compare</a><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
+<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/docs">Docs</a><a href="/compare">Compare</a><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
 <main>{main}</main>
 {FOOTER}
 </body>

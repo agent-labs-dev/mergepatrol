@@ -52,8 +52,8 @@ a pull request does not go through cleanly. Checked against GitHub's docs on 31 
 
 Mergepatrol and GitHub's queue should not both run on one branch: they would race for merges.
 
-1. [Install Mergepatrol](https://mergepatrol.ai) and merge the setup PR that adds
-   `.mergepatrol/mergepatrol.yml`.
+1. [Install Mergepatrol](/docs/getting-started) and merge the setup PR that adds
+   `.mergepatrol/mergepatrol.yml` ([reference](/docs/configuration)).
 2. Turn off "Require merge queue" on the branch's ruleset or branch protection.
 3. Keep your required checks. Mergepatrol waits for the same ones.
 4. Label pull requests `mergepatrol` instead of pressing "Merge when ready".

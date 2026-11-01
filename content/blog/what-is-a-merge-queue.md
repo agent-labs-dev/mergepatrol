@@ -78,7 +78,8 @@ If none of these sound familiar, you probably do not need a queue yet. A team of
   and on private repositories only with GitHub Enterprise Cloud. CI needs a `merge_group` trigger.
   See [Mergepatrol vs GitHub's merge queue](/compare/github-merge-queue).
 - **A hosted merge queue as a GitHub App**, which works on any plan. Mergepatrol is one; the
-  [Compare](/compare) pages put it next to the others.
+  [Compare](/compare) pages put it next to the others, and [Get started](/docs/getting-started)
+  sets it up in five steps.
 - **A self-hosted bot.** bors-ng was the classic one and is now archived: see [bors-ng
   alternative](/blog/bors-ng-alternative). Mergepatrol is Apache-2.0 and self-hostable too.
 
@@ -95,3 +96,7 @@ review on each queued pull request, which asks a human only about what it is uns
 **Does it work with any CI?**
 A queue waits on the checks your branch protection requires, so any CI that reports checks to
 GitHub works. Mergepatrol runs them through your existing `pull_request` workflows.
+
+**What does a queue do with a PR whose checks fail?**
+Most eject it. Mergepatrol can commit a fix first: see [Fix failing CI in the merge
+queue](/blog/fix-failing-ci-in-the-merge-queue).
