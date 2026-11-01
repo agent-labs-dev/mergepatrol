@@ -47,7 +47,6 @@ const DEFAULT_BRANCH_FILE: &str = "query($owner: String!, $name: String!, $path:
     }
   }";
 
-/// The default branch's file, from a `DEFAULT_BRANCH_FILE` answer.
 /// What [`Installation::objects_at`] found.
 #[derive(Debug, Clone)]
 pub struct ObjectsAt {
@@ -69,6 +68,7 @@ pub enum GitObject {
 /// A tree entry's mode for a symlink, as GraphQL gives it: `0o120000`.
 pub const SYMLINK_MODE: u32 = 0o120000;
 
+/// The default branch's file, from a `DEFAULT_BRANCH_FILE` answer.
 fn branch_file(data: &Value) -> Result<BranchFile> {
     let r = &data["repository"]["defaultBranchRef"];
     Ok(BranchFile {
@@ -154,7 +154,7 @@ impl Installation {
         let query = format!(
             "query($owner: String!, $name: String!, $head: String!) {{ repository(owner: $owner, name: $name) {{
               defaultBranchRef {{ name target {{ oid }} }}
-              pullRequests(headRefName: $head, states: OPEN, first: 1) {{ nodes {{ number url }} }}
+              pullRequests(headRefName: $head, states: OPEN, first: 10) {{ nodes {{ number url isCrossRepository }} }}
               {} }} }}",
             fields.join("\n")
         );
@@ -177,14 +177,18 @@ impl Installation {
                 .to_owned(),
             text: None,
         };
-        let pull_request = r["pullRequests"]["nodes"][0]["number"]
-            .as_u64()
-            .map(|number| PullRef {
-                number,
-                url: r["pullRequests"]["nodes"][0]["url"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
+        // A fork's PR may have a branch of the same name: only the repo's own is Mergepatrol's,
+        // as `open_pr_from` finds it.
+        let pull_request = r["pullRequests"]["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["isCrossRepository"] == false)
+            .and_then(|p| {
+                Some(PullRef {
+                    number: p["number"].as_u64()?,
+                    url: p["url"].as_str().unwrap_or_default().to_owned(),
+                })
             });
         let objects = (0..lookups.len())
             .map(|i| {
