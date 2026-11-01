@@ -18,6 +18,27 @@ pub struct PullDetail {
     pub checks: Vec<CheckRun>,
     /// Oldest first, up to the last 100 events.
     pub timeline: Vec<TimelineItem>,
+    /// Its review threads, up to the first 100, in order.
+    pub threads: Vec<ThreadSummary>,
+    /// All its review threads, past the 100 read.
+    pub thread_count: u32,
+}
+
+/// A review thread, as the PR's comment on a line starts it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadSummary {
+    pub resolved: bool,
+    pub path: String,
+    /// `None` on a whole file, or a line the PR has since changed.
+    pub line: Option<u32>,
+    /// Who started it. `None` for a deleted account.
+    pub author: Option<String>,
+    /// The first line of its first comment, as text.
+    pub title: String,
+    /// The first comment on GitHub.
+    pub url: String,
+    /// Its comments, the first too.
+    pub comments: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +110,8 @@ const DETAIL: &str = "query($owner: String!, $name: String!, $number: Int!) {
     pullRequest(number: $number) {
       bodyHTML
       labels(first: 20) { nodes { name color } }
+      reviewThreads(first: 100) { totalCount nodes { isResolved path line
+        comments(first: 1) { totalCount nodes { author { login } bodyText url } } } }
       commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
         __typename
         ... on CheckRun { name status conclusion detailsUrl startedAt completedAt checkSuite { workflowRun { workflow { name } } } }
@@ -163,7 +186,40 @@ fn pull_detail(pr: &Value) -> Result<PullDetail> {
             .into_iter()
             .flatten()
             .collect(),
+        threads: nodes(&pr["reviewThreads"])
+            .iter()
+            .map(review_thread)
+            .collect(),
+        thread_count: pr["reviewThreads"]["totalCount"].as_u64().unwrap_or(0) as u32,
     })
+}
+
+fn review_thread(t: &Value) -> ThreadSummary {
+    let first = &t["comments"]["nodes"][0];
+    ThreadSummary {
+        resolved: t["isResolved"].as_bool().unwrap_or(false),
+        path: str_of(&t["path"]),
+        line: t["line"].as_u64().map(|l| l as u32),
+        author: opt_str(&first["author"]["login"]),
+        title: thread_title(&str_of(&first["bodyText"])),
+        url: str_of(&first["url"]),
+        comments: t["comments"]["totalCount"].as_u64().unwrap_or(0) as u32,
+    }
+}
+
+/// A comment's first line that says something, without Markdown's bold, cut to 140 chars. A
+/// Mergepatrol finding's first line is its label, so its title is the next one.
+fn thread_title(text: &str) -> String {
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let mut line = lines.next().unwrap_or_default();
+    if line.starts_with("Sent back to the author") || line.starts_with("For a human") {
+        line = lines.next().unwrap_or(line);
+    }
+    let line = line.trim_matches('*');
+    match line.char_indices().nth(140) {
+        Some((i, _)) => format!("{}…", &line[..i]),
+        None => line.to_owned(),
+    }
 }
 
 fn str_of(v: &Value) -> String {
@@ -325,6 +381,45 @@ mod tests {
             avatar_url: "ann".into(),
             bot: false,
         })
+    }
+
+    #[test]
+    fn reads_review_threads_and_names_each_by_its_first_line() {
+        let pr = json!({
+            "reviewThreads": { "totalCount": 120, "nodes": [
+                { "isResolved": false, "path": "src/a.rs", "line": 7, "comments": { "totalCount": 2, "nodes": [
+                    { "author": { "login": "merge-patrol" }, "url": "u1",
+                      "bodyText": "Sent back to the author · f1 · other · 60% sure\n\nThe retry loop has no cap\n\nIt spins." } ] } },
+                { "isResolved": true, "path": "src/b.rs", "line": null, "comments": { "totalCount": 1, "nodes": [
+                    { "author": null, "url": "u2", "bodyText": "\n  Rename this  \nplease" } ] } },
+            ] },
+        });
+        let d = pull_detail(&pr).unwrap();
+        assert_eq!(d.thread_count, 120);
+        assert_eq!(
+            d.threads,
+            [
+                ThreadSummary {
+                    resolved: false,
+                    path: "src/a.rs".into(),
+                    line: Some(7),
+                    author: Some("merge-patrol".into()),
+                    title: "The retry loop has no cap".into(),
+                    url: "u1".into(),
+                    comments: 2,
+                },
+                ThreadSummary {
+                    resolved: true,
+                    path: "src/b.rs".into(),
+                    line: None,
+                    author: None,
+                    title: "Rename this".into(),
+                    url: "u2".into(),
+                    comments: 1,
+                },
+            ]
+        );
+        assert_eq!(thread_title(&"x".repeat(200)).chars().count(), 141);
     }
 
     #[test]

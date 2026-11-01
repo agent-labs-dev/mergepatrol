@@ -4,6 +4,7 @@ import { fetchPullDetail } from "./api";
 import type { CheckRunStateView } from "./api/CheckRunStateView";
 import type { CheckRunView } from "./api/CheckRunView";
 import type { OpenPullView } from "./api/OpenPullView";
+import type { ReviewThreadsView } from "./api/ReviewThreadsView";
 import type { TimelineItemView } from "./api/TimelineItemView";
 import { Avatar, timeAgo } from "./ui";
 
@@ -121,6 +122,22 @@ export function PullDetail({
                 </button>
               ))}
           </div>
+          {d && d.review_threads.total > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setTab("summary");
+                requestAnimationFrame(() =>
+                  document
+                    .getElementById("review-comments")
+                    ?.scrollIntoView({ behavior: "smooth" }),
+                );
+              }}
+              className="text-sm whitespace-nowrap text-muted hover:text-fg"
+            >
+              <OpenComments threads={d.review_threads} />
+            </button>
+          )}
           {d && ran(d.checks) > 0 && (
             <button
               type="button"
@@ -181,6 +198,7 @@ export function PullDetail({
                   <p className="text-faint">No description.</p>
                 )}
               </Section>
+              {d.review_threads.total > 0 && <ReviewComments threads={d.review_threads} />}
               <Section id="checks" title="Checks">
                 {d.checks.length === 0 ? (
                   <p className="text-faint">No checks.</p>
@@ -196,6 +214,64 @@ export function PullDetail({
       )}
       {footer}
     </div>
+  );
+}
+
+/** How many review comments are open, of all of them. Past the threads read, more may be. */
+function OpenComments({ threads: t }: { threads: ReviewThreadsView }) {
+  if (t.open === 0 && t.total <= t.read)
+    return (
+      <>
+        <span className="text-ok">✓</span>{" "}
+        {t.total === 1 ? "1 comment resolved" : `All ${t.total} comments resolved`}
+      </>
+    );
+  return (
+    <>
+      <span className="text-warn">●</span> {openOf(t)}
+    </>
+  );
+}
+
+/** "2 of 5 comments open", or with more threads than were read, "2+ of 120 comments open". */
+const openOf = (t: ReviewThreadsView) =>
+  `${t.open}${t.total > t.read ? "+" : ""} of ${t.total} ${t.total === 1 ? "comment" : "comments"} open`;
+
+/** The review threads still open, each linked to its place on GitHub. */
+function ReviewComments({ threads: t }: { threads: ReviewThreadsView }) {
+  return (
+    <Section id="review-comments" title={`Review comments · ${openOf(t)}`}>
+      {t.open === 0 && t.total <= t.read ? (
+        <p className="text-muted">Every review comment is resolved.</p>
+      ) : t.open === 0 ? (
+        <p className="text-muted">
+          The first {t.read} are resolved. Open the PR on GitHub for the other {t.total - t.read}.
+        </p>
+      ) : (
+        <ol className="divide-y divide-line-soft rounded-lg border border-line bg-surface">
+          {t.open_threads.map((c) => (
+            <li key={c.url} className="px-3 py-2 text-sm">
+              <a
+                href={c.url}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium hover:underline"
+              >
+                {c.title || "(no text)"}
+              </a>
+              <p className="mt-0.5 text-xs text-faint">
+                <code>
+                  {c.path}
+                  {c.line != null && `:${c.line}`}
+                </code>
+                {c.author && ` · @${c.author}`}
+                {c.comments > 1 && ` · ${c.comments - 1} ${c.comments === 2 ? "reply" : "replies"}`}
+              </p>
+            </li>
+          ))}
+        </ol>
+      )}
+    </Section>
   );
 }
 

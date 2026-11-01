@@ -15,7 +15,9 @@ pub use app::{
 };
 pub use checks::{CheckState, Checks, RequiredChecks};
 pub use codeowners::CodeOwners;
-pub use detail::{CheckRun, CheckRunState, Label, PullDetail, TimelineEvent, TimelineItem};
+pub use detail::{
+    CheckRun, CheckRunState, Label, PullDetail, ThreadSummary, TimelineEvent, TimelineItem,
+};
 pub use files::{BranchFile, GitObject, ObjectsAt, Proposal, PullRef, SYMLINK_MODE};
 pub use repo::{
     BranchMerge, HeadRepository, InboxPull, MergeOutcome, PrDetails, PullRequest, RepoOwner,

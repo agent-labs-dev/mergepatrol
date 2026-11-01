@@ -1428,6 +1428,21 @@ async fn an_unresolved_thread_holds_an_approved_pr_until_it_is_resolved() {
         run.lane(),
         [(1, "Held(UnresolvedThreads { count: 2 })".into())]
     );
+    let said = || run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(
+        said().contains("2 review comments are unresolved"),
+        "{}",
+        said()
+    );
+    // One is resolved: the PR's comment says how many are left.
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().unresolved_threads = 1);
+    run.tick().await;
+    assert!(
+        said().contains("1 review comment is unresolved"),
+        "{}",
+        said()
+    );
     // A workspace that does not require them lets it on.
     *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
         require_resolved: false,

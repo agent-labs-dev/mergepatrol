@@ -1219,6 +1219,33 @@ pub struct PullDetailView {
     pub checks: Vec<CheckRunView>,
     /// Oldest first, up to the last 100 events.
     pub timeline: Vec<TimelineItemView>,
+    /// Its review comments: how many threads are open, of how many.
+    pub review_threads: ReviewThreadsView,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ReviewThreadsView {
+    /// Unresolved, of the threads read.
+    pub open: u32,
+    pub total: u32,
+    /// The threads read: the first 100. Under `total`, more may be open than `open` says.
+    pub read: u32,
+    /// The unresolved ones, in the PR's order.
+    pub open_threads: Vec<ReviewThreadView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ReviewThreadView {
+    pub path: String,
+    pub line: Option<u32>,
+    pub author: Option<String>,
+    /// The first line of its first comment.
+    pub title: String,
+    pub url: String,
+    /// Its comments, replies too.
+    pub comments: u32,
 }
 
 #[derive(Serialize, TS)]
@@ -1311,7 +1338,27 @@ impl From<mergepatrol_github::Label> for LabelView {
 
 impl From<PullDetail> for PullDetailView {
     fn from(d: PullDetail) -> Self {
+        let read = d.threads.len() as u32;
+        let open_threads: Vec<ReviewThreadView> = d
+            .threads
+            .into_iter()
+            .filter(|t| !t.resolved)
+            .map(|t| ReviewThreadView {
+                path: t.path,
+                line: t.line,
+                author: t.author,
+                title: t.title,
+                url: t.url,
+                comments: t.comments,
+            })
+            .collect();
         PullDetailView {
+            review_threads: ReviewThreadsView {
+                open: open_threads.len() as u32,
+                total: d.thread_count.max(read),
+                read,
+                open_threads,
+            },
             body_html: d.body_html,
             labels: d.labels.into_iter().map(LabelView::from).collect(),
             checks: d
@@ -2505,6 +2552,33 @@ mod tests {
             None
         );
         assert_eq!(skill_lookups(".claude/skills")[0].1, ".claude");
+    }
+
+    #[test]
+    fn the_open_comments_say_when_more_threads_exist_than_were_read() {
+        use mergepatrol_github::ThreadSummary;
+        let thread = |resolved| ThreadSummary {
+            resolved,
+            path: "a.rs".into(),
+            line: Some(1),
+            author: None,
+            title: "t".into(),
+            url: "u".into(),
+            comments: 1,
+        };
+        let detail = |threads, thread_count| PullDetail {
+            body_html: String::new(),
+            labels: Vec::new(),
+            checks: Vec::new(),
+            timeline: Vec::new(),
+            threads,
+            thread_count,
+        };
+        let v = PullDetailView::from(detail(vec![thread(true), thread(false)], 120)).review_threads;
+        assert_eq!((v.open, v.total, v.read), (1, 120, 2));
+        // GitHub's count never says fewer than were read.
+        let v = PullDetailView::from(detail(vec![thread(true)], 0)).review_threads;
+        assert_eq!((v.open, v.total, v.read), (0, 1, 1));
     }
 
     /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
