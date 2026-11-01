@@ -284,7 +284,11 @@ export function You() {
   const own = (data?.authored ?? []).filter(awake).map((p) => ({ p, step: stepOf(p, clickOf(p)) }));
   const lists: Record<Folder, InboxPullView[]> = {
     needs,
-    turn: own.filter((o) => o.step.folder === "turn").map((o) => o.p),
+    // In its sections' order, so j and k walk them top to bottom.
+    turn: own
+      .filter((o) => o.step.folder === "turn")
+      .sort((a, b) => turnRank(a.step) - turnRank(b.step))
+      .map((o) => o.p),
     queue: own.filter((o) => o.step.folder === "queue").map((o) => o.p),
     others: own.filter((o) => o.step.folder === "others").map((o) => o.p),
     drafts: own.filter((o) => o.step.folder === "drafts").map((o) => o.p),
@@ -459,7 +463,9 @@ export function You() {
                 ? "Yours, merged in the last week."
                 : folder === "snoozed"
                   ? "Out of the way until their time is up, or until someone else comments or reviews."
-                  : "Your open PRs, in every repo."}
+                  : folder === "turn"
+                    ? "Your open PRs that wait on you, by what they need. Those the queue holds come first."
+                    : "Your open PRs, in every repo."}
           </p>
         </div>
         {error && (
@@ -491,7 +497,16 @@ export function You() {
             )}
           </div>
         )}
-        <Groups folder={folder} list={list} me={me}>
+        <Groups
+          sections={
+            folder === "needs"
+              ? reasonSections(list, me)
+              : folder === "turn"
+                ? turnSectionsOf(list, (p) => stepOf(p, clickOf(p)))
+                : undefined
+          }
+          list={list}
+        >
           {(p) => (
             <Row
               key={keyOf(p)}
@@ -819,19 +834,28 @@ function Reason({ pull, me }: { pull: InboxPullView; me: string }) {
   return <span className={`truncate ${reasonStyle[r.kind]}`}>{r.text}</span>;
 }
 
-/** Needs you in groups by why, each with a header. Any other folder as one list. */
+/** Needs you's PRs by why. */
+const reasonSections = (list: InboxPullView[], me: string): Section[] =>
+  (["held", "again", "asked"] as const).map((kind) => ({
+    key: kind,
+    label: reasonGroups[kind],
+    ps: list.filter((p) => reasonOf(p, me).kind === kind),
+  }));
+
+type Section = { key: string; label: string; ps: InboxPullView[] };
+
+/** A folder in sections, each with a header, an empty one left out. A folder without them as one
+ * list. */
 function Groups({
-  folder,
+  sections,
   list,
-  me,
   children,
 }: {
-  folder: Folder;
+  sections?: Section[];
   list: InboxPullView[];
-  me: string;
   children: (p: InboxPullView) => ReactNode;
 }) {
-  if (folder !== "needs")
+  if (!sections)
     return (
       <ol>
         {list.map((p) => (
@@ -839,13 +863,12 @@ function Groups({
         ))}
       </ol>
     );
-  return (["held", "again", "asked"] as const).map((kind) => {
-    const ps = list.filter((p) => reasonOf(p, me).kind === kind);
+  return sections.map(({ key, label, ps }) => {
     if (!ps.length) return null;
     return (
-      <div key={kind}>
+      <div key={key}>
         <p className="border-b border-line-soft bg-sunken px-4 py-1.5 text-xs font-medium text-muted">
-          {reasonGroups[kind]} · {ps.length}
+          {label} · {ps.length}
         </p>
         <ol>
           {ps.map((p) => (
@@ -859,7 +882,35 @@ function Groups({
 
 // ── What the author's next move is ───────────────────────────────────────────
 
-type Step = { folder: Own; label: string; detail?: string; ready?: boolean };
+/** Why a PR of yours is your turn: its section of Your turn. */
+type Turn = "held" | "ready" | "changes" | "failing" | "off";
+
+type Step = { label: string; detail?: string; ready?: boolean } & (
+  | { folder: Exclude<Own, "turn"> }
+  | { folder: "turn"; turn: Turn }
+);
+
+/** Your turn's sections, in order: what holds up the queue, what you can queue, what needs work,
+ * then what Mergepatrol can't queue. */
+const turnSections: Record<Turn, string> = {
+  held: "Held in the queue: needs your decision",
+  ready: "Ready to queue",
+  changes: "Changes requested",
+  failing: "Checks failing",
+  off: "Not queued: Mergepatrol is off in the repo",
+};
+const turnOrder = Object.keys(turnSections) as Turn[];
+const turnRank = (s: Step) => (s.folder === "turn" ? turnOrder.indexOf(s.turn) : turnOrder.length);
+
+const turnSectionsOf = (list: InboxPullView[], step: (p: InboxPullView) => Step): Section[] =>
+  turnOrder.map((turn) => ({
+    key: turn,
+    label: turnSections[turn],
+    ps: list.filter((p) => {
+      const s = step(p);
+      return s.folder === "turn" && s.turn === turn;
+    }),
+  }));
 
 const ordinal = (n: number) =>
   `${n}${["th", "st", "nd", "rd"][n % 100 >= 11 && n % 100 <= 13 ? 0 : n % 10 > 3 ? 0 : n % 10]}`;
@@ -878,17 +929,23 @@ function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
       detail: q.priority ? "priority" : undefined,
     };
   if (q?.state === "held")
-    return { folder: "turn", label: "Held in the queue", detail: q.detail ?? undefined };
+    return {
+      folder: "turn",
+      turn: "held",
+      label: "Held in the queue",
+      detail: q.detail ?? undefined,
+    };
   if (p.draft) return { folder: "drafts", label: "Draft" };
   if (p.review_decision === "changes_requested") {
     const who = p.reviews.filter((r) => !r.approved).map((r) => r.reviewer.login);
     return {
       folder: "turn",
+      turn: "changes",
       label: "Changes requested",
       detail: who.length ? `by ${who.join(", ")}` : undefined,
     };
   }
-  if (p.checks === "failed") return { folder: "turn", label: "Checks failing" };
+  if (p.checks === "failed") return { folder: "turn", turn: "failing", label: "Checks failing" };
   if (p.review_decision === "review_required")
     return {
       folder: "others",
@@ -897,8 +954,13 @@ function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
     };
   if (p.checks === "pending") return { folder: "others", label: "Checks running" };
   return p.queues
-    ? { folder: "turn", label: "Ready to queue", ready: true }
-    : { folder: "turn", label: "Ready to merge", detail: "Mergepatrol is not on in this repo" };
+    ? { folder: "turn", turn: "ready", label: "Ready to queue", ready: true }
+    : {
+        folder: "turn",
+        turn: "off",
+        label: "Ready to merge",
+        detail: "Mergepatrol is not on in this repo",
+      };
 }
 
 function StepLine({ step }: { step: Step }) {
