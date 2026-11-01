@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, Spend, SpendTask,
+    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, SentBack, Spend, SpendTask,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -370,7 +370,7 @@ async fn review(
     git: &Git,
     resolver: &dyn Resolver,
     answered: &[Answered],
-    sent_back: &[Finding],
+    sent_back: &[SentBack],
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,

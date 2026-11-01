@@ -143,8 +143,11 @@ pub enum HoldReasonView {
     Reviewing,
     /// The agent's review asks a human about what it was not sure of.
     ReviewAsks,
-    /// A human answering the agent's review asked for changes: it waits for a push.
+    /// The agent sent findings back to the author, or a human asked for changes: it waits for
+    /// the author.
     ReviewChanges,
+    /// Review threads are unresolved, and the review's gate waits for them all.
+    UnresolvedThreads,
 }
 
 #[derive(Clone, Serialize, TS)]
@@ -192,6 +195,7 @@ impl From<&Hold> for HoldView {
             Hold::Reviewing => HoldReasonView::Reviewing,
             Hold::ReviewAsks => HoldReasonView::ReviewAsks,
             Hold::ReviewChanges => HoldReasonView::ReviewChanges,
+            Hold::UnresolvedThreads { .. } => HoldReasonView::UnresolvedThreads,
             Hold::Layer { .. } => unreachable!("innermost is no layer"),
         };
         HoldView {

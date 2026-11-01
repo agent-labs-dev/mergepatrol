@@ -10,12 +10,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
     Answered, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings, ReviewStatus,
-    review_status, review_url,
+    SentBack, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
 };
-use mergepatrol_github::{App, CodeOwners, Installation, PullRequest};
+use mergepatrol_github::{App, CodeOwners, Installation, PullRequest, ReviewThread, ThreadComment};
 use mergepatrol_resolver::withdraws;
 use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
 use tokio::task::JoinSet;
@@ -176,7 +176,24 @@ async fn run_review(
         .await
         .map_err(|e| format!("{e:#}"))?;
     let answered = answered_before(&earlier);
-    let sent_back = sent_back_before(&earlier);
+    let threads = threads(gh, r).await;
+    let sent_back = sent_back_before(&earlier)
+        .into_iter()
+        .map(|finding| {
+            let thread = threads
+                .iter()
+                .find(|t| title_of(t) == Some(norm(&finding.title)));
+            SentBack {
+                reply: thread
+                    .and_then(|t| t.reply.as_ref())
+                    .filter(|(_, body)| !body.contains(REPLY_MARK))
+                    .map(|(_, body)| body.clone())
+                    .unwrap_or_default(),
+                resolved: thread.is_some_and(|t| t.resolved),
+                finding,
+            }
+        })
+        .collect();
     let job_id = format!(
         "{}-{}-{}-review-{}",
         r.repo.owner,
@@ -363,14 +380,18 @@ async fn finish(
     };
     record(ctx, key, r.number, kind, &message).await?;
 
-    // GitHub hears of it too, where the PR's people are. Failing to post loses no state. A
-    // comment, never an approval: an App's approval could meet a rule that asks for a human's.
-    let body = github_body(ctx, key, r.number, &done);
-    let posted = gh
-        .review(&r.repo, r.number, &r.head_sha, "COMMENT", &body)
-        .await;
-    if let Err(e) = posted {
-        tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not post the review");
+    // GitHub hears of it too, where the PR's people are: each finding that holds the PR in a
+    // thread on its line, which its author resolves. Failing to post loses no state, but a
+    // finding with no thread waits for a push. A comment, never an approval: an App's approval
+    // could meet a rule that asks for a human's.
+    match post(ctx, gh, key, pr, r, &done).await {
+        Ok(threaded) if !threaded.is_empty() => {
+            ctx.store.mark_threaded(r.id, &threaded).await?;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not post the review");
+        }
     }
     if let Err(e) = gh.request_reviewers(&r.repo, r.number, &done.asked).await {
         tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not ask for reviews");
@@ -428,8 +449,146 @@ async fn codeowners(gh: &Installation, repo: &RepoName) -> Option<CodeOwners> {
     None
 }
 
-/// The review as GitHub shows it: what the agent sent back to the author, what it asks a
-/// human, and what it cleared. Each finding keeps its id, which a reply names.
+/// Starts each of Mergepatrol's threads, with the finding's title, so the next review finds it.
+const MARK: &str = "<!-- mergepatrol-finding: ";
+/// Ends each of Mergepatrol's replies in a thread, so a reply is not taken for the author's.
+const REPLY_MARK: &str = "<!-- mergepatrol-reply -->";
+
+/// A title as threads match it.
+fn norm(title: &str) -> String {
+    title.trim().to_lowercase().replace("--", "-")
+}
+
+/// The title of the finding a thread of Mergepatrol's is about.
+fn title_of(t: &ReviewThread) -> Option<String> {
+    let rest = &t.body[t.body.find(MARK)? + MARK.len()..];
+    Some(rest[..rest.find(" -->")?].to_owned())
+}
+
+/// Mergepatrol's threads on the PR. None when GitHub could not say.
+async fn threads(gh: &Installation, r: &ReviewRecord) -> Vec<ReviewThread> {
+    gh.threads_marked(&r.repo, r.number, MARK)
+        .await
+        .inspect_err(|e| {
+            tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not read the review threads");
+        })
+        .unwrap_or_default()
+}
+
+/// Posts the review: a summary, and a thread for each finding that holds the PR. A finding a
+/// thread is already about gets a reply there, and its thread opens again; a thread whose
+/// finding no longer holds is resolved. Returns the ids of the findings that have a thread.
+async fn post(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    r: &ReviewRecord,
+    done: &ReviewDone,
+) -> Result<Vec<String>> {
+    let short = &r.head_sha[..7.min(r.head_sha.len())];
+    let before = threads(gh, r).await;
+    let held: Vec<&Judged> = done
+        .findings
+        .iter()
+        .filter(|f| f.sent_back || f.asked)
+        .collect();
+    let mut threaded = Vec::new();
+    let mut new = Vec::new();
+    for f in &held {
+        let title = norm(&f.finding.title);
+        if let Some(t) = before.iter().find(|t| title_of(t).as_ref() == Some(&title)) {
+            let body = format!(
+                "Still holds on `{short}`: {}\n\n{}\n\n{REPLY_MARK}",
+                f.finding.finding,
+                still(f)
+            );
+            gh.reply_in_thread(&r.repo, r.number, t.comment_id, &body)
+                .await?;
+            if t.resolved {
+                gh.resolve_thread(&t.id, false).await?;
+            }
+            threaded.push(f.finding.id.clone());
+            continue;
+        }
+        // A finding about the whole PR goes on its first file.
+        let Some(path) = f.finding.file.clone().or_else(|| pr.files.first().cloned()) else {
+            continue;
+        };
+        let line = f.finding.file.as_ref().and(f.finding.line);
+        new.push(ThreadComment {
+            path,
+            line,
+            body: thread_body(f),
+        });
+    }
+    let body = github_body(ctx, key, r.number, done);
+    gh.review_lines(&r.repo, r.number, &r.head_sha, &body, &new)
+        .await?;
+    // Which new threads GitHub took: one turned down went in the body, and has none.
+    let after = threads(gh, r).await;
+    for f in &held {
+        let title = norm(&f.finding.title);
+        if !threaded.contains(&f.finding.id)
+            && after.iter().any(|t| title_of(t).as_ref() == Some(&title))
+        {
+            threaded.push(f.finding.id.clone());
+        }
+    }
+    // What no longer holds: the review found it fixed, or took the author's answer.
+    let holds: Vec<String> = held.iter().map(|f| norm(&f.finding.title)).collect();
+    for t in after.iter().filter(|t| !t.resolved) {
+        if title_of(t).is_some_and(|title| !holds.contains(&title)) {
+            let body = format!("Cleared by the review of `{short}`.\n\n{REPLY_MARK}");
+            gh.reply_in_thread(&r.repo, r.number, t.comment_id, &body)
+                .await?;
+            gh.resolve_thread(&t.id, true).await?;
+        }
+    }
+    Ok(threaded)
+}
+
+/// What the author does about a finding.
+fn still(f: &Judged) -> String {
+    match f.asked {
+        true => {
+            "A human decides this one: Mergepatrol asked them. Resolve this thread once they have."
+                .to_owned()
+        }
+        false => match f.finding.suggestion.as_str() {
+            "" => "Fix it and push, or reply with why it doesn't apply. Then resolve this thread."
+                .to_owned(),
+            change => format!(
+                "**Change:** {change}\n\nFix it and push, or reply with why it doesn't apply. Then resolve this thread."
+            ),
+        },
+    }
+}
+
+/// The comment that starts a finding's thread.
+fn thread_body(f: &Judged) -> String {
+    let to = match f.asked {
+        true => "For a human",
+        false => "Sent back to the author",
+    };
+    let whole = match f.finding.file {
+        None => " (about the whole PR)",
+        Some(_) => "",
+    };
+    format!(
+        "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}\n\n{MARK}{} -->",
+        f.finding.id,
+        f.finding.kind.as_str(),
+        f.finding.confidence,
+        f.finding.title,
+        f.finding.finding,
+        still(f),
+        norm(&f.finding.title),
+    )
+}
+
+/// The review's summary on GitHub: what it sent back to the author and asks a human, each in
+/// a thread on its line, and what it cleared.
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
     let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
     let mut body = String::from("**Mergepatrol's review**");
@@ -442,39 +601,25 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
     if !done.summary.is_empty() {
         body.push_str(&format!("\n\n{}", done.summary));
     }
-    let sent: Vec<&Judged> = done.findings.iter().filter(|f| f.sent_back).collect();
-    let asks: Vec<&Judged> = done.findings.iter().filter(|f| f.asked).collect();
+    let sent = done.findings.iter().filter(|f| f.sent_back).count();
+    let asks = done.findings.iter().filter(|f| f.asked).count();
     let cleared: Vec<&Judged> = done
         .findings
         .iter()
         .filter(|f| !f.asked && !f.sent_back)
         .collect();
-    if sent.is_empty() && asks.is_empty() {
+    if sent == 0 && asks == 0 {
         body.push_str(&format!(
             "\n\nIt cleared all {} things it looked at. Next: the merge queue.",
             cleared.len()
         ));
     }
-    if !sent.is_empty() {
+    if sent > 0 {
         body.push_str(&format!(
-            "\n\n### Sent back to the author: {}\n",
-            sent.len()
+            "\n\nIt sent {sent} back to the author, each in a thread on its line. For each, fix it and push, or reply with why it doesn't apply, then resolve the thread. Once every thread is resolved, the PR goes on to the merge queue with no human approval."
         ));
-        for f in &sent {
-            body.push_str(&format!("\n- {}", line(f)));
-            if !f.finding.suggestion.is_empty() {
-                body.push_str(&format!("\n  {}", f.finding.suggestion));
-            }
-        }
-        body.push_str(
-            "\n\nFix them and push: the next review checks each by its title, and the PR goes on to the merge queue once nothing is left, with no human approval. If one is wrong, reply to it with `ask_agent_about_review` and its id: the agent withdraws it when the reply holds up in the code.",
-        );
     }
-    if !asks.is_empty() {
-        body.push_str(&format!("\n\n### For a human: {}\n", asks.len()));
-        for f in &asks {
-            body.push_str(&format!("\n- {}", line(f)));
-        }
+    if asks > 0 {
         let who = match done.asked.as_slice() {
             [] => "Anyone who may approve this PR".to_owned(),
             logins => logins
@@ -484,7 +629,7 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
                 .join(", "),
         };
         body.push_str(&format!(
-            "\n\n{who}: [answer them in Mergepatrol]({url}), or approve the PR here on GitHub if they are all fine as they are. A comment doesn't answer them. The PR keeps its place in the queue meanwhile."
+            "\n\nIt asks a human about {asks}, each in a thread on its line. {who}: [answer them in Mergepatrol]({url}), or approve the PR here on GitHub if they are all fine as they are. The PR keeps its place in the queue meanwhile."
         ));
     }
     if !cleared.is_empty() {
@@ -502,19 +647,6 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
         body.push_str("\n\n</details>");
     }
     body
-}
-
-/// A finding on one line: its id, title, place, and how sure the agent is.
-fn line(f: &Judged) -> String {
-    let place = match (&f.finding.file, f.finding.line) {
-        (Some(file), Some(line)) => format!(" (`{file}:{line}`)"),
-        (Some(file), None) => format!(" (`{file}`)"),
-        _ => String::new(),
-    };
-    format!(
-        "`{}` **{}**{place}, {}% sure",
-        f.finding.id, f.finding.title, f.finding.confidence
-    )
 }
 
 async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> Result<()> {
@@ -625,6 +757,7 @@ mod tests {
                 asked: false,
                 sent_back,
                 withdrawn: false,
+                threaded: false,
                 bar: Bar::From(80),
             }],
             asked: Vec::new(),
@@ -635,6 +768,25 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn a_findings_thread_carries_its_title_for_the_next_review_to_find() {
+        let mut f = review(1, true, None).findings.remove(0);
+        f.finding.title = "Retry loop has no cap --> ever".into();
+        let thread = ReviewThread {
+            id: "t".into(),
+            resolved: false,
+            comment_id: 1,
+            body: thread_body(&f),
+            reply: None,
+        };
+        assert_eq!(
+            title_of(&thread),
+            Some(norm("retry loop has NO cap --> ever "))
+        );
+        assert!(thread.body.contains("Sent back to the author"));
+        assert!(thread.body.contains("Then resolve this thread."));
     }
 
     #[test]

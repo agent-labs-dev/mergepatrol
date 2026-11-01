@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
-use mergepatrol_core::{CheckFailure, LabelSpec, Labels, ResolverSettings, Spend, Step, StepTimes};
+use mergepatrol_core::{
+    Bar, CheckFailure, Finding, Judged, Kind, LabelSpec, Labels, Lean, ResolverSettings, Spend,
+    Step, StepTimes,
+};
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
 use mergepatrol_github::{
@@ -125,6 +128,7 @@ impl State {
                 stack: None,
                 maintainer_can_modify: false,
                 head_repository: None,
+                unresolved_threads: 0,
                 details: Default::default(),
             },
         );
@@ -694,6 +698,43 @@ impl Mem {
             .unwrap();
         r.status = status;
     }
+
+    /// Changes a finding of the PR's newest review, which has one from then on.
+    fn with_finding(&self, number: PrNumber, f: impl FnOnce(&mut Judged)) {
+        let mut reviews = self.reviews.lock().unwrap();
+        let r = reviews
+            .iter_mut()
+            .rev()
+            .find(|r| r.number == number)
+            .unwrap();
+        if r.findings.is_empty() {
+            r.findings.push(Judged {
+                finding: Finding {
+                    id: "f1".into(),
+                    kind: Kind::Other,
+                    title: "t".into(),
+                    file: Some("a.rs".into()),
+                    line: Some(1),
+                    confidence: 90,
+                    lean: Lean::Change,
+                    finding: String::new(),
+                    unsure: String::new(),
+                    checked: Vec::new(),
+                    would_clear: String::new(),
+                    suggestion: String::new(),
+                    needs_human: false,
+                    code: Vec::new(),
+                    related: Vec::new(),
+                },
+                asked: false,
+                sent_back: false,
+                withdrawn: false,
+                threaded: false,
+                bar: Bar::From(80),
+            });
+        }
+        f(&mut r.findings[0]);
+    }
 }
 
 /// The reviews a tick starts and reads. The review worker is not run here.
@@ -837,6 +878,18 @@ impl ReviewStore for Mem {
     }
     async fn withdraw_finding(&self, _: i64, _: &str) -> Result<Option<ReviewStatus>> {
         unreachable!()
+    }
+    async fn mark_threaded(&self, _: i64, _: &[String]) -> Result<()> {
+        unreachable!()
+    }
+    async fn approve_resolved(&self, id: i64) -> Result<bool> {
+        let mut reviews = self.reviews.lock().unwrap();
+        let r = reviews.iter_mut().find(|r| r.id == id).unwrap();
+        let held = r.status == ReviewStatus::Changes && r.answered_by.is_none();
+        if held {
+            r.status = ReviewStatus::Approved;
+        }
+        Ok(held)
     }
     async fn reviews_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
         unreachable!()
@@ -1336,6 +1389,52 @@ async fn with_the_review_on_a_pr_keeps_its_place_until_the_agent_or_a_human_appr
     run.store.finish_review(1, ReviewStatus::Approved);
     run.drain().await;
     assert_eq!(run.merged(), [2, 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_goes_on_once_its_author_resolves_every_comment_with_no_human() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings::default());
+    let threads = |n: u32| {
+        run.gh
+            .with_mut(|s| s.prs.get_mut(&1).unwrap().unresolved_threads = n)
+    };
+    run.tick().await;
+    // The agent sent a finding back, in a thread the author has not resolved.
+    run.store.finish_review(1, ReviewStatus::Changes);
+    run.store.with_finding(1, |f| {
+        f.sent_back = true;
+        f.threaded = true;
+    });
+    threads(1);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(ReviewChanges)".into())]);
+    // The author answers it and resolves the thread: no human approves, and it merges.
+    threads(0);
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unresolved_thread_holds_an_approved_pr_until_it_is_resolved() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings::default());
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().unresolved_threads = 2);
+    run.tick().await;
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.tick().await;
+    assert_eq!(
+        run.lane(),
+        [(1, "Held(UnresolvedThreads { count: 2 })".into())]
+    );
+    // A workspace that does not require them lets it on.
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        require_resolved: false,
+        ..ReviewSettings::default()
+    });
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
 }
 
 #[tokio::test(start_paused = true)]

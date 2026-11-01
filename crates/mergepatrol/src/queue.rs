@@ -721,18 +721,19 @@ fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> Hold {
 }
 
 /// Why a unit waits for the agent's review, the queue's first gate: each PR's review of its
-/// head, which a tick starts. `heads` are each layer's, bottom to top, as (PR, head).
+/// head, which a tick starts, then its review threads. `heads` are each layer's, bottom to top,
+/// as (PR, head, unresolved review threads).
 async fn review_hold(
     ctx: &Ctx,
     key: &LaneKey,
     review: &ReviewSettings,
     stacked: bool,
-    heads: &[(PrNumber, &str)],
+    heads: &[(PrNumber, &str, u32)],
 ) -> Result<Option<Hold>> {
     if !review.enabled {
         return Ok(None);
     }
-    for &(number, head) in heads {
+    for &(number, head, unresolved) in heads {
         let latest = ctx
             .store
             .latest_review(key.installation_id, &key.repo, number)
@@ -740,7 +741,22 @@ async fn review_hold(
         let status = match latest {
             // A stale review of the head the lane sees: the worker read GitHub before it
             // caught up. It runs again.
-            Some(r) if r.head_sha == head && r.status != ReviewStatus::Stale => r.status,
+            Some(r) if r.head_sha == head && r.status != ReviewStatus::Stale => {
+                // The author resolved every thread of what it sent back to them: it goes on.
+                if resolved(&r, unresolved) && ctx.store.approve_resolved(r.id).await? {
+                    record(
+                        ctx,
+                        key,
+                        number,
+                        "review-resolved",
+                        "the author resolved every comment",
+                    )
+                    .await?;
+                    ReviewStatus::Approved
+                } else {
+                    r.status
+                }
+            }
             _ => {
                 let r = ctx
                     .store
@@ -753,8 +769,31 @@ async fn review_hold(
         if let Some(hold) = Hold::of_reviews(stacked, [(number, status)]) {
             return Ok(Some(hold));
         }
+        if review.require_resolved && unresolved > 0 {
+            let hold = Hold::UnresolvedThreads { count: unresolved };
+            return Ok(Some(match stacked {
+                true => Hold::Layer {
+                    number,
+                    hold: Box::new(hold),
+                },
+                false => hold,
+            }));
+        }
     }
     Ok(None)
+}
+
+/// Whether the author resolved what the agent's review sent back to them alone: each finding
+/// had a thread, and no thread on the PR is left open.
+fn resolved(r: &mergepatrol_store::ReviewRecord, unresolved: u32) -> bool {
+    r.status == ReviewStatus::Changes
+        && r.answered_by.is_none()
+        && unresolved == 0
+        && r.findings.iter().any(|f| f.sent_back)
+        && r.findings
+            .iter()
+            .filter(|f| f.sent_back)
+            .all(|f| f.threaded)
 }
 
 /// The queue moved PRs to heads it made, as (PR, before, after): their approvals hold.
@@ -837,12 +876,12 @@ async fn tick_lane(
         } else if let Some(draft) = unit.hold_reason().filter(|h| *h.innermost() == Hold::Draft) {
             Some(draft)
         } else if let Some(reason) = {
-            let heads: Vec<(PrNumber, &str)> = unit
+            let heads: Vec<(PrNumber, &str, u32)> = unit
                 .layers
                 .iter()
                 .map(|pr| match pr.number == top.number {
-                    true => (pr.number, top.head_ref_oid.as_str()),
-                    false => (pr.number, pr.head_ref_oid.as_str()),
+                    true => (pr.number, top.head_ref_oid.as_str(), top.unresolved_threads),
+                    false => (pr.number, pr.head_ref_oid.as_str(), pr.unresolved_threads),
                 })
                 .collect();
             review_hold(ctx, &key, &read.review, unit.stacked, &heads).await?
@@ -2182,11 +2221,11 @@ async fn run_job(
             Phase::Merging { head } => {
                 // An author's push during the job made heads the review never saw: what
                 // merges is what was reviewed, or what the queue made of it.
-                let reviewed: Vec<(PrNumber, &str)> = now
+                let reviewed: Vec<(PrNumber, &str, u32)> = now
                     .layers
                     .iter()
                     .zip(&heads)
-                    .map(|(pr, head)| (pr.number, head.as_str()))
+                    .map(|(pr, head)| (pr.number, head.as_str(), pr.unresolved_threads))
                     .collect();
                 if let Some(reason) = now.hold_reason() {
                     Event::OnHold(reason)

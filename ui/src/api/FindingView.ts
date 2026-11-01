@@ -24,4 +24,8 @@ withdrawn: boolean,
 /**
  * The change needs a call the author cannot make from the PR.
  */
-needs_human: boolean, bar: number | "always_ask", };
+needs_human: boolean, 
+/**
+ * It has a review thread on the PR, which its author resolves.
+ */
+threaded: boolean, bar: number | "always_ask", };

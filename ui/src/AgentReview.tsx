@@ -56,6 +56,8 @@ export function reviewBadge(e: Gated): [string, string] | null {
       return ["Needs a human", reviewTones.asks];
     case "review_changes":
       return ["Sent back", reviewTones.sentBack];
+    case "unresolved_threads":
+      return ["Unresolved comments", reviewTones.sentBack];
     default:
       return null;
   }
@@ -87,9 +89,11 @@ export function reviewLine(e: Gated): ReactNode {
             {r.answered_by
               ? `@${r.answered_by} asked for changes`
               : `${r.sent_back} sent back to the author`}{" "}
-            · reviewed again on the next push
+            · goes on once each comment is resolved
           </span>
         );
+      case "unresolved_threads":
+        return <span className="text-muted">{e.hold?.message}</span>;
       default:
         return null;
     }
@@ -376,8 +380,9 @@ export function Gate({
             {r.answered_by
               ? `@${r.answered_by} asked for changes, in a review on GitHub.`
               : "The agent sent what it found back to the author, in a review on GitHub."}{" "}
-            It keeps its place; on the next push the agent reviews it again, checking each fix.
-            Nobody needs to approve it once nothing is left.
+            Each finding is a comment on its line. It keeps its place, and goes on once the author
+            resolves every comment, fixed or answered; nobody needs to approve it. A push gets a new
+            review, which reads the replies.
           </p>
         </div>
       )}

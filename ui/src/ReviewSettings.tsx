@@ -59,6 +59,7 @@ export function ReviewSettings({ workspace }: { workspace: number }) {
 function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewSettingsView }) {
   const client = useQueryClient();
   const [enabled, setEnabled] = useState(saved.enabled);
+  const [resolved, setResolved] = useState(saved.require_resolved);
   const [bars, setBars] = useState<Record<KindView, Bar>>(
     () => Object.fromEntries(saved.bars.map((b) => [b.kind, b.bar])) as Record<KindView, Bar>,
   );
@@ -72,13 +73,17 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
       setReviewSettings(workspace, {
         enabled,
         bars: KINDS.map((k) => ({ kind: k, bar: bars[k] })),
+        require_resolved: resolved,
       }),
     onSuccess: (data) => {
       capture("review settings saved", { enabled: data.enabled });
       client.setQueryData(["review-settings", workspace], data);
     },
   });
-  const dirty = enabled !== saved.enabled || KINDS.some((k) => bars[k] !== barOf(saved.bars, k));
+  const dirty =
+    enabled !== saved.enabled ||
+    resolved !== saved.require_resolved ||
+    KINDS.some((k) => bars[k] !== barOf(saved.bars, k));
 
   const bar = bars[kind];
   const cut = bar === "always_ask" ? 101 : bar;
@@ -106,12 +111,26 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
         </div>
         <p className="mt-1 text-muted">
           The agent reviews every queued PR before it takes its place in line. A change it's sure
-          enough of goes back to the PR's author, often the agent that built it, to fix and push;
-          once nothing is left, the PR goes on with no human approval. It asks a human only about a
-          call the author can't make. It runs on the workspace's API key. Set how sure is sure
-          enough to send a change back for each kind: lower sends back more. A repo can set its own
-          below.
+          enough of goes back to the PR's author, often the agent that built it, as a comment on its
+          line. The author fixes it or says why not, and resolves the thread; once every thread is
+          resolved, the PR goes on with no human approval. It asks a human only about a call the
+          author can't make. It runs on the workspace's API key. Set how sure is sure enough to send
+          a change back for each kind: lower sends back more. A repo can set its own below.
         </p>
+        <label className="mt-3 flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={resolved}
+            onChange={(e) => setResolved(e.target.checked)}
+          />
+          <span>
+            Require resolved comments
+            <span className="block text-muted">
+              Hold a queued PR while any review thread on it is unresolved, whoever started it.
+            </span>
+          </span>
+        </label>
       </div>
       <div className="flex border-t border-line max-sm:flex-col">
         <ul className="shrink-0 border-line py-2 max-sm:border-b sm:w-44 sm:border-r">

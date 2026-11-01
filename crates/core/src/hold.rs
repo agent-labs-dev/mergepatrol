@@ -35,8 +35,13 @@ pub enum Hold {
     /// The agent's review asks a human about what it was not sure of.
     ReviewAsks,
     /// The agent sent findings back to the author, or a human answering its review asked for
-    /// changes: it waits for a push.
+    /// changes: it waits for a push, or for the author to resolve the review's threads.
     ReviewChanges,
+    /// Review threads on it are unresolved: the review's gate waits for them all, as the
+    /// workspace or the repo asks.
+    UnresolvedThreads {
+        count: u32,
+    },
     /// A layer of the stack is not ready.
     Layer {
         number: PrNumber,
@@ -56,7 +61,10 @@ impl Hold {
     /// Held by the agent's review, the queue's first gate of a PR's own.
     pub fn of_review(&self) -> bool {
         match self.innermost() {
-            Hold::Reviewing | Hold::ReviewAsks | Hold::ReviewChanges => true,
+            Hold::Reviewing
+            | Hold::ReviewAsks
+            | Hold::ReviewChanges
+            | Hold::UnresolvedThreads { .. } => true,
             Hold::Draft
             | Hold::ReviewRequired
             | Hold::ChangesRequested
@@ -127,8 +135,14 @@ impl fmt::Display for Hold {
                 f.write_str("the agent's review asks a human about what it was not sure of")
             }
             Hold::ReviewChanges => f.write_str(
-                "its review sent changes back to the author: it is reviewed again on the next push",
+                "its review sent changes back to the author: it goes on once they resolve each comment, or push and it is reviewed again",
             ),
+            Hold::UnresolvedThreads { count: 1 } => {
+                f.write_str("1 review comment is unresolved: resolve it to go on")
+            }
+            Hold::UnresolvedThreads { count } => {
+                write!(f, "{count} review comments are unresolved: resolve them to go on")
+            }
             Hold::Layer { number, hold } => write!(f, "#{number} is not ready: {hold}"),
         }
     }

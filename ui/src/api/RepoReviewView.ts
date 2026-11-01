@@ -12,4 +12,9 @@ enabled: boolean | null,
 /**
  * The kinds whose bar the repo sets. The others follow the workspace.
  */
-bars: Array<BarView>, };
+bars: Array<BarView>, 
+/**
+ * Whether its gate waits for every review thread to be resolved. Unset follows the
+ * workspace.
+ */
+require_resolved?: boolean, };

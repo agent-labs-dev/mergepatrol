@@ -106,6 +106,14 @@ pub struct ReviewSettings {
     pub enabled: bool,
     /// Every kind's bar.
     pub bars: BTreeMap<Kind, Bar>,
+    /// The gate also waits for every review thread on the PR to be resolved, whoever started
+    /// it: its author resolves each, fixed or answered.
+    #[serde(default = "yes")]
+    pub require_resolved: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// On for every workspace: a review runs the agent, on the workspace's own key, and runs only
@@ -116,6 +124,7 @@ impl Default for ReviewSettings {
         Self {
             enabled: true,
             bars: Kind::ALL.map(|k| (k, default_bar(k))).into(),
+            require_resolved: true,
         }
     }
 }
@@ -142,6 +151,7 @@ impl ReviewSettings {
         ReviewSettings {
             enabled: repo.enabled.unwrap_or(self.enabled),
             bars,
+            require_resolved: repo.require_resolved.unwrap_or(self.require_resolved),
         }
     }
 
@@ -177,11 +187,13 @@ pub struct ReviewOverrides {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bars: BTreeMap<Kind, Bar>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_resolved: Option<bool>,
 }
 
 impl ReviewOverrides {
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.bars.is_empty()
+        self.enabled.is_none() && self.bars.is_empty() && self.require_resolved.is_none()
     }
 }
 
@@ -351,6 +363,18 @@ pub struct Answered {
     pub by: String,
 }
 
+/// A finding the last review sent back to the author, as the next review sees it: with what the
+/// author said in its thread, and whether they resolved it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentBack {
+    pub finding: Finding,
+    /// The author's last reply in its thread. Empty when there is none.
+    #[serde(default)]
+    pub reply: String,
+    #[serde(default)]
+    pub resolved: bool,
+}
+
 /// A finding as the review keeps it: whether the agent asks a human about it or sent it back
 /// to the author, and the bar it was held to.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,6 +388,9 @@ pub struct Judged {
     /// The agent withdrew it after the author's reply.
     #[serde(default)]
     pub withdrawn: bool,
+    /// It has a review thread on the PR, which its author resolves once it is fixed or answered.
+    #[serde(default)]
+    pub threaded: bool,
     pub bar: Bar,
 }
 
@@ -378,6 +405,7 @@ impl ReviewSettings {
                     asked: route == Route::Human,
                     sent_back: route == Route::Author,
                     withdrawn: false,
+                    threaded: false,
                     bar: self.bar(finding.kind),
                     finding,
                 }
@@ -504,6 +532,7 @@ mod tests {
         let repo = ReviewOverrides {
             enabled: None,
             bars: BTreeMap::from([(Kind::Security, Bar::Always), (Kind::Other, Bar::From(65))]),
+            require_resolved: None,
         };
         let s = ws.with(&repo);
         assert!(s.enabled);

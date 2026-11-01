@@ -19,7 +19,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{Answer, Answered, CheckFailure, Finding};
+use mergepatrol_core::{Answer, Answered, CheckFailure, Finding, SentBack};
 
 pub struct ResolveRequest<'a> {
     pub workdir: &'a Path,
@@ -53,8 +53,9 @@ pub struct ReviewRequest<'a> {
     pub trunk: &'a str,
     /// What humans said about findings on an earlier head.
     pub answered: &'a [Answered],
-    /// What the agent sent back to the author on the last head, to check the fix of.
-    pub sent_back: &'a [Finding],
+    /// What the agent sent back to the author on the last head, to check the fix of, with the
+    /// author's replies.
+    pub sent_back: &'a [SentBack],
     pub transcript: &'a Path,
 }
 
@@ -285,21 +286,30 @@ check whether it was made.\n{items}\n"
         let items = req
             .sent_back
             .iter()
-            .map(|f| {
+            .map(|s| {
+                let f = &s.finding;
                 let place = match (&f.file, f.line) {
                     (Some(file), Some(l)) => format!(" ({file}:{l})"),
                     (Some(file), None) => format!(" ({file})"),
                     _ => String::new(),
                 };
-                format!("- {}{place}: {}", f.title, f.suggestion)
+                let reply = match (s.resolved, s.reply.trim()) {
+                    (true, "") => " The author resolved it.".to_owned(),
+                    (true, r) => format!(" The author resolved it, replying: {r}"),
+                    (false, "") => String::new(),
+                    (false, r) => format!(" The author replied: {r}"),
+                };
+                format!("- {}{place}: {}{reply}", f.title, f.suggestion)
             })
             .collect::<Vec<_>>()
             .join("\n");
         format!(
             "\nYou sent these findings back to the author on the last version of this PR. Check \
 each against the code now. One that was fixed, report as a `fine` finding with the same title, \
-saying how it was fixed. One that was not, report again with the same title, so the author can \
-tell it is the same one, and say what is still missing.\n{items}\n"
+saying how it was fixed. One the author answered instead of changing: if their reply holds up in \
+the code, report it as `fine` with the same title; if it does not, report it again with the same \
+title and say why the reply does not hold. One that was neither fixed nor answered, report again \
+with the same title, so the author can tell it is the same one, and say what is still missing.\n{items}\n"
         )
     };
     format!(

@@ -149,6 +149,11 @@ pub trait ReviewStore: Send + Sync {
     /// held the PR for the author alone, and now holds it for nothing, approves it. Returns the
     /// review's status after, or `None` if the finding was not sent back.
     async fn withdraw_finding(&self, id: i64, finding: &str) -> Result<Option<ReviewStatus>>;
+    /// These findings of the review have a thread on the PR.
+    async fn mark_threaded(&self, id: i64, findings: &[String]) -> Result<()>;
+    /// The author resolved every thread of a review that held the PR for them alone: it
+    /// approves. False if it no longer holds for them alone.
+    async fn approve_resolved(&self, id: i64) -> Result<bool>;
     /// The workspace's reviews of the last `days`, newest first.
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>>;
     /// `None`: the workspace never saved any, and has the defaults.
@@ -562,6 +567,36 @@ impl ReviewStore for PgStore {
         Ok(Some(status))
     }
 
+    async fn mark_threaded(&self, id: i64, ids: &[String]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT findings FROM agent_reviews WHERE id = $1 FOR UPDATE")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
+        for f in findings.iter_mut().filter(|f| ids.contains(&f.finding.id)) {
+            f.threaded = true;
+        }
+        sqlx::query("UPDATE agent_reviews SET findings = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(serde_json::to_value(&findings)?)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn approve_resolved(&self, id: i64) -> Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE agent_reviews SET status = 'approved', updated_at = now()
+             WHERE id = $1 AND status = 'changes' AND answered_by IS NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>> {
         let rows = sqlx::query(concat!(
             "SELECT ",
@@ -635,6 +670,7 @@ mod tests {
             asked,
             sent_back: false,
             withdrawn: false,
+            threaded: false,
             bar: Bar::From(90),
         }
     }

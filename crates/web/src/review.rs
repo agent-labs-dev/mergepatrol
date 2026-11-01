@@ -85,6 +85,11 @@ pub struct RepoReviewView {
     pub enabled: Option<bool>,
     /// The kinds whose bar the repo sets. The others follow the workspace.
     pub bars: Vec<BarView>,
+    /// Whether its gate waits for every review thread to be resolved. Unset follows the
+    /// workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub require_resolved: Option<bool>,
 }
 
 impl From<ReviewOverrides> for RepoReviewView {
@@ -92,6 +97,7 @@ impl From<ReviewOverrides> for RepoReviewView {
         RepoReviewView {
             enabled: o.enabled,
             bars: bar_views(&o.bars),
+            require_resolved: o.require_resolved,
         }
     }
 }
@@ -101,6 +107,7 @@ impl From<RepoReviewView> for ReviewOverrides {
         ReviewOverrides {
             enabled: v.enabled,
             bars: bars_of(&v.bars),
+            require_resolved: v.require_resolved,
         }
     }
 }
@@ -113,6 +120,8 @@ pub struct ReviewSettingsView {
     pub enabled: bool,
     /// Every kind's bar.
     pub bars: Vec<BarView>,
+    /// Whether the gate waits for every review thread on a PR to be resolved.
+    pub require_resolved: bool,
     pub defaults: Vec<BarView>,
     /// Each kind's findings over `days`, by confidence.
     pub history: Vec<KindHistoryView>,
@@ -147,6 +156,10 @@ pub struct BandView {
 pub struct SetReviewSettings {
     pub enabled: bool,
     pub bars: Vec<BarView>,
+    /// Unset keeps what is saved.
+    #[serde(default)]
+    #[ts(optional)]
+    pub require_resolved: Option<bool>,
 }
 
 /// How far back the track record goes.
@@ -168,6 +181,7 @@ async fn settings_view(app: &AppState, id: u64) -> Result<Json<ReviewSettingsVie
     Ok(Json(ReviewSettingsView {
         enabled: full.enabled,
         bars: bar_views(&full.bars),
+        require_resolved: full.require_resolved,
         defaults: bar_views(&ReviewSettings::default().bars),
         history: history(&reviews),
         days: HISTORY_DAYS,
@@ -221,8 +235,10 @@ pub(crate) async fn set_review_settings(
     Json(body): Json<SetReviewSettings>,
 ) -> Result<Json<ReviewSettingsView>, ApiError> {
     let id = caller.workspace(id)?;
+    let saved = app.store.review_settings(id).await?.unwrap_or_default();
     let mut settings = ReviewSettings {
         enabled: body.enabled,
+        require_resolved: body.require_resolved.unwrap_or(saved.require_resolved),
         ..ReviewSettings::default()
     };
     settings.bars.extend(bars_of(&body.bars));
@@ -308,6 +324,8 @@ pub struct FindingView {
     pub withdrawn: bool,
     /// The change needs a call the author cannot make from the PR.
     pub needs_human: bool,
+    /// It has a review thread on the PR, which its author resolves.
+    pub threaded: bool,
     #[ts(type = "number | \"always_ask\"")]
     pub bar: Bar,
 }
@@ -412,6 +430,7 @@ impl From<Judged> for FindingView {
             asked: j.asked,
             sent_back: j.sent_back,
             withdrawn: j.withdrawn,
+            threaded: j.threaded,
             bar: j.bar,
         }
     }
@@ -862,6 +881,7 @@ mod tests {
             asked,
             sent_back: false,
             withdrawn: false,
+            threaded: false,
             bar: Bar::From(90),
         }
     }

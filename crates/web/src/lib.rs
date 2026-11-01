@@ -1201,6 +1201,7 @@ mod tests {
                     asked: false,
                     sent_back: false,
                     withdrawn: false,
+                    threaded: false,
                     bar: Bar::From(90),
                 },
                 Judged {
@@ -1208,6 +1209,7 @@ mod tests {
                     asked: true,
                     sent_back: false,
                     withdrawn: false,
+                    threaded: false,
                     bar: Bar::From(90),
                 },
             ],
