@@ -10,8 +10,9 @@ import { field, Narrow, primary, secondary } from "./ui";
 
 export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
   const queryClient = useQueryClient();
-  const [filter, setFilter] = useState("");
   const { repo: open } = useSearch({ from: "/$account/repos" });
+  // "Turn on Mergepatrol" links here with a repo, which can be far down a long list.
+  const [filter, setFilter] = useState(open ?? "");
   const navigate = useNavigate({ from: "/$account/repos" });
   const repos = useQuery({
     queryKey: ["repos", workspace],
