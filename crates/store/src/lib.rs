@@ -18,8 +18,8 @@ pub use vault::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{
-    Lane, Person, PrNumber, PrSummary, Provider, RepoName, Spend, SpendTask, Step, StepTimes,
-    step_times,
+    Lane, Person, PrNumber, PrSummary, Provider, RepoName, RepoSettings, Spend, SpendTask, Step,
+    StepTimes, WorkspaceDefaults, step_times,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -236,6 +236,24 @@ pub trait Store: ReadCache + InboxStore + ReviewStore {
         repo: &RepoName,
         enabled: Option<bool>,
     ) -> Result<()>;
+    /// `None`: the workspace never saved any, and follows the instance.
+    async fn repo_defaults(&self, installation_id: u64) -> Result<Option<WorkspaceDefaults>>;
+    async fn set_repo_defaults(
+        &self,
+        installation_id: u64,
+        defaults: &WorkspaceDefaults,
+    ) -> Result<()>;
+    /// What the repos of the workspace inherit: its defaults over the instance's.
+    async fn inherited(
+        &self,
+        installation_id: u64,
+        instance: &RepoSettings,
+    ) -> Result<RepoSettings> {
+        Ok(match self.repo_defaults(installation_id).await? {
+            Some(defaults) => defaults.over(instance),
+            None => instance.clone(),
+        })
+    }
     async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()>;
     /// All the repos of an installation that have the config file. The rest have not.
     async fn replace_has_config(
@@ -1095,6 +1113,31 @@ impl Store for PgStore {
         .bind(label)
         .fetch_optional(&self.pool)
         .await?)
+    }
+
+    async fn repo_defaults(&self, installation_id: u64) -> Result<Option<WorkspaceDefaults>> {
+        let row = sqlx::query("SELECT settings FROM repo_defaults WHERE installation_id = $1")
+            .bind(installation_id as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|r| Ok(serde_json::from_value(r.get("settings"))?))
+            .transpose()
+    }
+
+    async fn set_repo_defaults(
+        &self,
+        installation_id: u64,
+        defaults: &WorkspaceDefaults,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO repo_defaults (installation_id, settings) VALUES ($1, $2)
+             ON CONFLICT (installation_id) DO UPDATE SET settings = $2, updated_at = now()",
+        )
+        .bind(installation_id as i64)
+        .bind(serde_json::to_value(defaults)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()> {

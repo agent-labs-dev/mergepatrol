@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{
     AgentSettings, Bar, CheckFailure, EntryState, Finding, Judged, Kind, LabelSpec, Labels, Lean,
-    Spend, Step, StepTimes,
+    Spend, Step, StepTimes, WorkspaceDefaults,
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -711,6 +711,7 @@ struct Mem {
     /// The agent's reviews, oldest first.
     reviews: Mutex<Vec<ReviewRecord>>,
     review_settings: Mutex<Option<ReviewSettings>>,
+    repo_defaults: Mutex<Option<WorkspaceDefaults>>,
 }
 
 impl Mem {
@@ -1161,6 +1162,12 @@ impl Store for Mem {
     async fn set_repo_enabled(&self, _: u64, _: &RepoName, _: Option<bool>) -> Result<()> {
         unreachable!()
     }
+    async fn repo_defaults(&self, _: u64) -> Result<Option<WorkspaceDefaults>> {
+        Ok(self.repo_defaults.lock().unwrap().clone())
+    }
+    async fn set_repo_defaults(&self, _: u64, _: &WorkspaceDefaults) -> Result<()> {
+        unimplemented!()
+    }
     async fn set_has_config(&self, _: u64, _: &RepoName, _: bool) -> Result<()> {
         unreachable!()
     }
@@ -1390,6 +1397,27 @@ async fn a_pr_merges_with_a_method_the_trunks_ruleset_allows() {
     }));
     run.tick().await;
     assert_eq!(run.merged(), [1, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_empty_config_file_follows_the_workspace() {
+    let run = Run::new(Fake::new(|s| {
+        s.config = Some(String::new());
+        s.add_pr(1);
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1], "the instance's label queues it");
+
+    let run = Run::new(Fake::new(|s| {
+        s.config = Some(String::new());
+        s.add_pr(1);
+    }));
+    let mut defaults = WorkspaceDefaults::from(run.ctx.config.repo_defaults.clone());
+    defaults.label = "queue".into();
+    *run.store.repo_defaults.lock().unwrap() = Some(defaults);
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert!(run.lane().is_empty(), "the PR has the instance's label");
+    assert_eq!(*run.store.config_error.lock().unwrap(), None);
 }
 
 #[tokio::test(start_paused = true)]

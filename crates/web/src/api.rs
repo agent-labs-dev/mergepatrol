@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use mergepatrol_core::{
     AgentSettings, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, ModelOverrides, Person,
     PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Step,
-    TaskModel,
+    TaskModel, WorkspaceDefaults,
 };
 use mergepatrol_github::{
     App, AsUser, BranchFile, CheckRunState, GitObject, InboxPull, Installation, Proposal,
@@ -734,7 +734,7 @@ pub struct RepoConfigView {
     /// What to edit: the open PR's file, else the default branch's, over the defaults. The
     /// defaults when the file does not parse.
     pub settings: RepoSettingsView,
-    /// What a repo without the file runs with.
+    /// What the repo follows where its file says nothing: `defaults` of `get_repo_defaults`.
     pub defaults: RepoSettingsView,
     pub efforts: Vec<String>,
     /// The providers a repo can choose.
@@ -1261,7 +1261,7 @@ pub(crate) async fn open_pulls(
     let id = caller.repo(&app, id, &repo).await?;
     let gh = AsUser::new(caller.github_token(&app)?)?;
     let file = as_user(gh.default_branch_file(&repo, REPO_CONFIG_PATH).await, &repo)?;
-    let (labels, trunk) = labels_of(&app, file)?;
+    let (labels, trunk) = labels_of(&app, id, file).await?;
     // A stack's layers are in the queue with it, though one layer alone may have the label.
     let queued: HashSet<u64> = app
         .store
@@ -2074,12 +2074,18 @@ async fn repo_labels(
     gh: &Installation,
     repo: &RepoName,
 ) -> Result<(Labels, String), ApiError> {
-    labels_of(app, gh.default_branch_file(repo, REPO_CONFIG_PATH).await?)
+    let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
+    labels_of(app, gh.id, file).await
 }
 
 /// The labels the config file sets, and the branch it is on.
-fn labels_of(app: &AppState, file: BranchFile) -> Result<(Labels, String), ApiError> {
-    let settings = RepoSettings::from_file(file.text.as_deref(), &app.repo_defaults)
+async fn labels_of(
+    app: &AppState,
+    id: u64,
+    file: BranchFile,
+) -> Result<(Labels, String), ApiError> {
+    let defaults = inherited(app, id).await?;
+    let settings = RepoSettings::from_file(file.text.as_deref(), &defaults)
         .map_err(|e| ApiError::Status(StatusCode::CONFLICT, e))?;
     Ok((settings.labels(), file.branch))
 }
@@ -2108,6 +2114,11 @@ fn as_user<T>(result: anyhow::Result<T>, repo: &RepoName) -> Result<T, ApiError>
     })
 }
 
+/// What the workspace's repos follow where their config files say nothing.
+async fn inherited(app: &AppState, id: u64) -> anyhow::Result<RepoSettings> {
+    app.store.inherited(id, &app.repo_defaults).await
+}
+
 /// The repo of a URL's `{owner}/{name}`. Each is one path segment, but `%2F` decodes to a
 /// slash: a repo stored with one would break every read of the repos.
 pub(crate) fn repo_name(owner: String, name: String) -> Result<RepoName, ApiError> {
@@ -2132,7 +2143,7 @@ pub(crate) async fn repo_config(
     let id = caller.repo(&app, id, &repo).await?;
     let gh = installation(&app, id).await?;
     let file = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
-    let defaults: &RepoSettings = &app.repo_defaults;
+    let defaults = &inherited(&app, id).await?;
     let error = RepoSettings::from_file(file.text.as_deref(), defaults).err();
     let pull_request = gh.open_pr_from(&repo, CONFIG_BRANCH).await?;
     // Edits start from the open PR, so updating it keeps the changes already in it.
@@ -2158,20 +2169,23 @@ pub(crate) async fn repo_config(
     }))
 }
 
-/// Opens a PR that writes these settings to the repo's config file, or updates the one open.
+/// Opens a PR that writes these settings to the repo's config file, or updates the one open, and
+/// queues it if the repo queues. The file says only what differs from the workspace.
 pub(crate) async fn propose_repo_config(
     State(app): State<AppState>,
     caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
     Json(body): Json<RepoSettingsView>,
-) -> Result<Json<PullRequestRef>, ApiError> {
+) -> Result<Json<UpdatePullView>, ApiError> {
     let id = caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let token = caller.github_token(&app)?;
     let settings = RepoSettings::from(body);
     settings
         .check()
         .map_err(|e| ApiError::Status(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    let content = settings.to_yaml();
+    let defaults = inherited(&app, id).await?;
+    let content = settings.to_yaml(&defaults);
     let gh = installation(&app, id).await?;
     let base = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
     if base.text.as_deref() == Some(content.as_str()) {
@@ -2184,6 +2198,10 @@ pub(crate) async fn propose_repo_config(
         Some(_) => Vec::new(),
         None => skill_paths(&gh, &repo).await?,
     };
+    let loses_comments = base
+        .text
+        .as_deref()
+        .is_some_and(|t| settings.loses_comments_of(t, &defaults));
     let (title, body) = config_pr(&settings, base.text.is_some(), &base.branch, &skills);
     let mut files = vec![(REPO_CONFIG_PATH, content.as_str())];
     files.extend(skills.iter().map(|p| (p.as_str(), SKILL)));
@@ -2200,7 +2218,122 @@ pub(crate) async fn propose_repo_config(
         )
         .await?;
     tracing::info!(installation = id, %repo, pr = pr.number, "proposed repo settings");
-    Ok(Json(pr.into()))
+    let pull_request = pr.into();
+    let file = UpdatedFileView::Settings;
+    Ok(Json(if loses_comments {
+        UpdatePullView::held(file, pull_request, LOSES_COMMENTS)
+    } else if repo_queues(&app, id, &repo).await? {
+        queue_update(&app, &gh, &token, &repo, file, pull_request).await
+    } else {
+        UpdatePullView::held(file, pull_request, "This repo does not queue yet.")
+    }))
+}
+
+async fn repo_queues(app: &AppState, id: u64, repo: &RepoName) -> anyhow::Result<bool> {
+    Ok(app
+        .store
+        .repo_state(id, repo)
+        .await?
+        .is_some_and(|s| s.on()))
+}
+
+/// What a workspace sets for every repo that leaves it out of its config file.
+#[derive(Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkspaceDefaultsView {
+    pub label: String,
+    pub batch_size: u32,
+    #[ts(type = "\"anthropic\" | \"openai\" | \"openrouter\"")]
+    pub provider: Provider,
+    pub model: String,
+    pub effort: String,
+    /// A model for one task over the default.
+    #[serde(default)]
+    pub overrides: ModelOverridesView,
+    /// The agent fixes failed required checks.
+    pub fix_ci: bool,
+    /// The most fixes a PR gets, before it is ejected.
+    pub fix_ci_attempts: u32,
+}
+
+impl From<WorkspaceDefaults> for WorkspaceDefaultsView {
+    fn from(d: WorkspaceDefaults) -> Self {
+        WorkspaceDefaultsView {
+            label: d.label,
+            batch_size: d.batch_size as u32,
+            provider: d.agent.provider,
+            model: d.agent.model,
+            effort: d.agent.effort,
+            overrides: d.agent.overrides.into(),
+            fix_ci: d.fix_ci.enabled,
+            fix_ci_attempts: d.fix_ci.attempts,
+        }
+    }
+}
+
+impl From<WorkspaceDefaultsView> for WorkspaceDefaults {
+    fn from(v: WorkspaceDefaultsView) -> Self {
+        WorkspaceDefaults {
+            label: v.label.trim().to_owned(),
+            batch_size: v.batch_size as usize,
+            agent: AgentSettings {
+                provider: v.provider,
+                model: v.model.trim().to_owned(),
+                effort: v.effort,
+                overrides: v.overrides.into(),
+            },
+            fix_ci: FixCiSettings {
+                enabled: v.fix_ci,
+                attempts: v.fix_ci_attempts,
+            },
+        }
+    }
+}
+
+/// The workspace's defaults, and what to pick them from.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct RepoDefaultsView {
+    pub defaults: WorkspaceDefaultsView,
+    pub efforts: Vec<String>,
+    /// The providers a repo can choose.
+    pub providers: Vec<ProviderView>,
+}
+
+async fn defaults_view(app: &AppState, id: u64) -> Result<Json<RepoDefaultsView>, ApiError> {
+    Ok(Json(RepoDefaultsView {
+        defaults: WorkspaceDefaults::from(inherited(app, id).await?).into(),
+        efforts: EFFORTS.map(str::to_owned).into(),
+        providers: Provider::SUPPORTED.map(ProviderView::from).into(),
+    }))
+}
+
+pub(crate) async fn repo_defaults(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path(id): Path<u64>,
+) -> Result<Json<RepoDefaultsView>, ApiError> {
+    let id = caller.workspace(id)?;
+    defaults_view(&app, id).await
+}
+
+/// Sets what every repo follows where its config file says nothing, at once and with no PR.
+pub(crate) async fn set_repo_defaults(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path(id): Path<u64>,
+    Json(body): Json<WorkspaceDefaultsView>,
+) -> Result<Json<RepoDefaultsView>, ApiError> {
+    let id = caller.workspace(id)?;
+    let defaults = WorkspaceDefaults::from(body);
+    defaults
+        .clone()
+        .over(&app.repo_defaults)
+        .check()
+        .map_err(|e| ApiError::Status(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    app.store.set_repo_defaults(id, &defaults).await?;
+    tracing::info!(installation = id, "set the repo defaults");
+    defaults_view(&app, id).await
 }
 
 /// MergeLoop's branch for the PR that updates a repo's skill.
@@ -2342,9 +2475,10 @@ pub(crate) async fn update_repo_skill(
     State(app): State<AppState>,
     caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
-) -> Result<Json<PullRequestRef>, ApiError> {
+) -> Result<Json<UpdatePullView>, ApiError> {
     let id = caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let token = caller.github_token(&app)?;
     let gh = installation(&app, id).await?;
     let (SkillView { state, paths, .. }, base) = repo_skill(&gh, &repo).await?;
     if state == SkillStateView::Current || paths.is_empty() {
@@ -2355,7 +2489,12 @@ pub(crate) async fn update_repo_skill(
     }
     let pr = propose_skill(&gh, &repo, &paths, &base).await?;
     tracing::info!(installation = id, %repo, pr = pr.number, "proposed the current skill");
-    Ok(Json(pr.into()))
+    let file = UpdatedFileView::Skill;
+    Ok(Json(if repo_queues(&app, id, &repo).await? {
+        queue_update(&app, &gh, &token, &repo, file, pr.into()).await
+    } else {
+        UpdatePullView::held(file, pr.into(), "This repo does not queue yet.")
+    }))
 }
 
 /// Opens a PR that writes the current skill to `paths`, or updates the one open.
@@ -2407,6 +2546,20 @@ pub struct UpdatePullView {
     pub note: Option<String>,
 }
 
+impl UpdatePullView {
+    /// Left out of the queue, and why.
+    fn held(file: UpdatedFileView, pull_request: PullRequestRef, note: &str) -> Self {
+        Self {
+            file,
+            pull_request,
+            queued: false,
+            note: Some(note.to_owned()),
+        }
+    }
+}
+
+const LOSES_COMMENTS: &str = "This drops the file's comments: carry them over, then queue this PR.";
+
 /// What an update did to a repo. With neither field set, the repo was up to date.
 #[derive(Serialize, TS)]
 #[ts(export)]
@@ -2437,7 +2590,7 @@ fn config_update(
     open: Option<Option<&str>>,
     defaults: &RepoSettings,
 ) -> ConfigUpdate {
-    if settings.written_in(text) {
+    if settings.written_in(text, defaults) {
         return ConfigUpdate::Current;
     }
     let Some(open) = open else {
@@ -2446,7 +2599,7 @@ fn config_update(
     match RepoSettings::from_file(open, defaults) {
         Ok(theirs) if theirs != *settings => ConfigUpdate::Leave,
         Err(_) => ConfigUpdate::Leave,
-        Ok(_) if open.is_some_and(|t| settings.written_in(t)) => ConfigUpdate::Queue,
+        Ok(_) if open.is_some_and(|t| settings.written_in(t, defaults)) => ConfigUpdate::Queue,
         Ok(_) => ConfigUpdate::Propose,
     }
 }
@@ -2477,7 +2630,7 @@ pub(crate) async fn update_repo(
     let Some(text) = file.text.as_deref() else {
         return skip(format!("{} has no config file.", file.branch));
     };
-    let defaults: &RepoSettings = &app.repo_defaults;
+    let defaults = &inherited(&app, id).await?;
     let settings = match RepoSettings::from_file(Some(text), defaults) {
         Ok(settings) => settings,
         Err(e) => return skip(e),
@@ -2502,7 +2655,7 @@ pub(crate) async fn update_repo(
         ConfigUpdate::Current => None,
         ConfigUpdate::Queue | ConfigUpdate::Leave => open,
         ConfigUpdate::Propose => Some(
-            propose_rewrite(&gh, &repo, &settings, &file, text)
+            propose_rewrite(&gh, &repo, &settings, defaults, &file, text)
                 .await
                 .map_err(github_failed)?,
         ),
@@ -2510,18 +2663,13 @@ pub(crate) async fn update_repo(
     if let Some(pr) = pr {
         let note = if update == ConfigUpdate::Leave {
             Some("This PR changes the settings, so the update left it as it is.")
-        } else if settings.loses_comments_of(text) {
-            Some("The update drops the file's comments: carry them over, then queue this PR.")
+        } else if settings.loses_comments_of(text, defaults) {
+            Some(LOSES_COMMENTS)
         } else {
             None
         };
         pulls.push(match note {
-            Some(note) => UpdatePullView {
-                file: UpdatedFileView::Settings,
-                pull_request: pr.into(),
-                queued: false,
-                note: Some(note.to_owned()),
-            },
+            Some(note) => UpdatePullView::held(UpdatedFileView::Settings, pr.into(), note),
             None => {
                 queue_update(
                     &app,
@@ -2568,17 +2716,18 @@ async fn propose_rewrite(
     gh: &Installation,
     repo: &RepoName,
     settings: &RepoSettings,
+    defaults: &RepoSettings,
     base: &BranchFile,
     text: &str,
 ) -> anyhow::Result<PullRef> {
-    let content = settings.to_yaml();
-    let comments = if settings.loses_comments_of(text) {
+    let content = settings.to_yaml(defaults);
+    let comments = if settings.loses_comments_of(text, defaults) {
         "\n\nIt replaces the file, so the file's comments are lost: carry them over in this PR if you want to keep them."
     } else {
         ""
     };
     let body = format!(
-        "This PR writes `{REPO_CONFIG_PATH}` the way MergeLoop writes it now: it renames old settings and spells out the ones the file left out. The queue runs as it did, with these settings.\n\n{}{comments}",
+        "This PR writes `{REPO_CONFIG_PATH}` the way MergeLoop writes it now: it renames old settings and keeps only those that differ from the workspace, so the rest follow it from now on. The queue runs as it did, with these settings.\n\n{}{comments}",
         settings_list(settings)
     );
     gh.propose_file(
@@ -2951,7 +3100,8 @@ mod tests {
         assert!(!old.contains("overrides"));
         let defaults = view(&old);
 
-        let read = RepoSettings::from_file(Some(&view(FORM).to_yaml()), &defaults).unwrap();
+        let read =
+            RepoSettings::from_file(Some(&view(FORM).to_yaml(&defaults)), &defaults).unwrap();
         let r = &read.agent;
         assert_eq!(r.model(SpendTask::Rebase), (Provider::OpenAi, "gpt-6-luna"));
         assert_eq!(
@@ -2963,7 +3113,7 @@ mod tests {
             (Provider::Anthropic, "claude-fable-5-1")
         );
 
-        let yaml = view(&old).to_yaml();
+        let yaml = view(&old).to_yaml(&defaults);
         assert!(!yaml.contains("overrides"), "{yaml}");
         let read = RepoSettings::from_file(Some(&yaml), &defaults).unwrap();
         assert_eq!(
@@ -3007,11 +3157,17 @@ mod tests {
         RepoSettings::from(serde_json::from_str::<RepoSettingsView>(FORM).unwrap())
     }
 
+    /// A file that says nothing over `s`, and one that spells out a setting it already follows.
+    fn files(s: &RepoSettings) -> (String, String) {
+        let current = s.to_yaml(s);
+        let old = format!("{current}label: {}\n", s.label);
+        (current, old)
+    }
+
     #[test]
     fn an_update_opens_a_pr_only_for_a_file_out_of_date() {
         let s = settings();
-        let current = s.to_yaml();
-        let old = current.replace("agent:", "resolver:");
+        let (current, old) = files(&s);
         assert_eq!(config_update(&s, &current, None, &s), ConfigUpdate::Current);
         assert_eq!(config_update(&s, &old, None, &s), ConfigUpdate::Propose);
     }
@@ -3021,8 +3177,8 @@ mod tests {
         let s = settings();
         let mut theirs = s.clone();
         theirs.batch_size += 1;
-        let theirs = theirs.to_yaml();
-        let old = s.to_yaml().replace("agent:", "resolver:");
+        let theirs = theirs.to_yaml(&s);
+        let (current, old) = files(&s);
         assert_eq!(
             config_update(&s, &old, Some(Some(&theirs)), &s),
             ConfigUpdate::Leave
@@ -3033,7 +3189,7 @@ mod tests {
         );
         // Nothing to update, so nothing to say about the PR either.
         assert_eq!(
-            config_update(&s, &s.to_yaml(), Some(Some(&theirs)), &s),
+            config_update(&s, &current, Some(Some(&theirs)), &s),
             ConfigUpdate::Current
         );
     }
@@ -3041,8 +3197,7 @@ mod tests {
     #[test]
     fn an_update_pushes_nothing_to_an_open_pr_that_has_it() {
         let s = settings();
-        let current = s.to_yaml();
-        let old = current.replace("agent:", "resolver:");
+        let (current, old) = files(&s);
         assert_eq!(
             config_update(&s, &old, Some(Some(&current)), &s),
             ConfigUpdate::Queue

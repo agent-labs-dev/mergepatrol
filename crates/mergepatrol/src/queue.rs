@@ -653,7 +653,11 @@ impl RepoRead {
 async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option<RepoRead>> {
     let installation = gh.installation_id();
     let file = gh.config_file(repo).await?;
-    let settings = match RepoSettings::from_file(file.as_deref(), &ctx.config.repo_defaults) {
+    let inherited = ctx
+        .store
+        .inherited(installation, &ctx.config.repo_defaults)
+        .await?;
+    let settings = match RepoSettings::from_file(file.as_deref(), &inherited) {
         Ok(s) => s,
         Err(e) => {
             // Paused: the settings it would run with are a guess.

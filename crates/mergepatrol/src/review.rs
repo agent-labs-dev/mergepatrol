@@ -111,12 +111,15 @@ async fn pull(ctx: &Ctx, r: &ReviewRecord) -> Result<(Installation, PullRequest)
     Ok((gh, pr))
 }
 
-/// What the repo's queue runs with: its config file over the defaults, which a file that does
-/// not parse leaves as they are.
+/// What the repo's queue runs with: its config file over the workspace's defaults, which a file
+/// that does not parse leaves as they are.
 async fn settings(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<RepoSettings> {
     let file = GitHub::config_file(gh, repo).await?;
-    let defaults = &ctx.config.repo_defaults;
-    Ok(RepoSettings::from_file(file.as_deref(), defaults).unwrap_or_else(|_| defaults.clone()))
+    let defaults = ctx
+        .store
+        .inherited(GitHub::installation_id(gh), &ctx.config.repo_defaults)
+        .await?;
+    Ok(RepoSettings::from_file(file.as_deref(), &defaults).unwrap_or(defaults))
 }
 
 fn lane_key(r: &ReviewRecord, pr: &PullRequest) -> LaneKey {
