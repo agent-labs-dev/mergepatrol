@@ -23,6 +23,10 @@ pub enum Change {
     ValuesUnder(String),
 }
 
+/// The prefix of a branch's rules read: its required checks, strictness and merge methods.
+/// Ruleset and branch-protection webhooks clear every key under it.
+pub const BRANCH_RULES: &str = "rules:";
+
 /// A repo's reads. Each counts the changes it saw: a newer count means it is stale.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RepoReads {

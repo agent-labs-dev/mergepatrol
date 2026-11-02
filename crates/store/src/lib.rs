@@ -7,7 +7,7 @@ mod review;
 mod vault;
 
 pub use billing::{BillingStore, FairUse, Subscription, Unsynced};
-pub use github::{Change, PrRead, PrWrite, Read, ReadCache, RepoReads, ValueRead};
+pub use github::{BRANCH_RULES, Change, PrRead, PrWrite, Read, ReadCache, RepoReads, ValueRead};
 pub use inbox::{InboxRead, InboxRow, InboxStale, InboxStore, InboxWrite, UserInbox};
 pub use review::{ReviewAnswers, ReviewDone, ReviewRecord, ReviewStore};
 pub use vault::{
