@@ -125,6 +125,87 @@ export function Narrow({
   );
 }
 
+/** A settings section: its title and a line or two of why on the left, its controls on the right.
+ * One column on a narrow screen. */
+export function Section({
+  id,
+  title,
+  sub,
+  aside,
+  children,
+}: {
+  id: string;
+  title: string;
+  sub: ReactNode;
+  aside?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      id={id}
+      className="grid scroll-mt-6 grid-cols-[minmax(0,1fr)] gap-4 py-8 first:pt-0 xl:grid-cols-[240px_minmax(0,1fr)] xl:gap-8"
+    >
+      <div>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-semibold">{title}</h2>
+          {aside}
+        </div>
+        <p className="mt-1 text-[13px] leading-relaxed text-muted">{sub}</p>
+      </div>
+      <div className="min-w-0">{children}</div>
+    </section>
+  );
+}
+
+/** An on/off switch. */
+export function Toggle({
+  on,
+  onChange,
+  label,
+}: {
+  on: boolean;
+  onChange: (on: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      onClick={() => onChange(!on)}
+      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${on ? "bg-ok" : "bg-line-strong"}`}
+    >
+      <span
+        className={`absolute top-0.5 size-4 rounded-full bg-white shadow transition-all ${on ? "left-4.5" : "left-0.5"}`}
+      />
+    </button>
+  );
+}
+
+/** A dot and a short state: green when set, grey when not. */
+export function Status({
+  ok,
+  title,
+  className = "",
+  children,
+}: {
+  ok: boolean;
+  title?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <span
+      title={title}
+      className={`flex min-w-0 items-center gap-1.5 text-xs ${ok ? "text-fg-2" : "text-faint"} ${className}`}
+    >
+      <span className={`size-1.5 shrink-0 rounded-full ${ok ? "bg-ok" : "bg-line-strong"}`} />
+      <span className="truncate">{children}</span>
+    </span>
+  );
+}
+
 /** "42s", "12m", "3.4h", "2.1d". */
 export function duration(secs: number) {
   if (secs < 60) return `${Math.round(secs)}s`;
