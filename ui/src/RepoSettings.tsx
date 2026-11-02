@@ -488,31 +488,32 @@ export function DraftsTray({
   workspace,
   drafts,
   discard,
-  opened,
+  sent,
 }: {
   workspace: number;
   drafts: Drafts;
   discard: () => void;
-  opened: (pulls: Record<string, UpdatePullView>) => void;
+  /** A draft left as this PR. */
+  sent: (repo: string, pull: UpdatePullView) => void;
 }) {
   const client = useQueryClient();
   const [reviewing, setReviewing] = useState(false);
   const repos = Object.keys(drafts);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  // Each repo on its own: one that fails keeps its draft to retry, and the others are done.
   const propose = useMutation({
     mutationFn: async () => {
-      const pulls: Record<string, UpdatePullView> = {};
+      setErrors({});
       for (const repo of repos) {
-        pulls[repo] = await proposeRepoConfig(workspace, repo, drafts[repo].to);
+        try {
+          sent(repo, await proposeRepoConfig(workspace, repo, drafts[repo].to));
+          capture("repo config proposed", { repo });
+          client.invalidateQueries({ queryKey: ["repo-config", workspace, repo] });
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          setErrors((errors) => ({ ...errors, [repo]: error }));
+        }
       }
-      return pulls;
-    },
-    onSuccess: (pulls) => {
-      capture("repo config proposed", { repos: Object.keys(pulls).length });
-      opened(pulls);
-      discard();
-      setReviewing(false);
-      for (const repo of Object.keys(pulls))
-        client.invalidateQueries({ queryKey: ["repo-config", workspace, repo] });
     },
   });
   useEffect(() => {
@@ -563,9 +564,9 @@ export function DraftsTray({
                       </li>
                     ))}
                   </ul>
+                  {errors[repo] && <p className="mt-1 text-sm text-bad">{errors[repo]}</p>}
                 </div>
               ))}
-              <ErrorText error={propose.error} />
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
               <button type="button" onClick={() => setReviewing(false)} className={secondary}>

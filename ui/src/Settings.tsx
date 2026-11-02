@@ -93,7 +93,10 @@ export function Settings({ workspace, app }: { workspace: number; app: AppView }
         workspace={workspace}
         drafts={drafts}
         discard={() => setDrafts({})}
-        opened={(pulls) => setOpened({ ...opened, ...pulls })}
+        sent={(repo, pull) => {
+          setOpened((opened) => ({ ...opened, [repo]: pull }));
+          setDrafts(({ [repo]: _, ...others }) => others);
+        }}
       />
     </div>
   );

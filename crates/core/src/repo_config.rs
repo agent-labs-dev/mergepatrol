@@ -321,31 +321,22 @@ impl WrittenOverrides<'_> {
     }
 }
 
-/// A task's model, or the repo's own provider alone: the task runs the repo's default, not the
-/// workspace's override.
+/// A task's model, or an empty mapping: the task runs the repo's default, not the workspace's
+/// override, whatever provider that is by then.
 #[derive(Serialize)]
 struct WrittenTask<'a> {
-    provider: Provider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
 }
 
 impl<'a> WrittenTask<'a> {
     /// `None` when the task follows the workspace.
-    fn over(
-        own: &'a Option<TaskModel>,
-        inherited: &Option<TaskModel>,
-        provider: Provider,
-    ) -> Option<Self> {
-        (own != inherited).then(|| match own {
-            Some(t) => Self {
-                provider: t.provider,
-                model: Some(&t.model),
-            },
-            None => Self {
-                provider,
-                model: None,
-            },
+    fn over(own: &'a Option<TaskModel>, inherited: &Option<TaskModel>) -> Option<Self> {
+        (own != inherited).then(|| Self {
+            provider: own.as_ref().map(|t| t.provider),
+            model: own.as_ref().map(|t| t.model.as_str()),
         })
     }
 }
@@ -498,15 +489,16 @@ impl RepoSettings {
     /// The file that reads back as these settings over `defaults`, and sets nothing else.
     pub fn to_yaml(&self, defaults: &RepoSettings) -> String {
         let (s, d) = (&self.agent, &defaults.agent);
-        // A provider's default model is no other's, so the two are written together.
+        // A model belongs to its provider, so the two are written together: the workspace's
+        // provider can change under a model the file names.
         let model = s.provider != d.provider || s.model != d.model;
-        let task = |own, inherited| WrittenTask::over(own, inherited, s.provider);
+        let task = WrittenTask::over;
         let yaml = serde_yaml::to_string(&Written {
             version: 1,
             label: (self.label != defaults.label).then_some(&self.label),
             batch_size: (self.batch_size != defaults.batch_size).then_some(self.batch_size),
             agent: WrittenAgent {
-                provider: (s.provider != d.provider).then_some(s.provider),
+                provider: model.then_some(s.provider),
                 model: model.then_some(&s.model),
                 effort: (s.effort != d.effort).then_some(&s.effort),
                 overrides: WrittenOverrides {
@@ -796,12 +788,14 @@ agent:
 
     #[test]
     fn a_task_the_file_names_is_its_own_and_may_be_the_default() {
-        let s = RepoSettings::from_file(
-            Some("agent: { overrides: { review: { provider: openai } } }\n"),
-            &workspace(),
-        )
-        .unwrap();
-        assert!(s.agent.overrides.is_empty());
+        for task in ["{}", "{ provider: openai }"] {
+            let yaml = format!("agent: {{ overrides: {{ review: {task} }} }}\n");
+            let s = RepoSettings::from_file(Some(&yaml), &workspace()).unwrap();
+            assert!(s.agent.overrides.is_empty(), "{yaml}");
+        }
+        let s =
+            RepoSettings::from_file(Some("agent: { overrides: { review: {} } }\n"), &workspace())
+                .unwrap();
         assert_eq!(
             s.agent.model(SpendTask::Review),
             (Provider::OpenAi, "gpt-6.1-sol")
@@ -828,6 +822,31 @@ agent:
         for inherited in ["label", "effort", "attempts", "verify"] {
             assert!(!yaml.contains(inherited), "{yaml}");
         }
+
+        // A repo that names a model keeps it, and its opt-out, when the workspace's provider
+        // changes.
+        let mut s = d.clone();
+        s.agent.model = "gpt-6-luna".into();
+        s.agent.overrides.review = None;
+        let yaml = s.to_yaml(&d);
+        let mut moved = d.clone();
+        moved.agent.provider = Provider::Anthropic;
+        moved.agent.model = "claude-opus-5-5".into();
+        let read = RepoSettings::from_file(Some(&yaml), &moved).unwrap();
+        assert_eq!(
+            read.agent.model(SpendTask::Review),
+            (Provider::OpenAi, "gpt-6-luna"),
+            "{yaml}"
+        );
+
+        // An opt-out alone follows the workspace's provider wherever it goes.
+        let mut s = d.clone();
+        s.agent.overrides.review = None;
+        let read = RepoSettings::from_file(Some(&s.to_yaml(&d)), &moved).unwrap();
+        assert_eq!(
+            read.agent.model(SpendTask::Review),
+            (Provider::Anthropic, "claude-opus-5-5")
+        );
 
         // Another provider than the workspace's says its model, even a model of the same name.
         let mut s = d.clone();
