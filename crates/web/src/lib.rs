@@ -596,6 +596,11 @@ mod tests {
         serde_json::from_slice(&bytes.unwrap()).unwrap()
     }
 
+    async fn text_of(res: Response) -> String {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await;
+        String::from_utf8(bytes.unwrap().to_vec()).unwrap()
+    }
+
     /// A router, with the session "old" holding a live GitHub token: a bearer for `/mcp` that
     /// GitHub need not check.
     async fn mcp_router(pool: PgPool) -> Router {
@@ -1878,7 +1883,8 @@ mod tests {
     }
 
     /// A router whose session "old" holds the GitHub token `ghu_x`, and GitHub as if it had
-    /// said that token, and `ghp_y`, read `o/r` (installation 1) and `o/off` (no installation).
+    /// said that token, and `ghp_y`, read `o/r` (installation 1) and `o/off` (no installation),
+    /// and that `ghp_y`'s user administers `o/r`. `ghp_z` reads `o/r` too, without admin.
     async fn v1_router(pool: PgPool) -> (Router, Arc<dyn Store>) {
         let (store, vault) = store_and_vault(pool).await;
         let live = UserToken {
@@ -1896,6 +1902,10 @@ mod tests {
             state.seen.assume(token, &r("o/r"), Some(1));
             state.seen.assume(token, &r("o/off"), None);
         }
+        let r = RepoName::parse("o/r").unwrap();
+        state.seen.assume_admin("ghp_y", &r, true);
+        state.seen.assume("ghp_z", &r, Some(1));
+        state.seen.assume_admin("ghp_z", &r, false);
         (serve(state), store)
     }
 
@@ -2088,5 +2098,48 @@ mod tests {
             v1_get(&router, bad, &[BEARER]).await.status(),
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_github_token_with_admin_turns_a_repo_on(pool: PgPool) {
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let set = |auth: &'static str, path: &'static str| {
+            let router = router.clone();
+            async move {
+                let req = Request::put(path)
+                    .header("authorization", auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"enabled":true}"#))
+                    .unwrap();
+                send(&router, req).await
+            }
+        };
+        let enabled = || async {
+            store
+                .repo_state(1, &repo)
+                .await
+                .unwrap()
+                .and_then(|s| s.enabled)
+        };
+
+        // Reads the repo, but does not administer it.
+        let res = set("Bearer ghp_z", "/api/w/1/repos/o/r").await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert_eq!(text_of(res).await, "You need admin access to o/r for this.");
+        assert_eq!(enabled().await, None);
+        // Administers it, but names another workspace.
+        let res = set("Bearer ghp_y", "/api/w/2/repos/o/r").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let res = set("Bearer ghp_y", "/api/w/1/repos/o/r").await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(enabled().await, Some(true));
+
+        // A call across the workspace still needs a sign-in, and says so.
+        let res = v1_get(&router, "/api/w/1/repos", &[BEARER]).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let error = text_of(res).await;
+        assert!(error.contains("spans a workspace"), "{error}");
     }
 }

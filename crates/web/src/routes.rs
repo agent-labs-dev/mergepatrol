@@ -190,7 +190,7 @@ pub(crate) static ROUTES: &[Route] = &[
     route!(GET "/api/w/{id}/repos", api::repos, tool!("list_repos", Reads,
         "The repos the workspace's installation reaches, and whether each queues: by its config file, or turned on or off. Needs a MergeLoop sign-in.")),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}", api::set_repo, tool!("set_repo", Writes,
-        "Turns a repo's queue on or off, over what its config file says, or back to following the file. Needs a MergeLoop sign-in.",
+        "Turns a repo's queue on or off, over what its config file says, or back to following the file. Needs a MergeLoop sign-in, or a GitHub token with admin access to the repo.",
         opt("enabled", Ty::Bool, "`true` on, `false` off. Without it, the repo follows its config file."))),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/open", api::open_pulls, tool!("list_open_pulls", Reads,
         "The repo's open PRs into its default branch that are not queued, last updated first, up to 50.")),

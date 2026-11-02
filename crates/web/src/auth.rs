@@ -249,7 +249,7 @@ impl Caller {
             Self::User(user) => Ok(user),
             Self::Token(_) => Err(ApiError::Status(
                 StatusCode::FORBIDDEN,
-                "Sign in to MergeLoop for this: a GitHub token reaches only single repos.".into(),
+                "This call spans a workspace, so it needs a MergeLoop sign-in, on the dashboard or through MCP: a GitHub token covers calls on one repo.".into(),
             )),
         }
     }
@@ -272,6 +272,38 @@ impl Caller {
             Self::Token(_) if self.workspace_of(state, repo).await? == id => Ok(id),
             Self::Token(_) => Err(no_repo(repo)),
         }
+    }
+
+    /// The workspace, for a call that changes how one of its repos is run: a user's, or one
+    /// whose repo a GitHub token's user administers.
+    pub(crate) async fn repo_admin(
+        &self,
+        state: &AppState,
+        id: u64,
+        repo: &RepoName,
+    ) -> Result<u64, ApiError> {
+        let id = self.repo(state, id, repo).await?;
+        let Self::Token(token) = self else {
+            return Ok(id);
+        };
+        let key = (hash(token), repo.clone());
+        // Only a yes is kept: one just made admin need not wait.
+        let admin = match state.seen.admins.get(&key) {
+            Some(admin) => admin,
+            None => match setup::can_admin(token, &repo.to_string()).await {
+                Ok(admin) => admin,
+                Err(e) if e.is::<Revoked>() => return Err(token_refused()),
+                Err(e) => return Err(e.into()),
+            },
+        };
+        if !admin {
+            return Err(ApiError::Status(
+                StatusCode::FORBIDDEN,
+                format!("You need admin access to {repo} for this."),
+            ));
+        }
+        state.seen.admins.put(key, true);
+        Ok(id)
     }
 
     /// The workspace of a repo the caller can read. It reads it first: that MergeLoop is
@@ -424,6 +456,8 @@ pub(crate) struct Seen {
     reads: Recent<(String, RepoName), ()>,
     /// The App's installation on each repo, or none.
     installations: Recent<RepoName, Option<u64>>,
+    /// Whether each token's user administers a repo.
+    admins: Recent<(String, RepoName), bool>,
 }
 
 #[cfg(test)]
@@ -433,6 +467,11 @@ impl Seen {
         self.tokens.put(hash(token), ());
         self.reads.put((hash(token), repo.clone()), ());
         self.installations.put(repo.clone(), installation);
+    }
+
+    /// As if GitHub had said whether `token`'s user administers `repo`.
+    pub(crate) fn assume_admin(&self, token: &str, repo: &RepoName, admin: bool) {
+        self.admins.put((hash(token), repo.clone()), admin);
     }
 }
 
