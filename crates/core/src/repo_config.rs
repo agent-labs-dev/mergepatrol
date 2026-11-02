@@ -74,7 +74,7 @@ pub struct Labels {
     pub failed: String,
 }
 
-/// A label as Mergepatrol creates it on a repo that lacks it.
+/// A label as MergeLoop creates it on a repo that lacks it.
 pub struct LabelSpec<'a> {
     pub name: &'a str,
     pub color: &'static str,
@@ -87,17 +87,17 @@ impl Labels {
             LabelSpec {
                 name: &self.trigger,
                 color: "0e8a16",
-                description: "Queue this PR: Mergepatrol rebases, tests and merges it",
+                description: "Queue this PR: MergeLoop rebases, tests and merges it",
             },
             LabelSpec {
                 name: &self.priority,
                 color: "d93f0b",
-                description: "Jump the Mergepatrol queue",
+                description: "Jump the MergeLoop queue",
             },
             LabelSpec {
                 name: &self.failed,
                 color: "b60205",
-                description: "Mergepatrol ejected this PR; see its comment",
+                description: "MergeLoop ejected this PR; see its comment",
             },
         ]
     }
@@ -134,7 +134,7 @@ struct FixCiConfig {
     attempts: Option<u32>,
 }
 
-/// The file as Mergepatrol writes it: every setting spelled out.
+/// The file as MergeLoop writes it: every setting spelled out.
 #[derive(Serialize)]
 struct Written<'a> {
     version: u32,
@@ -256,7 +256,7 @@ impl RepoSettings {
         })
         .expect("settings serialize");
         format!(
-            "# Mergepatrol reads this file from the default branch. The dashboard opens a PR to change it.\n{yaml}"
+            "# MergeLoop reads this file from the default branch. The dashboard opens a PR to change it.\n{yaml}"
         )
     }
 

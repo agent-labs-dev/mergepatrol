@@ -449,9 +449,9 @@ async fn codeowners(gh: &Installation, repo: &RepoName) -> Option<CodeOwners> {
     None
 }
 
-/// Starts each of Mergepatrol's threads, with the finding's title, so the next review finds it.
+/// Starts each of MergeLoop's threads, with the finding's title, so the next review finds it.
 const MARK: &str = "<!-- mergepatrol-finding: ";
-/// Ends each of Mergepatrol's replies in a thread, so a reply is not taken for the author's.
+/// Ends each of MergeLoop's replies in a thread, so a reply is not taken for the author's.
 const REPLY_MARK: &str = "<!-- mergepatrol-reply -->";
 
 /// A title as threads match it.
@@ -459,13 +459,13 @@ fn norm(title: &str) -> String {
     title.trim().to_lowercase().replace("--", "-")
 }
 
-/// The title of the finding a thread of Mergepatrol's is about.
+/// The title of the finding a thread of MergeLoop's is about.
 fn title_of(t: &ReviewThread) -> Option<String> {
     let rest = &t.body[t.body.find(MARK)? + MARK.len()..];
     Some(rest[..rest.find(" -->")?].to_owned())
 }
 
-/// Mergepatrol's threads on the PR. None when GitHub could not say.
+/// MergeLoop's threads on the PR. None when GitHub could not say.
 async fn threads(gh: &Installation, r: &ReviewRecord) -> Vec<ReviewThread> {
     gh.threads_marked(&r.repo, r.number, MARK)
         .await
@@ -552,7 +552,7 @@ async fn post(
 fn still(f: &Judged) -> String {
     match f.asked {
         true => {
-            "A human decides this one: Mergepatrol asked them. Resolve this thread once they have."
+            "A human decides this one: MergeLoop asked them. Resolve this thread once they have."
                 .to_owned()
         }
         false => match f.finding.suggestion.as_str() {
@@ -591,7 +591,7 @@ fn thread_body(f: &Judged) -> String {
 /// a thread on its line, and what it cleared.
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
     let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
-    let mut body = String::from("**Mergepatrol's review**");
+    let mut body = String::from("**MergeLoop's review**");
     if let Some(why) = &done.error {
         body.push_str(&format!(
             "\n\nThe agent could not review this PR: {why}\n\nA human reviews it instead: [approve it, or ask for changes]({url}), or approve it here on GitHub."
@@ -629,7 +629,7 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
                 .join(", "),
         };
         body.push_str(&format!(
-            "\n\nIt asks a human about {asks}, each in a thread on its line. {who}: [answer them in Mergepatrol]({url}), or approve the PR here on GitHub if they are all fine as they are. The PR keeps its place in the queue meanwhile."
+            "\n\nIt asks a human about {asks}, each in a thread on its line. {who}: [answer them in MergeLoop]({url}), or approve the PR here on GitHub if they are all fine as they are. The PR keeps its place in the queue meanwhile."
         ));
     }
     if !cleared.is_empty() {

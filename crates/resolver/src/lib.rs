@@ -85,7 +85,7 @@ pub struct Resolution {
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Resolved,
-    /// The agent was not sure, or the failure is not the PR's to fix, and said why. Mergepatrol
+    /// The agent was not sure, or the failure is not the PR's to fix, and said why. MergeLoop
     /// ejects the PR rather than guess.
     GaveUp(String),
     /// The run broke: it went over its turns or its time, or the CLI failed.
@@ -202,7 +202,7 @@ Find out why they fail, and change the code so that they pass. Use `git log`, `g
 Rules:
 - Make the smallest change that fixes the failure, in the spirit of the pull request.
 - Do not delete, skip or weaken tests or checks to make them pass.
-- Do not edit `.github/` or `.mergepatrol/`: Mergepatrol rejects the fix if you do.
+- Do not edit `.github/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
 - Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
 - Do not refactor or improve unrelated code.
 

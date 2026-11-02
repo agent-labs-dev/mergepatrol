@@ -49,7 +49,7 @@ conflicts frequent enough that somebody is spending their morning rebasing.
 
 ## What to use instead, on private repos
 
-Mergepatrol is a merge queue that works on any repository you can install a GitHub App on:
+MergeLoop is a merge queue that works on any repository you can install a GitHub App on:
 private, personal-account, Free, Pro, Team, or Enterprise Cloud. It is Apache-2.0, and you can
 self-host it.
 
@@ -100,7 +100,7 @@ is the config file, an agent skill file and its queue labels, all of which you c
 No. It is gated to GitHub Enterprise Cloud on private repositories, and to public repositories
 owned by an organization. Enterprise Server has it on any organization-owned repository.
 
-**Can I use Mergepatrol and GitHub's native queue on the same branch?**
+**Can I use MergeLoop and GitHub's native queue on the same branch?**
 Technically you could install both, but do not: two queues on one branch will race each other for
 merges. Pick one per branch.
 

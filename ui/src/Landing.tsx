@@ -14,7 +14,7 @@ const steps: [string, ReactNode][] = [
     </>,
   ],
   [
-    "Mergepatrol tests it",
+    "MergeLoop tests it",
     "It rebases the PR onto its base branch, or batches it with the PRs ahead of it, and waits for the required checks.",
   ],
   [
@@ -118,13 +118,13 @@ function Pricing({ pricing }: { pricing: PricingView }) {
         />
       </div>
       <p className="mt-6 text-sm text-muted">
-        Or self-host it: Mergepatrol is Apache-2.0, with no limits.
+        Or self-host it: MergeLoop is Apache-2.0, with no limits.
       </p>
     </section>
   );
 }
 
-/** What a signed-out visitor sees: what Mergepatrol does, and the way in. */
+/** What a signed-out visitor sees: what MergeLoop does, and the way in. */
 export function Landing({
   theme,
   setTheme,
@@ -133,7 +133,7 @@ export function Landing({
   return (
     <div className="min-h-screen">
       <header className="mx-auto flex h-14 max-w-5xl items-center gap-2 px-6 font-semibold">
-        <Mark /> Mergepatrol
+        <Mark /> MergeLoop
         <div className="ml-auto flex items-center gap-2 font-normal sm:gap-3">
           <ThemeToggle theme={theme} onChange={setTheme} />
           {pricing && (
@@ -155,8 +155,8 @@ export function Landing({
             A merge queue for GitHub, with an agent on conflicts
           </h1>
           <p className="mx-auto mt-5 max-w-xl text-base leading-relaxed text-fg-2 text-balance">
-            Label a pull request. Mergepatrol rebases it, tests it with the PRs around it, and
-            merges it. When a rebase conflicts, an LLM resolves it.
+            Label a pull request. MergeLoop rebases it, tests it with the PRs around it, and merges
+            it. When a rebase conflicts, an LLM resolves it.
           </p>
           <SignInButton className="mt-8 h-10 px-5" />
         </section>

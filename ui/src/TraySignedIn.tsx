@@ -7,7 +7,7 @@ export function TraySignedIn({ error, theme, setTheme }: { error: string | null 
   return (
     <div className="flex min-h-screen flex-col">
       <header className="mx-auto flex h-14 w-full max-w-5xl items-center gap-2 px-6 font-semibold">
-        <Mark /> Mergepatrol
+        <Mark /> MergeLoop
         <div className="ml-auto font-normal">
           <ThemeToggle theme={theme} onChange={setTheme} />
         </div>
@@ -22,7 +22,7 @@ export function TraySignedIn({ error, theme, setTheme }: { error: string | null 
               </h1>
               <p className="mt-3 leading-relaxed text-fg-2 text-balance">{error}</p>
               <p className="mt-3 leading-relaxed text-fg-2">
-                Try again from Mergepatrol in the menu bar.
+                Try again from MergeLoop in the menu bar.
               </p>
             </>
           ) : (

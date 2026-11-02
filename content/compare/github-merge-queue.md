@@ -1,17 +1,17 @@
 ---
-title: Mergepatrol vs GitHub's merge queue
-description: GitHub's merge queue needs Enterprise Cloud on private repos and a merge_group trigger in CI. Where Mergepatrol differs: any plan, agent-resolved conflicts, bisected batches.
+title: MergeLoop vs GitHub's merge queue
+description: GitHub's merge queue needs Enterprise Cloud on private repos and a merge_group trigger in CI. Where MergeLoop differs: any plan, agent-resolved conflicts, bisected batches.
 date: 2026-10-31
 ---
 
 GitHub's built-in [merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
-and Mergepatrol do the same core job: test each pull request against the code it will land on,
+and MergeLoop do the same core job: test each pull request against the code it will land on,
 then merge it. They differ in who can use them, what your CI has to change, and what happens when
 a pull request does not go through cleanly. Checked against GitHub's docs on 31 October 2026.
 
 ## At a glance
 
-| | GitHub merge queue | Mergepatrol |
+| | GitHub merge queue | MergeLoop |
 | --- | --- | --- |
 | Private repositories | Only for organizations on GitHub Enterprise Cloud | Any GitHub plan, $15 per seat a month after a 14-day trial |
 | Public repositories | Organization-owned repositories | Any public repository, free within a fair-use limit |
@@ -32,7 +32,7 @@ a pull request does not go through cleanly. Checked against GitHub's docs on 31 
   builds at once and set minimum and maximum group sizes.
 - **Your CI already runs on `merge_group`.** Then the wiring cost is paid.
 
-## Where Mergepatrol is the better fit
+## Where MergeLoop is the better fit
 
 - **Private repositories on GitHub Free, Pro or Team.** GitHub's queue is not available there; see
   [A merge queue for private repos](/blog/merge-queue-for-private-repos).
@@ -50,12 +50,12 @@ a pull request does not go through cleanly. Checked against GitHub's docs on 31 
 
 ## Switching
 
-Mergepatrol and GitHub's queue should not both run on one branch: they would race for merges.
+MergeLoop and GitHub's queue should not both run on one branch: they would race for merges.
 
-1. [Install Mergepatrol](/docs/getting-started) and merge the setup PR that adds
+1. [Install MergeLoop](/docs/getting-started) and merge the setup PR that adds
    `.mergepatrol/mergepatrol.yml` ([reference](/docs/configuration)).
 2. Turn off "Require merge queue" on the branch's ruleset or branch protection.
-3. Keep your required checks. Mergepatrol waits for the same ones.
+3. Keep your required checks. MergeLoop waits for the same ones.
 4. Label pull requests `mergepatrol` instead of pressing "Merge when ready".
 
 You can leave the `merge_group` trigger in your workflows; nothing calls it.
@@ -68,9 +68,9 @@ repositories owned by organizations on GitHub Enterprise Cloud. Team is not on t
 
 **Does GitHub's merge queue bisect a failed group?**
 Its documentation describes removing the failing pull request and rebuilding the group for the
-rest. Mergepatrol splits a failed batch in half until it finds the one that broke it: see [How a
+rest. MergeLoop splits a failed batch in half until it finds the one that broke it: see [How a
 merge queue batches pull requests](/blog/how-a-merge-queue-batches-pull-requests).
 
-**Does Mergepatrol need a model key?**
+**Does MergeLoop need a model key?**
 Only for the agent features. Without one, a conflict or a failed check ejects the PR, as GitHub's
 queue does.

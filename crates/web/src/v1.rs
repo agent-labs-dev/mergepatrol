@@ -1,5 +1,5 @@
-//! The versioned API under `/api/v1`, for other apps: what Mergepatrol knows of a PR, read with
-//! the caller's GitHub token or a Mergepatrol session, as MCP reads it. Each response carries an
+//! The versioned API under `/api/v1`, for other apps: what MergeLoop knows of a PR, read with
+//! the caller's GitHub token or a MergeLoop session, as MCP reads it. Each response carries an
 //! `ETag`, and the caller's rate limit.
 
 use std::collections::HashMap;
@@ -24,7 +24,7 @@ const MAX_BATCH: usize = 100;
 const LIMIT: u32 = 5000;
 const WINDOW_SECS: u64 = 3600;
 
-/// What Mergepatrol knows of a PR. `queue`, `merged` and `ejected` are all null for a PR that
+/// What MergeLoop knows of a PR. `queue`, `merged` and `ejected` are all null for a PR that
 /// was never in a queue.
 #[derive(Clone, Serialize, TS)]
 #[ts(export)]
@@ -35,7 +35,7 @@ pub struct PullStateView {
     /// The PR in the dashboard: a permalink that opens wherever the PR is, queued or not, merged
     /// or ejected.
     pub url: String,
-    /// Whether the repo uses Mergepatrol.
+    /// Whether the repo uses MergeLoop.
     pub mergepatrol: RepoStatusView,
     /// Its place in the queue. Null when it is not queued.
     pub queue: Option<QueueView>,
@@ -50,7 +50,7 @@ pub struct PullStateView {
 #[ts(export)]
 pub struct RepoStatusView {
     pub state: RepoStateView,
-    /// The Mergepatrol GitHub App is installed on the repo.
+    /// The MergeLoop GitHub App is installed on the repo.
     pub installed: bool,
     /// The default branch has `.mergepatrol/mergepatrol.yml`, as of the last look.
     pub has_config: bool,
@@ -135,9 +135,9 @@ pub enum HoldReasonView {
     ForkEditsOff,
     /// It targets a branch without a queue.
     NoQueue,
-    /// A private repo without a Mergepatrol subscription.
+    /// A private repo without a MergeLoop subscription.
     NoSubscription,
-    /// The account's public repos are over Mergepatrol's fair-use limit for the hour.
+    /// The account's public repos are over MergeLoop's fair-use limit for the hour.
     FairUseLimit,
     /// The agent is reviewing it, the queue's first gate.
     Reviewing,
@@ -227,7 +227,7 @@ impl RepoStatusView {
     }
 }
 
-/// What Mergepatrol knows of each of `numbers`, PRs of `repo`, which the App's `installation`
+/// What MergeLoop knows of each of `numbers`, PRs of `repo`, which the App's `installation`
 /// is on, if one is.
 pub(crate) async fn statuses(
     app: &AppState,

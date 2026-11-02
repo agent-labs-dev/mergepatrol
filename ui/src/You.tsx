@@ -73,7 +73,7 @@ export function You() {
   const { folder = "needs", pr, answer } = useSearch({ from: "/$account/you" });
   const navigate = useNavigate({ from: "/$account/you" });
   const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login ?? "";
-  // Read from Mergepatrol's own database, not GitHub: cheap to read often.
+  // Read from MergeLoop's own database, not GitHub: cheap to read often.
   const you = useQuery({ queryKey: ["you"], queryFn: fetchYou, refetchInterval: 5000 });
   const client = useQueryClient();
   const [clicks, setClicks] = useState(new Map<string, Click>());
@@ -902,13 +902,13 @@ type Step = { label: string; detail?: string; ready?: boolean } & (
 );
 
 /** Your turn's sections, in order: what holds up the queue, what you can queue, what needs work,
- * then what Mergepatrol can't queue. */
+ * then what MergeLoop can't queue. */
 const turnSections: Record<Turn, string> = {
   held: "Held in the queue: needs your decision",
   ready: "Ready to queue",
   changes: "Changes requested",
   failing: "Checks failing",
-  off: "Not queued: Mergepatrol is off in the repo",
+  off: "Not queued: MergeLoop is off in the repo",
 };
 const turnOrder = Object.keys(turnSections) as Turn[];
 const turnRank = (s: Step) => (s.folder === "turn" ? turnOrder.indexOf(s.turn) : turnOrder.length);
@@ -970,7 +970,7 @@ function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
         folder: "turn",
         turn: "off",
         label: "Ready to merge",
-        detail: "Mergepatrol is not on in this repo",
+        detail: "MergeLoop is not on in this repo",
       };
 }
 
@@ -1335,7 +1335,7 @@ function OwnerBar({
           search={{ repo: p.repo }}
           className={solid}
         >
-          Turn on Mergepatrol
+          Turn on MergeLoop
         </Link>
       ) : (
         !p.draft && (

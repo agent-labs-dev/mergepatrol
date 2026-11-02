@@ -57,7 +57,7 @@ requests](/blog/how-a-merge-queue-batches-pull-requests).
   extra run per batch, not per pull request.
 - **Ejections.** A pull request that conflicts with the code ahead of it, or fails on the combined
   tree, leaves the queue and goes back to its author. On a fast-moving `main` this is the cost
-  people feel most. Mergepatrol's answer is to run a coding agent on the conflict or the failed
+  people feel most. MergeLoop's answer is to run a coding agent on the conflict or the failed
   check, so the pull request keeps its place: see [Resolve rebase conflicts
   automatically](/blog/resolve-rebase-conflicts-automatically).
 
@@ -76,12 +76,12 @@ If none of these sound familiar, you probably do not need a queue yet. A team of
 
 - **GitHub's built-in merge queue.** Available on public repositories owned by an organization,
   and on private repositories only with GitHub Enterprise Cloud. CI needs a `merge_group` trigger.
-  See [Mergepatrol vs GitHub's merge queue](/compare/github-merge-queue).
-- **A hosted merge queue as a GitHub App**, which works on any plan. Mergepatrol is one; the
+  See [MergeLoop vs GitHub's merge queue](/compare/github-merge-queue).
+- **A hosted merge queue as a GitHub App**, which works on any plan. MergeLoop is one; the
   [Compare](/compare) pages put it next to the others, and [Get started](/docs/getting-started)
   walks through the setup.
 - **A self-hosted bot.** bors-ng was the classic one and is now archived: see [bors-ng
-  alternative](/blog/bors-ng-alternative). Mergepatrol is Apache-2.0 and self-hostable too.
+  alternative](/blog/bors-ng-alternative). MergeLoop is Apache-2.0 and self-hostable too.
 
 ## FAQ
 
@@ -90,13 +90,13 @@ No. GitHub's auto-merge merges a pull request once its own checks pass, against 
 was when they ran. A merge queue tests it against the `main` it will land on.
 
 **Does a merge queue replace code review?**
-No. It waits for the reviews your branch already requires. Mergepatrol can also run an agent
+No. It waits for the reviews your branch already requires. MergeLoop can also run an agent
 review on each queued pull request, which asks a human only about what it is unsure of.
 
 **Does it work with any CI?**
 A queue waits on the checks your branch protection requires, so any CI that reports checks to
-GitHub works. Mergepatrol runs them through your existing `pull_request` workflows.
+GitHub works. MergeLoop runs them through your existing `pull_request` workflows.
 
 **What does a queue do with a PR whose checks fail?**
-Most eject it. Mergepatrol can commit a fix first: see [Fix failing CI in the merge
+Most eject it. MergeLoop can commit a fix first: see [Fix failing CI in the merge
 queue](/blog/fix-failing-ci-in-the-merge-queue).

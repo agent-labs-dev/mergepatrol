@@ -235,7 +235,7 @@ fn signed_in(session: Session, token_hash: String) -> Option<SignedIn> {
 }
 
 /// Who calls the API: a signed-in user, or anyone with a GitHub token, as a CI job or a coding
-/// agent calls. Mergepatrol cannot tell which installations a GitHub token reaches: it reaches
+/// agent calls. MergeLoop cannot tell which installations a GitHub token reaches: it reaches
 /// only the repos GitHub lets it read, and calls across a workspace need a sign-in.
 pub(crate) enum Caller {
     User(SignedIn),
@@ -249,7 +249,7 @@ impl Caller {
             Self::User(user) => Ok(user),
             Self::Token(_) => Err(ApiError::Status(
                 StatusCode::FORBIDDEN,
-                "Sign in to Mergepatrol for this: a GitHub token reaches only single repos.".into(),
+                "Sign in to MergeLoop for this: a GitHub token reaches only single repos.".into(),
             )),
         }
     }
@@ -274,7 +274,7 @@ impl Caller {
         }
     }
 
-    /// The workspace of a repo the caller can read. It reads it first: that Mergepatrol is
+    /// The workspace of a repo the caller can read. It reads it first: that MergeLoop is
     /// installed on a repo is the business of those who can read it.
     pub(crate) async fn workspace_of(
         &self,
@@ -284,7 +284,7 @@ impl Caller {
         self.installation_on(state, repo).await?.ok_or_else(|| {
             ApiError::Status(
                 StatusCode::NOT_FOUND,
-                format!("Mergepatrol is not installed on {repo}."),
+                format!("MergeLoop is not installed on {repo}."),
             )
         })
     }
@@ -627,7 +627,7 @@ pub(crate) async fn manifest_callback(
             anyhow::bail!("this setup link expired, or started in another browser: start again");
         }
         if state.hosted_app.is_some() {
-            anyhow::bail!("this Mergepatrol uses the hosted GitHub App");
+            anyhow::bail!("this MergeLoop uses the hosted GitHub App");
         }
         if state.app_credentials().await?.is_some() {
             anyhow::bail!("the GitHub App already exists");

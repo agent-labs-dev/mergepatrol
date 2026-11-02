@@ -231,7 +231,7 @@ pub struct InboxPullView {
     pub merged_at: Option<String>,
     /// The workspace the PR is in, to act on it in.
     pub workspace: u32,
-    /// Whether Mergepatrol runs on the repo, so the PR can be queued.
+    /// Whether MergeLoop runs on the repo, so the PR can be queued.
     pub queues: bool,
     /// Where the queue has it. `None` when it is not queued.
     pub queue: Option<QueueSpotView>,
@@ -681,7 +681,7 @@ pub struct RepoConfigView {
     pub has_file: bool,
     /// Why the file on the default branch does not parse.
     pub error: Option<String>,
-    /// Mergepatrol's open PR that changes the file.
+    /// MergeLoop's open PR that changes the file.
     pub pull_request: Option<PullRequestRef>,
 }
 
@@ -1104,7 +1104,7 @@ impl From<ExitRecord> for ExitView {
     }
 }
 
-/// The repos this workspace's installation can access, and whether Mergepatrol runs on each.
+/// The repos this workspace's installation can access, and whether MergeLoop runs on each.
 pub(crate) async fn repos(
     State(app): State<AppState>,
     caller: Caller,
@@ -2001,7 +2001,7 @@ pub(crate) fn repo_name(owner: String, name: String) -> Result<RepoName, ApiErro
     RepoName::parse(&format!("{owner}/{name}")).ok_or_else(|| ApiError::bad_request("not a repo"))
 }
 
-/// Mergepatrol's branch for the PR that changes a repo's config file.
+/// MergeLoop's branch for the PR that changes a repo's config file.
 const CONFIG_BRANCH: &str = "mergepatrol/config";
 
 /// The skill that tells a repo's agents how its queue works. The setup PR adds it.
@@ -2090,10 +2090,10 @@ pub(crate) async fn propose_repo_config(
     Ok(Json(pr.into()))
 }
 
-/// Mergepatrol's branch for the PR that updates a repo's skill.
+/// MergeLoop's branch for the PR that updates a repo's skill.
 const SKILL_BRANCH: &str = "mergepatrol/skill";
 
-/// Where a repo's copy of the skill is against the one Mergepatrol ships.
+/// Where a repo's copy of the skill is against the one MergeLoop ships.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -2114,7 +2114,7 @@ pub struct SkillView {
     /// The copies an update writes.
     pub paths: Vec<String>,
     pub default_branch: String,
-    /// Mergepatrol's open PR that updates it.
+    /// MergeLoop's open PR that updates it.
     pub pull_request: Option<PullRequestRef>,
     /// The open PR already writes the current skill to every copy an update writes: updating
     /// it changes nothing.
@@ -2211,7 +2211,7 @@ async fn repo_skill(
     Ok((view, found.head))
 }
 
-/// Whether the repo's copy of the `mergepatrol` skill is the one Mergepatrol ships now.
+/// Whether the repo's copy of the `mergepatrol` skill is the one MergeLoop ships now.
 pub(crate) async fn repo_skill_view(
     State(app): State<AppState>,
     caller: Caller,
@@ -2243,7 +2243,7 @@ pub(crate) async fn update_repo_skill(
     let files: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), SKILL)).collect();
     let list: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
     let body = format!(
-        "This PR writes the current `mergepatrol` agent skill to {}, so coding agents in this repo follow how Mergepatrol works now: they queue their PRs, then work every review comment to resolved. Once it merges into `{}`, agents read the new skill.
+        "This PR writes the current MergeLoop agent skill to {}, so coding agents in this repo follow how MergeLoop works now: they queue their PRs, then work every review comment to resolved. Once it merges into `{}`, agents read the new skill.
 
 It replaces the copy that is there, so a change made to the skill in this repo is lost: carry it over in this PR if you want to keep it.",
         list.join(" and "),
@@ -2256,7 +2256,7 @@ It replaces the copy that is there, so a change made to the skill in this repo i
                 base: &base,
                 files: &files,
                 branch: SKILL_BRANCH,
-                title: "Update the Mergepatrol skill",
+                title: "Update the MergeLoop skill",
                 body: &body,
             },
         )
@@ -2317,22 +2317,22 @@ fn config_pr(
     } else {
         let paths: Vec<String> = skills.iter().map(|p| format!("`{p}`")).collect();
         format!(
-            "\n\nIt also adds the `mergepatrol` agent skill, at {}, so coding agents in this repo queue their PRs instead of merging them.",
+            "\n\nIt also adds the MergeLoop agent skill, at {}, so coding agents in this repo queue their PRs instead of merging them.",
             paths.join(" and ")
         )
     };
     if update {
         (
-            "Update the Mergepatrol settings",
+            "Update the MergeLoop settings",
             format!(
-                "This PR changes `{REPO_CONFIG_PATH}`, as edited in the Mergepatrol dashboard. The queue uses the new settings once this PR merges into `{branch}`.\n\n{list}"
+                "This PR changes `{REPO_CONFIG_PATH}`, as edited in the MergeLoop dashboard. The queue uses the new settings once this PR merges into `{branch}`.\n\n{list}"
             ),
         )
     } else {
         (
-            "Set up Mergepatrol",
+            "Set up MergeLoop",
             format!(
-                "This PR adds `{REPO_CONFIG_PATH}` with the settings below. Once it merges into `{branch}`, Mergepatrol runs a merge queue on this repo: add the `{}` label to a PR to queue it.\n\n{list}{skills}\n\nTo change the settings later, edit the file, or use the Mergepatrol dashboard, which opens a PR like this one.",
+                "This PR adds `{REPO_CONFIG_PATH}` with the settings below. Once it merges into `{branch}`, MergeLoop runs a merge queue on this repo: add the `{}` label to a PR to queue it.\n\n{list}{skills}\n\nTo change the settings later, edit the file, or use the MergeLoop dashboard, which opens a PR like this one.",
                 settings.label
             ),
         )
@@ -2619,7 +2619,7 @@ mod tests {
         assert_eq!((v.open, v.total, v.read), (0, 1, 1));
     }
 
-    /// This repo queues through Mergepatrol too: its agents read the skill every repo gets.
+    /// This repo queues through MergeLoop too: its agents read the skill every repo gets.
     #[test]
     fn this_repo_has_the_skill_every_repo_gets() {
         assert_eq!(

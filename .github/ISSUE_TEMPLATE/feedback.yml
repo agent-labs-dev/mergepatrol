@@ -1,5 +1,5 @@
 name: Feedback, bug, or feature request
-description: Tell us what broke, what you need, or what you think of Mergepatrol.
+description: Tell us what broke, what you need, or what you think of MergeLoop.
 body:
   - type: dropdown
     id: kind
@@ -22,7 +22,7 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
-      description: For a bug. Link the pull request, and the Mergepatrol comment on it, if there is one.
+      description: For a bug. Link the pull request, and the MergeLoop comment on it, if there is one.
       placeholder: |
         1. Label a PR with `mergepatrol`
         2. ...
@@ -30,4 +30,4 @@ body:
     id: deployment
     attributes:
       label: Deployment
-      description: Hosted Mergepatrol, or self-hosted? If self-hosted, which version or commit?
+      description: Hosted MergeLoop, or self-hosted? If self-hosted, which version or commit?

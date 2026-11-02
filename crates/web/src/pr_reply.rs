@@ -121,7 +121,7 @@ pub(crate) async fn heard(
         app.store.release_nudge(review.id).await?;
         return Err(e);
     }
-    tracing::info!(installation, %repo, number = reply.number, by = %reply.login, "told the PR to answer the agent's review in Mergepatrol");
+    tracing::info!(installation, %repo, number = reply.number, by = %reply.login, "told the PR to answer the agent's review in MergeLoop");
     Ok(())
 }
 
@@ -173,19 +173,19 @@ fn nudge(review: &ReviewRecord, login: &str, missed: &Missed, url: &str) -> Stri
     };
     let how = match missed {
         Missed::Said => format!(
-            "Comments on GitHub don't reach it. [Answer in Mergepatrol]({url}), or, if everything it asks about is fine as it is, approve the PR here on GitHub."
+            "Comments on GitHub don't reach it. [Answer in MergeLoop]({url}), or, if everything it asks about is fine as it is, approve the PR here on GitHub."
         ),
         Missed::OtherCommit { commit } => format!(
-            "Your approval is of `{}`, but the agent reviewed `{}`, so it doesn't answer the review. [Answer in Mergepatrol]({url}), or approve the PR's newest commit here on GitHub.",
+            "Your approval is of `{}`, but the agent reviewed `{}`, so it doesn't answer the review. [Answer in MergeLoop]({url}), or approve the PR's newest commit here on GitHub.",
             short(commit),
             short(&review.head_sha),
         ),
         Missed::NoWrite => format!(
-            "Your approval doesn't answer it: only someone who can push to the repo may. [Answer in Mergepatrol]({url}) if you can push, or ask someone who can to approve."
+            "Your approval doesn't answer it: only someone who can push to the repo may. [Answer in MergeLoop]({url}) if you can push, or ask someone who can to approve."
         ),
     };
     format!(
-        "@{login}, Mergepatrol's review still holds this PR: {what}. {how} The PR keeps its place in the queue meanwhile."
+        "@{login}, MergeLoop's review still holds this PR: {what}. {how} The PR keeps its place in the queue meanwhile."
     )
 }
 

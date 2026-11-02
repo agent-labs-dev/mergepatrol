@@ -1,6 +1,6 @@
 ---
 title: Fix failing CI in the merge queue, without sending the PR back
-description: A required check that fails in the queue usually ejects the PR. How Mergepatrol's agent commits a fix on the PR instead, what it may touch, and when it gives up.
+description: A required check that fails in the queue usually ejects the PR. How MergeLoop's agent commits a fix on the PR instead, what it may touch, and when it gives up.
 date: 2026-10-31
 ---
 
@@ -15,7 +15,7 @@ queue, on the PR, while it keeps its place.
 
 ## What the fix agent does
 
-When a queued PR's required checks fail, Mergepatrol runs a coding agent on it (Claude Code for
+When a queued PR's required checks fail, MergeLoop runs a coding agent on it (Claude Code for
 Anthropic's models, Codex for OpenAI's, on the workspace's own key):
 
 1. **It reads the failure.** The agent gets each failed check's output and annotations, and for a
@@ -74,5 +74,5 @@ every failure, set `fix_ci.enabled: false`: the queue then ejects on failure, as
 - [Resolve rebase conflicts automatically](/blog/resolve-rebase-conflicts-automatically), the
   same agent on the other common reason a PR is ejected.
 - [What is a merge queue](/blog/what-is-a-merge-queue).
-- [How Mergepatrol compares](/compare) with GitHub's merge queue, Mergify, Graphite, Aviator and
+- [How MergeLoop compares](/compare) with GitHub's merge queue, Mergify, Graphite, Aviator and
   Trunk, none of which fix a failed check in the queue as of October 2026.

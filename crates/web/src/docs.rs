@@ -23,7 +23,7 @@ pub struct Doc {
 pub const DOCS: &[Doc] = &[
     Doc {
         slug: "getting-started",
-        title: "Get started with Mergepatrol",
+        title: "Get started with MergeLoop",
         description: "Sign in with GitHub, install the App, merge the setup PR, add a model key, and label a pull request to queue it.",
         sections: &["Try it"],
     },
@@ -42,13 +42,13 @@ pub const DOCS: &[Doc] = &[
     Doc {
         slug: "pricing",
         title: "Pricing",
-        description: "Mergepatrol is free on public repos. Private repos cost $15 a seat a month after a 14-day trial with no card. Self-hosting is free.",
+        description: "MergeLoop is free on public repos. Private repos cost $15 a seat a month after a 14-day trial with no card. Self-hosting is free.",
         sections: &["Pricing"],
     },
     Doc {
         slug: "mcp-and-api",
         title: "MCP server and API",
-        description: "Let Claude Code, Codex or Cursor queue and review PRs through Mergepatrol's MCP server, or read a PR's queue state from the JSON API.",
+        description: "Let Claude Code, Codex or Cursor queue and review PRs through MergeLoop's MCP server, or read a PR's queue state from the JSON API.",
         sections: &[
             "From an agent, or the API",
             "Read a PR's state from another app",
@@ -56,8 +56,8 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         slug: "self-hosting",
-        title: "Self-host Mergepatrol",
-        description: "Run the open-source Mergepatrol yourself with Docker Compose, configure it, bring your own GitHub App, and isolate its jobs in gVisor sandboxes.",
+        title: "Self-host MergeLoop",
+        description: "Run the open-source MergeLoop yourself with Docker Compose, configure it, bring your own GitHub App, and isolate its jobs in gVisor sandboxes.",
         sections: &[
             "Run it",
             "Run it with an App you made yourself",
@@ -188,7 +188,7 @@ fn doc_page(doc: &Doc, public_url: &str, analytics: Analytics) -> String {
         "description": doc.description,
         "url": url,
         "mainEntityOfPage": url,
-        "publisher": { "@type": "Organization", "name": "Mergepatrol", "url": format!("{public_url}/") },
+        "publisher": { "@type": "Organization", "name": "MergeLoop", "url": format!("{public_url}/") },
     });
     let head = format!(
         "<meta property=\"og:type\" content=\"article\" />\n<script type=\"application/ld+json\">{}</script>",
@@ -228,12 +228,12 @@ fn docs_nav(current: Option<&str>) -> String {
 
 fn index_page(public_url: &str, analytics: Analytics) -> String {
     let main = format!(
-        "<h1>Docs</h1><p>How to set up, configure and run Mergepatrol, a merge queue for GitHub. The same text as the <a href=\"{REPO}#readme\">README</a>.</p>{}",
+        "<h1>Docs</h1><p>How to set up, configure and run MergeLoop, a merge queue for GitHub. The same text as the <a href=\"{REPO}#readme\">README</a>.</p>{}",
         docs_nav(None)
     );
     page(
         "Docs",
-        "How to set up, configure, self-host and automate Mergepatrol, a merge queue for GitHub.",
+        "How to set up, configure, self-host and automate MergeLoop, a merge queue for GitHub.",
         &format!("{public_url}/docs"),
         "<meta property=\"og:type\" content=\"website\" />",
         &main,

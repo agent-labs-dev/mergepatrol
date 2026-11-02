@@ -287,7 +287,7 @@ fn picture(e: &Entry) -> String {
 
 fn index_page(all: &[Entry], public_url: &str, analytics: Analytics) -> String {
     let mut main = String::from(
-        "<h1>Changelog</h1><p class=\"lede\">New features, improvements and fixes in Mergepatrol.</p>",
+        "<h1>Changelog</h1><p class=\"lede\">New features, improvements and fixes in MergeLoop.</p>",
     );
     for day in all.chunk_by(|a, b| a.date == b.date) {
         let date = &day[0].date;
@@ -336,7 +336,7 @@ fn index_page(all: &[Entry], public_url: &str, analytics: Analytics) -> String {
     }
     page(
         "Changelog",
-        "New features, improvements and fixes in Mergepatrol, the merge queue for GitHub.",
+        "New features, improvements and fixes in MergeLoop, the merge queue for GitHub.",
         &format!("{public_url}/changelog"),
         &format!("<meta property=\"og:type\" content=\"website\" /><style>{STYLE}</style>"),
         &main,
@@ -483,16 +483,16 @@ mod tests {
 
     #[test]
     fn serves_index_and_entries_but_not_pictures() {
-        let index = serve("changelog", "https://mergepatrol.ai", None).unwrap();
+        let index = serve("changelog", "https://mergeloop.ai", None).unwrap();
         assert_eq!(index.status(), StatusCode::OK);
         let first = &entries()[0];
         let one = serve(
             &format!("changelog/{}", first.slug),
-            "https://mergepatrol.ai",
+            "https://mergeloop.ai",
             None,
         );
         assert_eq!(one.unwrap().status(), StatusCode::OK);
-        let missing = serve("changelog/nope", "https://mergepatrol.ai", None).unwrap();
+        let missing = serve("changelog/nope", "https://mergeloop.ai", None).unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert!(serve("changelog/you-tab/needs-you.png", "", None).is_none());
         assert!(serve("changelogs", "", None).is_none());
@@ -513,7 +513,7 @@ mod tests {
                 e("2026-10-30-bug", "fixed"),
                 e("2026-10-29-older", "improved"),
             ],
-            "https://mergepatrol.ai",
+            "https://mergeloop.ai",
             None,
         );
         let newer = html.find("October 30, 2026").unwrap();
