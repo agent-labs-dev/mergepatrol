@@ -1,6 +1,7 @@
 ---
 title: Update every repo from one button
 kind: new
+pr: 191
 image: /changelog/update-all-repos/after.png
 ---
 
