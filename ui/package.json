@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "biome check ."
+    "check": "biome check .",
+    "prototype:repos": "vite --open /prototype-repos.html"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
