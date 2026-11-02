@@ -1461,7 +1461,7 @@ function OwnerBar({
         </>
       ) : !p.queues ? (
         <Link
-          to="/$account/repos"
+          to="/$account/settings"
           params={{ account: p.repo.split("/")[0] }}
           search={{ repo: p.repo }}
           className={solid}

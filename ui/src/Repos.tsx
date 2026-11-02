@@ -1,135 +1,127 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   fetchRepoConfig,
   fetchRepoSkill,
-  fetchRepos,
   proposeRepoConfig,
   setRepo,
   updateRepoSkill,
 } from "./api";
 import type { AppView } from "./api/AppView";
+import type { RepoSettingsView } from "./api/RepoSettingsView";
 import type { RepoView } from "./api/RepoView";
-import { RepoSettings } from "./RepoSettings";
-import { field, Narrow, RepoIcon, secondary } from "./ui";
+import type { UpdatePullView } from "./api/UpdatePullView";
+import { type Drafts, overrides, RepoSettings } from "./RepoSettings";
+import { RepoReview } from "./ReviewSettings";
+import { field, RepoIcon, secondary } from "./ui";
 
 const small =
   "inline-flex h-7 items-center justify-center rounded-md px-2.5 text-xs font-medium whitespace-nowrap disabled:opacity-40";
 const smallPrimary = `${small} bg-fg text-surface hover:bg-fg-2`;
 const smallSecondary = `${small} border border-line-strong bg-surface text-fg-2 hover:bg-page`;
 
-/** The repos on the left, the one picked on the right: its queue, config file, skill and
- * settings. */
-export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
-  // "Turn on MergeLoop" and permalinks link here with a repo, which picks it.
-  const { repo: picked } = useSearch({ from: "/$account/repos" });
-  const navigate = useNavigate({ from: "/$account/repos" });
-  const [filter, setFilter] = useState("");
-  const repos = useQuery({
-    queryKey: ["repos", workspace],
-    queryFn: () => fetchRepos(workspace),
+/** The repo's settings, which the rail reads for its summary and the form to edit. */
+function useConfig(workspace: number, repo: string, enabled = true) {
+  return useQuery({
+    queryKey: ["repo-config", workspace, repo],
+    queryFn: () => fetchRepoConfig(workspace, repo),
+    staleTime: 5 * 60_000,
+    enabled,
   });
-  const detail = useRef<HTMLElement>(null);
+}
+
+/** The workspace, and below it the repos: their summaries say what each sets of its own. */
+export function RepoRail({
+  workspace,
+  app,
+  repos,
+  error,
+  current,
+  pick,
+  drafts,
+}: {
+  workspace: number;
+  app: AppView;
+  repos: RepoView[] | undefined;
+  error: Error | null;
+  /** None: the workspace is in view. */
+  current: string | undefined;
+  pick: (repo: string | undefined) => void;
+  drafts: Drafts;
+}) {
+  const [filter, setFilter] = useState("");
   const list = useRef<HTMLElement>(null);
-  const shown = repos.data?.filter((r) => r.repo.includes(filter.trim())) ?? [];
-  const current = repos.data?.find((r) => r.repo === picked) ?? shown[0] ?? repos.data?.[0];
-  const pick = (repo: string) => {
-    navigate({ search: { repo }, replace: true });
-    // One column on a phone: the detail is below the list, out of view.
-    if (matchMedia("(max-width: 767px)").matches) detail.current?.scrollIntoView();
-  };
+  const shown = repos?.filter((r) => r.repo.includes(filter.trim())) ?? [];
   // A link from elsewhere can pick a repo far down the list: show it, once the list loads.
-  const loaded = !!repos.data;
+  const loaded = !!repos;
   useEffect(() => {
     if (loaded && matchMedia("(min-width: 768px)").matches)
       list.current?.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
   }, [loaded]);
-
-  return (
-    <Narrow
-      wide
-      title="Repos"
-      sub={
-        <>
-          The repos the App can access. A repo queues once its default branch has{" "}
-          <code className="rounded bg-sunken px-1 text-xs">.mergepatrol/mergepatrol.yml</code>. To
-          add repos,{" "}
-          <a href={app.install_url} className="font-medium text-fg underline underline-offset-2">
-            change the installation on GitHub
-          </a>
-          .
-        </>
-      }
-    >
-      {repos.isPending && <p className="text-muted">Loading…</p>}
-      {repos.error && <p className="text-bad">{repos.error.message}</p>}
-      {repos.data?.length === 0 && (
-        <p className="text-muted">The App cannot access any repos yet.</p>
-      )}
-      {current && (
-        <div className="grid gap-6 md:grid-cols-[16rem_1fr]">
-          <aside
-            ref={list}
-            className="md:sticky md:top-4 md:max-h-[calc(100dvh-8rem)] md:self-start md:overflow-y-auto"
-          >
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter repos"
-              className={`${field} mb-3 w-full`}
-            />
-            <List
-              title="Queuing"
-              rows={shown.filter((r) => r.on)}
-              empty="No repo is on."
-              workspace={workspace}
-              current={current.repo}
-              pick={pick}
-            />
-            <List
-              title="Available"
-              rows={shown.filter((r) => !r.on)}
-              empty="Every repo is on."
-              workspace={workspace}
-              current={current.repo}
-              pick={pick}
-            />
-          </aside>
-          <section ref={detail} className="min-w-0 scroll-mt-4">
-            <Detail key={current.repo} workspace={workspace} repo={current} />
-          </section>
-        </div>
-      )}
-    </Narrow>
-  );
-}
-
-function List({
-  title,
-  rows,
-  empty,
-  workspace,
-  current,
-  pick,
-}: {
-  title: string;
-  rows: RepoView[];
-  empty: string;
-  workspace: number;
-  current: string;
-  pick: (repo: string) => void;
-}) {
-  return (
+  const rows = (title: string, rows: RepoView[], empty: string) => (
     <div className="mb-4">
       <h2 className="px-2 pb-1 text-xs font-medium text-muted">
         {title} · {rows.length}
       </h2>
       {rows.length === 0 && <p className="px-2 py-1 text-faint">{empty}</p>}
       {rows.map((r) => (
-        <Item key={r.repo} workspace={workspace} repo={r} active={r.repo === current} pick={pick} />
+        <Item
+          key={r.repo}
+          workspace={workspace}
+          repo={r}
+          active={r.repo === current}
+          draft={drafts[r.repo]?.to}
+          pick={pick}
+        />
       ))}
     </div>
+  );
+  return (
+    <aside
+      ref={list}
+      className="border-line px-3 py-4 md:h-full md:overflow-y-auto md:border-r md:pb-16"
+    >
+      <button
+        type="button"
+        onClick={() => pick(undefined)}
+        aria-current={current ? undefined : true}
+        className={`mb-4 w-full rounded-md px-2 py-2 text-left ${current ? "hover:bg-sunken/60" : "bg-sunken"}`}
+      >
+        <span className="block font-medium">Workspace</span>
+        <span className="block text-xs text-muted">Plan, models, and defaults for every repo</span>
+      </button>
+      <input
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder="Filter repos"
+        className={`${field} mb-3 w-full`}
+      />
+      {!repos && !error && <p className="px-2 text-muted">Loading…</p>}
+      {error && <p className="px-2 text-bad">{error.message}</p>}
+      {repos?.length === 0 && (
+        <p className="px-2 text-muted">The App cannot access any repos yet.</p>
+      )}
+      {!!repos?.length && (
+        <>
+          {rows(
+            "Queuing",
+            shown.filter((r) => r.on),
+            "No repo is on.",
+          )}
+          {rows(
+            "Available",
+            shown.filter((r) => !r.on),
+            "Every repo is on.",
+          )}
+        </>
+      )}
+      <a
+        href={app.install_url}
+        className="block px-2 pt-1 text-xs text-muted underline underline-offset-2 hover:text-fg"
+      >
+        Add repos on GitHub
+      </a>
+    </aside>
   );
 }
 
@@ -137,14 +129,18 @@ function Item({
   workspace,
   repo: r,
   active,
+  draft,
   pick,
 }: {
   workspace: number;
   repo: RepoView;
   active: boolean;
+  draft: RepoSettingsView | undefined;
   pick: (repo: string) => void;
 }) {
   const skill = useSkill(workspace, r);
+  const config = useConfig(workspace, r.repo, r.has_config);
+  const c = config.data;
   const s = skill.data;
   const needs =
     r.on && r.config_error
@@ -154,20 +150,37 @@ function Item({
         : s && s.state !== "current" && !s.pull_request_current
           ? { tone: "bg-warn", label: s.state === "missing" ? "No agent skill" : "Skill outdated" }
           : null;
+  const own = c ? overrides(draft ?? c.settings, c.defaults, c.providers) : [];
   return (
     <button
       type="button"
       onClick={() => pick(r.repo)}
       aria-current={active || undefined}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${active ? "bg-sunken text-fg" : "text-fg-2 hover:bg-sunken/60"}`}
+      className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left ${active ? "bg-sunken text-fg" : "text-fg-2 hover:bg-sunken/60"}`}
     >
-      <RepoIcon repo={r.repo} size="size-4" />
-      <span className="min-w-0 flex-1 truncate" title={r.repo}>
-        {r.repo.split("/")[1]}
+      <span className="pt-0.5">
+        <RepoIcon repo={r.repo} size="size-4" />
       </span>
-      {needs && (
-        <span className={`size-1.5 shrink-0 rounded-full ${needs.tone}`} title={needs.label} />
-      )}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 truncate" title={r.repo}>
+            {r.repo.split("/")[1]}
+          </span>
+          {draft && <span className="text-[11px] text-warn">edited</span>}
+          {needs && (
+            <span className={`size-1.5 shrink-0 rounded-full ${needs.tone}`} title={needs.label} />
+          )}
+        </span>
+        {(r.on || own.length > 0) && (
+          <span
+            className={`block truncate text-xs ${own.length ? "text-muted" : "text-faint"}`}
+            title={own.join(" · ")}
+          >
+            {own.join(" · ") ||
+              (c ? (c.follows ? "Follows the workspace" : "Matches the workspace") : "\u00a0")}
+          </span>
+        )}
+      </span>
     </button>
   );
 }
@@ -182,12 +195,73 @@ function useSkill(workspace: number, repo: RepoView) {
   });
 }
 
-function Detail({ workspace, repo: r }: { workspace: number; repo: RepoView }) {
+/** The repos that set something of their own, for the workspace's view of them. */
+export function DifferingRepos({
+  workspace,
+  repos,
+  pick,
+}: {
+  workspace: number;
+  repos: RepoView[];
+  pick: (repo: string) => void;
+}) {
+  return (
+    <div className="divide-y divide-line-soft rounded-lg border border-line bg-surface">
+      {repos.map((r) => (
+        <Differing key={r.repo} workspace={workspace} repo={r} pick={pick} />
+      ))}
+    </div>
+  );
+}
+
+function Differing({
+  workspace,
+  repo: r,
+  pick,
+}: {
+  workspace: number;
+  repo: RepoView;
+  pick: (repo: string) => void;
+}) {
+  const { data: c } = useConfig(workspace, r.repo, r.has_config);
+  const own = c ? overrides(c.settings, c.defaults, c.providers) : [];
+  if (own.length === 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={() => pick(r.repo)}
+      className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-page"
+    >
+      <RepoIcon repo={r.repo} size="size-5" />
+      <span className="w-40 shrink-0 truncate font-medium">{r.repo.split("/")[1]}</span>
+      <span className="min-w-0 flex-1 truncate text-xs text-fg-2">{own.join(" · ")}</span>
+    </button>
+  );
+}
+
+/** A repo: its queue, config file, skill and settings. An edit goes to `edit`, not the repo. */
+export function RepoDetail({
+  workspace,
+  repo: r,
+  draft,
+  edit,
+  opened,
+}: {
+  workspace: number;
+  repo: RepoView;
+  draft: RepoSettingsView | undefined;
+  edit: (from: RepoSettingsView, to: RepoSettingsView) => void;
+  /** The PR the page opened from a draft. */
+  opened: UpdatePullView | undefined;
+}) {
   const queryClient = useQueryClient();
+  const config = useConfig(workspace, r.repo);
   const override = useMutation({
     mutationFn: (enabled: boolean | null) => setRepo(workspace, r.repo, { enabled }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repos", workspace] }),
   });
+  const c = config.data;
+  const settings = c && (draft ?? c.settings);
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-surface">
       <div className="flex items-center gap-3 px-5 py-4">
@@ -241,7 +315,42 @@ function Detail({ workspace, repo: r }: { workspace: number; repo: RepoView }) {
       </Fact>
       <ConfigFact workspace={workspace} repo={r} />
       <SkillFact workspace={workspace} repo={r} />
-      <RepoSettings workspace={workspace} repo={r.repo} />
+      {opened && (
+        <Fact label="Settings PR">
+          <a
+            href={opened.pull_request.url}
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium underline underline-offset-2"
+          >
+            PR #{opened.pull_request.number}
+          </a>{" "}
+          {opened.queued ? (
+            <span className="text-ok">queued</span>
+          ) : (
+            <span className="text-warn">{opened.note ?? "not queued"}</span>
+          )}
+        </Fact>
+      )}
+      {config.isPending && <p className="border-t border-line-soft p-5 text-muted">Loading…</p>}
+      {config.error && (
+        <p className="border-t border-line-soft p-5 text-bad">{config.error.message}</p>
+      )}
+      {c && settings && (
+        <RepoSettings
+          config={c}
+          settings={settings}
+          onChange={(to) => edit(c.settings, to)}
+          review={
+            <RepoReview
+              workspace={workspace}
+              review={settings.review}
+              saved={c.settings.review}
+              onChange={(review) => edit(c.settings, { ...settings, review })}
+            />
+          }
+        />
+      )}
     </div>
   );
 }
@@ -297,14 +406,13 @@ function Switch({
 function ConfigFact({ workspace, repo: r }: { workspace: number; repo: RepoView }) {
   const queryClient = useQueryClient();
   // The settings form below reads the same query, so this costs no extra request.
-  const config = useQuery({
-    queryKey: ["repo-config", workspace, r.repo],
-    queryFn: () => fetchRepoConfig(workspace, r.repo),
-  });
+  const config = useConfig(workspace, r.repo);
   const setUp = useMutation({
     mutationFn: async () => {
       const c = await fetchRepoConfig(workspace, r.repo);
-      return c.pull_request ?? proposeRepoConfig(workspace, r.repo, c.defaults);
+      return (
+        c.pull_request ?? (await proposeRepoConfig(workspace, r.repo, c.defaults)).pull_request
+      );
     },
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["repo-config", workspace, r.repo] }),
@@ -412,6 +520,11 @@ function SkillFact({ workspace, repo: r }: { workspace: number; repo: RepoView }
         <span className="text-warn">
           {s.state === "missing" ? "Not in the repo" : "Older than MergeLoop's"}
         </span>
+      )}
+      {update.data && (
+        <p className="text-xs text-muted">
+          {update.data.queued ? "Queued." : (update.data.note ?? "Not queued.")}
+        </p>
       )}
     </Fact>
   );

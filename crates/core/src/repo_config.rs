@@ -1,5 +1,6 @@
 //! `.mergepatrol/mergepatrol.yml`: a repo's queue settings, committed on its default branch so a
-//! PR cannot change them for itself. A setting the file leaves out takes the instance default.
+//! PR cannot change them for itself. A setting the file leaves out follows the workspace, so an
+//! empty file is a repo that inherits everything.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +11,7 @@ pub const REPO_CONFIG_PATH: &str = ".mergepatrol/mergepatrol.yml";
 /// The agent's `--effort` values.
 pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// A repo's settings, complete: the file over the instance defaults.
+/// A repo's settings, complete: the file over the workspace's defaults.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoSettings {
     /// The trigger label. `<label>:priority` jumps the queue, and ejected PRs get `<label>:failed`.
@@ -158,11 +159,45 @@ impl Labels {
     }
 }
 
-/// The file as written: every setting optional.
+/// What a workspace sets for every repo that leaves it out of its config file. A repo's `verify`
+/// and `branches` name its own commands and branches, so they have no workspace value.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDefaults {
+    pub label: String,
+    pub batch_size: usize,
+    pub agent: AgentSettings,
+    pub fix_ci: FixCiSettings,
+}
+
+impl WorkspaceDefaults {
+    /// The settings a repo inherits: these over the instance's.
+    pub fn over(self, instance: &RepoSettings) -> RepoSettings {
+        RepoSettings {
+            label: self.label,
+            batch_size: self.batch_size,
+            agent: self.agent,
+            fix_ci: self.fix_ci,
+            ..instance.clone()
+        }
+    }
+}
+
+impl From<RepoSettings> for WorkspaceDefaults {
+    fn from(s: RepoSettings) -> Self {
+        Self {
+            label: s.label,
+            batch_size: s.batch_size,
+            agent: s.agent,
+            fix_ci: s.fix_ci,
+        }
+    }
+}
+
+/// The file as written: every setting optional, the empty file included.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoConfig {
-    version: u32,
+    version: Option<u32>,
     label: Option<String>,
     batch_size: Option<usize>,
     /// `resolver` is its name from before a task could override its model.
@@ -226,26 +261,113 @@ struct FixCiConfig {
     attempts: Option<u32>,
 }
 
-/// The file as MergeLoop writes it: every setting spelled out.
+/// How the header `to_yaml` writes ends, under every name MergeLoop has gone by.
+const HEADER_END: &str = "The dashboard opens a PR to change it.";
+
+/// The file as MergeLoop writes it: only what differs from the workspace, so the rest follows it.
 #[derive(Serialize)]
 struct Written<'a> {
     version: u32,
-    #[serde(flatten)]
-    settings: &'a RepoSettings,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_size: Option<usize>,
+    #[serde(skip_serializing_if = "WrittenAgent::is_empty")]
+    agent: WrittenAgent<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verify: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "WrittenFixCi::is_empty")]
+    fix_ci: WrittenFixCi,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branches: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "ReviewOverrides::is_empty")]
+    review: &'a ReviewOverrides,
+}
+
+#[derive(Serialize)]
+struct WrittenAgent<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "WrittenOverrides::is_empty")]
+    overrides: WrittenOverrides<'a>,
+}
+
+impl WrittenAgent<'_> {
+    fn is_empty(&self) -> bool {
+        self.provider.is_none()
+            && self.model.is_none()
+            && self.effort.is_none()
+            && self.overrides.is_empty()
+    }
+}
+
+#[derive(Serialize)]
+struct WrittenOverrides<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rebase: Option<WrittenTask<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix: Option<WrittenTask<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<WrittenTask<'a>>,
+}
+
+impl WrittenOverrides<'_> {
+    fn is_empty(&self) -> bool {
+        self.rebase.is_none() && self.fix.is_none() && self.review.is_none()
+    }
+}
+
+/// A task's model, or an empty mapping: the task runs the repo's default, not the workspace's
+/// override, whatever provider that is by then.
+#[derive(Serialize)]
+struct WrittenTask<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+}
+
+impl<'a> WrittenTask<'a> {
+    /// `None` when the task follows the workspace.
+    fn over(own: &'a Option<TaskModel>, inherited: &Option<TaskModel>) -> Option<Self> {
+        (own != inherited).then(|| Self {
+            provider: own.as_ref().map(|t| t.provider),
+            model: own.as_ref().map(|t| t.model.as_str()),
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct WrittenFixCi {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempts: Option<u32>,
+}
+
+impl WrittenFixCi {
+    fn is_empty(&self) -> bool {
+        self.enabled.is_none() && self.attempts.is_none()
+    }
 }
 
 impl RepoSettings {
-    /// The settings of a repo whose default branch has `file`, or the defaults without one.
+    /// The settings of a repo whose default branch has `file`, or the defaults without one. An
+    /// empty file is the defaults too.
     pub fn from_file(file: Option<&str>, defaults: &RepoSettings) -> Result<Self, String> {
         let Some(yaml) = file else {
             return Ok(defaults.clone());
         };
-        let config: RepoConfig =
+        let config: Option<RepoConfig> =
             serde_yaml::from_str(yaml).map_err(|e| format!("{REPO_CONFIG_PATH}: {e}"))?;
-        if config.version != 1 {
+        let config = config.unwrap_or_default();
+        if let Some(version) = config.version.filter(|v| *v != 1) {
             return Err(format!(
-                "{REPO_CONFIG_PATH}: version {} is not supported",
-                config.version
+                "{REPO_CONFIG_PATH}: version {version} is not supported"
             ));
         }
         // The default model is the default provider's: another provider needs its own.
@@ -260,17 +382,18 @@ impl RepoSettings {
             .agent
             .model
             .unwrap_or_else(|| defaults.agent.model.clone());
-        let task = |name: &str, t: Option<TaskModelConfig>| {
-            t.map(|t| t.resolve(name, provider))
-                .transpose()
-                .map(Option::flatten)
+        // A task the file leaves out follows the workspace. One it names is its own, and may say
+        // the repo's default.
+        let task = |name: &str, t: Option<TaskModelConfig>, inherited: &Option<TaskModel>| {
+            t.map_or(Ok(inherited.clone()), |t| t.resolve(name, provider))
                 .map_err(|e| format!("{REPO_CONFIG_PATH}: {e}"))
         };
         let overrides = config.agent.overrides;
+        let inherited = &defaults.agent.overrides;
         let overrides = ModelOverrides {
-            rebase: task("rebase", overrides.rebase)?,
-            fix: task("fix", overrides.fix)?,
-            review: task("review", overrides.review)?,
+            rebase: task("rebase", overrides.rebase, &inherited.rebase)?,
+            fix: task("fix", overrides.fix, &inherited.fix)?,
+            review: task("review", overrides.review, &inherited.review)?,
         };
         let settings = Self {
             label: config.label.unwrap_or_else(|| defaults.label.clone()),
@@ -363,16 +486,53 @@ impl RepoSettings {
         branch == default_branch || self.branches.iter().any(|b| b == branch)
     }
 
-    /// The file that sets exactly these settings.
-    pub fn to_yaml(&self) -> String {
+    /// The file that reads back as these settings over `defaults`, and sets nothing else.
+    pub fn to_yaml(&self, defaults: &RepoSettings) -> String {
+        let (s, d) = (&self.agent, &defaults.agent);
+        // A model belongs to its provider, so the two are written together: the workspace's
+        // provider can change under a model the file names.
+        let model = s.provider != d.provider || s.model != d.model;
+        let task = WrittenTask::over;
         let yaml = serde_yaml::to_string(&Written {
             version: 1,
-            settings: self,
+            label: (self.label != defaults.label).then_some(&self.label),
+            batch_size: (self.batch_size != defaults.batch_size).then_some(self.batch_size),
+            agent: WrittenAgent {
+                provider: model.then_some(s.provider),
+                model: model.then_some(&s.model),
+                effort: (s.effort != d.effort).then_some(&s.effort),
+                overrides: WrittenOverrides {
+                    rebase: task(&s.overrides.rebase, &d.overrides.rebase),
+                    fix: task(&s.overrides.fix, &d.overrides.fix),
+                    review: task(&s.overrides.review, &d.overrides.review),
+                },
+            },
+            verify: (self.verify != defaults.verify).then_some(&self.verify),
+            fix_ci: WrittenFixCi {
+                enabled: (self.fix_ci.enabled != defaults.fix_ci.enabled)
+                    .then_some(self.fix_ci.enabled),
+                attempts: (self.fix_ci.attempts != defaults.fix_ci.attempts)
+                    .then_some(self.fix_ci.attempts),
+            },
+            branches: (self.branches != defaults.branches).then_some(&self.branches),
+            review: &self.review,
         })
         .expect("settings serialize");
-        format!(
-            "# MergeLoop reads this file from the default branch. The dashboard opens a PR to change it.\n{yaml}"
-        )
+        format!("# MergeLoop reads this file from the default branch. {HEADER_END}\n{yaml}")
+    }
+
+    /// Whether `file` is these settings as `to_yaml` writes them, whatever its comments say.
+    pub fn written_in(&self, file: &str, defaults: &RepoSettings) -> bool {
+        let written = self.to_yaml(defaults);
+        settings_lines(file).eq(settings_lines(&written))
+    }
+
+    /// Whether `to_yaml` would lose a comment of `file`, other than the header it writes itself.
+    pub fn loses_comments_of(&self, file: &str, defaults: &RepoSettings) -> bool {
+        let written = self.to_yaml(defaults);
+        file.lines()
+            .filter(|l| l.contains('#') && !l.ends_with(HEADER_END))
+            .any(|l| !written.lines().any(|w| w == l))
     }
 
     pub fn labels(&self) -> Labels {
@@ -382,6 +542,15 @@ impl RepoSettings {
             failed: format!("{}:failed", self.label),
         }
     }
+}
+
+/// The lines of a file that set something: neither blank, a comment, nor the version, which only
+/// an empty file leaves out.
+fn settings_lines(file: &str) -> impl Iterator<Item = &str> {
+    file.lines().filter(|l| {
+        let l = l.trim();
+        !l.is_empty() && !l.starts_with('#') && l != "version: 1"
+    })
 }
 
 #[cfg(test)]
@@ -559,15 +728,201 @@ agent:
             require_resolved: Some(false),
         };
         assert_eq!(
-            RepoSettings::from_file(Some(&s.to_yaml()), &defaults()),
+            RepoSettings::from_file(Some(&s.to_yaml(&defaults())), &defaults()),
             Ok(s)
         );
+    }
+
+    #[test]
+    fn an_empty_file_inherits_everything() {
+        for yaml in [
+            "",
+            "\n",
+            "# Follows the workspace.\n",
+            "---\n",
+            "version: 1\n",
+        ] {
+            assert_eq!(
+                RepoSettings::from_file(Some(yaml), &defaults()),
+                Ok(defaults()),
+                "{yaml:?}"
+            );
+        }
+        assert!(defaults().written_in("", &defaults()));
+        assert!(defaults().written_in("# Why.\n", &defaults()));
+    }
+
+    /// Defaults a workspace chose: a label, a batch, a model and a model for reviews of its own.
+    fn workspace() -> RepoSettings {
+        WorkspaceDefaults {
+            label: "queue".into(),
+            batch_size: 3,
+            agent: AgentSettings {
+                provider: Provider::OpenAi,
+                model: "gpt-6.1-sol".into(),
+                effort: "high".into(),
+                overrides: ModelOverrides {
+                    review: Some(TaskModel {
+                        provider: Provider::Anthropic,
+                        model: "claude-fable-5-1".into(),
+                    }),
+                    ..Default::default()
+                },
+            },
+            fix_ci: FixCiSettings {
+                enabled: false,
+                attempts: 4,
+            },
+        }
+        .over(&defaults())
+    }
+
+    #[test]
+    fn a_repo_follows_the_workspace_in_what_its_file_leaves_out() {
+        let s = RepoSettings::from_file(Some("batch_size: 2\n"), &workspace()).unwrap();
+        assert_eq!(s.batch_size, 2);
+        assert_eq!(s.label, "queue");
+        assert_eq!(s.agent, workspace().agent);
+        assert_eq!(s.fix_ci.allowed(), 0);
+    }
+
+    #[test]
+    fn a_setting_spelled_out_stays_put_when_the_workspace_moves() {
+        let d = workspace();
+        let file = format!("batch_size: {}\n", d.batch_size);
+        let s = RepoSettings::from_file(Some(&file), &d).unwrap();
+        assert!(!s.written_in(&file, &d), "equal, but not following");
+        assert!(s.written_in(&s.to_yaml(&d), &d));
+
+        let mut moved = d.clone();
+        moved.batch_size += 1;
+        let s = RepoSettings::from_file(Some(&file), &moved).unwrap();
+        assert_eq!(s.batch_size, d.batch_size);
+    }
+
+    #[test]
+    fn a_task_the_file_names_is_its_own_and_may_be_the_default() {
+        for task in ["{}", "{ provider: openai }"] {
+            let yaml = format!("agent: {{ overrides: {{ review: {task} }} }}\n");
+            let s = RepoSettings::from_file(Some(&yaml), &workspace()).unwrap();
+            assert!(s.agent.overrides.is_empty(), "{yaml}");
+        }
+        let s =
+            RepoSettings::from_file(Some("agent: { overrides: { review: {} } }\n"), &workspace())
+                .unwrap();
+        assert_eq!(
+            s.agent.model(SpendTask::Review),
+            (Provider::OpenAi, "gpt-6.1-sol")
+        );
+    }
+
+    #[test]
+    fn a_file_says_only_what_differs_from_the_workspace() {
+        let d = workspace();
+        let yaml = d.to_yaml(&d);
+        assert!(yaml.lines().skip(1).eq(["version: 1"]), "{yaml}");
+
+        let mut s = workspace();
+        s.batch_size = 9;
+        s.fix_ci.enabled = true;
+        s.agent.model = "gpt-6-luna".into();
+        s.agent.overrides.review = None;
+        s.agent.overrides.fix = Some(TaskModel {
+            provider: Provider::Anthropic,
+            model: "claude-haiku-5-5".into(),
+        });
+        let yaml = s.to_yaml(&d);
+        assert_eq!(RepoSettings::from_file(Some(&yaml), &d), Ok(s), "{yaml}");
+        for inherited in ["label", "effort", "attempts", "verify"] {
+            assert!(!yaml.contains(inherited), "{yaml}");
+        }
+
+        // A repo that names a model keeps it, and its opt-out, when the workspace's provider
+        // changes.
+        let mut s = d.clone();
+        s.agent.model = "gpt-6-luna".into();
+        s.agent.overrides.review = None;
+        let yaml = s.to_yaml(&d);
+        let mut moved = d.clone();
+        moved.agent.provider = Provider::Anthropic;
+        moved.agent.model = "claude-opus-5-5".into();
+        let read = RepoSettings::from_file(Some(&yaml), &moved).unwrap();
+        assert_eq!(
+            read.agent.model(SpendTask::Review),
+            (Provider::OpenAi, "gpt-6-luna"),
+            "{yaml}"
+        );
+
+        // An opt-out alone follows the workspace's provider wherever it goes.
+        let mut s = d.clone();
+        s.agent.overrides.review = None;
+        let read = RepoSettings::from_file(Some(&s.to_yaml(&d)), &moved).unwrap();
+        assert_eq!(
+            read.agent.model(SpendTask::Review),
+            (Provider::Anthropic, "claude-opus-5-5")
+        );
+
+        // Another provider than the workspace's says its model, even a model of the same name.
+        let mut s = d.clone();
+        s.agent.provider = Provider::Anthropic;
+        assert_eq!(
+            RepoSettings::from_file(Some(&s.to_yaml(&d)), &d),
+            Ok(s.clone())
+        );
+    }
+
+    #[test]
+    fn a_file_from_before_the_rename_is_not_written_as_mergeloop_writes_it_now() {
+        let old = "# Mergepatrol reads this file from the default branch. The dashboard opens a PR to change it.\nversion: 1\nlabel: mergepatrol\nbatch_size: 8\nresolver:\n  model: claude-opus-5-5\n  effort: medium\nverify: []\n";
+        let settings = RepoSettings::from_file(Some(old), &defaults()).unwrap();
+        assert!(!settings.written_in(old, &defaults()));
+        // Rewriting it keeps what it means, and there is nothing left to do after.
+        let new = settings.to_yaml(&defaults());
+        assert_eq!(
+            RepoSettings::from_file(Some(&new), &defaults()).unwrap(),
+            settings
+        );
+        assert!(settings.written_in(&new, &defaults()));
+        assert!(!new.contains("label"), "{new}");
+    }
+
+    #[test]
+    fn comments_make_no_file_out_of_date() {
+        let d = defaults();
+        let mut settings = defaults();
+        settings.verify = vec!["cargo check".into()];
+        let written = settings.to_yaml(&d);
+        let old_header = written.replacen("MergeLoop", "Mergepatrol", 1);
+        assert!(settings.written_in(&old_header, &d));
+        let commented = written.replace("verify:", "# Why these run.\n\nverify:");
+        assert!(settings.written_in(&commented, &d));
+    }
+
+    #[test]
+    fn only_a_comment_someone_wrote_counts_as_lost() {
+        let d = defaults();
+        let mut settings = defaults();
+        settings.batch_size = 2;
+        settings.verify = vec!["cargo check".into()];
+        let written = settings.to_yaml(&d);
+        assert!(!settings.loses_comments_of(&written, &d));
+        assert!(!settings.loses_comments_of(&written.replacen("MergeLoop", "Mergepatrol", 1), &d));
+        assert!(settings.loses_comments_of(&written.replace("verify:", "# Why.\nverify:"), &d));
+        assert!(settings.loses_comments_of(
+            &written.replace("batch_size: 2", "batch_size: 2 # Why."),
+            &d
+        ));
+        // A `#` the rewrite keeps is no comment lost.
+        let mut hash = defaults();
+        hash.verify = vec!["echo '#'".into()];
+        assert!(!hash.loses_comments_of(&hash.to_yaml(&d), &d));
     }
 
     #[test]
     fn bad_files_are_errors() {
         for yaml in [
             "version: 2\n",
+            "- a list\n",
             "version: 1\nbatchsize: 2\n",
             "version: 1\nbatch_size: 0\n",
             "version: 1\nagent: { effort: extreme }\n",

@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useState } from "react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { capture } from "./analytics";
 import {
   deleteApiKey,
   deleteChatGptLogin,
   fetchBilling,
+  fetchRepos,
   fetchSettings,
   freeSeat,
   openPortal,
@@ -14,10 +16,17 @@ import {
   startCheckout,
 } from "./api";
 import type { ApiKeyView } from "./api/ApiKeyView";
+import type { AppView } from "./api/AppView";
 import type { BillingView } from "./api/BillingView";
 import type { ChatGptView } from "./api/ChatGptView";
+import type { RepoSettingsView } from "./api/RepoSettingsView";
+import type { RepoView } from "./api/RepoView";
 import type { SettingsView } from "./api/SettingsView";
+import type { UpdatePullView } from "./api/UpdatePullView";
+import { type Drafts, DraftsTray, RepoDefaults } from "./RepoSettings";
+import { DifferingRepos, RepoDetail, RepoRail } from "./Repos";
 import { ReviewSettings } from "./ReviewSettings";
+import { UpdateRepos } from "./UpdateRepos";
 import { danger, ErrorText, field, primary, Section, Status, secondary, timeAgo } from "./ui";
 
 const link =
@@ -30,15 +39,82 @@ const PLACEHOLDERS: Record<string, string> = {
   openrouter: "sk-or-…",
 };
 
-/** The sections, in order, for the menu beside them. */
-const SECTIONS = [
-  ["plan", "Plan"],
-  ["models", "Model access"],
-  ["review", "Automatic review"],
-  ["repos", "Repo overrides"],
-] as const;
+/** The workspace on the rail, or a repo: global settings first, each repo's over them. */
+export function Settings({ workspace, app }: { workspace: number; app: AppView }) {
+  // "Turn on MergeLoop" and permalinks link here with a repo, which picks it.
+  const { repo: picked } = useSearch({ from: "/$account/settings" });
+  const navigate = useNavigate({ from: "/$account/settings" });
+  const repos = useQuery({
+    queryKey: ["repos", workspace],
+    queryFn: () => fetchRepos(workspace),
+  });
+  const [drafts, setDrafts] = useState<Drafts>({});
+  const [opened, setOpened] = useState<Record<string, UpdatePullView>>({});
+  const pane = useRef<HTMLDivElement>(null);
+  const current = repos.data?.find((r) => r.repo === picked);
+  const pick = (repo?: string) => {
+    navigate({ search: { repo }, replace: true });
+    pane.current?.scrollTo({ top: 0 });
+    // One column on a phone: the pane is below the rail, out of view.
+    if (matchMedia("(max-width: 767px)").matches) pane.current?.scrollIntoView();
+  };
+  const edit = (repo: string, from: RepoSettingsView, to: RepoSettingsView) => {
+    const same = JSON.stringify(from) === JSON.stringify(to);
+    setDrafts(({ [repo]: _, ...others }) => (same ? others : { ...others, [repo]: { from, to } }));
+  };
+  return (
+    <div className="h-full overflow-y-auto md:grid md:grid-cols-[18rem_minmax(0,1fr)] md:overflow-hidden">
+      <RepoRail
+        workspace={workspace}
+        app={app}
+        repos={repos.data}
+        error={repos.error}
+        current={current?.repo}
+        pick={pick}
+        drafts={drafts}
+      />
+      <div ref={pane} className="min-w-0 scroll-mt-4 pb-16 md:h-full md:overflow-y-auto">
+        {current ? (
+          <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
+            <RepoDetail
+              key={current.repo}
+              workspace={workspace}
+              repo={current}
+              draft={drafts[current.repo]?.to}
+              edit={(from, to) => edit(current.repo, from, to)}
+              opened={opened[current.repo]}
+            />
+          </div>
+        ) : (
+          <Workspace workspace={workspace} repos={repos.data ?? []} pick={pick} />
+        )}
+      </div>
+      <DraftsTray
+        workspace={workspace}
+        drafts={drafts}
+        discard={() => setDrafts({})}
+        sent={(repo, settings, pull) => {
+          setOpened((opened) => ({ ...opened, [repo]: pull }));
+          // An edit made while the PR opened stays a draft.
+          setDrafts((drafts) => {
+            const { [repo]: draft, ...others } = drafts;
+            return draft?.to === settings ? others : drafts;
+          });
+        }}
+      />
+    </div>
+  );
+}
 
-export function Settings({ workspace }: { workspace: number }) {
+function Workspace({
+  workspace,
+  repos,
+  pick,
+}: {
+  workspace: number;
+  repos: RepoView[];
+  pick: (repo: string) => void;
+}) {
   const settings = useQuery({
     queryKey: ["settings", workspace],
     queryFn: () => fetchSettings(workspace),
@@ -48,60 +124,54 @@ export function Settings({ workspace }: { workspace: number }) {
     queryFn: () => fetchBilling(workspace),
   });
   if (!settings.data) return null;
+  const queuing = repos.filter((r) => r.on);
   return (
-    <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex max-w-6xl gap-10 px-4 py-6 sm:px-6 sm:py-8">
-        <nav className="sticky top-0 h-fit w-44 shrink-0 max-xl:hidden">
-          <h1 className="mb-3 text-xl font-semibold tracking-tight">Settings</h1>
-          {SECTIONS.filter(([id]) => id !== "plan" || billing.data).map(([id, label]) => (
+    <div className="mx-auto max-w-6xl divide-y divide-line px-4 py-6 sm:px-6 sm:py-8">
+      <h1 className="pb-6 text-xl font-semibold tracking-tight">Settings</h1>
+      {billing.data && <Billing workspace={workspace} billing={billing.data} />}
+      <Section
+        id="models"
+        title="Model access"
+        sub={
+          <>
+            Resolves rebase conflicts and fixes failed checks. Each repo's config picks the
+            provider. Keys are encrypted and never shown again. For Anthropic, use a dedicated key
+            in a{" "}
             <a
-              key={id}
-              href={`#${id}`}
-              className="block rounded-md px-2 py-1.5 text-fg-2 hover:bg-sunken hover:text-fg"
+              href="https://platform.claude.com/settings/workspaces"
+              target="_blank"
+              rel="noreferrer"
+              className={link}
             >
-              {label}
+              workspace with a spend limit
             </a>
-          ))}
-        </nav>
-        <div className="min-w-0 flex-1 divide-y divide-line">
-          <h1 className="pb-6 text-xl font-semibold tracking-tight xl:hidden">Settings</h1>
-          {billing.data && <Billing workspace={workspace} billing={billing.data} />}
-          <Section
-            id="models"
-            title="Model access"
-            sub={
-              <>
-                Resolves rebase conflicts and fixes failed checks. Each repo's config picks the
-                provider. Keys are encrypted and never shown again. For Anthropic, use a dedicated
-                key in a{" "}
-                <a
-                  href="https://platform.claude.com/settings/workspaces"
-                  target="_blank"
-                  rel="noreferrer"
-                  className={link}
-                >
-                  workspace with a spend limit
-                </a>
-                .
-              </>
-            }
-          >
-            <div className="divide-y divide-line-soft rounded-lg border border-line bg-surface">
-              {settings.data.api_keys.flatMap((k) => [
-                <KeyForm key={k.provider.id} workspace={workspace} apiKey={k} />,
-                k.provider.id === "openai" && (
-                  <ChatGptForm
-                    key="chatgpt"
-                    workspace={workspace}
-                    chatgpt={settings.data.chatgpt}
-                  />
-                ),
-              ])}
-            </div>
-          </Section>
-          <ReviewSettings workspace={workspace} />
+            .
+          </>
+        }
+      >
+        <div className="divide-y divide-line-soft rounded-lg border border-line bg-surface">
+          {settings.data.api_keys.flatMap((k) => [
+            <KeyForm key={k.provider.id} workspace={workspace} apiKey={k} />,
+            k.provider.id === "openai" && (
+              <ChatGptForm key="chatgpt" workspace={workspace} chatgpt={settings.data.chatgpt} />
+            ),
+          ])}
         </div>
-      </div>
+      </Section>
+      <RepoDefaults workspace={workspace} />
+      <ReviewSettings workspace={workspace} />
+      {queuing.length > 0 && (
+        <Section
+          id="repos"
+          title="Repos"
+          sub="Update all brings every queuing repo to the latest settings and agent skill. The repos below set something of their own."
+        >
+          <div className="space-y-4">
+            <UpdateRepos workspace={workspace} repos={queuing} />
+            <DifferingRepos workspace={workspace} repos={queuing} pick={pick} />
+          </div>
+        </Section>
+      )}
     </div>
   );
 }

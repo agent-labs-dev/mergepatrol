@@ -65,7 +65,7 @@ export function Queue({ workspace }: { workspace: number }) {
             Set up a repo, then add the{" "}
             <code className="rounded bg-sunken px-1 text-xs">mergepatrol</code> label to a PR.
           </p>
-          <Link to="/$account/repos" params={{ account }} className={`${primary} mt-4`}>
+          <Link to="/$account/settings" params={{ account }} className={`${primary} mt-4`}>
             Set up a repo
           </Link>
         </div>

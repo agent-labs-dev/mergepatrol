@@ -17,7 +17,7 @@ pub use lane::{
 };
 pub use repo_config::{
     AgentSettings, EFFORTS, FixCiSettings, LabelSpec, Labels, ModelOverrides, REPO_CONFIG_PATH,
-    RepoSettings, TaskModel,
+    RepoSettings, TaskModel, WorkspaceDefaults,
 };
 pub use review::{
     Answer, Answered, Bar, CodeLine, Finding, Judged, Kind, Lean, LineKind, Question, Related,

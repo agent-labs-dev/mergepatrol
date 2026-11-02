@@ -10,9 +10,14 @@ export type RepoConfigView = {
  */
 settings: RepoSettingsView, 
 /**
- * What a repo without the file runs with.
+ * What the repo follows where its file says nothing: `defaults` of `get_repo_defaults`.
  */
-defaults: RepoSettingsView, efforts: Array<string>, 
+defaults: RepoSettingsView, 
+/**
+ * A setting equal to its default follows it. False while the file spells such a setting
+ * out: that one stays put when the default changes, until the file is trimmed.
+ */
+follows: boolean, efforts: Array<string>, 
 /**
  * The providers a repo can choose.
  */

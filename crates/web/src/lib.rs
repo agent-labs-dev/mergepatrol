@@ -1272,6 +1272,22 @@ mod tests {
         let (_, body) = json(&router, "GET", path, &cookie, None).await;
         assert_eq!(body["status"], "asks", "unanswered");
 
+        // What repos inherit: the instance's, then the workspace's.
+        let path = "/api/w/1/settings/repo-defaults";
+        let (status, d) = json(&router, "GET", path, &cookie, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let mut defaults = d["defaults"].clone();
+        defaults["batch_size"] = 0.into();
+        let (status, _) = json(&router, "PUT", path, &cookie, Some(defaults.clone())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        defaults["batch_size"] = 3.into();
+        defaults["label"] = "queue".into();
+        let (status, _) = json(&router, "PUT", path, &cookie, Some(defaults)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, d) = json(&router, "GET", path, &cookie, None).await;
+        assert_eq!(d["defaults"]["label"], "queue");
+        assert_eq!(d["defaults"]["batch_size"], 3);
+
         // Settings: the defaults, then saved.
         let (status, s) = json(&router, "GET", "/api/w/1/settings/review", &cookie, None).await;
         assert_eq!(status, StatusCode::OK);

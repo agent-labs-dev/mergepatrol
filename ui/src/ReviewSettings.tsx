@@ -1,26 +1,18 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { kindNames } from "./AgentReview";
 import { capture } from "./analytics";
-import {
-  fetchRepoConfig,
-  fetchRepos,
-  fetchReviewSettings,
-  proposeRepoConfig,
-  setReviewSettings,
-} from "./api";
+import { fetchReviewSettings, setReviewSettings } from "./api";
 import type { BandView } from "./api/BandView";
 import type { BarView } from "./api/BarView";
 import type { KindView } from "./api/KindView";
-import type { PullRequestRef } from "./api/PullRequestRef";
-import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoReviewView } from "./api/RepoReviewView";
 import type { ReviewSettingsView } from "./api/ReviewSettingsView";
-import { ErrorText, primary, Section, secondary, Toggle } from "./ui";
+import { ErrorText, primary, Section, Toggle } from "./ui";
 
 /*
  * How sure the agent must be to send each kind of change back to the PR's author: the workspace's bars, set
- * against how the agent's confidence has held up, and each repo's own, from its config file.
+ * against how the agent's confidence has held up, and the choices of a repo's own, for its config file.
  */
 
 type Bar = BarView["bar"];
@@ -45,16 +37,7 @@ export function ReviewSettings({ workspace }: { workspace: number }) {
     queryFn: () => fetchReviewSettings(workspace),
   });
   if (!settings.data) return null;
-  return (
-    <>
-      <WorkspaceBars workspace={workspace} saved={settings.data} />
-      <RepoBars
-        workspace={workspace}
-        workspaceBars={settings.data.bars}
-        workspaceOn={settings.data.enabled}
-      />
-    </>
-  );
+  return <WorkspaceBars workspace={workspace} saved={settings.data} />;
 }
 
 function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewSettingsView }) {
@@ -253,234 +236,93 @@ function KindRow({
 
 const CHOICES: Bar[] = [55, 60, 65, 70, 75, 80, 85, 90, 95, "always_ask"];
 
-/** Each queuing repo's own bars, from its config file. A change opens a PR there. */
-function RepoBars({
+/** What a repo's review sets over the workspace, in words. */
+export function reviewOverrides(r: RepoReviewView): string[] {
+  return [
+    ...(r.enabled === null ? [] : [`Review ${r.enabled ? "on" : "off"}`]),
+    ...(r.require_resolved === undefined
+      ? []
+      : [`Resolved threads ${r.require_resolved ? "on" : "off"}`]),
+    ...KINDS.flatMap((k) => {
+      const own = barOf(r.bars, k);
+      return own === undefined ? [] : [`${kindNames[k]} ${barText(own)}`];
+    }),
+  ];
+}
+
+const ON_OFF: [string, string][] = [
+  ["on", "On"],
+  ["off", "Off"],
+];
+const onOff = (on: boolean) => (on ? "On" : "Off");
+
+/** A repo's own review settings: each shows the workspace's until the repo sets one. */
+export function RepoReview({
   workspace,
-  workspaceBars,
-  workspaceOn,
+  review,
+  saved,
+  onChange,
 }: {
   workspace: number;
-  workspaceBars: BarView[];
-  workspaceOn: boolean;
+  review: RepoReviewView;
+  /** The file's, to mark what an edit changed. */
+  saved: RepoReviewView;
+  onChange: (review: RepoReviewView) => void;
 }) {
-  const repos = useQuery({ queryKey: ["repos", workspace], queryFn: () => fetchRepos(workspace) });
-  const on = (repos.data ?? []).filter((r) => r.on).map((r) => r.repo);
-  const configs = useQueries({
-    queries: on.map((repo) => ({
-      queryKey: ["repo-config", workspace, repo],
-      queryFn: () => fetchRepoConfig(workspace, repo),
-    })),
+  const settings = useQuery({
+    queryKey: ["review-settings", workspace],
+    queryFn: () => fetchReviewSettings(workspace),
   });
-  const [staged, setStaged] = useState<Record<string, RepoReviewView>>({});
-  const [opened, setOpened] = useState<Record<string, PullRequestRef>>({});
-  const [reviewing, setReviewing] = useState(false);
-  const [open, setOpen] = useState<string | null>(null);
-  const client = useQueryClient();
-  const loaded = on.flatMap((repo, i) => {
-    const c = configs[i].data;
-    return c ? [{ repo, config: c }] : [];
-  });
-  const propose = useMutation({
-    mutationFn: async () => {
-      const prs: Record<string, PullRequestRef> = {};
-      for (const { repo, config } of loaded) {
-        const review = staged[repo];
-        if (!review) continue;
-        prs[repo] = await proposeRepoConfig(workspace, repo, { ...config.settings, review });
-      }
-      return prs;
-    },
-    onSuccess: (prs) => {
-      capture("repo review settings proposed", { repos: Object.keys(prs).length });
-      setOpened({ ...opened, ...prs });
-      setStaged({});
-      setReviewing(false);
-      for (const repo of Object.keys(prs))
-        client.invalidateQueries({ queryKey: ["repo-config", workspace, repo] });
-    },
-  });
-
-  const view = (repo: string, config: RepoConfigView) => staged[repo] ?? config.settings.review;
-  const set = (repo: string, config: RepoConfigView, change: Partial<RepoReviewView>) =>
-    setStaged({ ...staged, [repo]: { ...view(repo, config), ...change } });
-  const setBar = (repo: string, config: RepoConfigView, kind: KindView, bar: Bar | undefined) => {
-    const bars = view(repo, config).bars.filter((b) => b.kind !== kind);
-    set(repo, config, { bars: bar === undefined ? bars : [...bars, { kind, bar }] });
+  const ws = settings.data;
+  if (!ws) return null;
+  const setBar = (kind: KindView, bar: Bar | undefined) => {
+    const bars = review.bars.filter((b) => b.kind !== kind);
+    onChange({ ...review, bars: bar === undefined ? bars : [...bars, { kind, bar }] });
   };
-  const changed = Object.keys(staged);
-
+  const resolved = review.require_resolved;
   return (
-    <Section
-      id="repos"
-      title="Repo overrides"
-      sub="A repo follows the settings above unless its config file sets its own. Changing one opens a PR there."
-    >
-      <div className="rounded-lg border border-line bg-surface">
-        {repos.data && on.length === 0 && (
-          <p className="px-4 py-3 text-muted">No repo queues yet.</p>
-        )}
-        <ul className="divide-y divide-line-soft">
-          {loaded.map(({ repo, config }) => {
-            const r = view(repo, config);
-            const overrides = [
-              ...(r.enabled === null ? [] : [`Review ${r.enabled ? "on" : "off"}`]),
-              ...KINDS.flatMap((k) => {
-                const own = barOf(r.bars, k);
-                return own === undefined ? [] : [`${kindNames[k]} ${barText(own)}`];
-              }),
-            ];
-            const expanded = open === repo;
-            return (
-              <li key={repo}>
-                <div className="flex items-baseline gap-3 px-4 text-sm hover:bg-page ">
-                  <button
-                    type="button"
-                    aria-expanded={expanded}
-                    onClick={() => setOpen(expanded ? null : repo)}
-                    className="flex min-w-0 flex-1 items-baseline gap-3 py-2.5 text-left"
-                  >
-                    <span className="shrink-0 font-medium" title={repo}>
-                      {repo.split("/")[1]}
-                    </span>
-                    <span
-                      className={`min-w-0 flex-1 truncate text-xs ${
-                        overrides.length ? "text-fg-2" : "text-faint"
-                      }`}
-                    >
-                      {overrides.length ? overrides.join(" · ") : "Follows the workspace"}
-                    </span>
-                    {staged[repo] && <span className="shrink-0 text-xs text-warn">edited</span>}
-                    <span className="shrink-0 text-xs text-muted">
-                      {expanded ? "Done" : "Edit"}
-                    </span>
-                  </button>
-                  {opened[repo] && (
-                    <a
-                      href={opened[repo].url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="shrink-0 text-xs text-ok"
-                    >
-                      PR #{opened[repo].number}
-                    </a>
-                  )}
-                </div>
-                {expanded && (
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 pt-1 pb-4 sm:grid-cols-3 ">
-                    <RepoChoice
-                      label="Review"
-                      value={r.enabled === null ? "inherit" : r.enabled ? "on" : "off"}
-                      inherit={workspaceOn ? "On" : "Off"}
-                      changed={!!staged[repo] && r.enabled !== config.settings.review.enabled}
-                      choices={[
-                        ["on", "On"],
-                        ["off", "Off"],
-                      ]}
-                      onChange={(v) =>
-                        set(repo, config, { enabled: v === "inherit" ? null : v === "on" })
-                      }
-                    />
-                    {KINDS.map((k) => {
-                      const own = barOf(r.bars, k);
-                      const ws = barOf(workspaceBars, k);
-                      return (
-                        <RepoChoice
-                          key={k}
-                          label={kindNames[k]}
-                          value={own === undefined ? "inherit" : String(own)}
-                          inherit={ws === undefined ? "" : barText(ws)}
-                          changed={!!staged[repo] && own !== barOf(config.settings.review.bars, k)}
-                          choices={CHOICES.map((c) => [String(c), barText(c)])}
-                          onChange={(v) =>
-                            setBar(
-                              repo,
-                              config,
-                              k,
-                              v === "inherit"
-                                ? undefined
-                                : v === "always_ask"
-                                  ? "always_ask"
-                                  : Number(v),
-                            )
-                          }
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-        {changed.length > 0 && (
-          <div className="flex items-center gap-3 border-t border-line px-4 py-3 ">
-            <span className="text-xs text-muted">
-              Changed {changed.map((r) => r.split("/")[1]).join(", ")}
-            </span>
-            <button
-              type="button"
-              onClick={() => setStaged({})}
-              className="ml-auto text-sm text-muted hover:text-fg"
-            >
-              Discard
-            </button>
-            <button
-              type="button"
-              onClick={() => setReviewing(true)}
-              className={`${primary} h-8 px-3`}
-            >
-              Review and open {changed.length === 1 ? "a PR" : `${changed.length} PRs`}
-            </button>
-          </div>
-        )}
-        {reviewing && (
-          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-6">
-            <div className="w-full max-w-xl rounded-lg bg-surface shadow-2xl ring-1 ring-line">
-              <div className="border-b border-line px-5 py-3">
-                <p className="font-medium">
-                  Open {changed.length === 1 ? "a PR" : `${changed.length} PRs`} to change review
-                  settings
-                </p>
-                <p className="text-sm text-muted">
-                  It goes through review and the queue like any other change, and applies once it
-                  merges.
-                </p>
-              </div>
-              <div className="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-4">
-                {loaded
-                  .filter(({ repo }) => staged[repo])
-                  .map(({ repo, config }) => (
-                    <div key={repo}>
-                      <p className="mb-1 text-sm">
-                        {repo} · <code className="text-xs">{config.path}</code>
-                      </p>
-                      <YamlDiff from={config.settings.review} to={staged[repo]} />
-                    </div>
-                  ))}
-                <ErrorText error={propose.error} />
-              </div>
-              <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
-                <button type="button" onClick={() => setReviewing(false)} className={secondary}>
-                  Back
-                </button>
-                <button
-                  type="button"
-                  disabled={propose.isPending}
-                  onClick={() => propose.mutate()}
-                  className={primary}
-                >
-                  {propose.isPending ? "Opening…" : `Open ${changed.length === 1 ? "PR" : "PRs"}`}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </Section>
+    <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+      <RepoChoice
+        label="Review"
+        value={review.enabled === null ? "inherit" : review.enabled ? "on" : "off"}
+        inherit={onOff(ws.enabled)}
+        changed={review.enabled !== saved.enabled}
+        choices={ON_OFF}
+        onChange={(v) => onChange({ ...review, enabled: v === "inherit" ? null : v === "on" })}
+      />
+      <RepoChoice
+        label="Resolved threads"
+        value={resolved === undefined ? "inherit" : resolved ? "on" : "off"}
+        inherit={onOff(ws.require_resolved)}
+        changed={resolved !== saved.require_resolved}
+        choices={ON_OFF}
+        onChange={(v) => {
+          const { require_resolved: _, ...rest } = review;
+          onChange(v === "inherit" ? rest : { ...rest, require_resolved: v === "on" });
+        }}
+      />
+      {KINDS.map((k) => {
+        const own = barOf(review.bars, k);
+        const theirs = barOf(ws.bars, k);
+        return (
+          <RepoChoice
+            key={k}
+            label={kindNames[k]}
+            value={own === undefined ? "inherit" : String(own)}
+            inherit={theirs === undefined ? "" : barText(theirs)}
+            changed={own !== barOf(saved.bars, k)}
+            choices={CHOICES.map((c) => [String(c), barText(c)])}
+            onChange={(v) =>
+              setBar(k, v === "inherit" ? undefined : v === "always_ask" ? v : Number(v))
+            }
+          />
+        );
+      })}
+    </div>
   );
 }
 
-/** One setting of a repo's: the workspace's value, shown with a dash, or its own. */
+/** One setting of a repo's: the workspace's value, or its own. */
 function RepoChoice({
   label,
   value,
@@ -507,10 +349,10 @@ function RepoChoice({
             ? "border-amber-500 text-fg"
             : value === "inherit"
               ? "border-line-soft text-faint"
-              : "border-line text-fg-2"
+              : "border-line-strong font-medium text-fg"
         }`}
       >
-        <option value="inherit">— {inherit}</option>
+        <option value="inherit">Workspace: {inherit}</option>
         {choices.map(([v, text]) => (
           <option key={v} value={v}>
             {text}
@@ -518,51 +360,5 @@ function RepoChoice({
         ))}
       </select>
     </label>
-  );
-}
-
-/** The `review:` block as the config file has it. */
-function yaml(r: RepoReviewView): string[] {
-  const lines = ["review:"];
-  if (r.enabled !== null) lines.push(`  enabled: ${r.enabled}`);
-  const set = KINDS.filter((k) => barOf(r.bars, k) !== undefined);
-  if (set.length) {
-    lines.push("  bars:");
-    for (const k of set) lines.push(`    ${k}: ${barOf(r.bars, k)}`);
-  }
-  return lines.length === 1 ? [] : lines;
-}
-
-function YamlDiff({ from, to }: { from: RepoReviewView; to: RepoReviewView }) {
-  const a = yaml(from);
-  const b = yaml(to);
-  const lines = [
-    ...a.filter((l) => !b.includes(l)).map((l) => ["-", l] as const),
-    ...b.map((l) => [a.includes(l) ? " " : "+", l] as const),
-  ];
-  return (
-    <pre className="overflow-x-auto rounded-md border border-line bg-page py-1 font-mono text-xs leading-5">
-      {lines.length === 0 && (
-        <div className="px-3 text-faint">No review settings: the workspace's apply.</div>
-      )}
-      {lines.map(([sign, l], i) => (
-        <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: the lines of a diff never move.
-          key={i}
-          className={`px-3 ${
-            sign === "+"
-              ? "bg-emerald-50 dark:bg-emerald-400/10"
-              : sign === "-"
-                ? "bg-red-50 dark:bg-red-400/10"
-                : ""
-          }`}
-        >
-          <span className={sign === "+" ? "text-ok" : sign === "-" ? "text-bad" : "text-faint"}>
-            {sign}
-          </span>{" "}
-          {l}
-        </div>
-      ))}
-    </pre>
   );
 }
