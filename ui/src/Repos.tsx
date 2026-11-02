@@ -31,6 +31,7 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
     queryFn: () => fetchRepos(workspace),
   });
   const detail = useRef<HTMLElement>(null);
+  const list = useRef<HTMLElement>(null);
   const shown = repos.data?.filter((r) => r.repo.includes(filter.trim())) ?? [];
   const current = repos.data?.find((r) => r.repo === picked) ?? shown[0] ?? repos.data?.[0];
   const pick = (repo: string) => {
@@ -38,6 +39,12 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
     // One column on a phone: the detail is below the list, out of view.
     if (matchMedia("(max-width: 767px)").matches) detail.current?.scrollIntoView();
   };
+  // A link from elsewhere can pick a repo far down the list: show it, once the list loads.
+  const loaded = !!repos.data;
+  useEffect(() => {
+    if (loaded && matchMedia("(min-width: 768px)").matches)
+      list.current?.querySelector("[aria-current]")?.scrollIntoView({ block: "nearest" });
+  }, [loaded]);
 
   return (
     <Narrow
@@ -62,7 +69,10 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
       )}
       {current && (
         <div className="grid gap-6 md:grid-cols-[16rem_1fr]">
-          <aside className="md:sticky md:top-4 md:max-h-[calc(100dvh-8rem)] md:self-start md:overflow-y-auto">
+          <aside
+            ref={list}
+            className="md:sticky md:top-4 md:max-h-[calc(100dvh-8rem)] md:self-start md:overflow-y-auto"
+          >
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -134,13 +144,7 @@ function Item({
   active: boolean;
   pick: (repo: string) => void;
 }) {
-  const ref = useRef<HTMLButtonElement>(null);
   const skill = useSkill(workspace, r);
-  // A link from elsewhere can pick a repo far down the list.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: only on mount
-  useEffect(() => {
-    if (active) ref.current?.scrollIntoView({ block: "nearest" });
-  }, []);
   const s = skill.data;
   const needs =
     r.on && r.config_error
@@ -152,7 +156,6 @@ function Item({
           : null;
   return (
     <button
-      ref={ref}
       type="button"
       onClick={() => pick(r.repo)}
       aria-current={active || undefined}
