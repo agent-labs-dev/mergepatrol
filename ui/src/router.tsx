@@ -11,7 +11,6 @@ import { History, LISTS, type List, OUTCOMES, WINDOWS, type Window } from "./His
 import { type OpenFilter, REVIEWS, STATUSES } from "./OpenFilters";
 import { Permalink } from "./Permalink";
 import { Queue } from "./Queue";
-import { Repos } from "./Repos";
 import { Settings } from "./Settings";
 import { useWorkspace } from "./workspace";
 import { FOLDERS, type Folder, You } from "./You";
@@ -117,12 +116,14 @@ const history = createRoute({
   component: () => <History workspace={useWorkspace().workspace} />,
 });
 
+/** The repo whose settings are open, for a tab that used to have them. */
 const repos = createRoute({
   getParentRoute: () => workspace,
   path: "repos",
-  /** The repo whose settings are open. */
   validateSearch: (search): { repo?: string } => ({ repo: optional(search.repo, "string") }),
-  component: () => <Repos {...useWorkspace()} />,
+  beforeLoad: ({ params, search }) => {
+    throw redirect({ to: "/$account/settings", params, search, replace: true });
+  },
 });
 
 /** A PR's permalink, which the API hands out: it opens wherever the PR is. */
@@ -135,7 +136,9 @@ const pull = createRoute({
 const settings = createRoute({
   getParentRoute: () => workspace,
   path: "settings",
-  component: () => <Settings workspace={useWorkspace().workspace} />,
+  /** The repo whose settings are open: the workspace's by default. */
+  validateSearch: (search): { repo?: string } => ({ repo: optional(search.repo, "string") }),
+  component: () => <Settings {...useWorkspace()} />,
 });
 
 export const router = createRouter({

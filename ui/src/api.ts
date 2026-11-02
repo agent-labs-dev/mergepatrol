@@ -16,13 +16,13 @@ import type { OpenPullView } from "./api/OpenPullView";
 import type { OutcomeView } from "./api/OutcomeView";
 import type { PullDetailView } from "./api/PullDetailView";
 import type { PullDiffView } from "./api/PullDiffView";
-import type { PullRequestRef } from "./api/PullRequestRef";
 import type { PullStateView } from "./api/PullStateView";
 import type { QuestionView } from "./api/QuestionView";
 import type { QueuedView } from "./api/QueuedView";
 import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
+import type { RepoDefaultsView } from "./api/RepoDefaultsView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
 import type { RepoUpdateView } from "./api/RepoUpdateView";
 import type { RepoView } from "./api/RepoView";
@@ -36,6 +36,8 @@ import type { SettingsView } from "./api/SettingsView";
 import type { SkillView } from "./api/SkillView";
 import type { SnoozePull } from "./api/SnoozePull";
 import type { Unlock } from "./api/Unlock";
+import type { UpdatePullView } from "./api/UpdatePullView";
+import type { WorkspaceDefaultsView } from "./api/WorkspaceDefaultsView";
 import type { YouView } from "./api/YouView";
 
 async function request(method: string, path: string, body?: unknown): Promise<Response> {
@@ -123,7 +125,7 @@ export const fetchRepoConfig = (id: number, repo: string) =>
 
 /** Opens a PR that writes the settings to the repo's config file, or updates the open one. */
 export const proposeRepoConfig = (id: number, repo: string, body: RepoSettingsView) =>
-  send<PullRequestRef>("PUT", w(id, `/repos/${repo}/config`), body);
+  send<UpdatePullView>("PUT", w(id, `/repos/${repo}/config`), body);
 
 /** Whether the repo has the current `mergepatrol` agent skill. */
 export const fetchRepoSkill = (id: number, repo: string) =>
@@ -131,7 +133,13 @@ export const fetchRepoSkill = (id: number, repo: string) =>
 
 /** Opens a PR that writes the current skill to the repo, or updates the open one. */
 export const updateRepoSkill = (id: number, repo: string) =>
-  send<PullRequestRef>("POST", w(id, `/repos/${repo}/skill`));
+  send<UpdatePullView>("POST", w(id, `/repos/${repo}/skill`));
+
+export const fetchRepoDefaults = (id: number) =>
+  get<RepoDefaultsView>(w(id, "/settings/repo-defaults"));
+
+export const setRepoDefaults = (id: number, defaults: WorkspaceDefaultsView) =>
+  send<RepoDefaultsView>("PUT", w(id, "/settings/repo-defaults"), defaults);
 
 /** Opens and queues the PRs that bring the repo up to the latest settings and skill. */
 export const updateRepo = (id: number, repo: string) =>

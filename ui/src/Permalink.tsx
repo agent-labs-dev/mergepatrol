@@ -68,7 +68,9 @@ export function Permalink({ workspace }: { workspace: number }) {
       />
     );
   if (s.mergepatrol.state === "off")
-    return <Navigate to="/$account/repos" params={{ account }} search={{ repo: full }} replace />;
+    return (
+      <Navigate to="/$account/settings" params={{ account }} search={{ repo: full }} replace />
+    );
   if (lanes.isPending) return null;
   const lane = lanes.data?.find((l) => l.repo === full);
   return (

@@ -16,7 +16,7 @@ The hosted MergeLoop at https://mergeloop.ai runs the public GitHub App [Merge L
 
 1. Sign in with GitHub at https://mergeloop.ai.
 2. Install the App on your organization or account, and choose its repos. GitHub sends you back to the dashboard.
-3. In **Repos**, **Set up** a repo. MergeLoop opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
+3. In **Settings**, pick a repo and **Set up**. MergeLoop opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
 4. In **Settings**, add an Anthropic or OpenAI API key. Create one for MergeLoop alone, with a spend limit.
 5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue. The dashboard puts the label on as you, so it takes triage access to the repo.
 6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review or your team's, those the queue holds first. Approve, request changes or comment there, as you. A review waits 5 seconds before it goes to GitHub, so you can undo it.
@@ -198,7 +198,7 @@ On GCP, a deploy runs the old revision beside the new one for a while, and each 
 
 ## Repo settings
 
-Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. MergeLoop reads the file from there, so a PR cannot change its own settings. A setting the file leaves out takes the instance's default: on a self-hosted MergeLoop, the `MERGEPATROL_*` variables in [Environment variables](#environment-variables).
+Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. MergeLoop reads the file from there, so a PR cannot change its own settings. A setting the file leaves out follows the workspace, so an empty file is valid, and inherits everything. **Settings** sets the workspace's defaults for the label, batch size, model, effort, task models and CI fixes. They apply at once, with no PR, to every repo that follows them. A workspace that has set none follows the instance: on a self-hosted MergeLoop, the `MERGEPATROL_*` variables in [Environment variables](#environment-variables).
 
 ```yaml
 version: 1
@@ -239,13 +239,13 @@ The verify commands run after an agent resolution or fix, before the publish.
 
 A fix runs in the sandbox, like a rebase, while the PR keeps its place at the head of the queue. It may change any file except those under `.github/` and `.mergepatrol/`. The agent gets each failed check's output and annotations, and for a GitHub Actions job, the end of its log. The log needs the App's `actions: read` permission: an App created before this permission existed must be given it on GitHub, or the agent works from the output alone.
 
-A repo queues once its default branch has the file. MergeLoop looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Repos** override the file, until you choose **Follow the config file**.
+A repo queues once its default branch has the file. MergeLoop looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Settings** override the file, until you choose **Follow the config file**.
 
-The dashboard edits the file through PRs. **Set up** opens a PR that adds the file with the defaults, and the `mergepatrol` agent skill at `.agents/skills/mergepatrol/SKILL.md` and `.claude/skills/mergepatrol/SKILL.md`, so coding agents in the repo queue their PRs rather than merge them. **Settings** opens one that changes the file. Both come from the branch `mergepatrol/config`: a second change updates the open PR. The queue uses the new settings once the PR merges.
+The dashboard edits the file through PRs. **Set up** opens a PR that adds a file with nothing but its version, and the `mergepatrol` agent skill at `.agents/skills/mergepatrol/SKILL.md` and `.claude/skills/mergepatrol/SKILL.md`, so coding agents in the repo queue their PRs rather than merge them. A change to a repo's settings opens one that writes only what differs from the workspace. Both come from the branch `mergepatrol/config`: a second change updates the open PR. A repo that queues gets the PR queued too, as does the PR that updates its skill, so it goes through review and checks like any other PR. The queue uses the new settings once the PR merges.
 
-**Update all** in **Repos** brings every queuing repo up to date at once, and says what it did to each. For a repo behind, it opens a PR that rewrites the config file the way MergeLoop writes it now, with the repo's own settings, and a PR that writes the current skill, then queues them, so they go through the repo's review and checks like any other PR. It skips a repo with no config file, or one that does not parse. It leaves alone an open settings PR that changes the settings, and opens but does not queue a PR that would drop comments from the file. Run it again as often as you like: a repo up to date gets no PR.
+**Update all** in **Settings** brings every queuing repo up to date at once, and says what it did to each. For a repo behind, it opens a PR that rewrites the config file the way MergeLoop writes it now, keeping only what differs from the workspace, and a PR that writes the current skill, then queues them, so they go through the repo's review and checks like any other PR. It skips a repo with no config file, or one that does not parse. It leaves alone an open settings PR that changes the settings, and opens but does not queue a PR that would drop comments from the file. Run it again as often as you like: a repo up to date gets no PR.
 
-When the file does not parse, the queue pauses, and **Repos** shows why, until the file is fixed.
+When the file does not parse, the queue pauses, and **Settings** shows why, until the file is fixed.
 
 ## From an agent, or the API
 
@@ -303,6 +303,8 @@ A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell
 | `get_repo_skill` | Whether a repo has the current `mergepatrol` agent skill | |
 | `update_repo_skill` | Opens a PR that updates a repo's `mergepatrol` agent skill | Yes |
 | `update_repo` | Opens and queues the PRs that bring a queuing repo up to the latest settings and agent skill | Yes |
+| `get_repo_defaults` | What the workspace's repos follow where their config files say nothing | Yes |
+| `set_repo_defaults` | Sets what the workspace's repos follow, at once and with no PR | Yes |
 | `get_settings` | Which model API keys and ChatGPT login the workspace has | Yes |
 | `set_api_key` | Sets a model provider's API key | Yes |
 | `delete_api_key` | Removes a model provider's API key | Yes |

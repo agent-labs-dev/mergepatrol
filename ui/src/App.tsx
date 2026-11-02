@@ -95,7 +95,6 @@ const tabs = [
   ["You", "/$account/you"],
   ["Queue", "/$account/queue"],
   ["History", "/$account/history"],
-  ["Repos", "/$account/repos"],
   ["Settings", "/$account/settings"],
 ] as const;
 
