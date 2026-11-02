@@ -316,7 +316,9 @@ function RepoBars({
       sub="A repo follows the settings above unless its config file sets its own. Changing one opens a PR there."
     >
       <div className="rounded-lg border border-line bg-surface">
-        {on.length === 0 && <p className="px-4 py-3 text-muted">No repo queues yet.</p>}
+        {repos.data && on.length === 0 && (
+          <p className="px-4 py-3 text-muted">No repo queues yet.</p>
+        )}
         <ul className="divide-y divide-line-soft">
           {loaded.map(({ repo, config }) => {
             const r = view(repo, config);

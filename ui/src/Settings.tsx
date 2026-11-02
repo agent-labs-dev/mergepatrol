@@ -53,7 +53,7 @@ export function Settings({ workspace }: { workspace: number }) {
       <div className="mx-auto flex max-w-6xl gap-10 px-4 py-6 sm:px-6 sm:py-8">
         <nav className="sticky top-0 h-fit w-44 shrink-0 max-xl:hidden">
           <h1 className="mb-3 text-xl font-semibold tracking-tight">Settings</h1>
-          {SECTIONS.map(([id, label]) => (
+          {SECTIONS.filter(([id]) => id !== "plan" || billing.data).map(([id, label]) => (
             <a
               key={id}
               href={`#${id}`}
