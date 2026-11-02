@@ -93,9 +93,13 @@ export function Settings({ workspace, app }: { workspace: number; app: AppView }
         workspace={workspace}
         drafts={drafts}
         discard={() => setDrafts({})}
-        sent={(repo, pull) => {
+        sent={(repo, settings, pull) => {
           setOpened((opened) => ({ ...opened, [repo]: pull }));
-          setDrafts(({ [repo]: _, ...others }) => others);
+          // An edit made while the PR opened stays a draft.
+          setDrafts((drafts) => {
+            const { [repo]: draft, ...others } = drafts;
+            return draft?.to === settings ? others : drafts;
+          });
         }}
       />
     </div>

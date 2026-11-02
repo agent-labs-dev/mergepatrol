@@ -493,8 +493,8 @@ export function DraftsTray({
   workspace: number;
   drafts: Drafts;
   discard: () => void;
-  /** A draft left as this PR. */
-  sent: (repo: string, pull: UpdatePullView) => void;
+  /** A draft left as this PR, with the settings it sent. */
+  sent: (repo: string, settings: RepoSettingsView, pull: UpdatePullView) => void;
 }) {
   const client = useQueryClient();
   const [reviewing, setReviewing] = useState(false);
@@ -506,7 +506,8 @@ export function DraftsTray({
       setErrors({});
       for (const repo of repos) {
         try {
-          sent(repo, await proposeRepoConfig(workspace, repo, drafts[repo].to));
+          const { to } = drafts[repo];
+          sent(repo, to, await proposeRepoConfig(workspace, repo, to));
           capture("repo config proposed", { repo });
           client.invalidateQueries({ queryKey: ["repo-config", workspace, repo] });
         } catch (e) {
