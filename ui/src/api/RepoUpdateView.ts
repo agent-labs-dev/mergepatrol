@@ -2,10 +2,14 @@
 import type { UpdatePullView } from "./UpdatePullView";
 
 /**
- * What an update did to a repo. With neither field set, the repo was up to date.
+ * What an update did to a repo. With no field set, the repo was up to date.
  */
 export type RepoUpdateView = { 
 /**
  * Why it left the repo alone.
  */
-skipped: string | null, pulls: Array<UpdatePullView>, };
+skipped: string | null, pulls: Array<UpdatePullView>, 
+/**
+ * Why the skill's half failed. `pulls` still has what the settings' half did.
+ */
+failed: string | null, };

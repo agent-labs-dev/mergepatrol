@@ -2198,10 +2198,22 @@ pub(crate) async fn propose_repo_config(
         Some(_) => Vec::new(),
         None => skill_paths(&gh, &repo).await?,
     };
-    let loses_comments = base
-        .text
-        .as_deref()
-        .is_some_and(|t| settings.loses_comments_of(t, &defaults));
+    let open = gh.open_pr_from(&repo, CONFIG_BRANCH).await?;
+    let on_branch = match open {
+        Some(_) => {
+            gh.branch_file(&repo, CONFIG_BRANCH, REPO_CONFIG_PATH)
+                .await?
+        }
+        None => None,
+    };
+    let loses_comments = [base.text.as_deref(), on_branch.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|t| settings.loses_comments_of(t, &defaults));
+    // A queued PR stays queued through a push: this one has to wait for a human.
+    if let Some(pr) = open.filter(|_| loses_comments) {
+        dequeue(&app, &gh, &token, &repo, pr.number).await?;
+    }
     let (title, body) = config_pr(&settings, base.text.is_some(), &base.branch, &skills);
     let mut files = vec![(REPO_CONFIG_PATH, content.as_str())];
     files.extend(skills.iter().map(|p| (p.as_str(), SKILL)));
@@ -2560,13 +2572,47 @@ impl UpdatePullView {
 
 const LOSES_COMMENTS: &str = "This drops the file's comments: carry them over, then queue this PR.";
 
-/// What an update did to a repo. With neither field set, the repo was up to date.
+/// What an update did to a repo. With no field set, the repo was up to date.
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct RepoUpdateView {
     /// Why it left the repo alone.
     pub skipped: Option<String>,
     pub pulls: Vec<UpdatePullView>,
+    /// Why the skill's half failed. `pulls` still has what the settings' half did.
+    pub failed: Option<String>,
+}
+
+impl RepoUpdateView {
+    /// The settings' PR, if any, with how the skill's half went.
+    fn finished(
+        mut pulls: Vec<UpdatePullView>,
+        skill: Result<Option<UpdatePullView>, ApiError>,
+    ) -> Self {
+        let failed = match skill {
+            Ok(pull) => {
+                pulls.extend(pull);
+                None
+            }
+            Err(e) => Some(reason(e, "MergeLoop could not update the skill.")),
+        };
+        Self {
+            skipped: None,
+            pulls,
+            failed,
+        }
+    }
+}
+
+/// An error, for a user reading an outcome rather than a failed request.
+fn reason(e: ApiError, fallback: &str) -> String {
+    match e {
+        ApiError::Status(_, why) | ApiError::GitHubLimited(_, why) => why,
+        ApiError::Internal(e) => {
+            tracing::error!(error = %format!("{e:#}"), "{fallback}");
+            fallback.to_owned()
+        }
+    }
 }
 
 /// What an update does about a repo's config file.
@@ -2580,6 +2626,9 @@ enum ConfigUpdate {
     Queue,
     /// The open PR changes the settings too: someone's change, not the update's to touch.
     Leave,
+    /// Rewriting the open PR would lose comments: a push cannot take it out of the queue, so
+    /// the update does not push.
+    KeepComments,
 }
 
 /// `text` is the file on the default branch, which sets `settings`, and `open` the file on the
@@ -2600,6 +2649,12 @@ fn config_update(
         Ok(theirs) if theirs != *settings => ConfigUpdate::Leave,
         Err(_) => ConfigUpdate::Leave,
         Ok(_) if open.is_some_and(|t| settings.written_in(t, defaults)) => ConfigUpdate::Queue,
+        Ok(_)
+            if settings.loses_comments_of(text, defaults)
+                || open.is_some_and(|t| settings.loses_comments_of(t, defaults)) =>
+        {
+            ConfigUpdate::KeepComments
+        }
         Ok(_) => ConfigUpdate::Propose,
     }
 }
@@ -2619,6 +2674,7 @@ pub(crate) async fn update_repo(
         Ok(Json(RepoUpdateView {
             skipped: Some(why),
             pulls: Vec::new(),
+            failed: None,
         }))
     };
     let state = app.store.repo_state(id, &repo).await?;
@@ -2653,7 +2709,7 @@ pub(crate) async fn update_repo(
     );
     let pr = match update {
         ConfigUpdate::Current => None,
-        ConfigUpdate::Queue | ConfigUpdate::Leave => open,
+        ConfigUpdate::Queue | ConfigUpdate::Leave | ConfigUpdate::KeepComments => open,
         ConfigUpdate::Propose => Some(
             propose_rewrite(&gh, &repo, &settings, defaults, &file, text)
                 .await
@@ -2661,12 +2717,15 @@ pub(crate) async fn update_repo(
         ),
     };
     if let Some(pr) = pr {
-        let note = if update == ConfigUpdate::Leave {
-            Some("This PR changes the settings, so the update left it as it is.")
-        } else if settings.loses_comments_of(text, defaults) {
-            Some(LOSES_COMMENTS)
-        } else {
-            None
+        let note = match update {
+            ConfigUpdate::Leave => {
+                Some("This PR changes the settings, so the update left it as it is.")
+            }
+            ConfigUpdate::KeepComments => {
+                Some("Updating this PR would drop comments, so the update left it as it is.")
+            }
+            _ if settings.loses_comments_of(text, defaults) => Some(LOSES_COMMENTS),
+            _ => None,
         };
         pulls.push(match note {
             Some(note) => UpdatePullView::held(UpdatedFileView::Settings, pr.into(), note),
@@ -2684,22 +2743,31 @@ pub(crate) async fn update_repo(
         });
     }
 
-    let (skill, base) = repo_skill(&gh, &repo).await?;
-    if skill.state != SkillStateView::Current {
-        let pr = match skill.pull_request {
-            Some(pr) if skill.pull_request_current => pr,
-            _ => propose_skill(&gh, &repo, &skill.paths, &base)
-                .await
-                .map_err(github_failed)?
-                .into(),
-        };
-        pulls.push(queue_update(&app, &gh, &token, &repo, UpdatedFileView::Skill, pr).await);
-    }
+    let skill = update_skill(&app, &gh, &token, &repo).await;
     tracing::info!(installation = id, %repo, pulls = pulls.len(), "updated from the dashboard");
-    Ok(Json(RepoUpdateView {
-        skipped: None,
-        pulls,
-    }))
+    Ok(Json(RepoUpdateView::finished(pulls, skill)))
+}
+
+/// Opens and queues the PR that brings the repo's skill up to date, if it is behind.
+async fn update_skill(
+    app: &AppState,
+    gh: &Installation,
+    token: &str,
+    repo: &RepoName,
+) -> Result<Option<UpdatePullView>, ApiError> {
+    let (skill, base) = repo_skill(gh, repo).await?;
+    if skill.state == SkillStateView::Current {
+        return Ok(None);
+    }
+    let pr = match skill.pull_request {
+        Some(pr) if skill.pull_request_current => pr,
+        _ => propose_skill(gh, repo, &skill.paths, &base)
+            .await
+            .map_err(github_failed)?
+            .into(),
+    };
+    let file = UpdatedFileView::Skill;
+    Ok(Some(queue_update(app, gh, token, repo, file, pr).await))
 }
 
 /// GitHub's answer for the user: an update runs across repos, and each can fail its own way.
@@ -2758,13 +2826,9 @@ async fn queue_update(
         file,
         pull_request,
         queued: queued.is_ok(),
-        note: queued.err().map(|e| match e {
-            ApiError::Status(_, why) | ApiError::GitHubLimited(_, why) => why,
-            ApiError::Internal(e) => {
-                tracing::error!(error = %format!("{e:#}"), "queue an update's PR");
-                "MergeLoop could not queue this PR.".to_owned()
-            }
-        }),
+        note: queued
+            .err()
+            .map(|e| reason(e, "MergeLoop could not queue this PR.")),
     }
 }
 
@@ -3192,6 +3256,50 @@ mod tests {
             config_update(&s, &current, Some(Some(&theirs)), &s),
             ConfigUpdate::Current
         );
+    }
+
+    #[test]
+    fn an_update_keeps_off_an_open_pr_it_would_lose_comments_of() {
+        let s = settings();
+        let (current, old) = files(&s);
+        let on_the_pr = format!("# Why.\n{old}");
+        assert_eq!(
+            config_update(&s, &old, Some(Some(&on_the_pr)), &s),
+            ConfigUpdate::KeepComments
+        );
+        let on_the_branch = format!("{old}# Why.\n");
+        assert_eq!(
+            config_update(&s, &on_the_branch, Some(Some(&old)), &s),
+            ConfigUpdate::KeepComments
+        );
+        // Without a PR there is nothing queued to protect: the new one opens, unqueued.
+        assert_eq!(
+            config_update(&s, &on_the_branch, None, &s),
+            ConfigUpdate::Propose
+        );
+        // A rewrite the open PR already has pushes nothing.
+        assert_eq!(
+            config_update(&s, &on_the_branch, Some(Some(&current)), &s),
+            ConfigUpdate::Queue
+        );
+    }
+
+    #[test]
+    fn a_skill_failure_keeps_what_the_settings_pr_did() {
+        let pull = UpdatePullView {
+            file: UpdatedFileView::Settings,
+            pull_request: PullRequestRef {
+                number: 7,
+                url: "u".into(),
+            },
+            queued: true,
+            note: None,
+        };
+        let failed = Err(ApiError::Status(StatusCode::BAD_GATEWAY, "no".into()));
+        let view = RepoUpdateView::finished(vec![pull], failed);
+        assert_eq!(view.pulls.len(), 1);
+        assert!(view.pulls[0].queued);
+        assert_eq!(view.failed.as_deref(), Some("no"));
     }
 
     #[test]

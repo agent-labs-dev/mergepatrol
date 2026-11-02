@@ -75,10 +75,10 @@ function summary(rows: Row[]) {
   const parts = [
     queued > 0 && `${queued} ${queued === 1 ? "PR" : "PRs"} queued`,
     pulls.length > queued && `${pulls.length - queued} not queued`,
-    `${done.filter((u) => !u.skipped && u.pulls.length === 0).length} up to date`,
+    `${done.filter((u) => !u.skipped && !u.failed && u.pulls.length === 0).length} up to date`,
     done.some((u) => u.skipped) && `${done.filter((u) => u.skipped).length} skipped`,
-    rows.some((r) => r.state === "failed") &&
-      `${rows.filter((r) => r.state === "failed").length} failed`,
+    (rows.some((r) => r.state === "failed") || done.some((u) => u.failed)) &&
+      `${rows.filter((r) => r.state === "failed").length + done.filter((u) => u.failed).length} failed`,
   ];
   return parts.filter(Boolean).join(" · ");
 }
@@ -99,10 +99,15 @@ function Outcome({ row }: { row: Row }) {
         {row.state === "done" &&
           (row.update.skipped ? (
             <span className="text-warn">{row.update.skipped}</span>
-          ) : row.update.pulls.length === 0 ? (
+          ) : row.update.pulls.length === 0 && !row.update.failed ? (
             <span className="text-ok">Up to date</span>
           ) : (
-            row.update.pulls.map((p) => <Pull key={p.file} pull={p} />)
+            <>
+              {row.update.pulls.map((p) => (
+                <Pull key={p.file} pull={p} />
+              ))}
+              {row.update.failed && <p className="text-bad">{row.update.failed}</p>}
+            </>
           ))}
       </div>
     </div>
