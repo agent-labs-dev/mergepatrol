@@ -1916,8 +1916,8 @@ pub(crate) async fn review_pull(
 }
 
 /// What `login`'s approval posts: `None` for a PR they opened, which GitHub lets no author
-/// approve. The author's approval stands only where GitHub asks for none before it merges, so
-/// it posts no review; where GitHub asks for one, it is someone else's to give.
+/// approve. The author's approval posts no review, and still takes the PR into the queue: where
+/// GitHub asks for an approval before it merges, the queue holds it there for a reviewer's.
 pub(crate) async fn approval(
     gh: &Installation,
     repo: &RepoName,
@@ -1925,18 +1925,7 @@ pub(crate) async fn approval(
     login: &str,
 ) -> Result<Option<setup::Verdict>, ApiError> {
     let pr = gh.pull_request(repo, number).await?;
-    if !pr.authored_by(login) {
-        return Ok(Some(setup::Verdict::Approve));
-    }
-    if pr.awaits_approval() {
-        return Err(ApiError::Status(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "GitHub won't let you approve your own PR, and {repo} needs an approval to merge it. Ask a reviewer."
-            ),
-        ));
-    }
-    Ok(None)
+    Ok((!pr.authored_by(login)).then_some(setup::Verdict::Approve))
 }
 
 /// Reviews the PR as the user, with GitHub's refusal theirs to read.
@@ -2547,6 +2536,33 @@ pub(crate) async fn delete_api_key(
 mod tests {
     use super::*;
     use mergepatrol_core::PrSummary;
+
+    /// An open PR by `@ada` that GitHub won't merge before someone approves it.
+    const ADAS_AWAITING_APPROVAL: &str = r#"{"data":{"repository":{
+        "pullRequest":{"number":7,"state":"OPEN","title":"t","body":"","isDraft":false,"isCrossRepository":false,
+            "reviewDecision":"REVIEW_REQUIRED","baseRefName":"main","headRefName":"t","headRefOid":"abc",
+            "labels":{"nodes":[]},"files":{"nodes":[]},
+            "url":"","createdAt":"","additions":1,"deletions":0,"changedFiles":1,
+            "author":{"__typename":"User","login":"Ada","avatarUrl":"a"},
+            "latestOpinionatedReviews":{"nodes":[]},"reviewRequests":{"nodes":[]},"commits":{"nodes":[]}},
+        "defaultBranchRef":{"name":"main","rules":{"nodes":[]}},
+        "codeowners0":null,"codeowners1":null,"codeowners2":null}}}"#;
+
+    /// GitHub takes no approval from a PR's author, even where the repo needs one to merge.
+    /// The author's approval posts none, and is no dead end: it still queues the PR, which
+    /// waits there for a reviewer.
+    #[tokio::test]
+    async fn an_author_queues_their_own_pr_though_it_awaits_an_approval() {
+        let repo = RepoName::parse("o/r").unwrap();
+        for (login, verdict) in [("ada", None), ("bo", Some(setup::Verdict::Approve))] {
+            let (gh, _) =
+                mergepatrol_github::fake::serve(vec![(200, "", ADAS_AWAITING_APPROVAL)]).await;
+            let Ok(got) = approval(&gh, &repo, 7, login).await else {
+                panic!("{login}'s approval was refused");
+            };
+            assert_eq!(got, verdict, "{login}");
+        }
+    }
 
     #[test]
     fn a_skill_update_writes_each_copy_that_is_not_the_current_skill() {
