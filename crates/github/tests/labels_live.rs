@@ -1,5 +1,5 @@
 //! Labels a real PR as a user, the way the dashboard queues one. Needs a user token, and an open
-//! PR to label in a repo the user can triage: not one Mergepatrol runs on, as it uses its own
+//! PR to label in a repo the user can triage: not one MergeLoop runs on, as it uses its own
 //! labels only. `LIVE_TOKEN=$(gh auth token) LIVE_REPO=owner/name LIVE_PR=1 \
 //! cargo test -p mergepatrol-github --test labels_live -- --ignored`
 

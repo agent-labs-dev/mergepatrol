@@ -24,7 +24,7 @@ repo: string, number: number,
  */
 url: string, 
 /**
- * Whether the repo uses Mergepatrol.
+ * Whether the repo uses MergeLoop.
  */
 mergepatrol: RepoStatusView, 
 /**

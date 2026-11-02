@@ -19,7 +19,7 @@ merged_at: string | null,
  */
 workspace: number, 
 /**
- * Whether Mergepatrol runs on the repo, so the PR can be queued.
+ * Whether MergeLoop runs on the repo, so the PR can be queued.
  */
 queues: boolean, 
 /**

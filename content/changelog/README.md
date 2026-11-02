@@ -1,12 +1,12 @@
 # Changelog entries
 
-Each `.md` file here is one entry on `https://mergepatrol.ai/changelog`, with its own page at
+Each `.md` file here is one entry on `https://mergeloop.ai/changelog`, with its own page at
 `/changelog/<slug>`. The server renders them with one template (`crates/web/src/changelog.rs`),
 so an entry is only its text and its picture.
 
 ## When a PR adds one
 
-A PR whose change a Mergepatrol user can see or feel adds one entry, in the same PR: a new page,
+A PR whose change a MergeLoop user can see or feel adds one entry, in the same PR: a new page,
 control or setting, a change in how the queue behaves, a fix to something users hit, a price
 change. Deploy, CI, refactors, internal logs, tests and docs-only PRs don't. The test: would a
 user who reads the entry care? If not, skip it.

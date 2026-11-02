@@ -1,11 +1,13 @@
 ---
 name: mergepatrol
-description: This repo merges pull requests through Mergepatrol, a label-driven merge queue. Use when merging, landing or shipping a PR, queueing or dequeueing one, reading a Mergepatrol comment or label on a PR, or working the review comments on a queued PR.
+description: This repo merges pull requests through MergeLoop, a label-driven merge queue. Use when merging, landing or shipping a PR, queueing or dequeueing one, reading a MergeLoop comment or label on a PR, or working the review comments on a queued PR.
 ---
 
-# Mergepatrol
+# MergeLoop
 
-Pull requests in this repo land through Mergepatrol's merge queue. Queue a PR with a label and let Mergepatrol merge it; merging by hand or pushing to the default branch races the queue.
+Pull requests in this repo land through MergeLoop's merge queue. Queue a PR with a label and let MergeLoop merge it; merging by hand or pushing to the default branch races the queue.
+
+The installed skill keeps its `mergepatrol` name and paths so existing repos still find it.
 
 ## The labels
 
@@ -13,27 +15,27 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 - `<label>` queues the PR: `gh pr edit <number> --add-label <label>`. Removing it leaves the queue, and cancels the PR's run.
 - `<label>:priority`, beside `<label>`, puts the PR at the front of the queue.
-- `<label>:failed` is set by Mergepatrol when it ejects the PR.
+- `<label>:failed` is set by MergeLoop when it ejects the PR.
 
 ## Over MCP
 
-When the `mergepatrol` MCP server is connected, use its tools instead of the labels: `queue_pull` (with `priority` for the front of the queue), `dequeue_pull`, `pull_status` and `list_queue`. They change the same labels, as the GitHub user or bot the server was connected as, so everything below still holds. `pull_status` reads where a PR is without parsing Mergepatrol's comment. The server's other tools do what the Mergepatrol dashboard does, such as reviewing a PR or reading why the queue ejected one.
+When the `mergeloop` MCP server (or its existing `mergepatrol` connection) is connected, use its tools instead of the labels: `queue_pull` (with `priority` for the front of the queue), `dequeue_pull`, `pull_status` and `list_queue`. They change the same labels, as the GitHub user or bot the server was connected as, so everything below still holds. `pull_status` reads where a PR is without parsing MergeLoop's comment. The server's other tools do what the MergeLoop dashboard does, such as reviewing a PR or reading why the queue ejected one.
 
 ## What the queue does
 
-Mergepatrol rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in `.mergepatrol/mergepatrol.yml`: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
+MergeLoop rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in `.mergepatrol/mergepatrol.yml`: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
 
-A PR from a fork merges only as it was when the label went on: a push to it after that takes it out of the queue, until a maintainer adds `<label>` again. It never joins a batch, gets no agent, and is ejected on a conflict or a failed check. Mergepatrol can push its rebase only while the author allows edits by maintainers.
+A PR from a fork merges only as it was when the label went on: a push to it after that takes it out of the queue, until a maintainer adds `<label>` again. It never joins a batch, gets no agent, and is ejected on a conflict or a failed check. MergeLoop can push its rebase only while the author allows edits by maintainers.
 
-A stack is one item of the queue. The label on any of its PRs queues the whole stack, and the stack waits until every PR in it is ready. Mergepatrol rebases every layer when the stack is behind, and merges the stack all at once: every PR, or none. When it ejects a stack, every PR in it gets `<label>:failed`.
+A stack is one item of the queue. The label on any of its PRs queues the whole stack, and the stack waits until every PR in it is ready. MergeLoop rebases every layer when the stack is behind, and merges the stack all at once: every PR, or none. When it ejects a stack, every PR in it gets `<label>:failed`.
 
-The rebase rewrites the PR branch, and a fix adds a commit to it. Before pushing more commits to a queued PR, fetch it and rebase your work onto the remote branch. A push to a queued PR makes Mergepatrol start the PR over.
+The rebase rewrites the PR branch, and a fix adds a commit to it. Before pushing more commits to a queued PR, fetch it and rebase your work onto the remote branch. A push to a queued PR makes MergeLoop start the PR over.
 
 ## Reading its status
 
-Mergepatrol keeps one comment on each queued PR up to date. It says one of:
+MergeLoop keeps one comment on each queued PR up to date. It says one of:
 
-- **On hold**: the PR is a draft, waits for a required review, or has changes requested. Mergepatrol comments the reason on the PR. It keeps its place, and runs once GitHub shows it ready.
+- **On hold**: the PR is a draft, waits for a required review, or has changes requested. MergeLoop comments the reason on the PR. It keeps its place, and runs once GitHub shows it ready.
 - **Under review**: with automatic review on, as it is by default, an agent reviews the PR before it takes its place in line. What it is sure should change it sends back to the PR's author, which is you if you built it, as review comments on their lines. The PR goes on once every review thread on it is resolved, with no human approval. It asks a human only about what the author can't settle: a call on scope or product, access, a change outside the repo. `get_agent_review` over MCP reads the review. If you built the PR, work the review as "After you queue" says, but never answer it.
 - **Ejected**: the rebase, the checks or the merge failed, and the comment says which. The trigger label is gone and `<label>:failed` is on. Fix the cause, push, then add `<label>` again.
 - **Merged**: done. The queue labels are removed.
@@ -46,12 +48,12 @@ Queuing is not the end of your job. If you built the PR, stay with it until it m
 
 Every unresolved review thread on the PR, whoever started it, is one comment:
 
-- Mergepatrol's review posts a thread on its line for each finding that holds the PR. "Sent back to the author" is yours to work. "For a human" is a finding it asked a human about: leave it to them, and resolve it once they have answered.
+- MergeLoop's review posts a thread on its line for each finding that holds the PR. "Sent back to the author" is yours to work. "For a human" is a finding it asked a human about: leave it to them, and resolve it once they have answered.
 - A thread from a human reviewer or another bot.
 
 Also count a review that requests changes, and a top-level comment that asks for one. Findings the review cleared, and its notes under the bar, need nothing from you.
 
-Mergepatrol keeps one thread per finding across pushes. When the next review still finds it, it replies in that thread and opens it again, rather than posting a new one. When the review finds it fixed, or your reply holds up in the code, it resolves the thread itself. Only work a review of the PR's current head: a review of an older head can land after you push, and is out of date.
+MergeLoop keeps one thread per finding across pushes. When the next review still finds it, it replies in that thread and opens it again, rather than posting a new one. When the review finds it fixed, or your reply holds up in the code, it resolves the thread itself. Only work a review of the PR's current head: a review of an older head can land after you push, and is out of date.
 
 ### The states
 
@@ -66,7 +68,7 @@ A comment is `needs-human` only for one of these: what the PR should do or inclu
 
 ### The loop
 
-1. **Wait for the review of the current head.** Poll `pull_status` or `get_agent_review` (or the Mergepatrol comment) every few minutes while it is `pending` or `running`, and don't push meanwhile, so each head gets one whole review. Check the PR's review threads at the same time.
+1. **Wait for the review of the current head.** Poll `pull_status` or `get_agent_review` (or the MergeLoop comment) every few minutes while it is `pending` or `running`, and don't push meanwhile, so each head gets one whole review. Check the PR's review threads at the same time.
 2. **List the unresolved threads**, and match each to the ledger. A thread that opened again is `open` again, and counts as a round.
 3. **Work each `open` one** to `fixed`, `dismissed` or `needs-human`. Batch the fixes in as few commits as you can: each push gets a new review.
 4. **Push once**, if you fixed anything. Fetch and rebase onto the remote branch first.
@@ -76,7 +78,7 @@ A comment is `needs-human` only for one of these: what the PR should do or inclu
 
 A PR with no unresolved thread and nothing asked of a human goes on to the queue by itself. You never need a human to approve it then.
 
-### The Mergepatrol review's findings
+### The MergeLoop review's findings
 
 - Never call `answer_agent_review` on a PR you built, and never approve your own PR with `review_pull`. That would answer your own review.
 - After three reviews in a row that send findings back, the next one asks a human about what is still left. Don't try to beat it with a fourth fix: mark those `needs-human`.
@@ -103,7 +105,7 @@ Keep one comment on the PR that lists every comment and its state, and edit it e
 ### What not to do
 
 - Don't resolve a thread before the commit that fixes it is pushed, or without a reply that says why.
-- Don't resolve a `needs-human` thread, or one Mergepatrol asked a human about, before the human has answered.
+- Don't resolve a `needs-human` thread, or one MergeLoop asked a human about, before the human has answered.
 - Don't post a new comment for a reply that belongs in a thread or in the ledger.
 - Don't leave a comment `open` when you stop. Each one ends `fixed`, `dismissed` or `needs-human`.
 - Don't ping a human for something on this list you could do yourself.
@@ -112,4 +114,4 @@ When you stop, tell the user where the PR stands: merged, ejected and why, or wh
 
 ## Settings
 
-`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver, the `verify` commands, `fix_ci`, and `review`. Mergepatrol reads it from the default branch, so a change takes effect once its PR merges.
+`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver, the `verify` commands, `fix_ci`, and `review`. MergeLoop reads it from the default branch, so a change takes effect once its PR merges.

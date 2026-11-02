@@ -92,7 +92,7 @@ impl Panel {
                 div()
                     .text_size(px(15.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Mergepatrol"),
+                    .child("MergeLoop"),
             )
             .child(
                 div()

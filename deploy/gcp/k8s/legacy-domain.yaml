@@ -1,0 +1,16 @@
+# The old domain still reaches the app, for the API/MCP clients and webhook senders set up on
+# it. Cloudflare redirects its pages to mergeloop.ai before they get here (deploy/gcp/rebrand.md).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mergepatrol-legacy
+  namespace: mergepatrol
+spec:
+  parentRefs:
+    - name: mergepatrol
+      sectionName: https
+  hostnames: [mergepatrol.ai]
+  rules:
+    - backendRefs:
+        - name: mergepatrol
+          port: 80

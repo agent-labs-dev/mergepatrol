@@ -22,6 +22,6 @@ providers: Array<ProviderView>, path: string, default_branch: string, has_file: 
  */
 error: string | null, 
 /**
- * Mergepatrol's open PR that changes the file.
+ * MergeLoop's open PR that changes the file.
  */
 pull_request: PullRequestRef | null, };

@@ -30,4 +30,4 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
       - run: >-
           gcloud builds submit --region=us-west1 --config=deploy/gcp/cloudbuild.yaml
-          --substitutions=_REGION=us-west1,_PUBLIC_URL=https://mergepatrol.ai .
+          --substitutions=_REGION=us-west1,_PUBLIC_URL=https://mergeloop.ai .

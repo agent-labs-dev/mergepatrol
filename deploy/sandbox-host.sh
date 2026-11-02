@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares a Debian/Ubuntu VM (a GCE VM in production) to run Mergepatrol's jobs:
+# Prepares a Debian/Ubuntu VM (a GCE VM in production) to run MergeLoop's jobs:
 #   - gVisor (runsc) as a Docker runtime: each job gets its own user-space kernel.
 #   - A Docker network for jobs, whose traffic may reach the internet but not the cloud
 #     metadata server, private ranges, or this host.

@@ -224,7 +224,7 @@ pub trait Store: ReadCache + InboxStore + ReviewStore {
         ciphertext: Vec<u8>,
     ) -> Result<()>;
 
-    /// The repos Mergepatrol knows of, in every workspace. Repos without a row are off.
+    /// The repos MergeLoop knows of, in every workspace. Repos without a row are off.
     async fn repos(&self) -> Result<Vec<RepoState>>;
     /// `None` for a repo without a row: it is off.
     async fn repo_state(&self, installation_id: u64, repo: &RepoName) -> Result<Option<RepoState>>;
@@ -292,7 +292,7 @@ pub trait Store: ReadCache + InboxStore + ReviewStore {
 /// Who a secret belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
-    /// This Mergepatrol: the self-hosted GitHub App.
+    /// This MergeLoop: the self-hosted GitHub App.
     Instance,
     /// One workspace: its Anthropic API key.
     Installation(u64),

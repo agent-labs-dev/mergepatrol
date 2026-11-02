@@ -1,11 +1,11 @@
 ---
-title: Mergepatrol vs Mergify
-description: Mergify is a rules-driven merge queue with speculative checks. Mergepatrol is a label-driven queue whose agent resolves conflicts and fixes failed checks. How they compare.
+title: MergeLoop vs Mergify
+description: Mergify is a rules-driven merge queue with speculative checks. MergeLoop is a label-driven queue whose agent resolves conflicts and fixes failed checks. How they compare.
 date: 2026-10-31
 ---
 
 [Mergify](https://mergify.com) is one of the longest-running merge queues for GitHub, configured
-with rules in `.mergify.yml`. Mergepatrol is a newer, open-source queue that puts a coding agent
+with rules in `.mergify.yml`. MergeLoop is a newer, open-source queue that puts a coding agent
 on the two things that eject pull requests most: rebase conflicts and failed checks. Checked
 against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 [changelog](https://docs.mergify.com/changelog/) and [pricing](https://mergify.com/pricing) on
@@ -13,7 +13,7 @@ against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 
 ## At a glance
 
-| | Mergify | Mergepatrol |
+| | Mergify | MergeLoop |
 | --- | --- | --- |
 | Price | Open Source $0; Free $0 for up to 5 users on private repos; Max $21 a seat a month; Enterprise custom | Public repos free; private repos $15 a seat a month after a 14-day trial; self-hosted free |
 | Configuration | `.mergify.yml`: `queue_rules`, conditions, priorities, scopes | `.mergepatrol/mergepatrol.yml`: label, batch size, verify commands, agent settings, extra branches |
@@ -33,24 +33,24 @@ against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 - **Rule-heavy workflows.** If you want queue behaviour driven by conditions on labels, paths,
   authors and checks, Mergify's rules engine is built for it.
 - **Small private teams that want to pay nothing.** Mergify's free plan covers up to 5 users on
-  private repos; Mergepatrol's private plan is paid after the trial.
+  private repos; MergeLoop's private plan is paid after the trial.
 
-## Where Mergepatrol is the better fit
+## Where MergeLoop is the better fit
 
-- **Pull requests keep getting ejected for conflicts.** Mergepatrol runs a plain `git rebase` first
+- **Pull requests keep getting ejected for conflicts.** MergeLoop runs a plain `git rebase` first
   and an agent only on a real conflict, then your `verify` commands, before anything is pushed. See
   [Resolve rebase conflicts automatically](/blog/resolve-rebase-conflicts-automatically).
 - **Failed checks that the PR could fix.** The fix agent reads the failure and commits a fix on the
   PR while it keeps its place. A failure that is not the PR's, such as a flaky test, ejects it.
 - **You want a short config.** A label to queue, a batch size, and the commands that check an
   agent's work. Most repos run on the defaults the setup PR writes.
-- **You want to run it yourself.** Mergepatrol is Apache-2.0 and starts with `docker compose up`.
+- **You want to run it yourself.** MergeLoop is Apache-2.0 and starts with `docker compose up`.
 - **Coding agents queue your PRs.** An MCP server lets an agent queue, read and review PRs with
   its own GitHub token.
 
 ## Switching
 
-1. [Install Mergepatrol](/docs/getting-started) on the repositories and merge its setup PR.
+1. [Install MergeLoop](/docs/getting-started) on the repositories and merge its setup PR.
 2. Remove the repo's `queue_rules` from `.mergify.yml`, or uninstall Mergify there. Two queues on
    one branch race each other for merges.
 3. Set `batch_size` in `.mergepatrol/mergepatrol.yml` to what you used in Mergify, and `verify` to
@@ -64,6 +64,6 @@ against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 We found no conflict resolution in Mergify's documentation as of 31 October 2026. Its AI feature
 for failing CI hands a quarantined test to Claude Code or Cursor as a prompt, outside the queue.
 
-**Does Mergepatrol support priorities?**
+**Does MergeLoop support priorities?**
 Yes, with a second label, `mergepatrol:priority` by default, or `priority` on the `queue_pull` MCP
 tool. It has no rules engine beyond that.

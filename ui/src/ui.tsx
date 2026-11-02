@@ -43,7 +43,7 @@ export function StarButton() {
       href={repoUrl}
       target="_blank"
       rel="noreferrer"
-      aria-label="Star Mergepatrol on GitHub"
+      aria-label="Star MergeLoop on GitHub"
     >
       <GitHubIcon />
       <span className="max-sm:hidden">Star</span>

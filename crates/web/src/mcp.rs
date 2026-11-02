@@ -1,6 +1,6 @@
 //! The MCP server at `/mcp`, for coding agents: a tool for each API route, as `routes` lists
 //! them, so an agent does what the dashboard does. The bearer token is a GitHub token, or a
-//! Mergepatrol session from signing in through `oauth`, which holds one. Either way an agent acts
+//! MergeLoop session from signing in through `oauth`, which holds one. Either way an agent acts
 //! as the person or bot the GitHub token is for, and GitHub checks what they may do.
 //!
 //! Streamable HTTP without sessions: each POST carries one JSON-RPC message, answered as JSON.
@@ -21,7 +21,7 @@ use crate::{ApiError, AppState};
 /// The newest first: the protocol versions this server speaks.
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "Mergepatrol is the merge queue of the repos it is installed on. Queue a PR with `queue_pull` instead of merging it, then follow it with `pull_status`. The other tools do what the Mergepatrol dashboard does. Calls act as the GitHub user or bot you connected as. A GitHub token reaches single repos: the tools for a whole workspace need a Mergepatrol sign-in.";
+const INSTRUCTIONS: &str = "MergeLoop is the merge queue of the repos it is installed on. Queue a PR with `queue_pull` instead of merging it, then follow it with `pull_status`. The other tools do what the MergeLoop dashboard does. Calls act as the GitHub user or bot you connected as. A GitHub token reaches single repos: the tools for a whole workspace need a MergeLoop sign-in.";
 
 pub(crate) async fn post(
     State(app): State<AppState>,
@@ -96,7 +96,7 @@ fn initialize(params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "mergepatrol", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "mergeloop", "version": env!("CARGO_PKG_VERSION") },
         "instructions": INSTRUCTIONS,
     })
 }

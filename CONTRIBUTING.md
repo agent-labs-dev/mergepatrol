@@ -1,6 +1,6 @@
 # Contributing
 
-Mergepatrol is early, and its design still moves. Before a large change, open an issue so we can agree on the shape first.
+MergeLoop is early, and its design still moves. Before a large change, open an issue so we can agree on the shape first.
 
 ## Develop
 
@@ -28,4 +28,4 @@ The tests marked `#[ignore]` need Docker images, or a real Anthropic API key. Ea
 
 ## Pull requests
 
-Title PRs as [Conventional Commits](https://www.conventionalcommits.org/): `feat: ...`, `fix(deploy): ...`. A maintainer merges them through Mergepatrol's own queue.
+Title PRs as [Conventional Commits](https://www.conventionalcommits.org/): `feat: ...`, `fix(deploy): ...`. A maintainer merges them through MergeLoop's own queue.

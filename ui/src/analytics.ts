@@ -5,7 +5,7 @@ import type { SessionView } from "./api/SessionView";
 import type { WorkspaceView } from "./api/WorkspaceView";
 
 /*
- * Product analytics in PostHog, when the server turns them on (the hosted Mergepatrol). A person
+ * Product analytics in PostHog, when the server turns them on (the hosted MergeLoop). A person
  * is a GitHub login, and a `workspace` group is an installation of the App: the same keys the
  * server sends its events with. posthog-js loads only then, so a self-hosted dashboard never
  * downloads it.

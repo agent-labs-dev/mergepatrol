@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         };
     }
     if args.get(1).map(String::as_str) == Some("--version") {
-        println!("mergepatrol {}", env!("CARGO_PKG_VERSION"));
+        println!("MergeLoop {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if let [_, cmd, url] = args.as_slice()
@@ -99,7 +99,7 @@ async fn orchestrator() -> Result<()> {
         None => None,
     };
 
-    // Self-hosted first run: whoever reads this log can set Mergepatrol up from the dashboard.
+    // Self-hosted first run: whoever reads this log can set MergeLoop up from the dashboard.
     let setup_token = match (
         &hosted_app,
         vault.status(Scope::Instance, GITHUB_APP).await?,

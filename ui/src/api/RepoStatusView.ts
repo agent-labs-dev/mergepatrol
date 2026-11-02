@@ -7,7 +7,7 @@ import type { SwitchView } from "./SwitchView";
  */
 export type RepoStatusView = { state: RepoStateView, 
 /**
- * The Mergepatrol GitHub App is installed on the repo.
+ * The MergeLoop GitHub App is installed on the repo.
  */
 installed: boolean, 
 /**

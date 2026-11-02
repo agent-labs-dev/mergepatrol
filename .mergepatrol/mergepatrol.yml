@@ -1,4 +1,4 @@
-# Mergepatrol reads this file from the default branch. The dashboard opens a PR to change it.
+# MergeLoop reads this file from the default branch. The dashboard opens a PR to change it.
 version: 1
 label: mergepatrol
 batch_size: 8
