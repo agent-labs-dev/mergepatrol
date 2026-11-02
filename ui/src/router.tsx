@@ -50,13 +50,22 @@ const workspaceHome = createRoute({
   },
 });
 
+/** The You tab's folders before they were four, for the links kept from then. */
+const oldFolders: Record<string, Folder> = {
+  needs: "review",
+  turn: "opened",
+  queue: "opened",
+  others: "opened",
+  drafts: "opened",
+};
+
 const you = createRoute({
   getParentRoute: () => workspace,
   path: "you",
-  /** The folder in view, Needs you by default, the PR in it as `owner/repo#n`, and whether the
-   * agent's review of the PR is being answered. */
+  /** The folder in view, Review requested by default, the PR in it as `owner/repo#n`, and
+   * whether the agent's review of the PR is being answered. */
   validateSearch: (search): { folder?: Folder; pr?: string; answer?: boolean } => ({
-    folder: oneOf(FOLDERS, search.folder),
+    folder: oneOf(FOLDERS, oldFolders[String(search.folder)] ?? search.folder),
     pr: optional(search.pr, "string"),
     answer: search.answer === true || undefined,
   }),

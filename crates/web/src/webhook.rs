@@ -132,14 +132,17 @@ fn installation(analytics: &Analytics, payload: &Value) {
     );
 }
 
-/// The PRs the delivery changed of what the You tab shows: themselves, their reviews, comments
-/// and checks.
+/// The PRs the delivery changed of what the You tab shows: themselves, their reviews, comments,
+/// review threads and checks.
 fn inbox_prs(event: Option<&str>, payload: &Value) -> Vec<u64> {
     let number = |v: &Value| v["number"].as_u64();
     match event {
-        Some("pull_request" | "pull_request_review" | "pull_request_review_comment") => {
-            number(&payload["pull_request"]).into_iter().collect()
-        }
+        Some(
+            "pull_request"
+            | "pull_request_review"
+            | "pull_request_review_comment"
+            | "pull_request_review_thread",
+        ) => number(&payload["pull_request"]).into_iter().collect(),
         // An issue's comment is not a PR's.
         Some("issue_comment") if !payload["issue"]["pull_request"].is_null() => {
             number(&payload["issue"]).into_iter().collect()
