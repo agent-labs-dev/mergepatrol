@@ -1,6 +1,7 @@
 ---
 title: Settings that fit on one screen
 kind: improved
+pr: 188
 image: /changelog/settings-sections/after.png
 ---
 
