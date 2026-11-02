@@ -857,9 +857,9 @@ async fn tick_lane(
     };
     let mut lane = read.lane(trunk);
     if let Some(merge) = lane.merging.clone() {
-        let method = &snap.merge_method;
+        let method = merge_method(gh, &key, &snap).await?;
         let number = merge.number;
-        if resume_merge(ctx, &settings, gh, &key, &mut lane, &units, merge, method).await? {
+        if resume_merge(ctx, &settings, gh, &key, &mut lane, &units, merge, &method).await? {
             units.retain(|u| u.number != number);
         }
     }
@@ -1009,11 +1009,11 @@ async fn tick_lane(
         .find(|u| u.number == number)
         .context("the lane's next entry is not on GitHub")?
         .clone();
-    let required = gh.required_checks(repo, &key.trunk).await?;
+    let rules = gh.branch_rules(repo, &key.trunk).await?;
 
     // GitHub merges a PR behind the trunk, which a batch's PRs are, unless the trunk is strict.
-    if next.len() > 1 && !required.strict {
-        let ready = batchable(gh, repo, &units, &required.names, &next).await?;
+    if next.len() > 1 && !rules.strict {
+        let ready = batchable(gh, repo, &units, &rules.checks, &next).await?;
         if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &ready).await? {
             run_batch(ctx, &settings, gh, &key, &snap, &mut lane, batch).await?;
             return Ok(Ran::Job);
@@ -1912,8 +1912,9 @@ async fn merge_batch(
             return finish(ctx, settings, gh, key, lane, tested, Outcome::Held(reason)).await;
         }
         let top = tested.top();
+        let method = merge_method(gh, key, snap).await?;
         start_merge(ctx, key, lane, tested, &top.head_ref_oid).await?;
-        match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &snap.merge_method).await? {
+        match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &method).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
                 let merged = Outcome::Merged(sha.clone());
@@ -1952,7 +1953,7 @@ async fn checks_verdict(
     head: &str,
     published: Instant,
 ) -> Result<(CheckState, Vec<String>)> {
-    let required = gh.required_checks(&key.repo, &key.trunk).await?.names;
+    let required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
     let verdict = gh.checks(&key.repo, head).await?.verdict(&required);
     Ok(match verdict {
         (CheckState::Passed, _) if required.is_empty() && published.elapsed() < NO_CHECKS_GRACE => {
@@ -1960,6 +1961,13 @@ async fn checks_verdict(
         }
         v => v,
     })
+}
+
+/// The method to merge into the trunk with: the repo's default, unless the trunk's rulesets do
+/// not allow it.
+async fn merge_method(gh: &dyn GitHub, key: &LaneKey, snap: &RepoSnapshot) -> Result<String> {
+    let rules = gh.branch_rules(&key.repo, &key.trunk).await?;
+    Ok(rules.merge_method(&snap.merge_method))
 }
 
 /// GitHub rejects a merge right after the one before it, until it has worked out the PR's
@@ -2253,8 +2261,9 @@ async fn run_job(
                     Event::OnHold(reason)
                 } else {
                     let top = now.top().number;
+                    let method = merge_method(gh, key, snap).await?;
                     start_merge(ctx, key, lane, &now, head).await?;
-                    match gh.merge(repo, top, head, &snap.merge_method).await? {
+                    match gh.merge(repo, top, head, &method).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),
                         MergeOutcome::Rejected(r) => {
                             lane.merging = None;

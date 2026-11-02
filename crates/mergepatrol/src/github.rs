@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, PrNumber, REPO_CONFIG_PATH, RepoName};
 use mergepatrol_github::{
-    BranchMerge, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot, RequiredChecks,
+    BranchMerge, BranchRules, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot,
 };
 
 #[async_trait]
@@ -26,7 +26,7 @@ pub trait GitHub: Send + Sync {
     async fn awaiting_approval(&self, repo: &RepoName, sha: &str) -> Result<bool>;
     /// Whether PR `number` changes a file under `dir`.
     async fn changes_under(&self, repo: &RepoName, number: PrNumber, dir: &str) -> Result<bool>;
-    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks>;
+    async fn branch_rules(&self, repo: &RepoName, branch: &str) -> Result<BranchRules>;
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks>;
     /// What GitHub shows of why the checks `names` failed on `sha`.
     async fn check_failures(
@@ -105,8 +105,8 @@ impl GitHub for Installation {
     async fn changes_under(&self, repo: &RepoName, number: PrNumber, dir: &str) -> Result<bool> {
         Installation::changes_under(self, repo, number, dir).await
     }
-    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks> {
-        Installation::required_checks(self, repo, branch).await
+    async fn branch_rules(&self, repo: &RepoName, branch: &str) -> Result<BranchRules> {
+        Installation::branch_rules(self, repo, branch).await
     }
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         Installation::checks(self, repo, sha).await

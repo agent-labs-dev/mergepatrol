@@ -57,40 +57,87 @@ impl Checks {
     }
 }
 
-/// The status checks that a branch requires before a merge.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequiredChecks {
-    pub names: Vec<String>,
+/// What a branch's rules ask of a merge into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchRules {
+    /// The status checks that must pass.
+    pub checks: Vec<String>,
     /// The PR must also be up to date with the branch: GitHub merges only a PR that has every
     /// commit of the branch.
     pub strict: bool,
+    /// Of `squash`, `rebase` and `merge`, those the rulesets allow.
+    pub merge_methods: Vec<String>,
+}
+
+/// The merge methods, in the order to fall back on when the repo's default is not allowed.
+const MERGE_METHODS: [&str; 3] = ["squash", "rebase", "merge"];
+
+impl Default for BranchRules {
+    fn default() -> Self {
+        Self {
+            checks: Vec::new(),
+            strict: false,
+            merge_methods: MERGE_METHODS.map(String::from).to_vec(),
+        }
+    }
+}
+
+impl BranchRules {
+    /// The method to merge with: `default` if the rules allow it, or else the first they allow.
+    pub fn merge_method(&self, default: &str) -> String {
+        let allowed = |m: &str| self.merge_methods.iter().any(|a| a == m);
+        if allowed(default) {
+            return default.to_owned();
+        }
+        MERGE_METHODS
+            .into_iter()
+            .find(|m| allowed(m))
+            .unwrap_or(default)
+            .to_owned()
+    }
 }
 
 impl Installation {
-    /// The status checks that the branch's rulesets and classic protection require.
-    pub async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks> {
-        let mut names = Vec::new();
-        let mut strict = false;
-        let rules: Vec<Value> = self
-            .rest(
+    /// What the branch's rulesets and classic protection ask of a merge into it.
+    pub async fn branch_rules(&self, repo: &RepoName, branch: &str) -> Result<BranchRules> {
+        let mut rules = BranchRules::default();
+        let res = self
+            .request(
                 Method::GET,
                 &format!("/repos/{repo}/rules/branches/{branch}"),
                 None,
             )
             .await?;
-        for rule in rules
-            .iter()
-            .filter(|r| r["type"] == "required_status_checks")
-        {
-            strict |= rule["parameters"]["strict_required_status_checks_policy"] == true;
-            for check in rule["parameters"]["required_status_checks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                if let Some(c) = check["context"].as_str() {
-                    names.push(c.to_owned());
+        let active = match res.status {
+            s if s.is_success() => res.body.as_array().cloned().unwrap_or_default(),
+            // GitHub Free has no rulesets on a private repo, and answers 403 for them.
+            StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => Vec::new(),
+            s => bail!("rules of {branch}: {s} {}", res.body),
+        };
+        for rule in &active {
+            let params = &rule["parameters"];
+            match rule["type"].as_str() {
+                Some("required_status_checks") => {
+                    rules.strict |= params["strict_required_status_checks_policy"] == true;
+                    for check in params["required_status_checks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(c) = check["context"].as_str() {
+                            rules.checks.push(c.to_owned());
+                        }
+                    }
                 }
+                Some("pull_request") => {
+                    if let Some(allowed) = params["allowed_merge_methods"].as_array() {
+                        rules
+                            .merge_methods
+                            .retain(|m| allowed.iter().any(|a| a == m.as_str()));
+                    }
+                }
+                Some("required_linear_history") => rules.merge_methods.retain(|m| m != "merge"),
+                _ => {}
             }
         }
         // Classic protection needs the "administration: read" permission. Without it, rulesets are
@@ -104,21 +151,21 @@ impl Installation {
             .await?;
         match res.status {
             s if s.is_success() => {
-                strict |= res.body["strict"] == true;
+                rules.strict |= res.body["strict"] == true;
                 for c in res.body["contexts"].as_array().into_iter().flatten() {
                     if let Some(c) = c.as_str() {
-                        names.push(c.to_owned());
+                        rules.checks.push(c.to_owned());
                     }
                 }
             }
             // The branch has no classic protection, or none for status checks.
             StatusCode::NOT_FOUND => {}
-            StatusCode::FORBIDDEN => strict = true,
+            StatusCode::FORBIDDEN => rules.strict = true,
             s => bail!("required status checks of {branch}: {s} {}", res.body),
         }
-        names.sort();
-        names.dedup();
-        Ok(RequiredChecks { names, strict })
+        rules.checks.sort();
+        rules.checks.dedup();
+        Ok(rules)
     }
 
     pub async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
@@ -624,6 +671,47 @@ mod tests {
             checks.verdict(&["Lint".into()]),
             (CheckState::Failed, vec!["Lint".to_owned()])
         );
+    }
+
+    #[tokio::test]
+    async fn rules_out_of_reach_on_github_free_count_as_none() {
+        let upgrade = r#"{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature."}"#;
+        let (gh, _) = crate::app::fake::serve(vec![(403, "", upgrade), (403, "", upgrade)]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let rules = gh.branch_rules(&repo, "main").await.unwrap();
+        assert_eq!(rules.checks, Vec::<String>::new());
+        assert_eq!(rules.merge_method("merge"), "merge");
+    }
+
+    #[tokio::test]
+    async fn a_ruleset_narrows_the_merge_methods() {
+        let rules = r#"[
+            {"type":"pull_request","parameters":{"allowed_merge_methods":["squash","rebase"]}},
+            {"type":"required_linear_history"},
+            {"type":"pull_request","parameters":{"allowed_merge_methods":["merge","rebase"]}},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]"#;
+        let (gh, _) = crate::app::fake::serve(vec![(200, "", rules), (404, "", "{}")]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let rules = gh.branch_rules(&repo, "main").await.unwrap();
+        assert_eq!(rules.checks, ["ci"]);
+        assert_eq!(rules.merge_methods, ["rebase"]);
+        assert_eq!(rules.merge_method("merge"), "rebase");
+    }
+
+    #[test]
+    fn the_default_merge_method_stays_while_allowed() {
+        let squash_only = BranchRules {
+            merge_methods: vec!["squash".into()],
+            ..Default::default()
+        };
+        assert_eq!(squash_only.merge_method("merge"), "squash");
+        assert_eq!(squash_only.merge_method("squash"), "squash");
+        let no_merge = BranchRules {
+            merge_methods: vec!["squash".into(), "rebase".into()],
+            ..Default::default()
+        };
+        assert_eq!(no_merge.merge_method("rebase"), "rebase");
+        assert_eq!(no_merge.merge_method("merge"), "squash");
     }
 
     #[test]
