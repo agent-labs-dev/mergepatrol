@@ -129,7 +129,7 @@ const LLMS_INTRO: &str = "\
 
 > MergeLoop is a merge queue for GitHub. Add a label to a pull request, and it rebases the PR onto its base branch, tests it with the PRs around it, and merges it once the required checks pass. When a rebase conflicts or a required check fails, a coding agent (Claude Code or Codex, on your own model API key) resolves the conflict or commits a fix, and the PR keeps its place.
 
-- The hosted MergeLoop, at https://mergeloop.ai, runs the public GitHub App `MergeLoop`. It is free on public repos; private repos cost $15 per seat a month after a 14-day trial with no card. MergeLoop is open source (Apache-2.0), and a self-hosted instance has no limits and bills no one.
+- The hosted MergeLoop, at https://mergeloop.ai, runs the public GitHub App Merge Loop (https://github.com/apps/merge-loop). It is free on public repos; private repos cost $15 per seat a month after a 14-day trial with no card. MergeLoop is open source (Apache-2.0), and a self-hosted instance has no limits and bills no one.
 - Works on any GitHub plan, including private repos on GitHub Free, Pro and Team, where GitHub's own merge queue is not available.
 - Batches PRs on a draft PR so the repo's existing `pull_request` CI runs on them (no `merge_group` trigger), and bisects a failed batch down to the PR that broke it.
 - Queues and merges `gh stack` stacks as one item. Queues PRs from forks without exposing the repo's secrets.

@@ -2,17 +2,17 @@
 
 MergeLoop is a merge queue for GitHub. Add a label to a pull request, and MergeLoop rebases it onto its base branch, waits for the required checks, and merges it.
 
-Status: early. Expect rough edges, and [tell us](https://github.com/agent-labs-dev/mergepatrol/issues/new/choose) what breaks.
+Status: early. Expect rough edges, and [tell us](https://github.com/agent-labs-dev/mergeloop/issues/new/choose) what breaks.
 
 This README is also the website's docs, at [mergeloop.ai/docs](https://mergeloop.ai/docs). `DOCS` in `crates/web/src/docs.rs` picks its `##` sections by heading, and a test fails when one is renamed.
 
 MergeLoop was previously called Mergepatrol. Existing queue labels, `.mergepatrol/mergepatrol.yml`,
 installed `mergepatrol` agent skills, environment variables and API fields retain their names
-so existing repos and clients continue to work. The source repo remains `agent-labs-dev/mergepatrol`.
+so existing repos and clients continue to work. The source repo is now `agent-labs-dev/mergeloop`; GitHub redirects the old name.
 
 ## Try it
 
-The hosted MergeLoop at https://mergeloop.ai runs the public GitHub App `MergeLoop`. You bring your own model API key.
+The hosted MergeLoop at https://mergeloop.ai runs the public GitHub App [Merge Loop](https://github.com/apps/merge-loop) (`merge-loop`). You bring your own model API key.
 
 1. Sign in with GitHub at https://mergeloop.ai.
 2. Install the App on your organization or account, and choose its repos. GitHub sends you back to the dashboard.
@@ -181,7 +181,7 @@ The hosted MergeLoop uses one public GitHub App, which we create by hand on GitH
 | `MERGEPATROL_GITHUB_CLIENT_SECRET` | The OAuth client secret |
 | `MERGEPATROL_GITHUB_WEBHOOK_SECRET` | The webhook secret. Optional: without it, MergeLoop only polls |
 
-The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file.
+The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), each with the reason it is there, the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file.
 
 ### Rotate the secret key
 
@@ -402,7 +402,7 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 
 The job image has git, the Claude and Codex CLIs, Rust, Go, Python, and Node with pnpm, for the verify commands.
 
-Each release publishes both images, tagged with its version and `latest`: `ghcr.io/agent-labs-dev/mergeloop`, the orchestrator, and `ghcr.io/agent-labs-dev/mergeloop-job`. To run a release instead of building, set `MERGEPATROL_JOB_IMAGE=ghcr.io/agent-labs-dev/mergeloop-job:<version>`. Releases before the repo's rename to `mergeloop` published them as `ghcr.io/agent-labs-dev/mergepatrol` and `-job`, which get no new tags.
+No release has been published yet, so for now build both images from source with `docker compose up --build`. Once releases start, each one publishes both images, tagged with its version and `latest`: `ghcr.io/agent-labs-dev/mergeloop`, the orchestrator, and `ghcr.io/agent-labs-dev/mergeloop-job`. To run a release instead of building, set `MERGEPATROL_JOB_IMAGE=ghcr.io/agent-labs-dev/mergeloop-job:<version>`.
 
 ## On GCP
 
@@ -419,7 +419,7 @@ A job that needs another host fails until the host is added there. The proxy log
 
 The orchestrator hands the sandbox its link, `http://<orchestrator pod IP>:8081/jobs/<token>`, over HTTP, since a claim that sets env would skip the warm pool. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done.
 
-This is the hosted MergeLoop at `https://mergeloop.ai`. It runs the public App `MergeLoop`, which any account can install; each workspace brings its own Anthropic or OpenAI API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
+This is the hosted MergeLoop at `https://mergeloop.ai`. It runs the public App [Merge Loop](https://github.com/apps/merge-loop), which any account can install; each workspace brings its own Anthropic or OpenAI API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
 
 | Variable | What it is |
 | --- | --- |
