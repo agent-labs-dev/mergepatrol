@@ -2076,9 +2076,18 @@ async fn checks_verdict(
         }
         v => v,
     };
+    let mut unreported = checks.unreported(&required);
+    // A workflow run queued behind its concurrency group has no check runs yet: with no Actions
+    // check run on the head, its runs were not read. Only a countdown to eject reads them.
+    if !unreported.is_empty()
+        && checks.workflows_running.is_none()
+        && gh.workflows_running(&key.repo, head).await?
+    {
+        unreported.clear();
+    }
     Ok(HeadChecks {
         verdict,
-        unreported: checks.unreported(&required),
+        unreported,
     })
 }
 

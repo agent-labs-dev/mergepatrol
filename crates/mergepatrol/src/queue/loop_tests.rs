@@ -81,6 +81,8 @@ struct State {
     stacks: BTreeMap<PrNumber, Vec<PrNumber>>,
     /// How many PR reads fail next, as in a GitHub outage.
     outage: u32,
+    /// Heads with a workflow run that has yet to finish, and no Actions check run.
+    queued_workflows: Vec<String>,
     /// How many comments fail next.
     failing_comments: u32,
     /// How many label removals fail next.
@@ -430,8 +432,13 @@ impl GitHub for Fake {
         }
         Ok(Checks {
             by_name: s.checks_of(sha),
-            workflows_running: false,
+            workflows_running: None,
         })
+    }
+
+    async fn workflows_running(&self, _: &RepoName, sha: &str) -> Result<bool> {
+        let s = self.state.lock().unwrap();
+        Ok(s.queued_workflows.iter().any(|h| h == sha))
     }
 
     async fn check_failures(
@@ -3567,4 +3574,32 @@ async fn a_sync_that_fails_partway_while_a_pr_runs_is_done_again_whole() {
         saved_lane(&run.store, "main"),
         Some(vec![(2, EntryState::Held(Hold::Draft))])
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_required_check_whose_workflow_is_queued_is_waited_for_past_the_missing_bound() {
+    let run = Run::new(Fake::new(sift_required));
+    // `ci` passed, and the workflow that runs `sift` waits in its concurrency group: no check
+    // run of GitHub Actions is on the head yet.
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Passed)].into());
+        let head = s.head(1);
+        s.queued_workflows.push(head);
+    });
+    for _ in 0..(CHECKS_MISSING_FOR.as_secs() / CHECKS_POLL.as_secs() + 10) {
+        run.gh.then(|_| {});
+    }
+    run.gh.then(|s| {
+        s.queued_workflows.clear();
+        let both = BTreeMap::from([
+            ("ci".to_owned(), CheckState::Passed),
+            ("sift".to_owned(), CheckState::Passed),
+        ]);
+        s.checks_on.insert(s.head(1), both);
+    });
+    let start = tokio::time::Instant::now();
+    run.tick().await;
+    assert!(start.elapsed() >= CHECKS_MISSING_FOR);
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
 }

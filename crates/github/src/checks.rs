@@ -20,10 +20,12 @@ pub enum CheckState {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Checks {
     pub by_name: BTreeMap<String, CheckState>,
-    /// A workflow run on the commit has yet to finish: queued behind its `concurrency` group,
-    /// waiting for an approval, or running. Its jobs may not have check runs yet.
+    /// Whether a workflow run on the commit has yet to finish: queued behind its `concurrency`
+    /// group, waiting for an approval, or running. Its jobs may not have check runs yet. `None`
+    /// when no GitHub Actions check run is on the commit, so the workflow runs were not read:
+    /// `Installation::workflows_running` reads them.
     #[serde(default)]
-    pub workflows_running: bool,
+    pub workflows_running: Option<bool>,
 }
 
 impl Checks {
@@ -63,11 +65,12 @@ impl Checks {
     /// The `required` checks that never reported on the commit, once no check that did is still
     /// running: CI is done, and does not run them, as when a PR renames one. Empty while any
     /// check runs, as a job that waits for another creates its check only when it starts, and
-    /// while a workflow run has yet to finish, as one queued creates no check runs yet. Empty too
-    /// while no check has reported at all: CI may not have started, as in an outage.
+    /// while a workflow run is known to have yet to finish, as one queued creates no check runs
+    /// yet. Empty too while no check has reported at all: CI may not have started, as in an
+    /// outage.
     pub fn unreported(&self, required: &[String]) -> Vec<String> {
         if self.by_name.is_empty()
-            || self.workflows_running
+            || self.workflows_running == Some(true)
             || self.by_name.values().any(|s| *s == CheckState::Pending)
         {
             return Vec::new();
@@ -228,9 +231,9 @@ impl Installation {
 impl Installation {
     /// The check runs on `sha`, without those of a workflow run that a later run of the same
     /// workflow replaced: a push that triggers a workflow twice cancels the first run, and its
-    /// gate jobs still fail. And whether a workflow run on `sha` has yet to finish, as far as
-    /// GitHub Actions' check runs on it lead to look.
-    async fn check_runs(&self, repo: &RepoName, sha: &str) -> Result<(Vec<Value>, bool)> {
+    /// gate jobs still fail. And whether a workflow run on `sha` has yet to finish, read only
+    /// when a GitHub Actions check run is on it.
+    async fn check_runs(&self, repo: &RepoName, sha: &str) -> Result<(Vec<Value>, Option<bool>)> {
         let runs = self
             .all_pages(
                 &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
@@ -238,7 +241,7 @@ impl Installation {
             )
             .await?;
         if !runs.iter().any(|r| r["app"]["slug"] == "github-actions") {
-            return Ok((runs, false));
+            return Ok((runs, None));
         }
         let workflow_runs = self
             .all_pages(
@@ -256,7 +259,19 @@ impl Installation {
                     .is_none_or(|id| !replaced.contains(&id))
             })
             .collect();
-        Ok((runs, running))
+        Ok((runs, Some(running)))
+    }
+
+    /// Whether a workflow run on `sha` has yet to finish: queued, waiting for an approval, or
+    /// running. For a commit whose checks did not lead to read its workflow runs.
+    pub async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool> {
+        let workflow_runs = self
+            .all_pages(
+                &format!("/repos/{repo}/actions/runs?head_sha={sha}"),
+                "workflow_runs",
+            )
+            .await?;
+        Ok(workflow_runs.iter().any(unfinished))
     }
 }
 
@@ -512,7 +527,7 @@ mod tests {
     fn checks(list: &[(&str, CheckState)]) -> Checks {
         Checks {
             by_name: list.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect(),
-            workflows_running: false,
+            workflows_running: None,
         }
     }
 
@@ -557,11 +572,35 @@ mod tests {
         let repo = RepoName::parse("o/r").unwrap();
         let required = ["lint".into(), "sift".into()];
         let checks = gh.checks(&repo, "abc").await.unwrap();
-        assert!(checks.workflows_running);
+        assert_eq!(checks.workflows_running, Some(true));
         assert!(checks.unreported(&required).is_empty());
         let checks = gh.checks(&repo, "abc").await.unwrap();
-        assert!(!checks.workflows_running);
+        assert_eq!(checks.workflows_running, Some(false));
         assert_eq!(checks.unreported(&required), ["sift"]);
+    }
+
+    #[tokio::test]
+    async fn without_an_actions_check_run_the_workflow_runs_are_read_only_when_asked() {
+        // `lint` is a commit status; the workflow that runs `sift` is queued.
+        let runs = r#"{"total_count":0,"check_runs":[]}"#;
+        let statuses = r#"{"total_count":1,"statuses":[{"context":"lint","state":"success"}]}"#;
+        let queued = r#"{"total_count":1,"workflow_runs":[
+            {"id":2,"workflow_id":8,"check_suite_id":20,"status":"queued"}]}"#;
+        let (gh, requests) = crate::app::fake::serve(vec![
+            (200, "", runs),
+            (200, "", statuses),
+            (200, "", queued),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let checks = gh.checks(&repo, "abc").await.unwrap();
+        assert_eq!(checks.workflows_running, None);
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        assert!(gh.workflows_running(&repo, "abc").await.unwrap());
+        assert_eq!(
+            requests.lock().unwrap()[2],
+            "GET /repos/o/r/actions/runs?head_sha=abc&per_page=100&page=1 HTTP/1.1"
+        );
     }
 
     #[test]
