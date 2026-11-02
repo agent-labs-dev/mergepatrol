@@ -12,13 +12,15 @@ PROJECT=${PROJECT:-mergepatrol}
 REGION=${REGION:-us-west1}
 PUBLIC_URL=${PUBLIC_URL:-https://mergeloop.ai}
 # Pushes to this repo's main deploy, through GitHub Actions.
-REPO=${REPO:-agent-labs-dev/mergepatrol}
+REPO=${REPO:-agent-labs-dev/mergeloop}
 SQL=mergepatrol
 DB=mergepatrol
 DB_USER=mergepatrol
 # kubernetes-sigs/agent-sandbox: the SandboxTemplate, SandboxWarmPool and SandboxClaim kinds.
 AGENT_SANDBOX=v1.0.6
 HOST=${PUBLIC_URL#https://}
+# The old domain, still served for its API, MCP and webhook clients (rebrand.md).
+LEGACY_HOST=${LEGACY_HOST-mergepatrol.ai}
 
 g() { gcloud --project="$PROJECT" "$@"; }
 secret() { g secrets describe "$1" >/dev/null 2>&1; }
@@ -119,15 +121,20 @@ kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controll
 # record, so the certificate is ready before the domain points here.
 g compute addresses describe mergepatrol --global >/dev/null 2>&1 \
   || g compute addresses create mergepatrol --global
-g certificate-manager dns-authorizations describe mergepatrol >/dev/null 2>&1 \
-  || g certificate-manager dns-authorizations create mergepatrol --domain="$HOST"
-g certificate-manager certificates describe mergepatrol >/dev/null 2>&1 \
-  || g certificate-manager certificates create mergepatrol --domains="$HOST" --dns-authorizations=mergepatrol
 g certificate-manager maps describe mergepatrol >/dev/null 2>&1 \
   || g certificate-manager maps create mergepatrol
-g certificate-manager maps entries describe mergepatrol --map=mergepatrol >/dev/null 2>&1 \
-  || g certificate-manager maps entries create mergepatrol --map=mergepatrol --hostname="$HOST" \
-    --certificates=mergepatrol
+# Each domain's DNS authorization, certificate and map entry are named for its first label:
+# `mergeloop` for mergeloop.ai.
+for h in $HOST $LEGACY_HOST; do
+  n=${h%%.*}
+  g certificate-manager dns-authorizations describe "$n" >/dev/null 2>&1 \
+    || g certificate-manager dns-authorizations create "$n" --domain="$h"
+  g certificate-manager certificates describe "$n" >/dev/null 2>&1 \
+    || g certificate-manager certificates create "$n" --domains="$h" --dns-authorizations="$n"
+  g certificate-manager maps entries describe "$n" --map=mergepatrol >/dev/null 2>&1 \
+    || g certificate-manager maps entries create "$n" --map=mergepatrol --hostname="$h" \
+      --certificates="$n"
+done
 sed -e "s#__PROJECT__#$PROJECT#g" -e "s#__REGION__#$REGION#g" -e "s#__HOST__#$HOST#g" \
   "$(dirname "$0")/k8s/cluster.yaml" | kubectl apply -f -
 sed -e "s#__HOST__#$HOST#g" "$(dirname "$0")/k8s/routes.yaml" | kubectl apply -f -
@@ -140,16 +147,22 @@ g builds submit --region="$REGION" --config=deploy/gcp/cloudbuild.yaml \
   --substitutions="_REGION=$REGION,_PUBLIC_URL=$PUBLIC_URL" .
 
 ADDRESS=$(g compute addresses describe mergepatrol --global --format='value(address)')
-CHALLENGE_NAME=$(g certificate-manager dns-authorizations describe mergepatrol --format='value(dnsResourceRecord.name)')
-CHALLENGE_DATA=$(g certificate-manager dns-authorizations describe mergepatrol --format='value(dnsResourceRecord.data)')
+echo
+echo "Deployed. Left to do by hand, in each domain's DNS, as DNS only records: a Cloudflare proxy"
+echo "blocks Google's certificate."
+for h in $HOST $LEGACY_HOST; do
+  n=${h%%.*}
+  CHALLENGE_NAME=$(g certificate-manager dns-authorizations describe "$n" --format='value(dnsResourceRecord.name)')
+  CHALLENGE_DATA=$(g certificate-manager dns-authorizations describe "$n" --format='value(dnsResourceRecord.data)')
+  cat <<EOF
+  $h:
+    1. A CNAME that proves the domain for the certificate: $CHALLENGE_NAME -> $CHALLENGE_DATA
+       Then wait until this says ACTIVE:
+         gcloud certificate-manager certificates describe $n --project=$PROJECT
+    2. An A record: $h -> $ADDRESS
+EOF
+done
 cat <<EOF
-
-Deployed. Left to do by hand, in the domain's DNS, as DNS only records: a Cloudflare proxy
-blocks Google's certificate.
-  1. A CNAME that proves the domain for the certificate: $CHALLENGE_NAME -> $CHALLENGE_DATA
-     Then wait until this says ACTIVE:
-       gcloud certificate-manager certificates describe mergepatrol --project=$PROJECT
-  2. An A record: $HOST -> $ADDRESS
-  3. Open $PUBLIC_URL, install the App, and sign in.
+Then open $PUBLIC_URL, install the App, and sign in.
 After this, every push to main of $REPO deploys (.github/workflows/deploy.yml).
 EOF
