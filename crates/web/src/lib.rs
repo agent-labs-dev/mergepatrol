@@ -237,11 +237,11 @@ mod tests {
             repo_defaults: RepoSettings {
                 label: "mergepatrol".into(),
                 batch_size: 8,
-                resolver: mergepatrol_core::ResolverSettings {
+                agent: mergepatrol_core::AgentSettings {
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),
-                    tasks: Default::default(),
+                    overrides: Default::default(),
                 },
                 verify: Vec::new(),
                 fix_ci: Default::default(),

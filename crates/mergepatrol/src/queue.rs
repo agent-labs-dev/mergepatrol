@@ -695,7 +695,7 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
             .credential(
                 &ctx.vault,
                 Scope::Installation(installation),
-                settings.resolver.model(SpendTask::Review).0,
+                settings.agent.model(SpendTask::Review).0,
             )
             .await?
             .is_some();
@@ -2436,8 +2436,8 @@ pub(crate) async fn job_spec(
     below: Option<Below<'_>>,
     task: Task,
 ) -> Result<(JobSpec, Option<Granted>)> {
-    let resolver = &settings.resolver;
-    let (provider, model) = resolver.model(task.spend_task());
+    let agent = &settings.agent;
+    let (provider, model) = agent.model(task.spend_task());
     // A fork PR's job gets no agent: without access, a conflict fails the job.
     let granted = match pr.is_cross_repository {
         true => None,
@@ -2467,7 +2467,7 @@ pub(crate) async fn job_spec(
         resolver: ResolverSpec {
             provider,
             model: model.to_owned(),
-            effort: resolver.effort.clone(),
+            effort: agent.effort.clone(),
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
             api: granted.as_ref().map(|g| ApiAccess {

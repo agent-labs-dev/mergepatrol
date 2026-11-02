@@ -2,9 +2,9 @@
 import type { TaskModelView } from "./TaskModelView";
 
 /**
- * Each task's own model: none runs the resolver's.
+ * Each task's own model: none runs the default.
  */
-export type TaskModelsView = { 
+export type ModelOverridesView = { 
 /**
  * Resolving a rebase's conflicts.
  */

@@ -16,8 +16,8 @@ pub use lane::{
     PendingMerge, Person, PrSummary, Review,
 };
 pub use repo_config::{
-    EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
-    TaskModel, TaskModels,
+    AgentSettings, EFFORTS, FixCiSettings, LabelSpec, Labels, ModelOverrides, REPO_CONFIG_PATH,
+    RepoSettings, TaskModel,
 };
 pub use review::{
     Answer, Answered, Bar, CodeLine, Finding, Judged, Kind, Lean, LineKind, Question, Related,

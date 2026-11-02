@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{
-    Bar, CheckFailure, Finding, Judged, Kind, LabelSpec, Labels, Lean, ResolverSettings, Spend,
-    Step, StepTimes,
+    AgentSettings, Bar, CheckFailure, Finding, Judged, Kind, LabelSpec, Labels, Lean, Spend, Step,
+    StepTimes,
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -1208,11 +1208,11 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                 label: TRIGGER.into(),
                 // One PR at a time, unless a test batches.
                 batch_size: 1,
-                resolver: ResolverSettings {
+                agent: AgentSettings {
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),
-                    tasks: Default::default(),
+                    overrides: Default::default(),
                 },
                 verify: Vec::new(),
                 fix_ci: Default::default(),
