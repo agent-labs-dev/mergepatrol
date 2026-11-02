@@ -2,7 +2,7 @@
 //! The job writes `result.json`, and on success `result.bundle` (a review, `review.json`; an
 //! answer, `answer.md`), to its output directory.
 
-use mergepatrol_core::{Answered, CheckFailure, Finding, Provider, SentBack};
+use mergepatrol_core::{Answered, CheckFailure, Finding, Provider, SentBack, SpendTask};
 use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
@@ -77,6 +77,15 @@ impl Task {
     /// Whether the job returns code: a review or a question returns only what it wrote.
     pub fn returns_code(&self) -> bool {
         matches!(self, Task::Rebase | Task::FixChecks { .. })
+    }
+
+    /// The task the agent runs for: it picks the model, and counts the spend.
+    pub fn spend_task(&self) -> SpendTask {
+        match self {
+            Task::Rebase => SpendTask::Rebase,
+            Task::FixChecks { .. } => SpendTask::Fix,
+            Task::Review { .. } | Task::Question { .. } => SpendTask::Review,
+        }
     }
 }
 

@@ -2,8 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 import { capture } from "./analytics";
 import { fetchRepoConfig, proposeRepoConfig } from "./api";
+import type { ProviderView } from "./api/ProviderView";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
+import type { TaskModelsView } from "./api/TaskModelsView";
+import type { TaskModelView } from "./api/TaskModelView";
 import { ErrorText, field, primary } from "./ui";
 
 /** A repo's config file, as a form. Saving opens a PR that changes the file. */
@@ -36,6 +39,8 @@ function Form({
   const [verify, setVerify] = useState(config.settings.verify.join("\n"));
   const [branches, setBranches] = useState(config.settings.branches.join("\n"));
   const set = (patch: Partial<RepoSettingsView>) => setDraft({ ...draft, ...patch });
+  const setTask = (task: keyof TaskModelsView, model: TaskModelView | null) =>
+    set({ tasks: { ...draft.tasks, [task]: model } });
   const propose = useMutation({
     mutationFn: (settings: RepoSettingsView) => proposeRepoConfig(workspace, repo, settings),
     onSuccess: () => {
@@ -98,7 +103,7 @@ function Form({
           <select
             id={`${id}-provider`}
             value={draft.provider}
-            onChange={(e) => set({ provider: e.target.value as RepoSettingsView["provider"] })}
+            onChange={(e) => set(pick(config.providers, e.target.value))}
             className={`${field} w-full`}
           >
             {config.providers.map((p) => (
@@ -109,11 +114,12 @@ function Form({
           </select>
         </Field>
         <Field id={`${id}-model`} label="Resolver model">
-          <input
+          <ModelSelect
             id={`${id}-model`}
+            providers={config.providers}
+            provider={draft.provider}
             value={draft.model}
-            onChange={(e) => set({ model: e.target.value })}
-            className={`${field} w-full font-mono`}
+            onChange={(model) => set({ model })}
           />
         </Field>
         <Field id={`${id}-effort`} label="Resolver effort">
@@ -128,6 +134,51 @@ function Form({
             ))}
           </select>
         </Field>
+      </div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {TASKS.map(({ task, label, hint }) => {
+          const model = draft.tasks[task];
+          return (
+            <div key={task} className="contents">
+              <Field id={`${id}-${task}-provider`} label={label} hint={hint}>
+                <select
+                  id={`${id}-${task}-provider`}
+                  value={model?.provider ?? ""}
+                  onChange={(e) =>
+                    setTask(task, e.target.value ? pick(config.providers, e.target.value) : null)
+                  }
+                  className={`${field} w-full`}
+                >
+                  <option value="">The resolver's</option>
+                  {config.providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field id={`${id}-${task}-model`} label={`${label} model`}>
+                {model ? (
+                  <ModelSelect
+                    id={`${id}-${task}-model`}
+                    providers={config.providers}
+                    provider={model.provider}
+                    value={model.model}
+                    onChange={(m) => setTask(task, { ...model, model: m })}
+                  />
+                ) : (
+                  <select
+                    id={`${id}-${task}-model`}
+                    disabled
+                    className={`${field} w-full opacity-50`}
+                  >
+                    <option>{nameOf(config.providers, draft.provider, draft.model)}</option>
+                  </select>
+                )}
+              </Field>
+            </div>
+          );
+        })}
       </div>
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         <Field id={`${id}-fix`} label="Fix failed checks" hint="The agent commits a fix">
@@ -214,6 +265,60 @@ function Form({
         </button>
       </div>
     </form>
+  );
+}
+
+/** The tasks that can run their own model, as the file names them. */
+const TASKS: { task: keyof TaskModelsView; label: string; hint: string }[] = [
+  { task: "rebase", label: "Rebase", hint: "Resolves conflicts" },
+  { task: "fix", label: "Fix", hint: "Fixes failed checks" },
+  { task: "review", label: "Review", hint: "Reviews, and answers questions" },
+];
+
+type ProviderId = TaskModelView["provider"];
+
+/** A provider, with the model to start from: its first. */
+function pick(providers: ProviderView[], id: string): TaskModelView {
+  const provider = id as ProviderId;
+  return { provider, model: providers.find((p) => p.id === id)?.models[0]?.id ?? "" };
+}
+
+/** A model's name as people write it, else its id. */
+function nameOf(providers: ProviderView[], provider: ProviderId, model: string) {
+  const models = providers.find((p) => p.id === provider)?.models ?? [];
+  return models.find((m) => m.id === model)?.name ?? model;
+}
+
+/** The provider's models. A model the file names that the list lacks stays, as itself. */
+function ModelSelect({
+  id,
+  providers,
+  provider,
+  value,
+  onChange,
+}: {
+  id: string;
+  providers: ProviderView[];
+  provider: ProviderId;
+  value: string;
+  onChange: (model: string) => void;
+}) {
+  const models = providers.find((p) => p.id === provider)?.models ?? [];
+  const known = models.some((m) => m.id === value);
+  return (
+    <select
+      id={id}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={`${field} w-full`}
+    >
+      {!known && <option value={value}>{value || "Pick a model"}</option>}
+      {models.map((m) => (
+        <option key={m.id} value={m.id}>
+          {m.name}
+        </option>
+      ))}
+    </select>
   );
 }
 

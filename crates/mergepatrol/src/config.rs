@@ -91,6 +91,7 @@ impl Config {
                 provider,
                 model,
                 effort: opt("MERGEPATROL_EFFORT", "medium"),
+                tasks: Default::default(),
             },
             verify: Vec::new(),
             fix_ci: Default::default(),

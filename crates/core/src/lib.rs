@@ -17,6 +17,7 @@ pub use lane::{
 };
 pub use repo_config::{
     EFFORTS, FixCiSettings, LabelSpec, Labels, REPO_CONFIG_PATH, RepoSettings, ResolverSettings,
+    TaskModel, TaskModels,
 };
 pub use review::{
     Answer, Answered, Bar, CodeLine, Finding, Judged, Kind, Lean, LineKind, Question, Related,
@@ -69,6 +70,41 @@ impl Provider {
             Provider::OpenAi => "OpenAI",
             Provider::OpenRouter => "OpenRouter",
         }
+    }
+
+    /// The models the settings offer, the one to start from first. The file may name any other.
+    pub fn models(self) -> &'static [Model] {
+        const ANTHROPIC: &[Model] = &[
+            Model::new("claude-opus-5-5", "Claude Opus 5.5"),
+            Model::new("claude-fable-5-1", "Claude Fable 5.1"),
+            Model::new("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            Model::new("claude-haiku-5-5", "Claude Haiku 5.5"),
+        ];
+        const OPENAI: &[Model] = &[
+            Model::new("gpt-6.1-sol", "GPT-6.1 Sol"),
+            Model::new("gpt-6-astra", "GPT-6 Astra"),
+            Model::new("gpt-6.1-terra", "GPT-6.1 Terra"),
+            Model::new("gpt-6-luna", "GPT-6 Luna"),
+        ];
+        match self {
+            Provider::Anthropic => ANTHROPIC,
+            Provider::OpenAi => OPENAI,
+            // It serves too many to list: its file names one.
+            Provider::OpenRouter => &[],
+        }
+    }
+}
+
+/// A model to pick: its id, as the provider's API takes it, and its name, as people write it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Model {
+    pub id: &'static str,
+    pub name: &'static str,
+}
+
+impl Model {
+    const fn new(id: &'static str, name: &'static str) -> Self {
+        Self { id, name }
     }
 }
 

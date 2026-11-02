@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Provider, ReviewOverrides};
+use crate::{Provider, ReviewOverrides, SpendTask};
 
 pub const REPO_CONFIG_PATH: &str = ".mergepatrol/mergepatrol.yml";
 
@@ -37,6 +37,61 @@ pub struct ResolverSettings {
     pub provider: Provider,
     pub model: String,
     pub effort: String,
+    /// A model for one task over the resolver's: each task without one runs the resolver's.
+    #[serde(default, skip_serializing_if = "TaskModels::is_empty")]
+    pub tasks: TaskModels,
+}
+
+/// The tasks the agent runs, each with its own model or none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskModels {
+    /// Resolving a rebase's conflicts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebase: Option<TaskModel>,
+    /// Fixing failed checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<TaskModel>,
+    /// Reviewing a PR, and answering questions about the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<TaskModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskModel {
+    pub provider: Provider,
+    pub model: String,
+}
+
+impl TaskModels {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn get(&self, task: SpendTask) -> Option<&TaskModel> {
+        match task {
+            SpendTask::Rebase => self.rebase.as_ref(),
+            SpendTask::Fix => self.fix.as_ref(),
+            SpendTask::Review => self.review.as_ref(),
+        }
+    }
+
+    fn all(&self) -> [(&'static str, Option<&TaskModel>); 3] {
+        [
+            ("rebase", self.rebase.as_ref()),
+            ("fix", self.fix.as_ref()),
+            ("review", self.review.as_ref()),
+        ]
+    }
+}
+
+impl ResolverSettings {
+    /// The provider and model that run `task`: its own, else the resolver's.
+    pub fn model(&self, task: SpendTask) -> (Provider, &str) {
+        match self.tasks.get(task) {
+            Some(t) => (t.provider, &t.model),
+            None => (self.provider, &self.model),
+        }
+    }
 }
 
 /// When a PR's required checks fail, the agent commits a fix and the checks run again, up to
@@ -125,6 +180,42 @@ struct ResolverConfig {
     provider: Option<Provider>,
     model: Option<String>,
     effort: Option<String>,
+    #[serde(default)]
+    tasks: TaskModelsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskModelsConfig {
+    rebase: Option<TaskModelConfig>,
+    fix: Option<TaskModelConfig>,
+    review: Option<TaskModelConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskModelConfig {
+    provider: Option<Provider>,
+    model: Option<String>,
+}
+
+impl TaskModelConfig {
+    /// The task's own model, if it differs from the resolver's. The resolver's model is its
+    /// provider's: another provider needs its own.
+    fn resolve(self, task: &str, provider: Provider) -> Result<Option<TaskModel>, String> {
+        let task_provider = self.provider.unwrap_or(provider);
+        match self.model {
+            Some(model) => Ok(Some(TaskModel {
+                provider: task_provider,
+                model,
+            })),
+            None if task_provider == provider => Ok(None),
+            None => Err(format!(
+                "resolver.tasks.{task}.model: set the {} model to use",
+                task_provider.name()
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -167,19 +258,33 @@ impl RepoSettings {
                 provider.name()
             ));
         }
+        let model = config
+            .resolver
+            .model
+            .unwrap_or_else(|| defaults.resolver.model.clone());
+        let task = |name: &str, t: Option<TaskModelConfig>| {
+            t.map(|t| t.resolve(name, provider))
+                .transpose()
+                .map(Option::flatten)
+                .map_err(|e| format!("{REPO_CONFIG_PATH}: {e}"))
+        };
+        let tasks = config.resolver.tasks;
+        let tasks = TaskModels {
+            rebase: task("rebase", tasks.rebase)?,
+            fix: task("fix", tasks.fix)?,
+            review: task("review", tasks.review)?,
+        };
         let settings = Self {
             label: config.label.unwrap_or_else(|| defaults.label.clone()),
             batch_size: config.batch_size.unwrap_or(defaults.batch_size),
             resolver: ResolverSettings {
                 provider,
-                model: config
-                    .resolver
-                    .model
-                    .unwrap_or_else(|| defaults.resolver.model.clone()),
+                model,
                 effort: config
                     .resolver
                     .effort
                     .unwrap_or_else(|| defaults.resolver.effort.clone()),
+                tasks,
             },
             verify: config.verify.unwrap_or_else(|| defaults.verify.clone()),
             fix_ci: FixCiSettings {
@@ -214,6 +319,18 @@ impl RepoSettings {
         }
         if self.resolver.model.trim().is_empty() {
             return Err("resolver.model is empty".into());
+        }
+        for (task, t) in self.resolver.tasks.all() {
+            let Some(t) = t else { continue };
+            if !Provider::SUPPORTED.contains(&t.provider) {
+                return Err(format!(
+                    "resolver.tasks.{task}.provider: {} is not supported yet",
+                    t.provider.as_str()
+                ));
+            }
+            if t.model.trim().is_empty() {
+                return Err(format!("resolver.tasks.{task}.model is empty"));
+            }
         }
         if !EFFORTS.contains(&self.resolver.effort.as_str()) {
             return Err(format!(
@@ -281,6 +398,7 @@ mod tests {
                 provider: Provider::Anthropic,
                 model: "claude-opus-5-5".into(),
                 effort: "medium".into(),
+                tasks: TaskModels::default(),
             },
             verify: vec![],
             fix_ci: FixCiSettings::default(),
@@ -327,6 +445,65 @@ resolver: { provider: openai }
     }
 
     #[test]
+    fn each_task_runs_the_resolver_s_model_unless_it_names_its_own() {
+        let s = RepoSettings::from_file(
+            Some(
+                "version: 1
+resolver:
+  model: claude-sonnet-5-5
+  tasks:
+    rebase: { provider: openai, model: gpt-6.1-sol }
+    review: { model: claude-fable-5-1 }
+",
+            ),
+            &defaults(),
+        )
+        .unwrap();
+        let r = &s.resolver;
+        assert_eq!(
+            r.model(SpendTask::Rebase),
+            (Provider::OpenAi, "gpt-6.1-sol")
+        );
+        assert_eq!(
+            r.model(SpendTask::Fix),
+            (Provider::Anthropic, "claude-sonnet-5-5")
+        );
+        assert_eq!(
+            r.model(SpendTask::Review),
+            (Provider::Anthropic, "claude-fable-5-1")
+        );
+
+        // A file from before tasks runs every task on the resolver's model.
+        let s = RepoSettings::from_file(
+            Some("version: 1\nresolver: { provider: openai, model: gpt-6.1-sol }\n"),
+            &defaults(),
+        )
+        .unwrap();
+        assert!(s.resolver.tasks.is_empty());
+        for task in [SpendTask::Rebase, SpendTask::Fix, SpendTask::Review] {
+            assert_eq!(s.resolver.model(task), (Provider::OpenAi, "gpt-6.1-sol"));
+        }
+
+        // The resolver's own provider, without a model, is no override.
+        let s = RepoSettings::from_file(
+            Some("version: 1\nresolver: { tasks: { fix: { provider: anthropic } } }\n"),
+            &defaults(),
+        )
+        .unwrap();
+        assert!(s.resolver.tasks.is_empty());
+
+        let err = RepoSettings::from_file(
+            Some("version: 1\nresolver: { tasks: { fix: { provider: openai } } }\n"),
+            &defaults(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("resolver.tasks.fix.model: set the OpenAI model"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn no_file_is_the_defaults() {
         assert_eq!(RepoSettings::from_file(None, &defaults()), Ok(defaults()));
     }
@@ -366,6 +543,17 @@ resolver: { provider: openai }
         s.fix_ci.enabled = false;
         s.resolver.provider = Provider::OpenAi;
         s.resolver.model = "gpt-6.1-sol".into();
+        s.resolver.tasks = TaskModels {
+            rebase: None,
+            fix: Some(TaskModel {
+                provider: Provider::OpenAi,
+                model: "gpt-6-luna".into(),
+            }),
+            review: Some(TaskModel {
+                provider: Provider::Anthropic,
+                model: "claude-fable-5-1".into(),
+            }),
+        };
         s.branches = vec!["release".into(), "release/2026-10".into()];
         s.review = ReviewOverrides {
             enabled: Some(true),
@@ -388,6 +576,10 @@ resolver: { provider: openai }
             "version: 1\nresolver: { provider: gemini, model: g }\n",
             "version: 1\nresolver: { provider: openrouter, model: qwen/qwen3-coder }\n",
             "version: 1\nlabel: ''\n",
+            "version: 1\nresolver: { tasks: { resolve: { model: m } } }\n",
+            "version: 1\nresolver: { tasks: { fix: { provider: openrouter, model: m } } }\n",
+            "version: 1\nresolver: { tasks: { fix: { model: '' } } }\n",
+            "version: 1\nresolver: { tasks: { fix: { effort: high } } }\n",
             "version: 1\nfix_ci: { attempts: 0 }\n",
             "version: 1\nfix_ci: { attempts: 6 }\n",
             "version: 1\nfix_ci: { retries: 1 }\n",

@@ -241,6 +241,7 @@ mod tests {
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),
+                    tasks: Default::default(),
                 },
                 verify: Vec::new(),
                 fix_ci: Default::default(),

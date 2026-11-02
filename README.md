@@ -206,6 +206,14 @@ resolver:
   provider: anthropic   # or openai
   model: claude-opus-5-5
   effort: medium        # low, medium, high, xhigh or max
+  tasks:                # optional: a model for one task over the resolver's
+    rebase:             # resolving a rebase's conflicts
+      provider: openai
+      model: gpt-6.1-sol
+    fix:                # fixing failed checks
+      model: claude-sonnet-5-5
+    review:             # reviewing a PR, and answering questions about the review
+      model: claude-fable-5-1
 verify:
   - cargo check
 fix_ci:
@@ -221,7 +229,7 @@ review:            # over the workspace's automatic review settings
   require_resolved: true   # wait for every review thread to be resolved
 ```
 
-The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too.
+The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too. Each task under `resolver.tasks` runs the resolver's provider and model unless it sets its own, so a file without `tasks` runs every task as before. A task that sets another provider than the resolver's must set its model too. The dashboard offers each provider's current models by name; the file takes the model's API id, and may name any model the provider serves.
 
 The verify commands run after an agent resolution or fix, before the publish.
 

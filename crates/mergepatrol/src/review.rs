@@ -212,7 +212,7 @@ async fn run_review(
         if granted.is_none() {
             bail!(
                 "{NO_KEY} in the workspace's settings for {}: the agent cannot review.",
-                settings.resolver.provider.name()
+                spec.resolver.provider.name()
             );
         }
         let out = run_job(ctx, gh, settings, key, r.number, &job_id, &spec).await?;
