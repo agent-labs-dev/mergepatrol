@@ -332,6 +332,12 @@ export function RepoSettings({
         )}{" "}
         Changing a setting opens a PR, queued for you, and applies once it merges.
       </p>
+      {!config.follows && (
+        <p className="mt-2 text-muted">
+          The file spells out settings that match the workspace, so they stay put if it changes.
+          Update all trims them.
+        </p>
+      )}
       {config.error && (
         <p className="mt-2 text-warn">
           The file does not parse, so the queue is paused: {config.error}. Saving these settings

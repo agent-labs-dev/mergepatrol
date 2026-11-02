@@ -239,7 +239,7 @@ pub(crate) static ROUTES: &[Route] = &[
         "Asks reviewers to review a PR, in a comment that mentions them, so GitHub tells them.",
         arg("reviewers", Ty::Strs, "Their GitHub logins."))),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/config", api::repo_config, tool!("get_repo_config", Reads,
-        "A repo's queue settings, as its config file on the default branch sets them over the workspace's defaults, or as the open settings PR would. With those `defaults`, and the models and efforts to pick from. A setting equal to its default follows the workspace.")),
+        "A repo's queue settings, as its config file on the default branch sets them over the workspace's defaults, or as the open settings PR would. With those `defaults`, and the models and efforts to pick from. A setting equal to its default follows the workspace, unless `follows` is false: the file spells it out, so it stays put until the file is trimmed.")),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/config", api::propose_repo_config, tool!("propose_repo_config", Writes,
         "Opens a PR that writes these settings to the repo's config file, or updates the one open, and queues it if the repo queues. The file keeps only what differs from the workspace's defaults, so the rest follows them. Returns the PR, with `queued` and a `note` when it is not. The queue uses the settings once it merges. Needs a MergeLoop sign-in.",
         arg("settings", Ty::Body, "Every setting, as `get_repo_config` returns them in `settings`."))),

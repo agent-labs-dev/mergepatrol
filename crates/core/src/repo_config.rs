@@ -787,6 +787,20 @@ agent:
     }
 
     #[test]
+    fn a_setting_spelled_out_stays_put_when_the_workspace_moves() {
+        let d = workspace();
+        let file = format!("batch_size: {}\n", d.batch_size);
+        let s = RepoSettings::from_file(Some(&file), &d).unwrap();
+        assert!(!s.written_in(&file, &d), "equal, but not following");
+        assert!(s.written_in(&s.to_yaml(&d), &d));
+
+        let mut moved = d.clone();
+        moved.batch_size += 1;
+        let s = RepoSettings::from_file(Some(&file), &moved).unwrap();
+        assert_eq!(s.batch_size, d.batch_size);
+    }
+
+    #[test]
     fn a_task_the_file_names_is_its_own_and_may_be_the_default() {
         for task in ["{}", "{ provider: openai }"] {
             let yaml = format!("agent: {{ overrides: {{ review: {task} }} }}\n");

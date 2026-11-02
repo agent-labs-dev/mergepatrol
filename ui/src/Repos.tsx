@@ -176,7 +176,8 @@ function Item({
             className={`block truncate text-xs ${own.length ? "text-muted" : "text-faint"}`}
             title={own.join(" · ")}
           >
-            {own.join(" · ") || (c ? "Follows the workspace" : "\u00a0")}
+            {own.join(" · ") ||
+              (c ? (c.follows ? "Follows the workspace" : "Matches the workspace") : "\u00a0")}
           </span>
         )}
       </span>

@@ -736,6 +736,9 @@ pub struct RepoConfigView {
     pub settings: RepoSettingsView,
     /// What the repo follows where its file says nothing: `defaults` of `get_repo_defaults`.
     pub defaults: RepoSettingsView,
+    /// A setting equal to its default follows it. False while the file spells such a setting
+    /// out: that one stays put when the default changes, until the file is trimmed.
+    pub follows: bool,
     pub efforts: Vec<String>,
     /// The providers a repo can choose.
     pub providers: Vec<ProviderView>,
@@ -2156,7 +2159,11 @@ pub(crate) async fn repo_config(
     };
     let settings =
         RepoSettings::from_file(text.as_deref(), defaults).unwrap_or_else(|_| defaults.clone());
+    let follows = text
+        .as_deref()
+        .is_none_or(|t| settings.written_in(t, defaults));
     Ok(Json(RepoConfigView {
+        follows,
         settings: settings.into(),
         defaults: defaults.clone().into(),
         efforts: EFFORTS.map(str::to_owned).into(),
