@@ -34,7 +34,7 @@ spec:
       # the pod ready before the load balancer sends to it, which left a deploy no backend for
       # over two minutes. If the zone goes down, change it here and deploy.
       nodeSelector:
-        topology.kubernetes.io/zone: us-west1-b
+        topology.kubernetes.io/zone: __REGION__-b
       # The Service `mergepatrol` would set MERGEPATROL_SERVICE_HOST, MERGEPATROL_PORT and others,
       # in the orchestrator's own namespace of variables.
       enableServiceLinks: false
