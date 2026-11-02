@@ -430,6 +430,7 @@ impl GitHub for Fake {
         }
         Ok(Checks {
             by_name: s.checks_of(sha),
+            workflows_running: false,
         })
     }
 

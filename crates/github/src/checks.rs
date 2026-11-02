@@ -20,6 +20,10 @@ pub enum CheckState {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Checks {
     pub by_name: BTreeMap<String, CheckState>,
+    /// A workflow run on the commit has yet to finish: queued behind its `concurrency` group,
+    /// waiting for an approval, or running. Its jobs may not have check runs yet.
+    #[serde(default)]
+    pub workflows_running: bool,
 }
 
 impl Checks {
@@ -58,10 +62,14 @@ impl Checks {
 
     /// The `required` checks that never reported on the commit, once no check that did is still
     /// running: CI is done, and does not run them, as when a PR renames one. Empty while any
-    /// check runs, as a job that waits for another creates its check only when it starts. Empty
-    /// too while no check has reported at all: CI may not have started, as in an outage.
+    /// check runs, as a job that waits for another creates its check only when it starts, and
+    /// while a workflow run has yet to finish, as one queued creates no check runs yet. Empty too
+    /// while no check has reported at all: CI may not have started, as in an outage.
     pub fn unreported(&self, required: &[String]) -> Vec<String> {
-        if self.by_name.is_empty() || self.by_name.values().any(|s| *s == CheckState::Pending) {
+        if self.by_name.is_empty()
+            || self.workflows_running
+            || self.by_name.values().any(|s| *s == CheckState::Pending)
+        {
             return Vec::new();
         }
         required
@@ -186,7 +194,8 @@ impl Installation {
     pub async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         let mut checks = Checks::default();
 
-        let runs = self.check_runs(repo, sha).await?;
+        let (runs, workflows_running) = self.check_runs(repo, sha).await?;
+        checks.workflows_running = workflows_running;
         for run in &runs {
             let state = match (run["status"].as_str(), run["conclusion"].as_str()) {
                 (Some("completed"), Some("success" | "neutral" | "skipped")) => CheckState::Passed,
@@ -218,9 +227,10 @@ impl Installation {
 
 impl Installation {
     /// The check runs on `sha`, without those of a workflow run that a later run of the same
-    /// workflow replaced. A push that triggers a workflow twice cancels the first run, and its
-    /// gate jobs still fail.
-    async fn check_runs(&self, repo: &RepoName, sha: &str) -> Result<Vec<Value>> {
+    /// workflow replaced: a push that triggers a workflow twice cancels the first run, and its
+    /// gate jobs still fail. And whether a workflow run on `sha` has yet to finish, as far as
+    /// GitHub Actions' check runs on it lead to look.
+    async fn check_runs(&self, repo: &RepoName, sha: &str) -> Result<(Vec<Value>, bool)> {
         let runs = self
             .all_pages(
                 &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
@@ -228,7 +238,7 @@ impl Installation {
             )
             .await?;
         if !runs.iter().any(|r| r["app"]["slug"] == "github-actions") {
-            return Ok(runs);
+            return Ok((runs, false));
         }
         let workflow_runs = self
             .all_pages(
@@ -237,15 +247,26 @@ impl Installation {
             )
             .await?;
         let replaced = replaced_suites(&workflow_runs);
-        Ok(runs
+        let running = workflow_runs.iter().any(unfinished);
+        let runs = runs
             .into_iter()
             .filter(|r| {
                 r["check_suite"]["id"]
                     .as_u64()
                     .is_none_or(|id| !replaced.contains(&id))
             })
-            .collect())
+            .collect();
+        Ok((runs, running))
     }
+}
+
+/// Whether a workflow run has yet to finish: queued, waiting for an approval or its
+/// environment, or running.
+fn unfinished(workflow_run: &Value) -> bool {
+    matches!(
+        workflow_run["status"].as_str(),
+        Some("queued" | "pending" | "waiting" | "requested" | "in_progress")
+    )
 }
 
 /// The check suites of the workflow runs that a later run of the same workflow replaced.
@@ -312,7 +333,7 @@ impl Installation {
         names: &[String],
     ) -> Result<Vec<CheckFailure>> {
         let mut found: BTreeMap<String, String> = BTreeMap::new();
-        let runs = self.check_runs(repo, sha).await?;
+        let (runs, _) = self.check_runs(repo, sha).await?;
         for run in &runs {
             let Some(name) = run["name"]
                 .as_str()
@@ -491,6 +512,7 @@ mod tests {
     fn checks(list: &[(&str, CheckState)]) -> Checks {
         Checks {
             by_name: list.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect(),
+            workflows_running: false,
         }
     }
 
@@ -508,6 +530,38 @@ mod tests {
         let done = checks(&[("test", CheckState::Passed), ("build", CheckState::Failed)]);
         assert_eq!(done.unreported(&required), ["sift"]);
         assert!(done.unreported(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_workflow_run_queued_behind_its_concurrency_group_keeps_its_checks_unreported() {
+        // `lint` finished; the workflow that runs `sift` waits in its concurrency group, so it
+        // has no check run yet.
+        let runs = r#"{"total_count":1,"check_runs":[
+            {"name":"lint","status":"completed","conclusion":"success","check_suite":{"id":10},"app":{"slug":"github-actions"}}]}"#;
+        let queued = r#"{"total_count":2,"workflow_runs":[
+            {"id":1,"workflow_id":7,"check_suite_id":10,"status":"completed"},
+            {"id":2,"workflow_id":8,"check_suite_id":20,"status":"queued"}]}"#;
+        let done = r#"{"total_count":2,"workflow_runs":[
+            {"id":1,"workflow_id":7,"check_suite_id":10,"status":"completed"},
+            {"id":2,"workflow_id":8,"check_suite_id":20,"status":"completed"}]}"#;
+        let statuses = r#"{"total_count":0,"statuses":[]}"#;
+        let (gh, _) = crate::app::fake::serve(vec![
+            (200, "", runs),
+            (200, "", queued),
+            (200, "", statuses),
+            (200, "", runs),
+            (200, "", done),
+            (200, "", statuses),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let required = ["lint".into(), "sift".into()];
+        let checks = gh.checks(&repo, "abc").await.unwrap();
+        assert!(checks.workflows_running);
+        assert!(checks.unreported(&required).is_empty());
+        let checks = gh.checks(&repo, "abc").await.unwrap();
+        assert!(!checks.workflows_running);
+        assert_eq!(checks.unreported(&required), ["sift"]);
     }
 
     #[test]
