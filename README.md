@@ -181,7 +181,7 @@ The hosted MergeLoop uses one public GitHub App, which we create by hand on GitH
 | `MERGEPATROL_GITHUB_CLIENT_SECRET` | The OAuth client secret |
 | `MERGEPATROL_GITHUB_WEBHOOK_SECRET` | The webhook secret. Optional: without it, MergeLoop only polls |
 
-The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), each with the reason it is there, the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file.
+The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), each with the reason it is there, the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file. An App created before `workflows: write` joined the manifest must be given it on GitHub, or the push of a rebase or fix of a PR that changes `.github/workflows` is refused.
 
 ### Rotate the secret key
 
