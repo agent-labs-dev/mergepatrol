@@ -628,12 +628,22 @@ pub async fn can_read(token: &str, repo: &str) -> Result<bool> {
 /// Whether the token's user may push to the repo. An App's installation token, as a workflow's
 /// `GITHUB_TOKEN` is, names no user: no.
 pub async fn can_write(token: &str, repo: &str) -> Result<bool> {
+    has_permission(token, repo, "push").await
+}
+
+/// Whether the token's user administers the repo. An App's installation token names no user: no.
+pub async fn can_admin(token: &str, repo: &str) -> Result<bool> {
+    has_permission(token, repo, "admin").await
+}
+
+/// Whether GitHub gives the token's user `permission` on the repo, as `/repos/{repo}` says.
+async fn has_permission(token: &str, repo: &str, permission: &str) -> Result<bool> {
     let res = user_get(token, &format!("/repos/{repo}")).await?;
     if res.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(false);
     }
     let repo: Value = res.error_for_status()?.json().await?;
-    Ok(repo["permissions"]["push"] == true)
+    Ok(repo["permissions"][permission] == true)
 }
 
 /// A 401 is `Revoked`, a 403 `Refused`.

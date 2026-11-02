@@ -1238,8 +1238,8 @@ pub(crate) async fn set_repo(
     Path((id, owner, name)): Path<(u64, String, String)>,
     Json(body): Json<SetRepo>,
 ) -> Result<StatusCode, ApiError> {
-    let id = caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let id = caller.repo_admin(&app, id, &repo).await?;
     app.store.set_repo_enabled(id, &repo, body.enabled).await?;
     tracing::info!(installation = id, %repo, enabled = ?body.enabled, "repo setting changed");
     Ok(StatusCode::NO_CONTENT)
