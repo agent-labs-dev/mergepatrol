@@ -569,7 +569,12 @@ export function DraftsTray({
               ))}
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
-              <button type="button" onClick={() => setReviewing(false)} className={secondary}>
+              <button
+                type="button"
+                disabled={propose.isPending}
+                onClick={() => setReviewing(false)}
+                className={secondary}
+              >
                 Back
               </button>
               <button

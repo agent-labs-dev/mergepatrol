@@ -2211,7 +2211,9 @@ pub(crate) async fn propose_repo_config(
         .flatten()
         .any(|t| settings.loses_comments_of(t, &defaults));
     // A queued PR stays queued through a push: this one has to wait for a human.
-    if let Some(pr) = open.filter(|_| loses_comments) {
+    if let Some(pr) =
+        open.filter(|_| dequeues_first(loses_comments, base.text.as_deref(), &defaults))
+    {
         dequeue(&app, &gh, &token, &repo, pr.number).await?;
     }
     let (title, body) = config_pr(&settings, base.text.is_some(), &base.branch, &skills);
@@ -2239,6 +2241,12 @@ pub(crate) async fn propose_repo_config(
     } else {
         UpdatePullView::held(file, pull_request, "This repo does not queue yet.")
     }))
+}
+
+/// Whether a rewrite of the open PR must take it out of the queue first. A default branch that
+/// does not parse has no labels to read and no queue running: the PR may be its repair.
+fn dequeues_first(loses_comments: bool, base: Option<&str>, defaults: &RepoSettings) -> bool {
+    loses_comments && RepoSettings::from_file(base, defaults).is_ok()
 }
 
 async fn repo_queues(app: &AppState, id: u64, repo: &RepoName) -> anyhow::Result<bool> {
@@ -3282,6 +3290,18 @@ mod tests {
             config_update(&s, &on_the_branch, Some(Some(&current)), &s),
             ConfigUpdate::Queue
         );
+    }
+
+    #[test]
+    fn a_repair_pr_for_a_file_that_does_not_parse_can_be_updated_again() {
+        let s = settings();
+        let (current, _) = files(&s);
+        assert!(dequeues_first(true, Some(&current), &s));
+        assert!(!dequeues_first(false, Some(&current), &s));
+        // Each submission reaches the push: nothing reads labels from the broken file.
+        for _ in 0..2 {
+            assert!(!dequeues_first(true, Some("# Why.\nnot: [settings"), &s));
+        }
     }
 
     #[test]
