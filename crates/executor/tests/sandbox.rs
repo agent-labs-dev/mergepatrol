@@ -54,6 +54,7 @@ async fn a_rebase_runs_in_a_gke_sandbox() {
             timeout_secs: 60,
             max_turns: 5,
             api: None,
+            settings_url: None,
         },
         task: Default::default(),
     };

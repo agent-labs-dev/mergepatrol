@@ -18,7 +18,8 @@ pub use vault::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{
-    Lane, Person, PrNumber, PrSummary, RepoName, Spend, SpendTask, Step, StepTimes, step_times,
+    Lane, Person, PrNumber, PrSummary, Provider, RepoName, Spend, SpendTask, Step, StepTimes,
+    step_times,
 };
 use serde::Serialize;
 use sqlx::Row;
@@ -249,6 +250,14 @@ pub trait Store: ReadCache + InboxStore + ReviewStore {
         repo: &RepoName,
         error: Option<&str>,
     ) -> Result<()>;
+    /// What the queue read of the repo: whether it is private, and the tasks its agent runs.
+    async fn set_repo_read(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        private: bool,
+        agent: &[AgentTask],
+    ) -> Result<()>;
 
     /// A fork PR's head when `label` went on it, as the `labeled` webhook told.
     async fn set_label_head(
@@ -335,6 +344,17 @@ pub struct RepoState {
     pub has_config: bool,
     /// Why the queue is paused: the config file does not parse.
     pub config_error: Option<String>,
+    /// The repo is private, as the queue last read it. `None` before the queue first read it.
+    pub private: Option<bool>,
+    /// The tasks the agent runs on the repo's queue, as its settings last read.
+    pub agent: Vec<AgentTask>,
+}
+
+/// A task the agent runs on a repo's queue, with the provider whose key it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AgentTask {
+    pub task: SpendTask,
+    pub provider: Provider,
 }
 
 impl RepoState {
@@ -439,6 +459,12 @@ impl QueueLock {
             .await
             .context("the queue lock's connection")
     }
+}
+
+/// A `repos` row's agent tasks. One it cannot read, as a newer MergeLoop's task, reads as none
+/// rather than stopping every queue.
+fn agent_tasks(row: &sqlx::postgres::PgRow) -> Vec<AgentTask> {
+    serde_json::from_value(row.get("agent")).unwrap_or_default()
 }
 
 /// An `exits` row, as the queries read it.
@@ -964,8 +990,8 @@ impl Store for PgStore {
 
     async fn repos(&self) -> Result<Vec<RepoState>> {
         let rows = sqlx::query(
-            "SELECT repo, installation_id, enabled, has_config, config_error FROM repos
-             ORDER BY installation_id, repo",
+            "SELECT repo, installation_id, enabled, has_config, config_error, private, agent
+             FROM repos ORDER BY installation_id, repo",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -984,6 +1010,8 @@ impl Store for PgStore {
                     enabled: row.get("enabled"),
                     has_config: row.get("has_config"),
                     config_error: row.get("config_error"),
+                    private: row.get("private"),
+                    agent: agent_tasks(&row),
                 })
             })
             .collect())
@@ -991,7 +1019,7 @@ impl Store for PgStore {
 
     async fn repo_state(&self, installation_id: u64, repo: &RepoName) -> Result<Option<RepoState>> {
         let row = sqlx::query(
-            "SELECT enabled, has_config, config_error FROM repos
+            "SELECT enabled, has_config, config_error, private, agent FROM repos
              WHERE installation_id = $1 AND repo = $2",
         )
         .bind(installation_id as i64)
@@ -1004,6 +1032,8 @@ impl Store for PgStore {
             enabled: row.get("enabled"),
             has_config: row.get("has_config"),
             config_error: row.get("config_error"),
+            private: row.get("private"),
+            agent: agent_tasks(&row),
         }))
     }
 
@@ -1121,6 +1151,28 @@ impl Store for PgStore {
         .bind(installation_id as i64)
         .bind(repo.to_string())
         .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn set_repo_read(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        private: bool,
+        agent: &[AgentTask],
+    ) -> Result<()> {
+        let agent = serde_json::to_value(agent)?;
+        sqlx::query(
+            "UPDATE repos SET private = $3, agent = $4
+             WHERE installation_id = $1 AND repo = $2
+             AND (private IS DISTINCT FROM $3 OR agent <> $4)",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(private)
+        .bind(agent)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1628,6 +1680,30 @@ mod tests {
         assert_eq!(one, states[1]);
         let unknown = RepoName::parse("o/c").unwrap();
         assert_eq!(store.repo_state(9, &unknown).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_queue_keeps_what_it_read_of_a_repo(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let a = RepoName::parse("o/a").unwrap();
+        store.set_has_config(9, &a, true).await.unwrap();
+        let read = store.repo_state(9, &a).await.unwrap().unwrap();
+        assert_eq!((read.private, read.agent), (None, vec![]));
+
+        let agent = [
+            AgentTask {
+                task: SpendTask::Rebase,
+                provider: Provider::Anthropic,
+            },
+            AgentTask {
+                task: SpendTask::Review,
+                provider: Provider::OpenAi,
+            },
+        ];
+        store.set_repo_read(9, &a, true, &agent).await.unwrap();
+        let read = store.repo_state(9, &a).await.unwrap().unwrap();
+        assert_eq!((read.private, read.agent), (Some(true), agent.to_vec()));
+        assert_eq!(store.repos().await.unwrap()[0].agent, agent);
     }
 
     #[sqlx::test(migrations = false)]

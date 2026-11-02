@@ -10,6 +10,7 @@ import {
   fetchLanes,
   fetchOpenPulls,
   fetchSession,
+  queuedWarning,
   queuePull,
   readyPull,
 } from "./api";
@@ -19,6 +20,7 @@ import type { LaneView } from "./api/LaneView";
 import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
 import { PullDetail } from "./PullDetail";
+import { toasts } from "./Toasts";
 import { Avatar, primary, secondary } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
@@ -452,9 +454,9 @@ function useActions(
     return () => clearInterval(timer);
   }, [lane, open, openAt, client]);
   const mutation = useMutation({
-    mutationFn: ({ kind, item, repo }: Pending) =>
+    mutationFn: async ({ kind, item, repo }: Pending) =>
       kind === "removing"
-        ? dequeuePull(workspace, repo, prOf(item))
+        ? void (await dequeuePull(workspace, repo, prOf(item)))
         : queuePull(workspace, repo, prOf(item), item.priority),
     onMutate: (p) => {
       setError(null);
@@ -467,7 +469,12 @@ function useActions(
       drop(pendingKey(p.repo, p.item.number));
     },
     // The open PRs stay as they are, the clicked one in its place, until the lane has it.
-    onSuccess: () => client.invalidateQueries({ queryKey: ["lanes"] }),
+    onSuccess: (queued, p) => {
+      const warning = queued && queuedWarning(queued);
+      if (warning)
+        toasts.add({ type: "success", title: `Queued #${prOf(p.item)}`, description: warning });
+      return client.invalidateQueries({ queryKey: ["lanes"] });
+    },
   });
   // GitHub closes it at once: it is closing until the open PRs are read again without it.
   const closing = useMutation({

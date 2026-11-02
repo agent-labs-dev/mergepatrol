@@ -27,7 +27,7 @@ use mergepatrol_github::{
     App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
     RateLimited, RepoSnapshot,
 };
-use mergepatrol_store::{Change, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
+use mergepatrol_store::{AgentTask, Change, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
 use secrecy::ExposeSecret;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -700,6 +700,23 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
             .await?
             .is_some();
     }
+    // For the status to tell before a PR is queued: whether the billing gate covers the repo,
+    // and which keys the agent's tasks need.
+    let agent: Vec<AgentTask> = [
+        (SpendTask::Rebase, true),
+        (SpendTask::Fix, settings.fix_ci.allowed() > 0),
+        (SpendTask::Review, review.enabled),
+    ]
+    .into_iter()
+    .filter(|(_, runs)| *runs)
+    .map(|(task, _)| AgentTask {
+        task,
+        provider: settings.agent.model(task).0,
+    })
+    .collect();
+    ctx.store
+        .set_repo_read(installation, repo, snap.private, &agent)
+        .await?;
     Ok(Some(RepoRead {
         settings,
         review,
@@ -2473,6 +2490,10 @@ pub(crate) async fn job_spec(
             api: granted.as_ref().map(|g| ApiAccess {
                 base_url: Api::of(provider, model).base_url(&ctx.config.job_proxy_url),
                 token: g.token.clone(),
+            }),
+            settings_url: (!pr.is_cross_repository).then(|| {
+                let url = ctx.config.public_url.trim_end_matches('/');
+                format!("{url}/{}/settings", key.repo.owner)
             }),
         },
         task,

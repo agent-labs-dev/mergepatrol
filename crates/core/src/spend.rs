@@ -4,7 +4,10 @@
 //! job writes the message, the dashboard reads it back.
 
 /// Why the agent ran.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum SpendTask {
     /// It resolved a conflict in a rebase.
     Rebase,

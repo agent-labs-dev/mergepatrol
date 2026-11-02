@@ -16,10 +16,10 @@ use mergepatrol_github::{
     BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
 };
 use mergepatrol_store::{
-    BillingStore, Change, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats, FairUse,
-    InboxStale, InboxStore, InboxWrite, LoginCode, PrWrite, ReadCache, RepoReads, RepoState,
-    ReviewAnswers, ReviewDone, ReviewRecord, ReviewStore, SecretRecord, Session, Slice, StepStats,
-    Subscription, Unsynced, UserInbox, ValueRead, Workspace,
+    AgentTask, BillingStore, Change, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats,
+    FairUse, InboxStale, InboxStore, InboxWrite, LoginCode, PrWrite, ReadCache, RepoReads,
+    RepoState, ReviewAnswers, ReviewDone, ReviewRecord, ReviewStore, SecretRecord, Session, Slice,
+    StepStats, Subscription, Unsynced, UserInbox, ValueRead, Workspace,
 };
 
 use super::*;
@@ -680,6 +680,8 @@ struct Mem {
     /// Each exit's PR, outcome, and title.
     exits: Mutex<Vec<(PrNumber, String, String)>>,
     config_error: Mutex<Option<String>>,
+    /// What the queue last read of the repo: whether it is private, and its agent's tasks.
+    repo_read: Mutex<Option<(bool, Vec<AgentTask>)>>,
     /// The head each PR had when the trigger label went on, as the webhook told.
     label_heads: Mutex<HashMap<PrNumber, String>>,
     /// The agent's reviews, oldest first.
@@ -1145,6 +1147,16 @@ impl Store for Mem {
         *self.config_error.lock().unwrap() = error.map(str::to_owned);
         Ok(())
     }
+    async fn set_repo_read(
+        &self,
+        _: u64,
+        _: &RepoName,
+        private: bool,
+        agent: &[AgentTask],
+    ) -> Result<()> {
+        *self.repo_read.lock().unwrap() = Some((private, agent.to_vec()));
+        Ok(())
+    }
     async fn set_label_head(
         &self,
         _: u64,
@@ -1530,6 +1542,29 @@ async fn the_queue_labels_are_created_once() {
     assert_eq!(
         run.gh.with(|s| s.repo_labels.clone()),
         ["ship:priority", "ship", "ship:failed"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tick_keeps_what_the_status_tells_before_a_pr_is_queued() {
+    let run = Run::new(Fake::new(|s| {
+        s.private = true;
+        s.config = Some("version: 1\nagent:\n  overrides:\n    fix:\n      provider: openai\n      model: gpt-6.1-sol\n".into());
+    }));
+    run.tick().await;
+    let (private, agent) = run.store.repo_read.lock().unwrap().clone().unwrap();
+    assert!(private);
+    // Without a model key, the review the workspace never chose is off: no task of the agent's.
+    let tasks: Vec<_> = agent.iter().map(|t| (t.task, t.provider)).collect();
+    assert_eq!(
+        tasks,
+        [
+            (
+                SpendTask::Rebase,
+                run.ctx.config.repo_defaults.agent.provider
+            ),
+            (SpendTask::Fix, mergepatrol_core::Provider::OpenAi),
+        ]
     );
 }
 

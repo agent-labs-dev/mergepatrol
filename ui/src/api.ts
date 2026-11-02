@@ -19,6 +19,7 @@ import type { PullDiffView } from "./api/PullDiffView";
 import type { PullRequestRef } from "./api/PullRequestRef";
 import type { PullStateView } from "./api/PullStateView";
 import type { QuestionView } from "./api/QuestionView";
+import type { QueuedView } from "./api/QueuedView";
 import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
@@ -180,7 +181,13 @@ export const fetchPullDiff = (id: number, repo: string, pr: number, commit?: str
 
 /** Queues the PR, or changes the priority of a queued one, as the user. */
 export const queuePull = (id: number, repo: string, pr: number, priority: boolean) =>
-  call("PUT", w(id, `/repos/${repo}/pulls/${pr}/queue`), { priority } satisfies QueuePull);
+  send<QueuedView>("PUT", w(id, `/repos/${repo}/pulls/${pr}/queue`), {
+    priority,
+  } satisfies QueuePull);
+
+/** What a PR just queued will run into, whatever the PR: a hold, or no model key for the agent. */
+export const queuedWarning = (q: QueuedView): string | undefined =>
+  q.mergepatrol.hold || q.mergepatrol.missing_key ? q.message : undefined;
 
 /** Takes the PR, and its stack, out of the queue, as the user. */
 export const dequeuePull = (id: number, repo: string, pr: number) =>

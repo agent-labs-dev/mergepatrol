@@ -196,6 +196,18 @@ impl Vault {
         }))
     }
 
+    /// Whether `scope` has what the agent calls `provider`'s models with: its API key, or for
+    /// OpenAI a ChatGPT login, which a job prefers.
+    pub async fn has_model_key(&self, scope: Scope, provider: Provider) -> Result<bool> {
+        if provider == Provider::OpenAi && self.status(scope, CHATGPT_LOGIN).await?.is_some() {
+            return Ok(true);
+        }
+        Ok(self
+            .status(scope, api_key_secret(provider))
+            .await?
+            .is_some())
+    }
+
     pub async fn delete(&self, scope: Scope, name: &str) -> Result<()> {
         self.store.delete_secret(scope, name).await
     }
