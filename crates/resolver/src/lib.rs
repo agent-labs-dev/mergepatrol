@@ -158,8 +158,14 @@ These files have conflict markers:
 Resolve the conflicts so that the result keeps the intent of the pull request AND the changes \
 that landed on `{trunk}`. Use `git log`, `git show` and `git diff` to understand both sides.
 
+A generated file, such as a lockfile, a schema or a digest of one, is regenerated, not merged: \
+take either side to clear its conflict markers, then run the repo's generator. `AGENTS.md`, \
+`CLAUDE.md` and the repo's docs say how. You have a shell, and may install what the generator \
+needs.
+
 Rules:
-- Edit only the files listed above.
+- Edit only the files listed above, and other files of the pull request that a generator rewrites. \
+MergeLoop rejects a result that changes any other file.
 - Remove every conflict marker.
 - Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
 - Do not refactor or improve unrelated code.

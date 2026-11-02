@@ -11,7 +11,7 @@ use crate::{
     fix_prompt, gave_up, prompt, question_prompt, review_prompt,
 };
 
-/// What the agent may use: to edit and verify, or only to read.
+/// What the agent may use: to edit and run the repo's tools, or only to read.
 #[derive(Clone, Copy, PartialEq)]
 enum Access {
     Edit,
@@ -32,16 +32,15 @@ pub struct ClaudeResolver {
 }
 
 impl ClaudeResolver {
-    fn allowed_tools(access: Access, verify: &[String]) -> String {
-        let mut tools: Vec<String> = ["Read", "Glob", "Grep"].map(String::from).into();
-        if access == Access::Edit {
-            tools.extend(["Edit", "Write"].map(String::from));
+    fn allowed_tools(access: Access) -> &'static str {
+        match access {
+            // The job's container is the sandbox, as it is for Codex. A conflict in a generated
+            // file takes the repo's own tools to resolve, and no list can name those.
+            Access::Edit => "Read,Glob,Grep,Edit,Write,Bash",
+            Access::Read => {
+                "Read,Glob,Grep,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
+            }
         }
-        for git in ["status", "diff", "log", "show"] {
-            tools.push(format!("Bash(git {git}:*)"));
-        }
-        tools.extend(verify.iter().map(|c| format!("Bash({c})")));
-        tools.join(",")
     }
 
     fn command(
@@ -49,7 +48,6 @@ impl ClaudeResolver {
         workdir: &Path,
         prompt: String,
         access: Access,
-        verify: &[String],
     ) -> Result<tokio::process::Command> {
         let key = self
             .api_key
@@ -76,7 +74,7 @@ impl ClaudeResolver {
             // Anything not in the allowlist is denied, never prompted.
             .args(["--permission-mode", "dontAsk"])
             .arg("--allowedTools")
-            .arg(Self::allowed_tools(access, verify));
+            .arg(Self::allowed_tools(access));
         Ok(cmd)
     }
 
@@ -85,10 +83,9 @@ impl ClaudeResolver {
         workdir: &Path,
         prompt: String,
         access: Access,
-        verify: &[String],
         transcript_path: &Path,
     ) -> Result<Resolution> {
-        let cmd = self.command(workdir, prompt, access, verify)?;
+        let cmd = self.command(workdir, prompt, access)?;
         let mut turns = 0;
         let mut result = None;
         let ended = cli::stream(cmd, "claude", self.timeout, transcript_path, |event| {
@@ -152,36 +149,24 @@ impl Resolver for ClaudeResolver {
     }
 
     async fn resolve(&self, req: ResolveRequest<'_>) -> Result<Resolution> {
-        self.run(
-            req.workdir,
-            prompt(&req),
-            Access::Edit,
-            req.verify_commands,
-            req.transcript,
-        )
-        .await
+        self.run(req.workdir, prompt(&req), Access::Edit, req.transcript)
+            .await
     }
 
     async fn fix(&self, req: FixRequest<'_>) -> Result<Resolution> {
-        self.run(
-            req.workdir,
-            fix_prompt(&req),
-            Access::Edit,
-            req.verify_commands,
-            req.transcript,
-        )
-        .await
+        self.run(req.workdir, fix_prompt(&req), Access::Edit, req.transcript)
+            .await
     }
 
     async fn review(&self, req: ReviewRequest<'_>) -> Result<Resolution> {
         let prompt = review_prompt(&req);
-        self.run(req.workdir, prompt, Access::Read, &[], req.transcript)
+        self.run(req.workdir, prompt, Access::Read, req.transcript)
             .await
     }
 
     async fn question(&self, req: QuestionRequest<'_>) -> Result<Resolution> {
         let prompt = question_prompt(&req);
-        self.run(req.workdir, prompt, Access::Read, &[], req.transcript)
+        self.run(req.workdir, prompt, Access::Read, req.transcript)
             .await
     }
 }
@@ -238,12 +223,7 @@ mod tests {
             max_turns: 1,
         };
         let cmd = resolver
-            .command(
-                Path::new("."),
-                "p".into(),
-                Access::Edit,
-                &["cargo check".into()],
-            )
+            .command(Path::new("."), "p".into(), Access::Edit)
             .unwrap();
         assert_eq!(env(&cmd, "ANTHROPIC_API_KEY").as_deref(), Some("job-token"));
         assert_eq!(
@@ -255,11 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn a_review_may_read_but_not_edit() {
-        let read = ClaudeResolver::allowed_tools(Access::Read, &[]);
-        assert!(read.contains("Read") && read.contains("Bash(git diff:*)"));
-        assert!(!read.contains("Edit") && !read.contains("Write"));
-        let edit = ClaudeResolver::allowed_tools(Access::Edit, &["cargo check".into()]);
-        assert!(edit.contains("Edit") && edit.contains("Bash(cargo check)"));
+    fn a_review_may_read_but_not_edit_or_run_anything() {
+        let tools =
+            |access| -> Vec<&str> { ClaudeResolver::allowed_tools(access).split(',').collect() };
+        let read = tools(Access::Read);
+        assert!(read.contains(&"Read") && read.contains(&"Bash(git diff:*)"));
+        assert!(!read.contains(&"Edit") && !read.contains(&"Write") && !read.contains(&"Bash"));
+        let edit = tools(Access::Edit);
+        assert!(edit.contains(&"Edit") && edit.contains(&"Bash"));
     }
 }

@@ -234,6 +234,7 @@ async fn rebase(
             }
         }
         let commit_message = git.commit_message(dir, &commit).await?;
+        let stopped_at = git.rev_parse(dir, "HEAD").await?;
         let transcript = out
             .join("transcripts")
             .join(format!("{}.jsonl", &commit[..12]));
@@ -263,6 +264,9 @@ async fn rebase(
             Outcome::Resolved => {}
             Outcome::GaveUp(reason) => bail!("the resolver gave up: {reason}"),
             Outcome::Failed(why) => bail!("the resolver failed: {why}"),
+        }
+        if git.rev_parse(dir, "HEAD").await? != stopped_at {
+            bail!("the agent moved HEAD");
         }
         for f in &files {
             let content = tokio::fs::read_to_string(dir.join(f))
