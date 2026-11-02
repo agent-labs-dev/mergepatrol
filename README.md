@@ -165,9 +165,9 @@ If you reach MergeLoop at another address than http://localhost:8080, set `MERGE
 | `MERGEPATROL_MAX_JOBS` | `4` | The most rebase and fix jobs that run at once, across every queue |
 | `MERGEPATROL_DATA_DIR` | `./data` | The repo caches and the job outputs, with their transcripts. A job's output is kept 7 days |
 | `MERGEPATROL_BIND` | `127.0.0.1:8080` | The dashboard address |
-| `MERGEPATROL_PROVIDER` | `anthropic` | The resolver's default provider: `anthropic` or `openai` |
-| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The resolver's default model. Required when the default provider is not `anthropic` |
-| `MERGEPATROL_EFFORT` | `medium` | The resolver's default effort |
+| `MERGEPATROL_PROVIDER` | `anthropic` | The agent's default provider: `anthropic` or `openai` |
+| `MERGEPATROL_MODEL` | `claude-opus-5-5` | The agent's default model. Required when the default provider is not `anthropic` |
+| `MERGEPATROL_EFFORT` | `medium` | The agent's default effort |
 
 ## Run it with an App you made yourself
 
@@ -202,10 +202,18 @@ Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch
 version: 1
 label: mergepatrol
 batch_size: 8
-resolver:
+agent:                  # the default model, which every task runs unless it overrides it
   provider: anthropic   # or openai
   model: claude-opus-5-5
   effort: medium        # low, medium, high, xhigh or max
+  overrides:            # optional: a task's own model, over the default
+    rebase:             # resolving a rebase's conflicts
+      provider: openai
+      model: gpt-6.1-sol
+    fix:                # fixing failed checks
+      model: claude-sonnet-5-5
+    review:             # reviewing a PR, and answering questions about the review
+      model: claude-fable-5-1
 verify:
   - cargo check
 fix_ci:
@@ -221,7 +229,9 @@ review:            # over the workspace's automatic review settings
   require_resolved: true   # wait for every review thread to be resolved
 ```
 
-The resolver runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the default must set its model too.
+The agent runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the instance's default must set its model too.
+
+The agent has three tasks: resolving a rebase's conflicts, fixing failed checks, and reviewing. Each runs the default model unless `agent.overrides` gives it its own. A task that sets another provider than the default's must set its model too. The dashboard offers each provider's current models by name; the file takes the model's API id, and may name any model the provider serves. A file that still says `resolver:`, the section's old name, reads as `agent:`.
 
 The verify commands run after an agent resolution or fix, before the publish.
 

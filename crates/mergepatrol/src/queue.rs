@@ -15,7 +15,7 @@ use mergepatrol_billing::Billing;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Hold, Job,
     Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH,
-    RepoName, RepoSettings, ReviewSettings, ReviewStatus, Transition,
+    RepoName, RepoSettings, ReviewSettings, ReviewStatus, SpendTask, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -695,7 +695,7 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
             .credential(
                 &ctx.vault,
                 Scope::Installation(installation),
-                settings.resolver.provider,
+                settings.agent.model(SpendTask::Review).0,
             )
             .await?
             .is_some();
@@ -2436,7 +2436,8 @@ pub(crate) async fn job_spec(
     below: Option<Below<'_>>,
     task: Task,
 ) -> Result<(JobSpec, Option<Granted>)> {
-    let resolver = &settings.resolver;
+    let agent = &settings.agent;
+    let (provider, model) = agent.model(task.spend_task());
     // A fork PR's job gets no agent: without access, a conflict fails the job.
     let granted = match pr.is_cross_repository {
         true => None,
@@ -2445,10 +2446,10 @@ pub(crate) async fn job_spec(
             .credential(
                 &ctx.vault,
                 Scope::Installation(key.installation_id),
-                resolver.provider,
+                provider,
             )
             .await?
-            .map(|c| ctx.proxy.grant(resolver.provider, c, REQUESTS_PER_JOB)),
+            .map(|c| ctx.proxy.grant(provider, c, REQUESTS_PER_JOB)),
     };
     let spec = JobSpec {
         repo: key.repo.to_string(),
@@ -2464,14 +2465,13 @@ pub(crate) async fn job_spec(
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
         resolver: ResolverSpec {
-            provider: resolver.provider,
-            model: resolver.model.clone(),
-            effort: resolver.effort.clone(),
+            provider,
+            model: model.to_owned(),
+            effort: agent.effort.clone(),
             timeout_secs: RESOLVER_TIMEOUT.as_secs(),
             max_turns: RESOLVER_MAX_TURNS,
             api: granted.as_ref().map(|g| ApiAccess {
-                base_url: Api::of(resolver.provider, &resolver.model)
-                    .base_url(&ctx.config.job_proxy_url),
+                base_url: Api::of(provider, model).base_url(&ctx.config.job_proxy_url),
                 token: g.token.clone(),
             }),
         },

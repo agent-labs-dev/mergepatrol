@@ -114,4 +114,4 @@ When you stop, tell the user where the PR stands: merged, ejected and why, or wh
 
 ## Settings
 
-`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the conflict resolver, the `verify` commands, `fix_ci`, and `review`. MergeLoop reads it from the default branch, so a change takes effect once its PR merges.
+`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the agent's default model and its per-task overrides, the `verify` commands, `fix_ci`, and `review`. MergeLoop reads it from the default branch, so a change takes effect once its PR merges.

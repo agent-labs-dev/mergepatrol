@@ -4,8 +4,9 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, Person, PrSummary, Provider,
-    REPO_CONFIG_PATH, RepoName, RepoSettings, ResolverSettings, Spend, SpendTask, Step,
+    AgentSettings, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, ModelOverrides, Person,
+    PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Step,
+    TaskModel,
 };
 use mergepatrol_github::{
     App, AsUser, BranchFile, CheckRunState, GitObject, InboxPull, Installation, Proposal,
@@ -609,6 +610,9 @@ pub struct RepoSettingsView {
     pub provider: Provider,
     pub model: String,
     pub effort: String,
+    /// A model for one task over the default.
+    #[serde(default)]
+    pub overrides: ModelOverridesView,
     pub verify: Vec<String>,
     /// The agent fixes failed required checks.
     pub fix_ci: bool,
@@ -621,14 +625,67 @@ pub struct RepoSettingsView {
     pub review: crate::review::RepoReviewView,
 }
 
+/// Each task's own model: none runs the default.
+#[derive(Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelOverridesView {
+    /// Resolving a rebase's conflicts.
+    pub rebase: Option<TaskModelView>,
+    /// Fixing failed checks.
+    pub fix: Option<TaskModelView>,
+    /// Reviewing a PR, and answering questions about the review.
+    pub review: Option<TaskModelView>,
+}
+
+#[derive(Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskModelView {
+    #[ts(type = "\"anthropic\" | \"openai\" | \"openrouter\"")]
+    pub provider: Provider,
+    pub model: String,
+}
+
+impl From<ModelOverrides> for ModelOverridesView {
+    fn from(t: ModelOverrides) -> Self {
+        let view = |t: Option<TaskModel>| {
+            t.map(|t| TaskModelView {
+                provider: t.provider,
+                model: t.model,
+            })
+        };
+        ModelOverridesView {
+            rebase: view(t.rebase),
+            fix: view(t.fix),
+            review: view(t.review),
+        }
+    }
+}
+
+impl From<ModelOverridesView> for ModelOverrides {
+    fn from(v: ModelOverridesView) -> Self {
+        let model = |v: Option<TaskModelView>| {
+            v.map(|v| TaskModel {
+                provider: v.provider,
+                model: v.model.trim().to_owned(),
+            })
+        };
+        ModelOverrides {
+            rebase: model(v.rebase),
+            fix: model(v.fix),
+            review: model(v.review),
+        }
+    }
+}
+
 impl From<RepoSettings> for RepoSettingsView {
     fn from(s: RepoSettings) -> Self {
         RepoSettingsView {
             label: s.label,
             batch_size: s.batch_size as u32,
-            provider: s.resolver.provider,
-            model: s.resolver.model,
-            effort: s.resolver.effort,
+            provider: s.agent.provider,
+            model: s.agent.model,
+            effort: s.agent.effort,
+            overrides: s.agent.overrides.into(),
             verify: s.verify,
             fix_ci: s.fix_ci.enabled,
             fix_ci_attempts: s.fix_ci.attempts,
@@ -643,10 +700,11 @@ impl From<RepoSettingsView> for RepoSettings {
         RepoSettings {
             label: v.label.trim().to_owned(),
             batch_size: v.batch_size as usize,
-            resolver: ResolverSettings {
+            agent: AgentSettings {
                 provider: v.provider,
                 model: v.model.trim().to_owned(),
                 effort: v.effort,
+                overrides: v.overrides.into(),
             },
             verify: v
                 .verify
@@ -711,6 +769,16 @@ pub struct ProviderView {
     /// As in the config file, and in the key's URL.
     pub id: String,
     pub name: String,
+    /// The models to pick from, the one to start from first.
+    pub models: Vec<ModelView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ModelView {
+    /// As the provider's API takes it, and the config file names it.
+    pub id: String,
+    pub name: String,
 }
 
 impl From<Provider> for ProviderView {
@@ -718,6 +786,14 @@ impl From<Provider> for ProviderView {
         ProviderView {
             id: p.as_str().into(),
             name: p.name().into(),
+            models: p
+                .models()
+                .iter()
+                .map(|m| ModelView {
+                    id: m.id.into(),
+                    name: m.name.into(),
+                })
+                .collect(),
         }
     }
 }
@@ -2303,13 +2379,28 @@ fn config_pr(
         true => "the default branch only".to_owned(),
         false => format!("the default branch, {}", branches.join(", ")),
     };
+    let r = &settings.agent;
+    let overrides: String = [
+        ("Rebase conflicts", r.overrides.rebase.as_ref()),
+        ("Fixes", r.overrides.fix.as_ref()),
+        ("Reviews", r.overrides.review.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(task, t)| {
+        Some(format!(
+            "\n  - {task}: {} `{}`",
+            t?.provider.name(),
+            t?.model
+        ))
+    })
+    .collect();
     let list = format!(
-        "- Trigger label: `{}`\n- Batch size: {}\n- Resolver: {} `{}`, effort `{}`\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}\n- Queues: {branches}",
+        "- Trigger label: `{}`\n- Batch size: {}\n- Default model: {} `{}`, effort `{}`{overrides}\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}\n- Queues: {branches}",
         settings.label,
         settings.batch_size,
-        settings.resolver.provider.name(),
-        settings.resolver.model,
-        settings.resolver.effort
+        r.provider.name(),
+        r.model,
+        r.effort
     );
     let skills = if skills.is_empty() {
         String::new()
@@ -2536,6 +2627,44 @@ pub(crate) async fn delete_api_key(
 mod tests {
     use super::*;
     use mergepatrol_core::PrSummary;
+
+    /// What the settings form sends: each task's model reaches the file, and a caller from
+    /// before overrides still writes a file whose tasks run the default model.
+    #[test]
+    fn the_form_s_task_models_reach_the_file() {
+        let view = |json: &str| -> RepoSettings {
+            serde_json::from_str::<RepoSettingsView>(json)
+                .unwrap()
+                .into()
+        };
+        let old = FORM.replace(FORM_OVERRIDES, "");
+        assert!(!old.contains("overrides"));
+        let defaults = view(&old);
+
+        let read = RepoSettings::from_file(Some(&view(FORM).to_yaml()), &defaults).unwrap();
+        let r = &read.agent;
+        assert_eq!(r.model(SpendTask::Rebase), (Provider::OpenAi, "gpt-6-luna"));
+        assert_eq!(
+            r.model(SpendTask::Fix),
+            (Provider::Anthropic, "claude-sonnet-5-5")
+        );
+        assert_eq!(
+            r.model(SpendTask::Review),
+            (Provider::Anthropic, "claude-fable-5-1")
+        );
+
+        let yaml = view(&old).to_yaml();
+        assert!(!yaml.contains("overrides"), "{yaml}");
+        let read = RepoSettings::from_file(Some(&yaml), &defaults).unwrap();
+        assert_eq!(
+            read.agent.model(SpendTask::Review),
+            (Provider::Anthropic, "claude-sonnet-5-5")
+        );
+    }
+
+    /// The settings form's PUT body, as the browser sent it.
+    const FORM: &str = r#"{"label":"mergepatrol","batch_size":8,"provider":"anthropic","model":"claude-sonnet-5-5","effort":"medium","overrides":{"rebase":{"provider":"openai","model":"gpt-6-luna"},"fix":null,"review":{"provider":"anthropic","model":"claude-fable-5-1"}},"verify":["cargo check"],"fix_ci":true,"fix_ci_attempts":2,"branches":["release"],"review":{"enabled":null,"bars":[]}}"#;
+    const FORM_OVERRIDES: &str = r#""overrides":{"rebase":{"provider":"openai","model":"gpt-6-luna"},"fix":null,"review":{"provider":"anthropic","model":"claude-fable-5-1"}},"#;
 
     /// An open PR by `@ada` that GitHub won't merge before someone approves it.
     const ADAS_AWAITING_APPROVAL: &str = r#"{"data":{"repository":{
