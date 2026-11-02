@@ -9,10 +9,10 @@ use anyhow::Result;
 use async_trait::async_trait;
 use mergepatrol_core::{CheckFailure, LabelSpec, Labels, PrNumber, RepoName};
 use mergepatrol_github::{
-    BranchMerge, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot, RequiredChecks,
+    BranchMerge, BranchRules, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot,
     SnapshotParts, queued,
 };
-use mergepatrol_store::{Change, PrWrite, RepoReads, Store};
+use mergepatrol_store::{BRANCH_RULES, Change, PrWrite, RepoReads, Store};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -326,9 +326,9 @@ impl GitHub for Cached<'_> {
     async fn changes_under(&self, repo: &RepoName, number: PrNumber, dir: &str) -> Result<bool> {
         GitHub::changes_under(self.gh, repo, number, dir).await
     }
-    async fn required_checks(&self, repo: &RepoName, branch: &str) -> Result<RequiredChecks> {
-        let read = GitHub::required_checks(self.gh, repo, branch);
-        let key = format!("required:{branch}");
+    async fn branch_rules(&self, repo: &RepoName, branch: &str) -> Result<BranchRules> {
+        let read = GitHub::branch_rules(self.gh, repo, branch);
+        let key = format!("{BRANCH_RULES}{branch}");
         self.reader
             .value(repo, key, Some(READ_ALL_EVERY), SETTLE, read)
             .await

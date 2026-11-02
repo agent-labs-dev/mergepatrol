@@ -12,9 +12,7 @@ use mergepatrol_core::{
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
-use mergepatrol_github::{
-    BranchMerge, Checks, HeadRepository, RepoOwner, RequiredChecks, StackRef,
-};
+use mergepatrol_github::{BranchMerge, BranchRules, Checks, HeadRepository, RepoOwner, StackRef};
 use mergepatrol_store::{
     AgentTask, BillingStore, Change, DeveloperStats, EventRecord, ExitQuery, ExitRecord, ExitStats,
     FairUse, InboxStale, InboxStore, InboxWrite, LoginCode, PrWrite, ReadCache, RepoReads,
@@ -55,6 +53,8 @@ struct State {
     stale: HashMap<PrNumber, (String, u32)>,
     required: Vec<String>,
     strict: bool,
+    /// The merge methods a ruleset allows, if one narrows them. The repo's default is `merge`.
+    merge_methods: Option<Vec<String>>,
     /// The checks on every commit, unless `checks_on` has the commit.
     checks: BTreeMap<String, CheckState>,
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
@@ -250,10 +250,18 @@ impl Fake {
     }
 
     /// As the asynchronous merge does: a stacked PR merges with every layer below it, or none.
-    fn merge_now(&self, number: PrNumber, sha: &str, _: &str) -> Result<MergeOutcome> {
+    fn merge_now(&self, number: PrNumber, sha: &str, method: &str) -> Result<MergeOutcome> {
         let mut s = self.state.lock().unwrap();
         if s.head(number) != sha {
             return Ok(MergeOutcome::Rejected("head moved".into()));
+        }
+        if s.merge_methods
+            .as_ref()
+            .is_some_and(|m| !m.iter().any(|m| m == method))
+        {
+            return Ok(MergeOutcome::Rejected(format!(
+                "{method} merges are not allowed on this repository."
+            )));
         }
         let layers: Vec<PrNumber> = s
             .up_to(number)
@@ -399,12 +407,17 @@ impl GitHub for Fake {
             .contains(&number))
     }
 
-    async fn required_checks(&self, _: &RepoName, _: &str) -> Result<RequiredChecks> {
+    async fn branch_rules(&self, _: &RepoName, _: &str) -> Result<BranchRules> {
         let s = self.state.lock().unwrap();
-        Ok(RequiredChecks {
-            names: s.required.clone(),
+        let mut rules = BranchRules {
+            checks: s.required.clone(),
             strict: s.strict,
-        })
+            ..Default::default()
+        };
+        if let Some(allowed) = &s.merge_methods {
+            rules.merge_methods = allowed.clone();
+        }
+        Ok(rules)
     }
 
     async fn checks(&self, _: &RepoName, sha: &str) -> Result<Checks> {
@@ -1349,6 +1362,23 @@ async fn a_labeled_pr_is_rebased_checked_and_merged() {
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
     assert!(run.lane().is_empty());
     assert!(matches!(run.tick().await, Ran::Idle));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_merges_with_a_method_the_trunks_ruleset_allows() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.merge_methods = Some(vec!["squash".into()]);
+    }));
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.merge_methods = Some(vec!["squash".into()]);
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
 }
 
 #[tokio::test(start_paused = true)]

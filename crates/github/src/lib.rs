@@ -13,7 +13,7 @@ pub use app::fake;
 pub use app::{
     App, AsUser, HookDelivery, Installation, InstallationInfo, RateLimited, RepoInfo, revoke_token,
 };
-pub use checks::{CheckState, Checks, RequiredChecks};
+pub use checks::{BranchRules, CheckState, Checks};
 pub use codeowners::CodeOwners;
 pub use detail::{
     CheckRun, CheckRunState, Label, PullDetail, ThreadSummary, TimelineEvent, TimelineItem,

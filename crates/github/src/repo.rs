@@ -314,12 +314,14 @@ pub enum MergeOutcome {
 /// How often to ask for the result of an asynchronous merge. A stack of three took 10 seconds.
 const MERGE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// GitHub's reason for not merging, from an error body or a failed result.
+/// GitHub's reason for not merging, from an error body or a failed result, without its full stop:
+/// the ejection's sentence ends with one.
 fn rejection(body: &Value) -> String {
     body["details"]["message"]
         .as_str()
         .or(body["message"].as_str())
         .unwrap_or("not mergeable")
+        .trim_end_matches('.')
         .to_owned()
 }
 
@@ -1695,6 +1697,15 @@ mod tests {
         assert!(
             matches!(&outcome, MergeOutcome::Rejected(m) if m.contains("not mergeable")),
             "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_rejection_drops_its_full_stop() {
+        let body = json!({ "message": "Merge commits are not allowed on this repository." });
+        assert_eq!(
+            rejection(&body),
+            "Merge commits are not allowed on this repository"
         );
     }
 

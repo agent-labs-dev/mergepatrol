@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use mergepatrol_analytics::{Analytics, WorkspaceInfo};
 use mergepatrol_core::{REPO_CONFIG_PATH, RepoName};
-use mergepatrol_store::Change;
+use mergepatrol_store::{BRANCH_RULES, Change};
 use serde_json::Value;
 use sha2::Sha256;
 
@@ -231,7 +231,7 @@ fn changed(event: Option<&str>, payload: &Value) -> Vec<Change> {
         Some("workflow_run") => vec![value("approval", &payload["workflow_run"]["head_sha"])],
         // The checks a branch requires, and the reviews.
         Some("branch_protection_rule" | "repository_ruleset") => vec![
-            Some(Change::ValuesUnder("required:".into())),
+            Some(Change::ValuesUnder(BRANCH_RULES.into())),
             Some(Change::Repo),
         ],
         _ => vec![],
@@ -313,4 +313,19 @@ pub(crate) fn sign(secret: &str, body: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect();
     format!("sha256={hex}")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_ruleset_change_clears_the_branch_rules() {
+        for event in ["repository_ruleset", "branch_protection_rule"] {
+            let changes = changed(Some(event), &json!({}));
+            assert!(changes.contains(&Change::ValuesUnder(BRANCH_RULES.into())));
+        }
+    }
 }
