@@ -24,6 +24,7 @@ import type { QueuePull } from "./api/QueuePull";
 import type { RedirectView } from "./api/RedirectView";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoSettingsView } from "./api/RepoSettingsView";
+import type { RepoUpdateView } from "./api/RepoUpdateView";
 import type { RepoView } from "./api/RepoView";
 import type { ReviewPull } from "./api/ReviewPull";
 import type { ReviewSettingsView } from "./api/ReviewSettingsView";
@@ -131,6 +132,10 @@ export const fetchRepoSkill = (id: number, repo: string) =>
 /** Opens a PR that writes the current skill to the repo, or updates the open one. */
 export const updateRepoSkill = (id: number, repo: string) =>
   send<PullRequestRef>("POST", w(id, `/repos/${repo}/skill`));
+
+/** Opens and queues the PRs that bring the repo up to the latest settings and skill. */
+export const updateRepo = (id: number, repo: string) =>
+  send<RepoUpdateView>("POST", w(id, `/repos/${repo}/update`));
 
 export const fetchSettings = (id: number) => get<SettingsView>(w(id, "/settings"));
 

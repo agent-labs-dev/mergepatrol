@@ -226,6 +226,9 @@ struct FixCiConfig {
     attempts: Option<u32>,
 }
 
+/// How the header `to_yaml` writes ends, under every name MergeLoop has gone by.
+const HEADER_END: &str = "The dashboard opens a PR to change it.";
+
 /// The file as MergeLoop writes it: every setting spelled out.
 #[derive(Serialize)]
 struct Written<'a> {
@@ -370,9 +373,21 @@ impl RepoSettings {
             settings: self,
         })
         .expect("settings serialize");
-        format!(
-            "# MergeLoop reads this file from the default branch. The dashboard opens a PR to change it.\n{yaml}"
-        )
+        format!("# MergeLoop reads this file from the default branch. {HEADER_END}\n{yaml}")
+    }
+
+    /// Whether `file` is these settings as `to_yaml` writes them, whatever its comments say.
+    pub fn written_in(&self, file: &str) -> bool {
+        let written = self.to_yaml();
+        settings_lines(file).eq(settings_lines(&written))
+    }
+
+    /// Whether `to_yaml` would lose a comment of `file`, other than the header it writes itself.
+    pub fn loses_comments_of(&self, file: &str) -> bool {
+        let written = self.to_yaml();
+        file.lines()
+            .filter(|l| l.contains('#') && !l.ends_with(HEADER_END))
+            .any(|l| !written.lines().any(|w| w == l))
     }
 
     pub fn labels(&self) -> Labels {
@@ -382,6 +397,14 @@ impl RepoSettings {
             failed: format!("{}:failed", self.label),
         }
     }
+}
+
+/// The lines of a file that say something: neither blank nor a comment.
+fn settings_lines(file: &str) -> impl Iterator<Item = &str> {
+    file.lines().filter(|l| {
+        let l = l.trim();
+        !l.is_empty() && !l.starts_with('#')
+    })
 }
 
 #[cfg(test)]
@@ -562,6 +585,46 @@ agent:
             RepoSettings::from_file(Some(&s.to_yaml()), &defaults()),
             Ok(s)
         );
+    }
+
+    #[test]
+    fn a_file_from_before_the_rename_is_not_written_as_mergeloop_writes_it_now() {
+        let old = "# Mergepatrol reads this file from the default branch. The dashboard opens a PR to change it.\nversion: 1\nlabel: mergepatrol\nbatch_size: 8\nresolver:\n  model: claude-opus-5-5\n  effort: medium\nverify: []\n";
+        let settings = RepoSettings::from_file(Some(old), &defaults()).unwrap();
+        assert!(!settings.written_in(old));
+        // Rewriting it keeps what it means, and there is nothing left to do after.
+        let new = settings.to_yaml();
+        assert_eq!(
+            RepoSettings::from_file(Some(&new), &defaults()).unwrap(),
+            settings
+        );
+        assert!(settings.written_in(&new));
+    }
+
+    #[test]
+    fn comments_make_no_file_out_of_date() {
+        let settings = defaults();
+        let written = settings.to_yaml();
+        let old_header = written.replacen("MergeLoop", "Mergepatrol", 1);
+        assert!(settings.written_in(&old_header));
+        let commented = written.replace("verify:", "# Why these run.\n\nverify:");
+        assert!(settings.written_in(&commented));
+    }
+
+    #[test]
+    fn only_a_comment_someone_wrote_counts_as_lost() {
+        let settings = defaults();
+        let written = settings.to_yaml();
+        assert!(!settings.loses_comments_of(&written));
+        assert!(!settings.loses_comments_of(&written.replacen("MergeLoop", "Mergepatrol", 1)));
+        assert!(settings.loses_comments_of(&written.replace("verify:", "# Why.\nverify:")));
+        assert!(
+            settings.loses_comments_of(&written.replace("batch_size: 8", "batch_size: 8 # Why."))
+        );
+        // A `#` the rewrite keeps is no comment lost.
+        let mut hash = defaults();
+        hash.verify = vec!["echo '#'".into()];
+        assert!(!hash.loses_comments_of(&hash.to_yaml()));
     }
 
     #[test]

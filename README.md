@@ -243,6 +243,8 @@ A repo queues once its default branch has the file. MergeLoop looks for it in ev
 
 The dashboard edits the file through PRs. **Set up** opens a PR that adds the file with the defaults, and the `mergepatrol` agent skill at `.agents/skills/mergepatrol/SKILL.md` and `.claude/skills/mergepatrol/SKILL.md`, so coding agents in the repo queue their PRs rather than merge them. **Settings** opens one that changes the file. Both come from the branch `mergepatrol/config`: a second change updates the open PR. The queue uses the new settings once the PR merges.
 
+**Update all** in **Repos** brings every queuing repo up to date at once, and says what it did to each. For a repo behind, it opens a PR that rewrites the config file the way MergeLoop writes it now, with the repo's own settings, and a PR that writes the current skill, then queues them, so they go through the repo's review and checks like any other PR. It skips a repo with no config file, or one that does not parse. It leaves alone an open settings PR that changes the settings, and opens but does not queue a PR that would drop comments from the file. Run it again as often as you like: a repo up to date gets no PR.
+
 When the file does not parse, the queue pauses, and **Repos** shows why, until the file is fixed.
 
 ## From an agent, or the API
@@ -300,6 +302,7 @@ A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell
 | `propose_repo_config` | Opens a PR that changes a repo's queue settings | Yes |
 | `get_repo_skill` | Whether a repo has the current `mergepatrol` agent skill | |
 | `update_repo_skill` | Opens a PR that updates a repo's `mergepatrol` agent skill | Yes |
+| `update_repo` | Opens and queues the PRs that bring a queuing repo up to the latest settings and agent skill | Yes |
 | `get_settings` | Which model API keys and ChatGPT login the workspace has | Yes |
 | `set_api_key` | Sets a model provider's API key | Yes |
 | `delete_api_key` | Removes a model provider's API key | Yes |

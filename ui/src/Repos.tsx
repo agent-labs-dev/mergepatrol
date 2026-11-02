@@ -12,6 +12,7 @@ import {
 import type { AppView } from "./api/AppView";
 import type { RepoView } from "./api/RepoView";
 import { RepoSettings } from "./RepoSettings";
+import { UpdateRepos } from "./UpdateRepos";
 import { field, Narrow, RepoIcon, secondary } from "./ui";
 
 const small =
@@ -66,6 +67,9 @@ export function Repos({ workspace, app }: { workspace: number; app: AppView }) {
       {repos.error && <p className="text-bad">{repos.error.message}</p>}
       {repos.data?.length === 0 && (
         <p className="text-muted">The App cannot access any repos yet.</p>
+      )}
+      {repos.data?.some((r) => r.on) && (
+        <UpdateRepos workspace={workspace} repos={repos.data.filter((r) => r.on)} />
       )}
       {current && (
         <div className="grid gap-6 md:grid-cols-[16rem_1fr]">

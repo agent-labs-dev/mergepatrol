@@ -2353,6 +2353,18 @@ pub(crate) async fn update_repo_skill(
             format!("`{}` already has the current skill.", base.branch),
         ));
     }
+    let pr = propose_skill(&gh, &repo, &paths, &base).await?;
+    tracing::info!(installation = id, %repo, pr = pr.number, "proposed the current skill");
+    Ok(Json(pr.into()))
+}
+
+/// Opens a PR that writes the current skill to `paths`, or updates the one open.
+async fn propose_skill(
+    gh: &Installation,
+    repo: &RepoName,
+    paths: &[String],
+    base: &BranchFile,
+) -> anyhow::Result<PullRef> {
     let files: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), SKILL)).collect();
     let list: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
     let body = format!(
@@ -2362,20 +2374,249 @@ It replaces the copy that is there, so a change made to the skill in this repo i
         list.join(" and "),
         base.branch
     );
-    let pr = gh
-        .propose_file(
-            &repo,
-            Proposal {
-                base: &base,
-                files: &files,
-                branch: SKILL_BRANCH,
-                title: "Update the MergeLoop skill",
-                body: &body,
+    gh.propose_file(
+        repo,
+        Proposal {
+            base,
+            files: &files,
+            branch: SKILL_BRANCH,
+            title: "Update the MergeLoop skill",
+            body: &body,
+        },
+    )
+    .await
+}
+
+/// Which file of a repo an update's PR brings up to date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum UpdatedFileView {
+    Settings,
+    Skill,
+}
+
+/// A PR that carries a repo's update.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct UpdatePullView {
+    pub file: UpdatedFileView,
+    pub pull_request: PullRequestRef,
+    pub queued: bool,
+    /// Why it is not queued.
+    pub note: Option<String>,
+}
+
+/// What an update did to a repo. With neither field set, the repo was up to date.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct RepoUpdateView {
+    /// Why it left the repo alone.
+    pub skipped: Option<String>,
+    pub pulls: Vec<UpdatePullView>,
+}
+
+/// What an update does about a repo's config file.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigUpdate {
+    /// The default branch has it already.
+    Current,
+    /// Open the PR, or bring the open one up to date.
+    Propose,
+    /// The open PR has it already: only queueing it is left.
+    Queue,
+    /// The open PR changes the settings too: someone's change, not the update's to touch.
+    Leave,
+}
+
+/// `text` is the file on the default branch, which sets `settings`, and `open` the file on the
+/// open PR's branch, if a PR is open.
+fn config_update(
+    settings: &RepoSettings,
+    text: &str,
+    open: Option<Option<&str>>,
+    defaults: &RepoSettings,
+) -> ConfigUpdate {
+    if settings.written_in(text) {
+        return ConfigUpdate::Current;
+    }
+    let Some(open) = open else {
+        return ConfigUpdate::Propose;
+    };
+    match RepoSettings::from_file(open, defaults) {
+        Ok(theirs) if theirs != *settings => ConfigUpdate::Leave,
+        Err(_) => ConfigUpdate::Leave,
+        Ok(_) if open.is_some_and(|t| settings.written_in(t)) => ConfigUpdate::Queue,
+        Ok(_) => ConfigUpdate::Propose,
+    }
+}
+
+/// Brings a queuing repo's config file and skill up to date: opens the PRs it needs, or updates
+/// the ones open, and queues them. A repo that is up to date gets none, and running it again
+/// pushes nothing to a PR that has the update.
+pub(crate) async fn update_repo(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name)): Path<(u64, String, String)>,
+) -> Result<Json<RepoUpdateView>, ApiError> {
+    let id = caller.workspace(id)?;
+    let repo = repo_name(owner, name)?;
+    let token = caller.github_token(&app)?;
+    let skip = |why: String| {
+        Ok(Json(RepoUpdateView {
+            skipped: Some(why),
+            pulls: Vec::new(),
+        }))
+    };
+    let state = app.store.repo_state(id, &repo).await?;
+    if !state.is_some_and(|s| s.on()) {
+        return skip("MergeLoop is off on this repo.".into());
+    }
+    let gh = installation(&app, id).await?;
+    let file = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
+    let Some(text) = file.text.as_deref() else {
+        return skip(format!("{} has no config file.", file.branch));
+    };
+    let defaults: &RepoSettings = &app.repo_defaults;
+    let settings = match RepoSettings::from_file(Some(text), defaults) {
+        Ok(settings) => settings,
+        Err(e) => return skip(e),
+    };
+
+    let mut pulls = Vec::new();
+    let open = gh.open_pr_from(&repo, CONFIG_BRANCH).await?;
+    let on_branch = match open {
+        Some(_) => Some(
+            gh.branch_file(&repo, CONFIG_BRANCH, REPO_CONFIG_PATH)
+                .await?,
+        ),
+        None => None,
+    };
+    let update = config_update(
+        &settings,
+        text,
+        on_branch.as_ref().map(Option::as_deref),
+        defaults,
+    );
+    let pr = match update {
+        ConfigUpdate::Current => None,
+        ConfigUpdate::Queue | ConfigUpdate::Leave => open,
+        ConfigUpdate::Propose => Some(
+            propose_rewrite(&gh, &repo, &settings, &file, text)
+                .await
+                .map_err(github_failed)?,
+        ),
+    };
+    if let Some(pr) = pr {
+        let note = if update == ConfigUpdate::Leave {
+            Some("This PR changes the settings, so the update left it as it is.")
+        } else if settings.loses_comments_of(text) {
+            Some("The update drops the file's comments: carry them over, then queue this PR.")
+        } else {
+            None
+        };
+        pulls.push(match note {
+            Some(note) => UpdatePullView {
+                file: UpdatedFileView::Settings,
+                pull_request: pr.into(),
+                queued: false,
+                note: Some(note.to_owned()),
             },
-        )
-        .await?;
-    tracing::info!(installation = id, %repo, pr = pr.number, "proposed the current skill");
-    Ok(Json(pr.into()))
+            None => {
+                queue_update(
+                    &app,
+                    &gh,
+                    &token,
+                    &repo,
+                    UpdatedFileView::Settings,
+                    pr.into(),
+                )
+                .await
+            }
+        });
+    }
+
+    let (skill, base) = repo_skill(&gh, &repo).await?;
+    if skill.state != SkillStateView::Current {
+        let pr = match skill.pull_request {
+            Some(pr) if skill.pull_request_current => pr,
+            _ => propose_skill(&gh, &repo, &skill.paths, &base)
+                .await
+                .map_err(github_failed)?
+                .into(),
+        };
+        pulls.push(queue_update(&app, &gh, &token, &repo, UpdatedFileView::Skill, pr).await);
+    }
+    tracing::info!(installation = id, %repo, pulls = pulls.len(), "updated from the dashboard");
+    Ok(Json(RepoUpdateView {
+        skipped: None,
+        pulls,
+    }))
+}
+
+/// GitHub's answer for the user: an update runs across repos, and each can fail its own way.
+fn github_failed(e: anyhow::Error) -> ApiError {
+    match ApiError::from(e) {
+        ApiError::Internal(e) => ApiError::Status(StatusCode::BAD_GATEWAY, format!("{e:#}")),
+        limited => limited,
+    }
+}
+
+/// Opens a PR that rewrites the config file the way MergeLoop writes it now, or updates the one
+/// open.
+async fn propose_rewrite(
+    gh: &Installation,
+    repo: &RepoName,
+    settings: &RepoSettings,
+    base: &BranchFile,
+    text: &str,
+) -> anyhow::Result<PullRef> {
+    let content = settings.to_yaml();
+    let comments = if settings.loses_comments_of(text) {
+        "\n\nIt replaces the file, so the file's comments are lost: carry them over in this PR if you want to keep them."
+    } else {
+        ""
+    };
+    let body = format!(
+        "This PR writes `{REPO_CONFIG_PATH}` the way MergeLoop writes it now: it renames old settings and spells out the ones the file left out. The queue runs as it did, with these settings.\n\n{}{comments}",
+        settings_list(settings)
+    );
+    gh.propose_file(
+        repo,
+        Proposal {
+            base,
+            files: &[(REPO_CONFIG_PATH, content.as_str())],
+            branch: CONFIG_BRANCH,
+            title: "Update the MergeLoop settings",
+            body: &body,
+        },
+    )
+    .await
+}
+
+/// Queues an update's PR as the caller. A PR GitHub won't let them queue is still open, so the
+/// refusal goes with it rather than failing the update.
+async fn queue_update(
+    app: &AppState,
+    gh: &Installation,
+    token: &str,
+    repo: &RepoName,
+    file: UpdatedFileView,
+    pull_request: PullRequestRef,
+) -> UpdatePullView {
+    let queued = queue(app, gh, token, repo, pull_request.number.into(), false).await;
+    UpdatePullView {
+        file,
+        pull_request,
+        queued: queued.is_ok(),
+        note: queued.err().map(|e| match e {
+            ApiError::Status(_, why) | ApiError::GitHubLimited(_, why) => why,
+            ApiError::Internal(e) => {
+                tracing::error!(error = %format!("{e:#}"), "queue an update's PR");
+                "MergeLoop could not queue this PR.".to_owned()
+            }
+        }),
+    }
 }
 
 /// The skill's path in each skills dir, but one that links to the other: a commit cannot write
@@ -2391,12 +2632,8 @@ async fn skill_paths(gh: &Installation, repo: &RepoName) -> Result<Vec<String>, 
     Ok(paths)
 }
 
-fn config_pr(
-    settings: &RepoSettings,
-    update: bool,
-    branch: &str,
-    skills: &[String],
-) -> (&'static str, String) {
+/// The settings as a PR's body lists them.
+fn settings_list(settings: &RepoSettings) -> String {
     let verify = if settings.verify.is_empty() {
         "none".to_owned()
     } else {
@@ -2432,14 +2669,23 @@ fn config_pr(
         ))
     })
     .collect();
-    let list = format!(
+    format!(
         "- Trigger label: `{}`\n- Batch size: {}\n- Default model: {} `{}`, effort `{}`{overrides}\n- Verify commands: {verify}\n- Fix failed checks: {fix_ci}\n- Queues: {branches}",
         settings.label,
         settings.batch_size,
         r.provider.name(),
         r.model,
         r.effort
-    );
+    )
+}
+
+fn config_pr(
+    settings: &RepoSettings,
+    update: bool,
+    branch: &str,
+    skills: &[String],
+) -> (&'static str, String) {
+    let list = settings_list(settings);
     let skills = if skills.is_empty() {
         String::new()
     } else {
@@ -2755,6 +3001,57 @@ mod tests {
             };
             assert_eq!(got, verdict, "{login}");
         }
+    }
+
+    fn settings() -> RepoSettings {
+        RepoSettings::from(serde_json::from_str::<RepoSettingsView>(FORM).unwrap())
+    }
+
+    #[test]
+    fn an_update_opens_a_pr_only_for_a_file_out_of_date() {
+        let s = settings();
+        let current = s.to_yaml();
+        let old = current.replace("agent:", "resolver:");
+        assert_eq!(config_update(&s, &current, None, &s), ConfigUpdate::Current);
+        assert_eq!(config_update(&s, &old, None, &s), ConfigUpdate::Propose);
+    }
+
+    #[test]
+    fn an_update_keeps_off_an_open_pr_that_changes_the_settings() {
+        let s = settings();
+        let mut theirs = s.clone();
+        theirs.batch_size += 1;
+        let theirs = theirs.to_yaml();
+        let old = s.to_yaml().replace("agent:", "resolver:");
+        assert_eq!(
+            config_update(&s, &old, Some(Some(&theirs)), &s),
+            ConfigUpdate::Leave
+        );
+        assert_eq!(
+            config_update(&s, &old, Some(Some("not: [settings")), &s),
+            ConfigUpdate::Leave
+        );
+        // Nothing to update, so nothing to say about the PR either.
+        assert_eq!(
+            config_update(&s, &s.to_yaml(), Some(Some(&theirs)), &s),
+            ConfigUpdate::Current
+        );
+    }
+
+    #[test]
+    fn an_update_pushes_nothing_to_an_open_pr_that_has_it() {
+        let s = settings();
+        let current = s.to_yaml();
+        let old = current.replace("agent:", "resolver:");
+        assert_eq!(
+            config_update(&s, &old, Some(Some(&current)), &s),
+            ConfigUpdate::Queue
+        );
+        // An older update's PR has the same settings in the old shape.
+        assert_eq!(
+            config_update(&s, &old, Some(Some(&old)), &s),
+            ConfigUpdate::Propose
+        );
     }
 
     #[test]

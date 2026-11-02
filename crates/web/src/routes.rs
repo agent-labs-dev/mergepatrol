@@ -247,6 +247,8 @@ pub(crate) static ROUTES: &[Route] = &[
         "Whether the repo's copy of the `mergepatrol` agent skill, on its default branch, is the one MergeLoop ships now: `current`, `outdated` (older, edited, or missing from one skills dir) or `missing`. With the paths an update writes, and the open PR that updates it.")),
     route!(POST "/api/w/{id}/repos/{owner}/{name}/skill", api::update_repo_skill, tool!("update_repo_skill", Writes,
         "Opens a PR that writes the current `mergepatrol` agent skill over the repo's older copies, or updates the one open. Agents read it once it merges. Refused when the repo has the current skill already. Needs a MergeLoop sign-in.")),
+    route!(POST "/api/w/{id}/repos/{owner}/{name}/update", api::update_repo, tool!("update_repo", Writes,
+        "Brings a queuing repo up to the latest settings and `mergepatrol` agent skill: opens the PRs it needs, one for the config file in the shape MergeLoop writes now, with the repo's own settings, and one for the skill, and queues them. Returns the PRs, each with `queued` and a `note` when it is not: a config PR that changes the settings is left alone, and one that would drop the file's comments waits for a human. `skipped` says why it left the repo alone: off, no config file, or one that does not parse. With neither, the repo was up to date. Safe to call again. Needs a MergeLoop sign-in.")),
     route!(GET "/api/w/{id}/settings", api::settings, tool!("get_settings", Reads,
         "The workspace's model API keys and ChatGPT login: which are set, and when. Never the keys themselves. Needs a MergeLoop sign-in.")),
     route!(PUT "/api/w/{id}/settings/api-keys/{provider}", api::set_api_key, tool!("set_api_key", Writes,
