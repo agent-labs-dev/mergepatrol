@@ -392,36 +392,37 @@ function RepoBars({
           const expanded = open === repo;
           return (
             <li key={repo}>
-              <button
-                type="button"
-                aria-expanded={expanded}
-                onClick={() => setOpen(expanded ? null : repo)}
-                className="flex w-full items-baseline gap-3 px-4 py-2.5 text-left text-sm hover:bg-page sm:px-5"
-              >
-                <span className="shrink-0 font-medium" title={repo}>
-                  {repo.split("/")[1]}
-                </span>
-                <span
-                  className={`min-w-0 flex-1 truncate text-xs ${
-                    overrides.length ? "text-fg-2" : "text-faint"
-                  }`}
+              <div className="flex items-baseline gap-3 px-4 text-sm hover:bg-page sm:px-5">
+                <button
+                  type="button"
+                  aria-expanded={expanded}
+                  onClick={() => setOpen(expanded ? null : repo)}
+                  className="flex min-w-0 flex-1 items-baseline gap-3 py-2.5 text-left"
                 >
-                  {overrides.length ? overrides.join(" · ") : "Follows the workspace"}
-                </span>
-                {staged[repo] && <span className="shrink-0 text-xs text-warn">edited</span>}
+                  <span className="shrink-0 font-medium" title={repo}>
+                    {repo.split("/")[1]}
+                  </span>
+                  <span
+                    className={`min-w-0 flex-1 truncate text-xs ${
+                      overrides.length ? "text-fg-2" : "text-faint"
+                    }`}
+                  >
+                    {overrides.length ? overrides.join(" · ") : "Follows the workspace"}
+                  </span>
+                  {staged[repo] && <span className="shrink-0 text-xs text-warn">edited</span>}
+                  <span className="shrink-0 text-xs text-muted">{expanded ? "Done" : "Edit"}</span>
+                </button>
                 {opened[repo] && (
                   <a
                     href={opened[repo].url}
                     target="_blank"
                     rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
                     className="shrink-0 text-xs text-ok"
                   >
                     PR #{opened[repo].number}
                   </a>
                 )}
-                <span className="shrink-0 text-xs text-muted">{expanded ? "Done" : "Edit"}</span>
-              </button>
+              </div>
               {expanded && (
                 <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 pt-1 pb-4 sm:grid-cols-3 sm:px-5">
                   <RepoChoice
