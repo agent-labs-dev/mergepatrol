@@ -9,4 +9,4 @@ The You tab now has four folders: **Review requested**, **Opened**, **Merged** a
 
 You can act from the list itself: **Queue**, **Dequeue** or **Publish** sits on each row, so you don't have to open the PR first.
 
-A PR whose checks are still running, or that waits on a review, now shows as **Ready to queue** in repos Mergepatrol runs on. The queue waits for both on its own, so queueing it is your only move. It used to sit in Waiting on others.
+A PR whose checks are still running, or that waits on a review, now shows as **Ready to queue** in repos MergeLoop runs on. The queue waits for both on its own, so queueing it is your only move. It used to sit in Waiting on others.

@@ -44,7 +44,7 @@ done
 manifest orchestrator | kubectl apply -f -
 kubectl -n mergepatrol rollout status deployment/mergepatrol --timeout=15m
 
-# Switch links and sign-in before sending browsers to the new origin.
+# Keep the old domain's API, MCP and webhooks up once routes.yaml moves to the new one.
 if [ "$PUBLIC_URL" = https://mergeloop.ai ]; then
   manifest legacy-domain | kubectl apply -f -
 fi

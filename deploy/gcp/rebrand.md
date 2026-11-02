@@ -1,29 +1,52 @@
 # MergeLoop domain cutover
 
-The hosted app's canonical URL is `https://mergeloop.ai`. Both domains must retain their
-existing DNS and certificates on the `mergepatrol` Gateway. No DNS change is needed for the
-cutover: both domains already reach it.
+The hosted app's canonical URL is `https://mergeloop.ai`. Both domains keep their DNS
+records and certificates on the `mergepatrol` Gateway; the only DNS change is turning on
+Cloudflare's proxy for `mergepatrol.ai`, below.
 
 Before deploying this change, an owner of the existing GitHub App (`merge-patrol`) must add
-`https://mergeloop.ai/auth/callback` to its callback URLs, retaining the old callback while
-the previous revision drains. Set its setup URL to `https://mergeloop.ai/setup/installed`,
-its homepage to `https://mergeloop.ai`, and its name to **MergeLoop**. Keep the existing
-App ID, credentials, permissions and installations; do not create a replacement app. If the
-name change changes its slug, verify its new public page. The orchestrator reads the current
-slug and installation URL from GitHub at startup. GitHub App settings are separate from
-the manifest used to create a new app; deploying the manifest does not update them.
+`https://mergeloop.ai/auth/callback` to its callback URLs: the new revision sends it as the
+`redirect_uri`, and GitHub refuses one it does not list. Keep the old callback until the
+previous revision has drained. Rename the App to **MergeLoop** before deploying too: the
+orchestrator reads the App's slug, and so its installation URL, from GitHub at startup, so
+the rollout picks up a changed slug. After the deployment is live, set its setup URL to
+`https://mergeloop.ai/setup/installed` and its homepage to `https://mergeloop.ai`. Keep the
+existing App ID, credentials, permissions and installations; do not create a replacement
+app. GitHub App settings are separate from the manifest used to create a new app; deploying
+the manifest does not update them.
 
 See GitHub's [callback URL requirements](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/about-the-user-authorization-callback-url)
 and [app registration settings](https://docs.github.com/en/apps/maintaining-github-apps/modifying-a-github-app-registration).
 
 The deployment sets `MERGEPATROL_PUBLIC_URL` to the new origin, rolls out the app, then
-applies `routes.yaml` and `legacy-domain.yaml`. HTTPS pages on `mergepatrol.ai` redirect
-with 302 to the same path and query at `mergeloop.ai`. Its HTTP pages go straight to the new
-HTTPS origin too. The old HTTPS `/api`, `/mcp` and `/webhooks` endpoints still reach the
-backend, preserving method, body and Authorization headers for existing clients and senders.
+applies `routes.yaml` and `legacy-domain.yaml`. The Gateway keeps serving `mergepatrol.ai`
+as is: the old HTTPS `/api`, `/mcp` and `/webhooks` endpoints must keep their method, body
+and Authorization header, which a redirect would drop.
 
-After deployment, verify a deep link with a query, sign-in, installation return, and a signed
-webhook delivery. For example:
+Cloudflare redirects the old domain's pages, once the deployment is live. In the
+`mergepatrol.ai` zone:
+
+1. SSL/TLS: set the encryption mode to **Full (strict)**. Google's certificate is valid for
+   `mergepatrol.ai`, and Flexible would send Cloudflare's requests to the HTTP listener.
+2. DNS: turn the proxy on (orange cloud) for the `mergepatrol.ai` A record. Leave the
+   certificate's `_acme-challenge` CNAME DNS only, or Google cannot renew the certificate.
+3. Rules > Redirect Rules: add a rule with this expression:
+
+   ```
+   (http.host eq "mergepatrol.ai" and not starts_with(http.request.uri.path, "/api")
+    and not starts_with(http.request.uri.path, "/mcp")
+    and not starts_with(http.request.uri.path, "/webhooks"))
+   ```
+
+   Its URL redirect is Dynamic, to `concat("https://mergeloop.ai", http.request.uri.path)`,
+   status 302, with **Preserve query string** on. Make it 301 once the new domain has settled.
+
+The proxy also sends GitHub's webhooks through Cloudflare, so Bot Fight Mode must stay off in
+this zone. Pointing the App's webhook URL at `https://mergeloop.ai/webhooks` removes that
+dependency.
+
+After the rule is on, verify a deep link with a query, sign-in, installation return, and a
+signed webhook delivery. For example:
 
 ```sh
 curl -I 'https://mergepatrol.ai/docs/configuration?source=old-link'
