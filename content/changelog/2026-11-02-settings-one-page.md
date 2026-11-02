@@ -1,6 +1,7 @@
 ---
 title: Repos and Settings are one page, with defaults for every repo
 kind: new
+pr: 192
 image: /changelog/settings-one-page/after.png
 ---
 
