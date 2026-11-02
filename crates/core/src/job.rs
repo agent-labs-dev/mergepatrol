@@ -38,13 +38,22 @@ pub enum EjectReason {
     MergeRejected(String),
     /// These required checks had not finished `CHECKS_TIMEOUT` after the publish.
     ChecksTimedOut(Vec<String>),
+    /// These required checks never reported on the PR's head, `CHECKS_MISSING_FOR` after every
+    /// check that did had finished: CI does not run them, as when the PR renames one.
+    ChecksMissing(Vec<String>),
     /// What the queue would have to do to a fork PR, it may not.
     Fork(String),
 }
 
-/// How long a PR's required checks may take, after a publish. A check that never reports, as a
-/// required check that no workflow runs, would otherwise hold the queue forever.
+/// How long a PR's required checks may take, after a publish. A check that never finishes would
+/// otherwise hold the queue forever. One that never reports at all goes sooner, by
+/// `CHECKS_MISSING_FOR`.
 pub const CHECKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3 * 60 * 60);
+
+/// How long a required check may go without reporting at all on a PR's head while no other
+/// check runs: long enough for a CI that creates its checks late, but not for the head of the
+/// queue to wait out `CHECKS_TIMEOUT` for a check that no workflow runs anymore.
+pub const CHECKS_MISSING_FOR: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 impl EjectReason {
     /// What kind of reason it is, for analytics.
@@ -56,6 +65,7 @@ impl EjectReason {
             Self::BaseMovedOutsideQueue => "base-moved",
             Self::MergeRejected(_) => "merge-rejected",
             Self::ChecksTimedOut(_) => "checks-timed-out",
+            Self::ChecksMissing(_) => "checks-missing",
             Self::Fork(_) => "fork",
         }
     }
@@ -91,6 +101,12 @@ impl std::fmt::Display for EjectReason {
                 CHECKS_TIMEOUT.as_secs() / 3600,
                 names.join(", ")
             ),
+            Self::ChecksMissing(names) => write!(
+                f,
+                "required checks never reported, {} minutes after every other check finished: {}. Does a workflow still run them under that name?",
+                CHECKS_MISSING_FOR.as_secs() / 60,
+                names.join(", ")
+            ),
             Self::Fork(r) => f.write_str(r),
         }
     }
@@ -107,6 +123,9 @@ pub enum Event {
     ChecksFailed(Vec<String>),
     /// These required checks are still pending, `CHECKS_TIMEOUT` after the publish.
     ChecksTimedOut(Vec<String>),
+    /// These required checks never reported on the head, `CHECKS_MISSING_FOR` after the others
+    /// finished.
+    ChecksMissing(Vec<String>),
     /// The fix is published: `head` is the new PR head, on the same base.
     Fixed {
         head: String,
@@ -180,6 +199,9 @@ impl Job {
             }
             (P::AwaitingChecks { .. }, E::ChecksTimedOut(names)) => {
                 Transition::Ejected(EjectReason::ChecksTimedOut(names))
+            }
+            (P::AwaitingChecks { .. }, E::ChecksMissing(names)) => {
+                Transition::Ejected(EjectReason::ChecksMissing(names))
             }
             (P::AwaitingChecks { .. }, E::ChecksFailed(names)) => {
                 Transition::Ejected(EjectReason::ChecksFailed {
@@ -336,6 +358,19 @@ mod tests {
             job.step(Event::ChecksTimedOut(vec!["ci".into()])),
             Transition::Ejected(EjectReason::ChecksTimedOut(vec!["ci".into()]))
         );
+    }
+
+    #[test]
+    fn checks_that_never_report_eject_without_a_fix_and_name_them() {
+        let job = rebased(Job::start(7, 2));
+        let reason = EjectReason::ChecksMissing(vec!["sift".into()]);
+        assert_eq!(
+            job.step(Event::ChecksMissing(vec!["sift".into()])),
+            Transition::Ejected(reason.clone())
+        );
+        assert_eq!(reason.kind(), "checks-missing");
+        assert!(reason.to_string().contains("30 minutes"), "{reason}");
+        assert!(reason.to_string().contains(": sift."), "{reason}");
     }
 
     #[test]

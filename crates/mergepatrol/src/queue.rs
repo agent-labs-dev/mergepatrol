@@ -13,9 +13,10 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_billing::Billing;
 use mergepatrol_core::{
-    BatchStep, BuiltBatch, CHECKS_TIMEOUT, Candidate, CheckFailure, EjectReason, Event, Hold, Job,
-    Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber, PrSummary, REPO_CONFIG_PATH,
-    RepoName, RepoSettings, ReviewSettings, ReviewStatus, SpendTask, Transition,
+    BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
+    EjectReason, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber,
+    PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings, ReviewStatus, SpendTask,
+    Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -834,22 +835,8 @@ async fn tick_lane(
 ) -> Result<Ran> {
     let installation = gh.installation_id();
     let settings = read.settings.clone();
-    let gate = read.gate.clone();
-    let labels = settings.labels();
     let mut units = read.units_into(trunk);
-    // The snapshot as this lane sees it: its trunk's head. A lane with no PR left reads none,
-    // as its branch may be gone.
-    let trunk_sha = if trunk == read.snap.default_branch {
-        read.snap.trunk_sha.clone()
-    } else if units.is_empty() {
-        String::new()
-    } else {
-        gh.branch_sha(repo, trunk).await?
-    };
-    let snap = RepoSnapshot {
-        trunk_sha,
-        ..read.snap.clone()
-    };
+    let snap = lane_snapshot(gh, repo, read, trunk, &units).await?;
     let key = LaneKey {
         installation_id: installation,
         repo: repo.clone(),
@@ -863,123 +850,7 @@ async fn tick_lane(
             units.retain(|u| u.number != number);
         }
     }
-
-    let mut candidates = Vec::new();
-    for unit in &units {
-        if unit.stacked && unit.layers.iter().any(|pr| pr.is_cross_repository) {
-            let why = "Stacks with a PR from a fork are not supported yet.";
-            eject(ctx, &settings, gh, &key, &unit.prs(), why, "fork").await?;
-            continue;
-        }
-        let mut pin = None;
-        // A fork PR's head from its pull ref, which the PR's GraphQL lags behind.
-        let mut top = unit.top().clone();
-        if unit.fork() {
-            top.head_ref_oid = gh.pull_head(repo, top.number).await?;
-            match fork_pin(ctx, &key, &mut lane, &top, &labels.trigger).await? {
-                Pin::Keep => {}
-                Pin::Join(head) => pin = Some(head),
-                Pin::Wait => continue,
-                Pin::Drop { kind, why } => {
-                    drop_fork(ctx, &settings, gh, &key, unit.number, kind, &why).await?;
-                    continue;
-                }
-            }
-        }
-        let hold = if let Some(gate) = &gate {
-            Some(gate.reason.clone())
-        } else if unit.base != trunk {
-            Some(no_queue(&unit.base, &read.snap.default_branch, &settings))
-        } else if let Some(draft) = unit.hold_reason().filter(|h| *h.innermost() == Hold::Draft) {
-            Some(draft)
-        } else if let Some(reason) = {
-            let heads: Vec<(PrNumber, &str, u32)> = unit
-                .layers
-                .iter()
-                .map(|pr| match pr.number == top.number {
-                    true => (pr.number, top.head_ref_oid.as_str(), top.unresolved_threads),
-                    false => (pr.number, pr.head_ref_oid.as_str(), pr.unresolved_threads),
-                })
-                .collect();
-            review_hold(ctx, &key, &read.review, unit.stacked, &heads).await?
-        } {
-            Some(reason)
-        } else if let Some(reason) = unit.hold_reason() {
-            Some(reason)
-        } else if unit.fork() {
-            match fork_block(gh, &key, &snap.trunk_sha, &top).await? {
-                Some(Block::Hold(reason)) => Some(reason),
-                Some(Block::Eject(why)) => {
-                    let why = format!("Ejected: {why}.");
-                    eject(ctx, &settings, gh, &key, &unit.prs(), &why, "fork").await?;
-                    continue;
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
-        candidates.push(Candidate {
-            number: unit.number,
-            priority: unit.layers.iter().any(|pr| pr.has_label(&labels.priority)),
-            hold,
-            summary: unit.layers[0].summary(),
-            layers: if unit.stacked { unit.prs() } else { Vec::new() },
-            pin,
-        });
-    }
-
-    // The PRs of each entry, also of those that leave the lane now.
-    let mut prs_of: HashMap<PrNumber, Vec<PrNumber>> =
-        lane.entries.iter().map(|e| (e.number, e.prs())).collect();
-    prs_of.extend(units.iter().map(|u| (u.number, u.prs())));
-    for change in lane.sync(&candidates) {
-        let (number, kind, message, comment) = match change {
-            LaneChange::Enqueued(n) => {
-                if let Some(b) = &ctx.billing {
-                    let unit = units.iter().find(|u| u.number == n);
-                    let authors = unit.map(Unit::authors).unwrap_or_default();
-                    b.queued(installation, snap.private, &authors, unix_now())
-                        .await?;
-                }
-                (n, "enqueued", "added to the queue".to_owned(), None)
-            }
-            LaneChange::Dequeued { number, .. } => {
-                ctx.job_errors.clear(&key, number);
-                (number, "dequeued", "left the queue".to_owned(), None)
-            }
-            LaneChange::Held { number, reason } => {
-                let comment = match &gate {
-                    Some(g) if g.reason == reason => Some(g.comment.clone()),
-                    // The agent's review, and a human's answer to it, are on the PR already. How
-                    // many comments are unresolved is not: it says so as the count changes.
-                    _ if reason.of_review()
-                        && !matches!(reason.innermost(), Hold::UnresolvedThreads { .. }) =>
-                    {
-                        None
-                    }
-                    _ => Some(on_hold(&reason)),
-                };
-                (number, "held", reason.to_string(), comment)
-            }
-            LaneChange::Released(n) => (
-                n,
-                "released",
-                "can merge again".to_owned(),
-                Some("No longer on hold. Waiting in its place in the queue.".to_owned()),
-            ),
-        };
-        let prs = prs_of.get(&number).cloned().unwrap_or(vec![number]);
-        if kind == "dequeued" {
-            exit_once(ctx, &key, &prs, kind, &message).await?;
-        } else {
-            record_all(ctx, &key, &prs, kind, &message).await?;
-        }
-        if let Some(comment) = comment {
-            comment_all(gh, repo, &prs, &comment).await?;
-        }
-    }
-    ctx.store.save_lane(&key, &lane).await?;
+    sync_lane(ctx, gh, read, &snap, &key, &mut lane, &units, &[]).await?;
 
     // Jobs run inside the tick, so a job still active here was cut short by a restart. A single
     // PR runs again. A batch picks up where it was, unless what it tests changed: then it is
@@ -1045,6 +916,239 @@ async fn tick_lane(
     ctx.job_errors.clear(&key, number);
     finish(ctx, &settings, gh, &key, &mut lane, &unit, outcome).await?;
     Ok(Ran::Job)
+}
+
+/// The snapshot as the lane of `trunk` sees it: its trunk's head. A lane with no PR left reads
+/// none, as its branch may be gone.
+async fn lane_snapshot(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    read: &RepoRead,
+    trunk: &str,
+    units: &[Unit],
+) -> Result<RepoSnapshot> {
+    let trunk_sha = if trunk == read.snap.default_branch {
+        read.snap.trunk_sha.clone()
+    } else if units.is_empty() {
+        String::new()
+    } else {
+        gh.branch_sha(repo, trunk).await?
+    };
+    Ok(RepoSnapshot {
+        trunk_sha,
+        ..read.snap.clone()
+    })
+}
+
+/// While a job waits for checks, how often the repo's lanes take in the PRs labeled, unlabeled,
+/// held or released meanwhile: as often as a tick would.
+struct SyncWhileRunning(Instant);
+
+impl SyncWhileRunning {
+    fn new() -> Self {
+        Self(Instant::now())
+    }
+
+    /// Syncs the repo's lanes with GitHub, if a poll has passed since the last time, so a PR
+    /// labeled while the job waits shows its place in the queue. The job's own entries in `lane`
+    /// stay as they are: the job sees to them. A failure leaves the lanes as they were, for the
+    /// next time: it is no failure of the job.
+    async fn poll(&mut self, ctx: &Ctx, gh: &dyn GitHub, key: &LaneKey, lane: &mut Lane) {
+        if self.0.elapsed() < ctx.config.poll {
+            return;
+        }
+        self.0 = Instant::now();
+        if let Err(e) = sync_while_running(ctx, gh, key, lane).await {
+            let error = format!("{e:#}");
+            tracing::warn!(installation = key.installation_id, repo = %key.repo, trunk = %key.trunk, %error, "could not sync the lanes while a job runs");
+        }
+    }
+}
+
+async fn sync_while_running(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    lane: &mut Lane,
+) -> Result<()> {
+    let Some(read) = read_repo(ctx, gh, &key.repo).await? else {
+        return Ok(());
+    };
+    for trunk in read.trunks() {
+        let units = read.units_into(&trunk);
+        let snap = lane_snapshot(gh, &key.repo, &read, &trunk, &units).await?;
+        if trunk == key.trunk {
+            let running = lane.active();
+            sync_lane(ctx, gh, &read, &snap, key, lane, &units, &running).await?;
+            continue;
+        }
+        let mut other = read.lane(&trunk);
+        // A merge or a batch that a restart cut short is that lane's own tick to see through.
+        if other.merging.is_some() || other.batch_branch.is_some() {
+            continue;
+        }
+        let other_key = LaneKey {
+            trunk: trunk.clone(),
+            ..key.clone()
+        };
+        sync_lane(ctx, gh, &read, &snap, &other_key, &mut other, &units, &[]).await?;
+    }
+    Ok(())
+}
+
+/// Makes the lane match `units`, the labeled PRs and stacks that merge into its trunk: each
+/// joins, waits, goes on hold or leaves, with an event and a comment, and the lane is saved. The
+/// entries of `running`, a job's that is under way, stay as they are.
+#[allow(clippy::too_many_arguments)]
+async fn sync_lane(
+    ctx: &Ctx,
+    gh: &dyn GitHub,
+    read: &RepoRead,
+    snap: &RepoSnapshot,
+    key: &LaneKey,
+    lane: &mut Lane,
+    units: &[Unit],
+    running: &[PrNumber],
+) -> Result<()> {
+    let installation = key.installation_id;
+    let repo = &key.repo;
+    let trunk = key.trunk.as_str();
+    let settings = &read.settings;
+    let gate = read.gate.clone();
+    let labels = settings.labels();
+    let units: Vec<&Unit> = units
+        .iter()
+        .filter(|u| !running.contains(&u.number))
+        .collect();
+
+    let mut candidates = Vec::new();
+    for &unit in &units {
+        if unit.stacked && unit.layers.iter().any(|pr| pr.is_cross_repository) {
+            let why = "Stacks with a PR from a fork are not supported yet.";
+            eject(ctx, settings, gh, key, &unit.prs(), why, "fork").await?;
+            continue;
+        }
+        let mut pin = None;
+        // A fork PR's head from its pull ref, which the PR's GraphQL lags behind.
+        let mut top = unit.top().clone();
+        if unit.fork() {
+            top.head_ref_oid = gh.pull_head(repo, top.number).await?;
+            match fork_pin(ctx, key, lane, &top, &labels.trigger).await? {
+                Pin::Keep => {}
+                Pin::Join(head) => pin = Some(head),
+                Pin::Wait => continue,
+                Pin::Drop { kind, why } => {
+                    drop_fork(ctx, settings, gh, key, unit.number, kind, &why).await?;
+                    continue;
+                }
+            }
+        }
+        let hold = if let Some(gate) = &gate {
+            Some(gate.reason.clone())
+        } else if unit.base != trunk {
+            Some(no_queue(&unit.base, &read.snap.default_branch, settings))
+        } else if let Some(draft) = unit.hold_reason().filter(|h| *h.innermost() == Hold::Draft) {
+            Some(draft)
+        } else if let Some(reason) = {
+            let heads: Vec<(PrNumber, &str, u32)> = unit
+                .layers
+                .iter()
+                .map(|pr| match pr.number == top.number {
+                    true => (pr.number, top.head_ref_oid.as_str(), top.unresolved_threads),
+                    false => (pr.number, pr.head_ref_oid.as_str(), pr.unresolved_threads),
+                })
+                .collect();
+            review_hold(ctx, key, &read.review, unit.stacked, &heads).await?
+        } {
+            Some(reason)
+        } else if let Some(reason) = unit.hold_reason() {
+            Some(reason)
+        } else if unit.fork() {
+            match fork_block(gh, key, &snap.trunk_sha, &top).await? {
+                Some(Block::Hold(reason)) => Some(reason),
+                Some(Block::Eject(why)) => {
+                    let why = format!("Ejected: {why}.");
+                    eject(ctx, settings, gh, key, &unit.prs(), &why, "fork").await?;
+                    continue;
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        candidates.push(Candidate {
+            number: unit.number,
+            priority: unit.layers.iter().any(|pr| pr.has_label(&labels.priority)),
+            hold,
+            summary: unit.layers[0].summary(),
+            layers: if unit.stacked { unit.prs() } else { Vec::new() },
+            pin,
+        });
+    }
+
+    // A running job's entries stay as they are.
+    for e in lane.entries.iter().filter(|e| running.contains(&e.number)) {
+        candidates.push(Candidate {
+            number: e.number,
+            priority: e.priority,
+            hold: None,
+            summary: e.summary.clone(),
+            layers: e.layers.clone(),
+            pin: None,
+        });
+    }
+
+    // The PRs of each entry, also of those that leave the lane now.
+    let mut prs_of: HashMap<PrNumber, Vec<PrNumber>> =
+        lane.entries.iter().map(|e| (e.number, e.prs())).collect();
+    prs_of.extend(units.iter().map(|u| (u.number, u.prs())));
+    for change in lane.sync(&candidates) {
+        let (number, kind, message, comment) = match change {
+            LaneChange::Enqueued(n) => {
+                if let Some(b) = &ctx.billing {
+                    let unit = units.iter().find(|u| u.number == n);
+                    let authors = unit.map(|u| u.authors()).unwrap_or_default();
+                    b.queued(installation, snap.private, &authors, unix_now())
+                        .await?;
+                }
+                (n, "enqueued", "added to the queue".to_owned(), None)
+            }
+            LaneChange::Dequeued { number, .. } => {
+                ctx.job_errors.clear(key, number);
+                (number, "dequeued", "left the queue".to_owned(), None)
+            }
+            LaneChange::Held { number, reason } => {
+                let comment = match &gate {
+                    Some(g) if g.reason == reason => Some(g.comment.clone()),
+                    // The agent's review, and a human's answer to it, are on the PR already. How
+                    // many comments are unresolved is not: it says so as the count changes.
+                    _ if reason.of_review()
+                        && !matches!(reason.innermost(), Hold::UnresolvedThreads { .. }) =>
+                    {
+                        None
+                    }
+                    _ => Some(on_hold(&reason)),
+                };
+                (number, "held", reason.to_string(), comment)
+            }
+            LaneChange::Released(n) => (
+                n,
+                "released",
+                "can merge again".to_owned(),
+                Some("No longer on hold. Waiting in its place in the queue.".to_owned()),
+            ),
+        };
+        let prs = prs_of.get(&number).cloned().unwrap_or(vec![number]);
+        if kind == "dequeued" {
+            exit_once(ctx, key, &prs, kind, &message).await?;
+        } else {
+            record_all(ctx, key, &prs, kind, &message).await?;
+        }
+        if let Some(comment) = comment {
+            comment_all(gh, repo, &prs, &comment).await?;
+        }
+    }
+    ctx.store.save_lane(key, lane).await
 }
 
 /// What the queue merges as one: a PR, or a stack of PRs, which GitHub merges all at once.
@@ -1806,6 +1910,8 @@ async fn test_and_merge(
 
     let head = &batch.steps.last().expect("a batch has PRs").1.sha;
     let opened = Instant::now();
+    let mut unreported = Unreported::default();
+    let mut sync = SyncWhileRunning::new();
     let tested = loop {
         let now = gh.snapshot(repo, &settings.labels()).await?;
         let now_units = units(gh, repo, &now.labeled).await?;
@@ -1816,16 +1922,21 @@ async fn test_and_merge(
         if let Some(why) = stale(&trunk_sha, &now_units, batch) {
             break Tested::Stale(why);
         }
-        match checks_verdict(gh, key, head, opened).await? {
+        let checks = checks_verdict(gh, key, head, opened).await?;
+        let missing = unreported.missing(checks.unreported, opened);
+        match checks.verdict {
             (CheckState::Passed, _) => break Tested::Passed,
             (CheckState::Failed, names) => {
                 break Tested::Failed(format!("required checks failed: {}", names.join(", ")));
             }
             // As a failure: a smaller batch, then the PR alone, runs its checks again.
+            (CheckState::Pending, _) if !missing.is_empty() => {
+                break Tested::Failed(EjectReason::ChecksMissing(missing).to_string());
+            }
             (CheckState::Pending, names) if opened.elapsed() >= CHECKS_TIMEOUT => {
                 break Tested::Failed(EjectReason::ChecksTimedOut(names).to_string());
             }
-            (CheckState::Pending, _) => {}
+            (CheckState::Pending, _) => sync.poll(ctx, gh, key, lane).await,
         }
         ctx.wakers
             .wait(key.installation_id, repo, CHECKS_POLL)
@@ -1952,14 +2063,18 @@ async fn checks_verdict(
     key: &LaneKey,
     head: &str,
     published: Instant,
-) -> Result<(CheckState, Vec<String>)> {
+) -> Result<HeadChecks> {
     let required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
-    let verdict = gh.checks(&key.repo, head).await?.verdict(&required);
-    Ok(match verdict {
+    let checks = gh.checks(&key.repo, head).await?;
+    let verdict = match checks.verdict(&required) {
         (CheckState::Passed, _) if required.is_empty() && published.elapsed() < NO_CHECKS_GRACE => {
             (CheckState::Pending, vec![])
         }
         v => v,
+    };
+    Ok(HeadChecks {
+        verdict,
+        unreported: checks.unreported(&required),
     })
 }
 
@@ -1968,6 +2083,34 @@ async fn checks_verdict(
 async fn merge_method(gh: &dyn GitHub, key: &LaneKey, snap: &RepoSnapshot) -> Result<String> {
     let rules = gh.branch_rules(&key.repo, &key.trunk).await?;
     Ok(rules.merge_method(&snap.merge_method))
+}
+
+struct HeadChecks {
+    /// Passed, failed with the checks that failed, or pending with those it waits for.
+    verdict: (CheckState, Vec<String>),
+    /// The required checks that never reported on the head, though no other check runs.
+    unreported: Vec<String>,
+}
+
+/// Since when a job's heads have had required checks that never reported, with no other check
+/// running.
+#[derive(Default)]
+struct Unreported(Option<Instant>);
+
+impl Unreported {
+    /// The required checks that have gone unreported for `CHECKS_MISSING_FOR`, counted from no
+    /// earlier than `published`: empty until then, and once they report.
+    fn missing(&mut self, unreported: Vec<String>, published: Instant) -> Vec<String> {
+        if unreported.is_empty() {
+            self.0 = None;
+            return Vec::new();
+        }
+        let since = (*self.0.get_or_insert_with(Instant::now)).max(published);
+        match since.elapsed() >= CHECKS_MISSING_FOR {
+            true => unreported,
+            false => Vec::new(),
+        }
+    }
 }
 
 /// GitHub rejects a merge right after the one before it, until it has worked out the PR's
@@ -2107,6 +2250,8 @@ async fn run_job(
     // Each layer's head as published, bottom to top, and the layer whose checks failed.
     let mut heads: Vec<String> = Vec::new();
     let mut failing = 0;
+    let mut unreported = Unreported::default();
+    let mut sync = SyncWhileRunning::new();
 
     loop {
         let mut now = unit.refreshed(gh, repo).await?;
@@ -2180,8 +2325,11 @@ async fn run_job(
                 } else {
                     // GitHub merges a stack only when every layer's required checks passed.
                     let mut verdict = (CheckState::Passed, Vec::new());
+                    let mut silent = Vec::new();
                     for (i, head) in heads.iter().enumerate() {
-                        match checks_verdict(gh, key, head, published_at).await? {
+                        let checks = checks_verdict(gh, key, head, published_at).await?;
+                        silent.extend(checks.unreported);
+                        match checks.verdict {
                             (CheckState::Failed, names) => {
                                 failing = i;
                                 verdict = (CheckState::Failed, names);
@@ -2194,15 +2342,20 @@ async fn run_job(
                             (CheckState::Passed, _) => {}
                         }
                     }
+                    let missing = unreported.missing(silent, published_at);
                     match verdict {
                         (CheckState::Passed, _) => Event::ChecksPassed,
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
+                        (CheckState::Pending, _) if !missing.is_empty() => {
+                            Event::ChecksMissing(missing)
+                        }
                         (CheckState::Pending, names)
                             if published_at.elapsed() >= CHECKS_TIMEOUT =>
                         {
                             Event::ChecksTimedOut(names)
                         }
                         (CheckState::Pending, _) => {
+                            sync.poll(ctx, gh, key, lane).await;
                             ctx.wakers
                                 .wait(key.installation_id, repo, CHECKS_POLL)
                                 .await;

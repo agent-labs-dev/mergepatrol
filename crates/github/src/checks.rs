@@ -55,6 +55,20 @@ impl Checks {
             (CheckState::Passed, vec![])
         }
     }
+
+    /// The `required` checks that never reported on the commit, once no check that did is still
+    /// running: CI is done, and does not run them, as when a PR renames one. Empty while any
+    /// check runs, as a job that waits for another creates its check only when it starts.
+    pub fn unreported(&self, required: &[String]) -> Vec<String> {
+        if self.by_name.values().any(|s| *s == CheckState::Pending) {
+            return Vec::new();
+        }
+        required
+            .iter()
+            .filter(|n| !self.by_name.contains_key(*n))
+            .cloned()
+            .collect()
+    }
 }
 
 /// What a branch's rules ask of a merge into it.
@@ -483,6 +497,16 @@ mod tests {
     fn missing_required_check_is_pending() {
         let c = checks(&[("lint", CheckState::Passed)]);
         assert_eq!(c.verdict(&["test".into()]).0, CheckState::Pending);
+    }
+
+    #[test]
+    fn a_required_check_is_unreported_only_once_every_reported_check_is_done() {
+        let required = ["test".into(), "sift".into()];
+        let running = checks(&[("test", CheckState::Passed), ("build", CheckState::Pending)]);
+        assert!(running.unreported(&required).is_empty());
+        let done = checks(&[("test", CheckState::Passed), ("build", CheckState::Failed)]);
+        assert_eq!(done.unreported(&required), ["sift"]);
+        assert!(done.unreported(&[]).is_empty());
     }
 
     #[test]

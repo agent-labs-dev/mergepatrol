@@ -10,7 +10,7 @@ mod spend;
 mod steps;
 
 pub use hold::Hold;
-pub use job::{CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
+pub use job::{CHECKS_MISSING_FOR, CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
     BatchStep, Bisect, BuiltBatch, Candidate, Entry, EntryState, Lane, LaneChange, LayerHead,
     PendingMerge, Person, PrSummary, Review,

@@ -122,8 +122,8 @@ impl Entry {
     }
 
     /// The entry as its PRs' newest reviews, by `status`, hold it now. A tick sets holds, and
-    /// one that runs a job saves no other PR's until the job ends: an answer to a review, or the
-    /// agent finishing one, would show only then. Only an entry the review holds changes: the
+    /// one that runs a job saves no other PR's until the job ends, or a poll into its wait for
+    /// checks: an answer to a review, or the agent finishing one, would show only then. Only an entry the review holds changes: the
     /// tick that held it found the gate on, and every gate before it open.
     pub fn with_review(mut self, status: impl Fn(PrNumber) -> Option<ReviewStatus>) -> Self {
         let EntryState::Held(hold) = &self.state else {

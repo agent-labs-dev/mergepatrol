@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{
-    AgentSettings, Bar, CheckFailure, Finding, Judged, Kind, LabelSpec, Labels, Lean, Spend, Step,
-    StepTimes,
+    AgentSettings, Bar, CheckFailure, EntryState, Finding, Judged, Kind, LabelSpec, Labels, Lean,
+    Spend, Step, StepTimes,
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -1731,10 +1731,11 @@ async fn a_failed_required_check_ejects() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_required_check_that_never_reports_ejects_without_a_fix() {
+async fn a_required_check_that_never_finishes_ejects_without_a_fix() {
     let run = Run::new(Fake::new(|s| {
         s.add_pr(1);
         s.required = vec!["ci".into(), "e2e".into()];
+        s.checks.insert("e2e".into(), CheckState::Pending);
     }));
     let start = tokio::time::Instant::now();
     run.tick().await;
@@ -1752,12 +1753,27 @@ async fn a_required_check_that_never_reports_ejects_without_a_fix() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn a_batch_whose_checks_never_finish_counts_as_failed() {
-    let run = Run::batching(Fake::new(|s| {
+/// The messages of a PR's events of `kind`.
+fn messages(run: &Run, number: PrNumber, kind: &str) -> Vec<String> {
+    run.store
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(n, k, _)| *n == number && k == kind)
+        .map(|(.., message)| message.clone())
+        .collect()
+}
+
+/// Two PRs that each passed `ci` and `e2e` on their own. The batch's `e2e` is as `batch_e2e`
+/// says: running, or never reported.
+fn batch_without_e2e(batch_e2e: Option<CheckState>) -> impl FnOnce(&mut State) {
+    move |s| {
         prs(&[1, 2])(s);
         s.required = vec!["ci".into(), "e2e".into()];
-        // Each PR passed both on its own; the batch never gets `e2e`.
+        if let Some(state) = batch_e2e {
+            s.checks.insert("e2e".into(), state);
+        }
         let both = BTreeMap::from([
             ("ci".to_owned(), CheckState::Passed),
             ("e2e".to_owned(), CheckState::Passed),
@@ -1765,21 +1781,169 @@ async fn a_batch_whose_checks_never_finish_counts_as_failed() {
         for n in [1, 2] {
             s.checks_on.insert(format!("pr-{n}-v0"), both.clone());
         }
-    }));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_checks_never_finish_counts_as_failed() {
+    let run = Run::batching(Fake::new(batch_without_e2e(Some(CheckState::Pending))));
     run.tick().await;
-    let failed: Vec<String> = run
-        .store
-        .events
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(n, kind, _)| *n == 1 && kind == "batch-failed")
-        .map(|(.., message)| message.clone())
-        .collect();
     assert_eq!(
-        failed,
+        messages(&run, 1, "batch-failed"),
         ["required checks did not finish within 3 hours: e2e"]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_required_check_never_reports_fails_once_ci_is_done() {
+    let run = Run::batching(Fake::new(batch_without_e2e(None)));
+    let start = tokio::time::Instant::now();
+    run.tick().await;
+    assert!(start.elapsed() >= CHECKS_MISSING_FOR);
+    assert!(start.elapsed() < CHECKS_TIMEOUT);
+    let failed = messages(&run, 1, "batch-failed");
+    assert_eq!(failed.len(), 1);
+    assert!(
+        failed[0].starts_with("required checks never reported, 30 minutes after"),
+        "{failed:?}"
+    );
+    assert!(failed[0].contains(": e2e."), "{failed:?}");
+}
+
+/// A PR whose published head reports every check but `sift`: it renamed that required check,
+/// so it never reports. With `pr2`, PR 2 is labeled while PR 1 waits for it.
+fn renamed_sift(run: &Run, pr2: bool) {
+    run.gh.then(move |s| {
+        let renamed = BTreeMap::from([
+            ("ci".to_owned(), CheckState::Passed),
+            ("sift-renamed".to_owned(), CheckState::Passed),
+        ]);
+        s.checks_on.insert(s.head(1), renamed);
+        if pr2 {
+            s.add_pr(2);
+        }
+    });
+}
+
+fn sift_required(s: &mut State) {
+    s.add_pr(1);
+    s.required = vec!["ci".into(), "sift".into()];
+    s.checks.insert("sift".into(), CheckState::Passed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_required_check_that_never_reports_ejects_once_ci_is_done_naming_it() {
+    let run = Run::new(Fake::new(sift_required));
+    renamed_sift(&run, false);
+    let start = tokio::time::Instant::now();
+    run.tick().await;
+    assert!(start.elapsed() >= CHECKS_MISSING_FOR);
+    assert!(start.elapsed() < CHECKS_MISSING_FOR + Duration::from_secs(60));
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "ejected"]
+    );
+    assert!(run.rebase.fixed().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = last_comment(&run);
+    assert!(
+        comment.contains(
+            "required checks never reported, 30 minutes after every other check finished: sift."
+        ),
+        "{comment}"
+    );
+    let exits = run.exits();
+    assert_eq!(exits.last().unwrap().1, "ejected");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_required_check_still_running_is_waited_for_past_the_missing_bound() {
+    let run = Run::new(Fake::new(sift_required));
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
+    });
+    // `sift` has not reported, but `ci` runs: CI may create `sift` once `ci` is done.
+    for _ in 0..(CHECKS_MISSING_FOR.as_secs() / CHECKS_POLL.as_secs() + 10) {
+        run.gh.then(|_| {});
+    }
+    run.gh.then(|s| {
+        let both = BTreeMap::from([
+            ("ci".to_owned(), CheckState::Passed),
+            ("sift".to_owned(), CheckState::Passed),
+        ]);
+        s.checks_on.insert(s.head(1), both);
+    });
+    let start = tokio::time::Instant::now();
+    run.tick().await;
+    assert!(start.elapsed() >= CHECKS_MISSING_FOR);
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_labeled_while_another_waits_for_checks_takes_its_place_at_once() {
+    let run = Run::new(Fake::new(sift_required));
+    // PR 1 waits on `sift`, which it renamed. PR 2 is labeled meanwhile, green.
+    renamed_sift(&run, true);
+    for _ in 0..8 {
+        run.gh.then(|_| {});
+    }
+    // While PR 1 still runs: PR 2 waits behind it, in the lane the status API reads.
+    let lanes = run.store.clone();
+    run.gh.then(move |_| {
+        let lanes = lanes.lanes.lock().unwrap();
+        let entries: Vec<(PrNumber, EntryState)> = lanes
+            .values()
+            .flat_map(|l| &l.entries)
+            .map(|e| (e.number, e.state.clone()))
+            .collect();
+        assert_eq!(entries, [(1, EntryState::Active), (2, EntryState::Waiting)]);
+    });
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "ejected");
+    // PR 2 joined while PR 1's job ran, not after it.
+    let events = run.store.events.lock().unwrap().clone();
+    let at = |n: PrNumber, kind: &str| events.iter().position(|(m, k, _)| *m == n && k == kind);
+    assert!(at(2, "enqueued").unwrap() < at(1, "ejected").unwrap());
+    // Then it runs, and merges.
+    run.drain().await;
+    assert_eq!(
+        run.kinds(2),
+        ["enqueued", "rebasing", "published", "merged"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_unlabeled_while_another_runs_leaves_the_queue_at_once() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+    }));
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
+        s.prs.get_mut(&2).unwrap().labels.clear();
+    });
+    for _ in 0..8 {
+        run.gh.then(|_| {});
+    }
+    let events = run.store.clone();
+    run.gh.then(move |s| {
+        let kinds: Vec<String> = events
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, ..)| *n == 2)
+            .map(|(_, kind, _)| kind.clone())
+            .collect();
+        assert_eq!(kinds, ["enqueued", "dequeued"]);
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Passed)].into());
+    });
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+    assert!(run.lane().is_empty());
 }
 
 fn failing_ci(s: &mut State) {
