@@ -9,13 +9,14 @@ import {
   proposeRepoConfig,
   setReviewSettings,
 } from "./api";
+import type { BandView } from "./api/BandView";
 import type { BarView } from "./api/BarView";
 import type { KindView } from "./api/KindView";
 import type { PullRequestRef } from "./api/PullRequestRef";
 import type { RepoConfigView } from "./api/RepoConfigView";
 import type { RepoReviewView } from "./api/RepoReviewView";
 import type { ReviewSettingsView } from "./api/ReviewSettingsView";
-import { ErrorText, primary, secondary } from "./ui";
+import { ErrorText, primary, Section, secondary, Toggle } from "./ui";
 
 /*
  * How sure the agent must be to send each kind of change back to the PR's author: the workspace's bars, set
@@ -63,7 +64,6 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
   const [bars, setBars] = useState<Record<KindView, Bar>>(
     () => Object.fromEntries(saved.bars.map((b) => [b.kind, b.bar])) as Record<KindView, Bar>,
   );
-  const [kind, setKind] = useState<KindView>("other");
   const defaults = Object.fromEntries(saved.defaults.map((b) => [b.kind, b.bar])) as Record<
     KindView,
     Bar
@@ -85,229 +85,169 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
     resolved !== saved.require_resolved ||
     KINDS.some((k) => bars[k] !== barOf(saved.bars, k));
 
-  const bar = bars[kind];
+  return (
+    <Section
+      id="review"
+      title="Automatic review"
+      sub="The agent reviews each queued PR. Findings it's sure of go back to the author as line comments; once every thread is resolved, the PR goes on without human approval."
+      aside={<Toggle on={enabled} onChange={setEnabled} label="Automatic review" />}
+    >
+      <div className={`rounded-lg border border-line bg-surface ${enabled ? "" : "opacity-60"}`}>
+        <div className="flex items-center justify-between gap-4 border-b border-line-soft p-4">
+          <span>
+            <span className="font-medium">Require resolved threads</span>
+            <span className="block text-xs text-muted">
+              Hold a queued PR while any review thread on it is open.
+            </span>
+          </span>
+          <Toggle on={resolved} onChange={setResolved} label="Require resolved threads" />
+        </div>
+        <p className="px-4 pt-3 text-xs text-muted">
+          <span className="font-medium text-fg-2">How sure the agent must be</span> to send a
+          finding back, by kind. Lower sends more back. Charts: its findings of the last{" "}
+          {saved.days} days by confidence; right of the line goes back, red was overruled.
+        </p>
+        <ul className="divide-y divide-line-soft">
+          {KINDS.map((k) => (
+            <KindRow
+              key={k}
+              kind={k}
+              bar={bars[k]}
+              fallback={defaults[k] === "always_ask" ? 90 : defaults[k]}
+              bands={saved.history.find((h) => h.kind === k)?.bands ?? []}
+              onChange={(bar) => setBars({ ...bars, [k]: bar })}
+            />
+          ))}
+        </ul>
+        <div className="flex items-center gap-3 border-t border-line-soft px-4 py-3">
+          <span className="text-xs text-muted">
+            {dirty ? "Unsaved. Applies to PRs reviewed after you save." : "Saved."}
+          </span>
+          <button
+            type="button"
+            onClick={() => setBars(defaults)}
+            className="ml-auto text-sm text-muted hover:text-fg"
+          >
+            Defaults
+          </button>
+          <button
+            type="button"
+            disabled={!dirty || save.isPending}
+            onClick={() => save.mutate()}
+            className={`${primary} h-8 px-3`}
+          >
+            Save
+          </button>
+        </div>
+        {save.error && (
+          <div className="px-4 pb-3">
+            <ErrorText error={save.error} />
+          </div>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+/** One kind's bar: its findings by confidence, the bar drawn on them, a slider, and what the bar
+ * sends back. */
+function KindRow({
+  kind,
+  bar,
+  fallback,
+  bands,
+  onChange,
+}: {
+  kind: KindView;
+  bar: Bar;
+  /** Where the slider lands when Always ask goes off. */
+  fallback: number;
+  bands: BandView[];
+  onChange: (bar: Bar) => void;
+}) {
   const cut = bar === "always_ask" ? 101 : bar;
-  const bands = saved.history.find((h) => h.kind === kind)?.bands ?? [];
-  const total = bands.reduce((t, b) => t + b.findings, 0);
   const max = Math.max(1, ...bands.map((b) => b.findings));
+  const total = bands.reduce((t, b) => t + b.findings, 0);
   const changes = bands.reduce((t, b) => t + b.changes, 0);
   const sentBack = bands.filter((b) => b.from >= cut).reduce((t, b) => t + b.changes, 0);
   const answered = bands.reduce((t, b) => t + b.answered, 0);
   const overruled = bands.reduce((t, b) => t + b.overruled, 0);
-
   return (
-    <section className="rounded-lg border border-line bg-surface">
-      <div className="p-4 sm:p-5">
-        <div className="flex items-start justify-between gap-4">
-          <h2 className="font-semibold">Automatic review</h2>
-          <label className="flex items-center gap-2 text-sm">
+    <li className="grid items-center gap-x-5 gap-y-2 px-4 py-3 sm:grid-cols-[140px_120px_minmax(0,1fr)]">
+      <span className="min-w-0">
+        <span className="font-medium">{kindNames[kind]}</span>
+        {kindHelp[kind] && (
+          <span className="block truncate text-xs text-faint" title={kindHelp[kind]}>
+            {kindHelp[kind]}
+          </span>
+        )}
+      </span>
+      <div className="relative flex h-8 items-end gap-0.5 max-sm:hidden">
+        {bands.map((b) => (
+          <div
+            key={b.from}
+            className={`flex flex-1 flex-col justify-end overflow-hidden rounded-t-sm ${
+              b.from < cut
+                ? "bg-neutral-200 dark:bg-neutral-400/30"
+                : "bg-amber-200 dark:bg-amber-400/30"
+            }`}
+            style={{ height: `${b.findings ? Math.sqrt(b.findings / max) * 28 + 2 : 1}px` }}
+            title={`${b.from}–${b.from + 5}% sure: ${b.findings} findings, ${b.overruled} overruled`}
+          >
+            <div
+              className="w-full bg-red-500"
+              style={{ height: `${b.findings ? (b.overruled / b.findings) * 100 : 0}%` }}
+            />
+          </div>
+        ))}
+        {bar !== "always_ask" && (
+          <div
+            className="pointer-events-none absolute inset-y-0 w-0.5 bg-fg"
+            style={{ left: `${((bar - 50) / 50) * 100}%` }}
+          />
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-3">
+          <input
+            type="range"
+            aria-label={`${kindNames[kind]}: how sure the agent must be`}
+            min={50}
+            max={100}
+            step={5}
+            disabled={bar === "always_ask"}
+            value={bar === "always_ask" ? 100 : bar}
+            onChange={(e) => onChange(Number(e.target.value))}
+            className="min-w-0 flex-1 accent-neutral-900 disabled:opacity-30 dark:accent-neutral-100"
+          />
+          <span
+            className={`w-18 shrink-0 text-right text-sm tabular-nums ${
+              bar === "always_ask" ? "text-warn" : ""
+            }`}
+          >
+            {barText(bar)}
+          </span>
+          <label className="flex items-center gap-1.5 text-xs whitespace-nowrap text-muted">
             <input
               type="checkbox"
-              checked={enabled}
-              onChange={(e) => setEnabled(e.target.checked)}
+              checked={bar === "always_ask"}
+              onChange={(e) => onChange(e.target.checked ? "always_ask" : fallback)}
             />
-            On
+            Always ask
           </label>
         </div>
-        <p className="mt-1 text-muted">
-          The agent reviews every queued PR before it takes its place in line. A change it's sure
-          enough of goes back to the PR's author, often the agent that built it, as a comment on its
-          line. The author fixes it or says why not, and resolves the thread; once every thread is
-          resolved, the PR goes on with no human approval. It asks a human only about a call the
-          author can't make. It runs on the workspace's API key. Set how sure is sure enough to send
-          a change back for each kind: lower sends back more. A repo can set its own below.
+        <p className="mt-0.5 text-xs text-faint tabular-nums">
+          {total === 0
+            ? "No findings yet"
+            : [
+                bar === "always_ask" ? "A human sees each" : `${sentBack} of ${changes} sent back`,
+                answered ? `${Math.round((overruled / answered) * 100)}% overruled` : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
         </p>
-        <label className="mt-3 flex items-start gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="mt-0.5"
-            checked={resolved}
-            onChange={(e) => setResolved(e.target.checked)}
-          />
-          <span>
-            Require resolved comments
-            <span className="block text-muted">
-              Hold a queued PR while any review thread on it is unresolved, whoever started it.
-            </span>
-          </span>
-        </label>
       </div>
-      <div className="flex border-t border-line max-sm:flex-col">
-        <ul className="shrink-0 border-line py-2 max-sm:border-b sm:w-44 sm:border-r">
-          {KINDS.map((k) => (
-            <li key={k}>
-              <button
-                type="button"
-                onClick={() => setKind(k)}
-                className={`block w-full px-4 py-1.5 text-left text-sm ${
-                  k === kind
-                    ? "bg-page font-medium shadow-[inset_2px_0_0_0_var(--color-fg)]"
-                    : "text-muted hover:text-fg"
-                }`}
-              >
-                {kindNames[k]}
-                <span
-                  className={`block text-xs font-normal tabular-nums ${
-                    bars[k] === "always_ask" ? "text-warn" : "text-muted"
-                  }`}
-                >
-                  {barText(bars[k])}
-                  {bars[k] === defaults[k] && <span className="text-faint"> · default</span>}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-        <div className="min-w-0 flex-1 p-4 sm:p-5">
-          <p className="text-sm">
-            <span className="font-medium">{kindNames[kind]}</span>
-            {kindHelp[kind] && <span className="text-muted"> · {kindHelp[kind]}</span>}
-          </p>
-          <p className="mt-0.5 text-xs text-muted">
-            The agent's findings of the last {saved.days} days, by how sure it was. A change from
-            the bar up goes back to the author; under it, it's a note. Red: a human answering it
-            decided otherwise than the agent leaned.
-          </p>
-          <div className="relative mt-8 flex h-32 items-end gap-1">
-            {bands.map((b) => (
-              <div
-                key={b.from}
-                className={`flex flex-1 flex-col justify-end overflow-hidden rounded-t ${
-                  b.from < cut
-                    ? "bg-neutral-200 dark:bg-neutral-400/30"
-                    : "bg-amber-200 dark:bg-amber-400/30"
-                }`}
-                style={{ height: `${b.findings ? Math.sqrt(b.findings / max) * 120 + 4 : 2}px` }}
-                title={`${b.from}–${b.from + 5}% sure: ${b.findings} findings, ${b.overruled} overruled`}
-              >
-                <div
-                  className="w-full bg-red-500"
-                  style={{ height: `${b.findings ? (b.overruled / b.findings) * 100 : 0}%` }}
-                />
-              </div>
-            ))}
-            {bar !== "always_ask" ? (
-              <div
-                className="pointer-events-none absolute inset-y-0 w-0.5 bg-fg"
-                style={{ left: `${((bar - 50) / 50) * 100}%` }}
-              >
-                <span
-                  className={`absolute -top-6 rounded bg-fg px-1.5 py-0.5 text-xs whitespace-nowrap text-surface ${
-                    bar > 80 ? "right-1.5" : "left-1.5"
-                  }`}
-                >
-                  sends back from {bar}%
-                </span>
-              </div>
-            ) : (
-              <span className="absolute -top-6 right-0 rounded bg-amber-500 px-1.5 py-0.5 text-xs text-white">
-                always asks a human
-              </span>
-            )}
-          </div>
-          <div className="mt-1 flex justify-between text-xs text-faint tabular-nums">
-            <span>50% sure</span>
-            <span>75%</span>
-            <span>100%</span>
-          </div>
-          <div className="mt-3 flex items-center gap-4">
-            <input
-              type="range"
-              aria-label={`${kindNames[kind]}: how sure the agent must be`}
-              min={50}
-              max={100}
-              step={5}
-              disabled={bar === "always_ask"}
-              value={bar === "always_ask" ? 100 : bar}
-              onChange={(e) => setBars({ ...bars, [kind]: Number(e.target.value) })}
-              className="flex-1 accent-neutral-900 disabled:opacity-30 dark:accent-neutral-100"
-            />
-            <label className="flex items-center gap-1.5 text-sm whitespace-nowrap">
-              <input
-                type="checkbox"
-                checked={bar === "always_ask"}
-                onChange={(e) =>
-                  setBars({
-                    ...bars,
-                    [kind]: e.target.checked
-                      ? "always_ask"
-                      : defaults[kind] === "always_ask"
-                        ? 90
-                        : defaults[kind],
-                  })
-                }
-              />
-              Always ask
-            </label>
-          </div>
-          {total === 0 ? (
-            <p className="mt-4 rounded-md bg-sunken px-3 py-2 text-sm text-muted">
-              No {kind === "other" ? "" : `${kindNames[kind].toLowerCase()} `}findings yet: the
-              chart fills in as the agent reviews.
-            </p>
-          ) : (
-            <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-              <Stat
-                label="Sent back"
-                value={bar === "always_ask" ? "–" : String(sentBack)}
-                sub={
-                  bar === "always_ask"
-                    ? "a human sees each"
-                    : `of ${changes} changes the agent wanted`
-                }
-              />
-              <Stat
-                label="Overruled"
-                value={answered ? `${Math.round((overruled / answered) * 100)}%` : "–"}
-                sub={`of ${answered} answered`}
-              />
-              <Stat
-                label="Notes"
-                value={bar === "always_ask" ? "–" : String(changes - sentBack)}
-                sub="under the bar, holding nothing"
-              />
-            </div>
-          )}
-        </div>
-      </div>
-      <div className="flex items-center gap-3 border-t border-line px-4 py-3 sm:px-5">
-        <span className="text-xs text-muted">
-          {dirty
-            ? "Unsaved. Applies to PRs reviewed after you save."
-            : "Saved. Every repo without its own bars uses these."}
-        </span>
-        <button
-          type="button"
-          onClick={() => setBars(defaults)}
-          className="ml-auto text-sm text-muted hover:text-fg"
-        >
-          Defaults
-        </button>
-        <button
-          type="button"
-          disabled={!dirty || save.isPending}
-          onClick={() => save.mutate()}
-          className={`${primary} h-8 px-3`}
-        >
-          Save
-        </button>
-      </div>
-      {save.error && (
-        <div className="px-4 pb-3 sm:px-5">
-          <ErrorText error={save.error} />
-        </div>
-      )}
-    </section>
-  );
-}
-
-function Stat({ label, value, sub }: { label: string; value: string; sub: string }) {
-  return (
-    <div className="rounded-md bg-sunken px-3 py-2">
-      <p className="text-xs text-muted">{label}</p>
-      <p className="text-xl font-semibold tabular-nums">{value}</p>
-      <p className="text-xs text-faint">{sub}</p>
-    </div>
+    </li>
   );
 }
 
@@ -359,7 +299,6 @@ function RepoBars({
         client.invalidateQueries({ queryKey: ["repo-config", workspace, repo] });
     },
   });
-  if (on.length === 0) return null;
 
   const view = (repo: string, config: RepoConfigView) => staged[repo] ?? config.settings.review;
   const set = (repo: string, config: RepoConfigView, change: Partial<RepoReviewView>) =>
@@ -371,169 +310,171 @@ function RepoBars({
   const changed = Object.keys(staged);
 
   return (
-    <section className="rounded-lg border border-line bg-surface">
-      <div className="p-4 sm:p-5">
-        <h2 className="font-semibold">Each repo's review</h2>
-        <p className="mt-1 text-muted">
-          A repo follows the workspace unless it sets its own. A repo's own bars live in its config
-          file, so changing one opens a PR there.
-        </p>
-      </div>
-      <ul className="divide-y divide-line-soft border-t border-line">
-        {loaded.map(({ repo, config }) => {
-          const r = view(repo, config);
-          const overrides = [
-            ...(r.enabled === null ? [] : [`Review ${r.enabled ? "on" : "off"}`]),
-            ...KINDS.flatMap((k) => {
-              const own = barOf(r.bars, k);
-              return own === undefined ? [] : [`${kindNames[k]} ${barText(own)}`];
-            }),
-          ];
-          const expanded = open === repo;
-          return (
-            <li key={repo}>
-              <div className="flex items-baseline gap-3 px-4 text-sm hover:bg-page sm:px-5">
+    <Section
+      id="repos"
+      title="Repo overrides"
+      sub="A repo follows the settings above unless its config file sets its own. Changing one opens a PR there."
+    >
+      <div className="rounded-lg border border-line bg-surface">
+        {on.length === 0 && <p className="px-4 py-3 text-muted">No repo queues yet.</p>}
+        <ul className="divide-y divide-line-soft">
+          {loaded.map(({ repo, config }) => {
+            const r = view(repo, config);
+            const overrides = [
+              ...(r.enabled === null ? [] : [`Review ${r.enabled ? "on" : "off"}`]),
+              ...KINDS.flatMap((k) => {
+                const own = barOf(r.bars, k);
+                return own === undefined ? [] : [`${kindNames[k]} ${barText(own)}`];
+              }),
+            ];
+            const expanded = open === repo;
+            return (
+              <li key={repo}>
+                <div className="flex items-baseline gap-3 px-4 text-sm hover:bg-page ">
+                  <button
+                    type="button"
+                    aria-expanded={expanded}
+                    onClick={() => setOpen(expanded ? null : repo)}
+                    className="flex min-w-0 flex-1 items-baseline gap-3 py-2.5 text-left"
+                  >
+                    <span className="shrink-0 font-medium" title={repo}>
+                      {repo.split("/")[1]}
+                    </span>
+                    <span
+                      className={`min-w-0 flex-1 truncate text-xs ${
+                        overrides.length ? "text-fg-2" : "text-faint"
+                      }`}
+                    >
+                      {overrides.length ? overrides.join(" · ") : "Follows the workspace"}
+                    </span>
+                    {staged[repo] && <span className="shrink-0 text-xs text-warn">edited</span>}
+                    <span className="shrink-0 text-xs text-muted">
+                      {expanded ? "Done" : "Edit"}
+                    </span>
+                  </button>
+                  {opened[repo] && (
+                    <a
+                      href={opened[repo].url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="shrink-0 text-xs text-ok"
+                    >
+                      PR #{opened[repo].number}
+                    </a>
+                  )}
+                </div>
+                {expanded && (
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 pt-1 pb-4 sm:grid-cols-3 ">
+                    <RepoChoice
+                      label="Review"
+                      value={r.enabled === null ? "inherit" : r.enabled ? "on" : "off"}
+                      inherit={workspaceOn ? "On" : "Off"}
+                      changed={!!staged[repo] && r.enabled !== config.settings.review.enabled}
+                      choices={[
+                        ["on", "On"],
+                        ["off", "Off"],
+                      ]}
+                      onChange={(v) =>
+                        set(repo, config, { enabled: v === "inherit" ? null : v === "on" })
+                      }
+                    />
+                    {KINDS.map((k) => {
+                      const own = barOf(r.bars, k);
+                      const ws = barOf(workspaceBars, k);
+                      return (
+                        <RepoChoice
+                          key={k}
+                          label={kindNames[k]}
+                          value={own === undefined ? "inherit" : String(own)}
+                          inherit={ws === undefined ? "" : barText(ws)}
+                          changed={!!staged[repo] && own !== barOf(config.settings.review.bars, k)}
+                          choices={CHOICES.map((c) => [String(c), barText(c)])}
+                          onChange={(v) =>
+                            setBar(
+                              repo,
+                              config,
+                              k,
+                              v === "inherit"
+                                ? undefined
+                                : v === "always_ask"
+                                  ? "always_ask"
+                                  : Number(v),
+                            )
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+        {changed.length > 0 && (
+          <div className="flex items-center gap-3 border-t border-line px-4 py-3 ">
+            <span className="text-xs text-muted">
+              Changed {changed.map((r) => r.split("/")[1]).join(", ")}
+            </span>
+            <button
+              type="button"
+              onClick={() => setStaged({})}
+              className="ml-auto text-sm text-muted hover:text-fg"
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              onClick={() => setReviewing(true)}
+              className={`${primary} h-8 px-3`}
+            >
+              Review and open {changed.length === 1 ? "a PR" : `${changed.length} PRs`}
+            </button>
+          </div>
+        )}
+        {reviewing && (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-6">
+            <div className="w-full max-w-xl rounded-lg bg-surface shadow-2xl ring-1 ring-line">
+              <div className="border-b border-line px-5 py-3">
+                <p className="font-medium">
+                  Open {changed.length === 1 ? "a PR" : `${changed.length} PRs`} to change review
+                  settings
+                </p>
+                <p className="text-sm text-muted">
+                  It goes through review and the queue like any other change, and applies once it
+                  merges.
+                </p>
+              </div>
+              <div className="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-4">
+                {loaded
+                  .filter(({ repo }) => staged[repo])
+                  .map(({ repo, config }) => (
+                    <div key={repo}>
+                      <p className="mb-1 text-sm">
+                        {repo} · <code className="text-xs">{config.path}</code>
+                      </p>
+                      <YamlDiff from={config.settings.review} to={staged[repo]} />
+                    </div>
+                  ))}
+                <ErrorText error={propose.error} />
+              </div>
+              <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
+                <button type="button" onClick={() => setReviewing(false)} className={secondary}>
+                  Back
+                </button>
                 <button
                   type="button"
-                  aria-expanded={expanded}
-                  onClick={() => setOpen(expanded ? null : repo)}
-                  className="flex min-w-0 flex-1 items-baseline gap-3 py-2.5 text-left"
+                  disabled={propose.isPending}
+                  onClick={() => propose.mutate()}
+                  className={primary}
                 >
-                  <span className="shrink-0 font-medium" title={repo}>
-                    {repo.split("/")[1]}
-                  </span>
-                  <span
-                    className={`min-w-0 flex-1 truncate text-xs ${
-                      overrides.length ? "text-fg-2" : "text-faint"
-                    }`}
-                  >
-                    {overrides.length ? overrides.join(" · ") : "Follows the workspace"}
-                  </span>
-                  {staged[repo] && <span className="shrink-0 text-xs text-warn">edited</span>}
-                  <span className="shrink-0 text-xs text-muted">{expanded ? "Done" : "Edit"}</span>
+                  {propose.isPending ? "Opening…" : `Open ${changed.length === 1 ? "PR" : "PRs"}`}
                 </button>
-                {opened[repo] && (
-                  <a
-                    href={opened[repo].url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="shrink-0 text-xs text-ok"
-                  >
-                    PR #{opened[repo].number}
-                  </a>
-                )}
               </div>
-              {expanded && (
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 pt-1 pb-4 sm:grid-cols-3 sm:px-5">
-                  <RepoChoice
-                    label="Review"
-                    value={r.enabled === null ? "inherit" : r.enabled ? "on" : "off"}
-                    inherit={workspaceOn ? "On" : "Off"}
-                    changed={!!staged[repo] && r.enabled !== config.settings.review.enabled}
-                    choices={[
-                      ["on", "On"],
-                      ["off", "Off"],
-                    ]}
-                    onChange={(v) =>
-                      set(repo, config, { enabled: v === "inherit" ? null : v === "on" })
-                    }
-                  />
-                  {KINDS.map((k) => {
-                    const own = barOf(r.bars, k);
-                    const ws = barOf(workspaceBars, k);
-                    return (
-                      <RepoChoice
-                        key={k}
-                        label={kindNames[k]}
-                        value={own === undefined ? "inherit" : String(own)}
-                        inherit={ws === undefined ? "" : barText(ws)}
-                        changed={!!staged[repo] && own !== barOf(config.settings.review.bars, k)}
-                        choices={CHOICES.map((c) => [String(c), barText(c)])}
-                        onChange={(v) =>
-                          setBar(
-                            repo,
-                            config,
-                            k,
-                            v === "inherit"
-                              ? undefined
-                              : v === "always_ask"
-                                ? "always_ask"
-                                : Number(v),
-                          )
-                        }
-                      />
-                    );
-                  })}
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      {changed.length > 0 && (
-        <div className="flex items-center gap-3 border-t border-line px-4 py-3 sm:px-5">
-          <span className="text-xs text-muted">
-            Changed {changed.map((r) => r.split("/")[1]).join(", ")}
-          </span>
-          <button
-            type="button"
-            onClick={() => setStaged({})}
-            className="ml-auto text-sm text-muted hover:text-fg"
-          >
-            Discard
-          </button>
-          <button
-            type="button"
-            onClick={() => setReviewing(true)}
-            className={`${primary} h-8 px-3`}
-          >
-            Review and open {changed.length === 1 ? "a PR" : `${changed.length} PRs`}
-          </button>
-        </div>
-      )}
-      {reviewing && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-6">
-          <div className="w-full max-w-xl rounded-lg bg-surface shadow-2xl ring-1 ring-line">
-            <div className="border-b border-line px-5 py-3">
-              <p className="font-medium">
-                Open {changed.length === 1 ? "a PR" : `${changed.length} PRs`} to change review
-                settings
-              </p>
-              <p className="text-sm text-muted">
-                It goes through review and the queue like any other change, and applies once it
-                merges.
-              </p>
-            </div>
-            <div className="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-4">
-              {loaded
-                .filter(({ repo }) => staged[repo])
-                .map(({ repo, config }) => (
-                  <div key={repo}>
-                    <p className="mb-1 text-sm">
-                      {repo} · <code className="text-xs">{config.path}</code>
-                    </p>
-                    <YamlDiff from={config.settings.review} to={staged[repo]} />
-                  </div>
-                ))}
-              <ErrorText error={propose.error} />
-            </div>
-            <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
-              <button type="button" onClick={() => setReviewing(false)} className={secondary}>
-                Back
-              </button>
-              <button
-                type="button"
-                disabled={propose.isPending}
-                onClick={() => propose.mutate()}
-                className={primary}
-              >
-                {propose.isPending ? "Opening…" : `Open ${changed.length === 1 ? "PR" : "PRs"}`}
-              </button>
             </div>
           </div>
-        </div>
-      )}
-    </section>
+        )}
+      </div>
+    </Section>
   );
 }
 

@@ -18,7 +18,7 @@ import type { BillingView } from "./api/BillingView";
 import type { ChatGptView } from "./api/ChatGptView";
 import type { SettingsView } from "./api/SettingsView";
 import { ReviewSettings } from "./ReviewSettings";
-import { danger, ErrorText, field, Narrow, primary, secondary, timeAgo } from "./ui";
+import { danger, ErrorText, field, primary, Section, Status, secondary, timeAgo } from "./ui";
 
 const link =
   "text-fg-2 underline decoration-line-strong underline-offset-2 hover:text-fg hover:decoration-fg";
@@ -29,6 +29,14 @@ const PLACEHOLDERS: Record<string, string> = {
   openai: "sk-…",
   openrouter: "sk-or-…",
 };
+
+/** The sections, in order, for the menu beside them. */
+const SECTIONS = [
+  ["plan", "Plan"],
+  ["models", "Model access"],
+  ["review", "Automatic review"],
+  ["repos", "Repo overrides"],
+] as const;
 
 export function Settings({ workspace }: { workspace: number }) {
   const settings = useQuery({
@@ -41,22 +49,65 @@ export function Settings({ workspace }: { workspace: number }) {
   });
   if (!settings.data) return null;
   return (
-    <Narrow title="Settings" sub="For this workspace only.">
-      <div className="flex flex-col gap-4">
-        {billing.data && <Billing workspace={workspace} billing={billing.data} />}
-        {settings.data.api_keys.map((k) => (
-          <div key={k.provider.id} className="contents">
-            <KeyForm workspace={workspace} apiKey={k} />
-            {k.provider.id === "openai" && (
-              <ChatGptForm workspace={workspace} chatgpt={settings.data.chatgpt} />
-            )}
-          </div>
-        ))}
-        <ReviewSettings workspace={workspace} />
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto flex max-w-6xl gap-10 px-4 py-6 sm:px-6 sm:py-8">
+        <nav className="sticky top-0 h-fit w-44 shrink-0 max-lg:hidden">
+          <h1 className="mb-3 text-xl font-semibold tracking-tight">Settings</h1>
+          {SECTIONS.map(([id, label]) => (
+            <a
+              key={id}
+              href={`#${id}`}
+              className="block rounded-md px-2 py-1.5 text-fg-2 hover:bg-sunken hover:text-fg"
+            >
+              {label}
+            </a>
+          ))}
+        </nav>
+        <div className="min-w-0 flex-1 divide-y divide-line">
+          <h1 className="pb-6 text-xl font-semibold tracking-tight lg:hidden">Settings</h1>
+          {billing.data && <Billing workspace={workspace} billing={billing.data} />}
+          <Section
+            id="models"
+            title="Model access"
+            sub={
+              <>
+                Resolves rebase conflicts and fixes failed checks. Each repo's config picks the
+                provider. Keys are encrypted and never shown again. For Anthropic, use a dedicated
+                key in a{" "}
+                <a
+                  href="https://platform.claude.com/settings/workspaces"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={link}
+                >
+                  workspace with a spend limit
+                </a>
+                .
+              </>
+            }
+          >
+            <div className="divide-y divide-line-soft rounded-lg border border-line bg-surface">
+              {settings.data.api_keys.flatMap((k) => [
+                <KeyForm key={k.provider.id} workspace={workspace} apiKey={k} />,
+                k.provider.id === "openai" && (
+                  <ChatGptForm
+                    key="chatgpt"
+                    workspace={workspace}
+                    chatgpt={settings.data.chatgpt}
+                  />
+                ),
+              ])}
+            </div>
+          </Section>
+          <ReviewSettings workspace={workspace} />
+        </div>
       </div>
-    </Narrow>
+    </div>
   );
 }
+
+/** A row's buttons: one height, smaller than a form's. */
+const sm = "h-8 px-3 text-[13px]";
 
 /** The plan in one line. */
 function planText(b: BillingView) {
@@ -66,7 +117,7 @@ function planText(b: BillingView) {
       return `Private repos: free for ${b.pricing.trial_days} days, then ${price}.`;
     case "trial": {
       const left = b.trial_days_left ?? 0;
-      return `Free trial: ${left} ${left === 1 ? "day" : "days"} left.`;
+      return `Free trial: ${left} ${left === 1 ? "day" : "days"} left, then ${price}.`;
     }
     case "subscribed":
       return `${price}.`;
@@ -100,60 +151,62 @@ function Billing({ workspace, billing }: { workspace: number; billing: BillingVi
   const n = billing.seats.length;
 
   return (
-    <section className="rounded-lg border border-line bg-surface">
-      <div className="p-4 sm:p-5">
-        <h2 className="font-semibold">Plan</h2>
-        <p className="mt-1 text-muted">{planText(billing)}</p>
+    <Section id="plan" title="Plan" sub={planText(billing)}>
+      <div className="rounded-lg border border-line bg-surface p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-medium text-muted">
+            {n === 0 ? "No seats yet" : `${n} ${n === 1 ? "seat" : "seats"}`}
+          </span>
+          <span className="flex gap-2">
+            {billing.manageable && (
+              <button
+                type="button"
+                onClick={() => portal.mutate()}
+                disabled={portal.isPending}
+                className={`${secondary} ${sm}`}
+              >
+                Manage billing
+              </button>
+            )}
+            {!live && (
+              <button
+                type="button"
+                onClick={() => checkout.mutate()}
+                disabled={checkout.isPending}
+                className={`${primary} ${sm}`}
+              >
+                {billing.access === "new" ? "Start free trial" : "Subscribe"}
+              </button>
+            )}
+          </span>
+        </div>
         {n > 0 && (
-          <div className="mt-3">
-            <p>
-              {n} {n === 1 ? "seat" : "seats"}
-            </p>
-            <ul className="mt-2 flex flex-col divide-y divide-line rounded-md border border-line">
-              {billing.seats.map((login) => (
-                <li key={login} className="flex items-center justify-between px-3 py-1.5">
-                  <span className="font-mono">{login}</span>
-                  <button
-                    type="button"
-                    onClick={() => free.mutate(login)}
-                    disabled={free.isPending}
-                    className="text-muted hover:text-fg"
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <ul className="mt-2 gap-6 sm:columns-2">
+            {billing.seats.map((login) => (
+              <li
+                key={login}
+                className="flex break-inside-avoid items-center justify-between border-b border-line-soft py-1.5"
+              >
+                <span className="font-mono text-[13px]">{login}</span>
+                <button
+                  type="button"
+                  onClick={() => free.mutate(login)}
+                  disabled={free.isPending}
+                  className="text-xs text-muted hover:text-bad"
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
         <ErrorText error={checkout.error ?? portal.error ?? free.error} />
       </div>
-      <div className="flex flex-wrap items-center justify-end gap-2 rounded-b-lg border-t border-line bg-page px-4 py-3 sm:px-5">
-        {billing.manageable && (
-          <button
-            type="button"
-            onClick={() => portal.mutate()}
-            disabled={portal.isPending}
-            className={secondary}
-          >
-            Manage billing
-          </button>
-        )}
-        {!live && (
-          <button
-            type="button"
-            onClick={() => checkout.mutate()}
-            disabled={checkout.isPending}
-            className={primary}
-          >
-            {billing.access === "new" ? "Start free trial" : "Subscribe"}
-          </button>
-        )}
-      </div>
-    </section>
+    </Section>
   );
 }
 
+/** A provider's key in one row: whether it is set, a field for a new one, Remove and Save. */
 function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState("");
@@ -184,63 +237,42 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
   };
 
   return (
-    <form onSubmit={submit} className="rounded-lg border border-line bg-surface">
-      <div className="p-4 sm:p-5">
-        <h2 className="font-semibold">{provider.name} API key</h2>
-        <p className="mt-1 text-muted">
-          The agent uses it when a rebase has conflicts, and to fix failed checks, in repos whose
-          config chooses {provider.name}. It is stored encrypted, and never shown again.
-        </p>
-        {provider.id === "anthropic" && (
-          <p className="mt-1 text-muted">
-            Create a key for MergeLoop alone, in an{" "}
-            <a
-              href="https://platform.claude.com/settings/workspaces"
-              target="_blank"
-              rel="noreferrer"
-              className={link}
-            >
-              Anthropic workspace
-            </a>{" "}
-            with a spend limit. If it leaks, the limit caps what it can cost.
-          </p>
-        )}
+    <form onSubmit={submit} className="p-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="w-24 shrink-0 font-medium">{provider.name}</span>
+        <Status ok={!!key} title={key?.updated_at} className="w-32 shrink-0">
+          {key ? `••••${key.hint} · ${timeAgo(key.updated_at)}` : "Not set"}
+        </Status>
         <input
           type="password"
           autoComplete="off"
+          aria-label={`${provider.name} API key`}
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder={
-            key ? `Replace the key ending in ${key.hint}` : (PLACEHOLDERS[provider.id] ?? "")
-          }
-          className={`${field} mt-4 w-full font-mono placeholder:font-sans`}
+          placeholder={key ? "New key" : (PLACEHOLDERS[provider.id] ?? "")}
+          className={`${field} h-8 min-w-40 flex-1 font-mono placeholder:font-sans`}
         />
-        <ErrorText error={save.error ?? remove.error} />
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-lg border-t border-line bg-page px-4 py-3 sm:px-5">
-        {key ? (
-          <span className="text-muted" title={key.updated_at}>
-            Ends in <span className="font-mono">{key.hint}</span>, updated {timeAgo(key.updated_at)}
-          </span>
-        ) : (
-          <span className="text-muted">Not set.</span>
-        )}
-        <span className="ml-auto flex gap-2">
+        <span className="flex shrink-0 gap-2">
           {key && (
             <button
               type="button"
               onClick={() => remove.mutate()}
               disabled={remove.isPending}
-              className={danger}
+              className={`${danger} ${sm}`}
             >
               Remove
             </button>
           )}
-          <button type="submit" disabled={!value.trim() || save.isPending} className={primary}>
+          <button
+            type="submit"
+            disabled={!value.trim() || save.isPending}
+            className={`${primary} ${sm}`}
+          >
             {save.isPending ? "Checking…" : "Save"}
           </button>
         </span>
       </div>
+      <ErrorText error={save.error ?? remove.error} />
     </form>
   );
 }
@@ -286,47 +318,19 @@ function ChatGptForm({ workspace, chatgpt }: { workspace: number; chatgpt: ChatG
   }, [code, interval, mutate, isPending]);
 
   return (
-    <div className="rounded-lg border border-line bg-surface">
-      <div className="p-4 sm:p-5">
-        <h2 className="font-semibold">ChatGPT plan</h2>
-        <p className="mt-1 text-muted">
-          Codex runs on your ChatGPT plan instead of the OpenAI API key, in repos whose config
-          chooses OpenAI. MergeLoop signs in the way the Codex CLI does, which OpenAI could stop at
-          any time: keep an API key to switch back to.
-        </p>
-        {sign_in && (
-          <div className="mt-4 flex flex-col gap-2">
-            <p>
-              Open{" "}
-              <a href={sign_in.verification_url} target="_blank" rel="noreferrer" className={link}>
-                {sign_in.verification_url}
-              </a>
-              , sign in, and enter this code:
-            </p>
-            <p className="font-mono text-xl tracking-widest">{sign_in.user_code}</p>
-            <p className="text-muted">
-              Waiting for you to enter it. The code works for 15 minutes.
-            </p>
-          </div>
-        )}
-        <ErrorText error={start.error ?? poll.error ?? remove.error} />
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-lg border-t border-line bg-page px-4 py-3 sm:px-5">
-        {login ? (
-          <span className="text-muted" title={login.updated_at}>
-            Signed in as <span className="font-mono">{login.hint}</span>, updated{" "}
-            {timeAgo(login.updated_at)}
-          </span>
-        ) : (
-          <span className="text-muted">Not signed in.</span>
-        )}
-        <span className="ml-auto flex gap-2">
+    <div className="p-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="w-24 shrink-0 font-medium">ChatGPT plan</span>
+        <Status ok={!!login} title={login?.updated_at} className="min-w-0 flex-1">
+          {login ? `Signed in as ${login.hint} · ${timeAgo(login.updated_at)}` : "Not signed in"}
+        </Status>
+        <span className="ml-auto flex shrink-0 gap-2">
           {(login || sign_in) && (
             <button
               type="button"
               onClick={() => remove.mutate()}
               disabled={remove.isPending}
-              className={login ? danger : secondary}
+              className={`${login ? danger : secondary} ${sm}`}
             >
               {login ? "Sign out" : "Cancel"}
             </button>
@@ -336,13 +340,31 @@ function ChatGptForm({ workspace, chatgpt }: { workspace: number; chatgpt: ChatG
               type="button"
               onClick={() => start.mutate()}
               disabled={start.isPending}
-              className={primary}
+              className={`${login ? secondary : primary} ${sm}`}
             >
               {login ? "Sign in again" : "Sign in with ChatGPT"}
             </button>
           )}
         </span>
       </div>
+      <p className="mt-1.5 text-xs text-faint sm:pl-27">
+        Runs Codex on your ChatGPT plan instead of the OpenAI key. OpenAI could stop this sign-in
+        any time, so keep a key to fall back on.
+      </p>
+      {sign_in && (
+        <div className="mt-3 flex flex-col gap-1.5 rounded-md bg-sunken p-3 sm:ml-27">
+          <p>
+            Open{" "}
+            <a href={sign_in.verification_url} target="_blank" rel="noreferrer" className={link}>
+              {sign_in.verification_url}
+            </a>
+            , sign in, and enter:
+          </p>
+          <p className="font-mono text-xl tracking-widest">{sign_in.user_code}</p>
+          <p className="text-xs text-muted">Waiting for the code. It works for 15 minutes.</p>
+        </div>
+      )}
+      <ErrorText error={start.error ?? poll.error ?? remove.error} />
     </div>
   );
 }
