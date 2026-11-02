@@ -1,6 +1,7 @@
 ---
 title: The You tab is down to four folders
 kind: improved
+pr: 165
 image: /changelog/you-command-center/after.png
 ---
 

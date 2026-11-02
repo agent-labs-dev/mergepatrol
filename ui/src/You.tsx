@@ -18,6 +18,7 @@ import {
   snoozePull,
   unsnoozePull,
 } from "./api";
+import type { HoldReasonView } from "./api/HoldReasonView";
 import type { InboxPullView } from "./api/InboxPullView";
 import type { ReviewPull } from "./api/ReviewPull";
 import type { VerdictView } from "./api/VerdictView";
@@ -543,7 +544,11 @@ export function You() {
                     pull={p}
                     step={stepFor(p)}
                     busy={!!clickOf(p)}
-                    publishing={publish.isPending && publish.variables === p}
+                    publishing={
+                      publish.isPending &&
+                      !!publish.variables &&
+                      keyOf(publish.variables) === keyOf(p)
+                    }
                     onQueue={() => queue.mutate({ p, priority: false })}
                     onDequeue={() => dequeue.mutate(p)}
                     onPublish={() => publish.mutate(p)}
@@ -947,6 +952,16 @@ const stateSectionsOf = (list: InboxPullView[], step: (p: InboxPullView) => Step
     ps: list.filter((p) => step(p).state === state),
   }));
 
+/** The queue's holds that wait on someone other than the author: a reviewer, the agent's
+ * review, a human it asked, a maintainer, or the hour's limit. */
+const othersHold = new Set<HoldReasonView>([
+  "review_required",
+  "reviewing",
+  "review_asks",
+  "workflow_approval",
+  "fair_use_limit",
+]);
+
 /** Whether the author can queue it now. */
 const canQueue = (p: InboxPullView) => !p.queue && p.queues && !p.draft;
 
@@ -972,6 +987,9 @@ function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
       label: `${ordinal(q.place)} of ${q.of} in line`,
       detail: q.priority ? "priority" : undefined,
     };
+  // A hold that waits on others keeps its place with nothing for the author to do.
+  if (q?.state === "held" && q.hold && othersHold.has(q.hold))
+    return { state: "queued", label: "Held in the queue", detail: q.detail ?? undefined };
   if (q?.state === "held")
     return { state: "held", label: "Held in the queue", detail: q.detail ?? undefined };
   if (p.draft) return { state: "draft", label: "Draft" };

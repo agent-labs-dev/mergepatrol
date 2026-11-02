@@ -259,6 +259,8 @@ pub struct QueueSpotView {
     pub priority: bool,
     /// Why it is held.
     pub detail: Option<String>,
+    /// Why it is held, typed: whether it waits on its author or on others.
+    pub hold: Option<crate::v1::HoldReasonView>,
 }
 
 /// Puts a PR out of the user's inbox for a while.
@@ -1833,10 +1835,14 @@ fn queue_spots(lanes: Vec<(LaneKey, Lane)>) -> HashMap<(RepoName, u64), QueueSpo
         let entries = in_merge_order(lane.entries);
         let of = entries.len() as u32;
         for (i, e) in entries.into_iter().enumerate() {
-            let (state, detail) = match e.state {
-                EntryState::Waiting => (EntryStateView::Waiting, None),
-                EntryState::Held(reason) => (EntryStateView::Held, Some(reason.to_string())),
-                EntryState::Active => (EntryStateView::Active, None),
+            let (state, detail, hold) = match e.state {
+                EntryState::Waiting => (EntryStateView::Waiting, None, None),
+                EntryState::Held(reason) => (
+                    EntryStateView::Held,
+                    Some(reason.to_string()),
+                    Some(crate::v1::HoldView::from(&reason).reason),
+                ),
+                EntryState::Active => (EntryStateView::Active, None, None),
             };
             let spot = QueueSpotView {
                 state,
@@ -1844,6 +1850,7 @@ fn queue_spots(lanes: Vec<(LaneKey, Lane)>) -> HashMap<(RepoName, u64), QueueSpo
                 of,
                 priority: e.priority,
                 detail,
+                hold,
             };
             for n in std::iter::once(e.number).chain(e.layers) {
                 spots.insert((key.repo.clone(), n), spot.clone());
