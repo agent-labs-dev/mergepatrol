@@ -138,7 +138,11 @@ const settings = createRoute({
   path: "settings",
   /** The repo whose settings are open: the workspace's by default. */
   validateSearch: (search): { repo?: string } => ({ repo: optional(search.repo, "string") }),
-  component: () => <Settings {...useWorkspace()} />,
+  // A key per workspace: drafts belong to one, and switching keeps this route mounted.
+  component: () => {
+    const context = useWorkspace();
+    return <Settings key={context.workspace} {...context} />;
+  },
 });
 
 export const router = createRouter({
