@@ -402,7 +402,7 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 | `MERGEPATROL_JOB_MEMORY` | `4g` | Memory limit per job |
 | `MERGEPATROL_JOB_CPUS` | `2` | CPU limit per job |
 
-The job image has git, the Claude and Codex CLIs, Rust, Go, Python, and Node with pnpm, for the verify commands.
+The job image has git, the Claude and Codex CLIs, Rust, Go, Python with uv, and Node with pnpm and Bun, for the verify commands and for the agent, which regenerates a generated file that conflicts with the repo's own tools.
 
 No release has been published yet, so for now build both images from source with `docker compose up --build`. Once releases start, each one publishes both images, tagged with its version and `latest`: `ghcr.io/agent-labs-dev/mergeloop`, the orchestrator, and `ghcr.io/agent-labs-dev/mergeloop-job`. To run a release instead of building, set `MERGEPATROL_JOB_IMAGE=ghcr.io/agent-labs-dev/mergeloop-job:<version>`.
 

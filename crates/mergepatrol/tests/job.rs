@@ -237,6 +237,11 @@ async fn an_openai_fix_runs_codex_and_needs_its_key() {
 /// An executor whose job finds, on its `PATH`, a `claude` that takes one turn, says `answer`
 /// and that the run cost $0.12, and changes nothing.
 fn with_fake_claude(dir: &Path, answer: &str) -> LocalExecutor {
+    with_fake_claude_running(dir, "", answer)
+}
+
+/// `with_fake_claude`, with a `claude` that first runs `shell` in the worktree.
+fn with_fake_claude_running(dir: &Path, shell: &str, answer: &str) -> LocalExecutor {
     let bin = dir.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let events = [
@@ -244,6 +249,7 @@ fn with_fake_claude(dir: &Path, answer: &str) -> LocalExecutor {
         serde_json::json!({ "type": "result", "result": answer, "total_cost_usd": 0.12 }),
     ];
     let lines: String = events.iter().map(|e| format!("echo '{e}'\n")).collect();
+    let lines = format!("{shell}\n{lines}");
     let script = |path: &Path, body: &str| {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
@@ -306,6 +312,40 @@ async fn a_fix_that_fails_still_tells_what_it_spent() {
             "1 turns, $0.12, by claude-opus-5-5 at medium effort"
         );
     }
+}
+
+#[tokio::test]
+async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
+    let run = |shell: &'static str| async move {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        let (head, trunk) = remote(&origin, "shared.txt", "shared.txt");
+        let mut spec = spec(&origin, &head, &trunk);
+        spec.resolver.api = Some(ApiAccess {
+            base_url: "http://127.0.0.1:9".into(),
+            token: "job-token".into(),
+        });
+        let out = tmp.path().join("out");
+        let result = with_fake_claude_running(tmp.path(), shell, "Resolved.")
+            .run("t9", &spec, &out)
+            .await
+            .unwrap();
+        (result.outcome, out.join(BUNDLE_FILE).exists())
+    };
+
+    let (outcome, bundled) = run("echo generated > shared.txt").await;
+    assert!(matches!(outcome, JobOutcome::Done), "{outcome:?}");
+    assert!(bundled);
+
+    let committed = "echo generated > shared.txt && git add -A && \
+        git -c user.name=a -c user.email=a@example.com commit -qm moved";
+    let (outcome, bundled) = run(committed).await;
+    let JobOutcome::Failed { reason } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(reason.contains("the agent moved HEAD"), "{reason}");
+    assert!(!bundled);
 }
 
 #[tokio::test]

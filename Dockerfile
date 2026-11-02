@@ -43,7 +43,8 @@ EXPOSE 8080
 ENTRYPOINT ["mergepatrol"]
 
 FROM node:24-bookworm-slim AS job
-# The default job image: git, the Claude and Codex CLIs, and common toolchains for verify commands.
+# The default job image: git, the Claude and Codex CLIs, and common toolchains for verify commands
+# and generators.
 # The CLIs come last, so a new CLI release reuses the toolchain layers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates build-essential pkg-config python3 python3-pip python3-venv \
@@ -52,6 +53,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=golang:1-bookworm /usr/local/go /usr/local/go
 COPY --from=rust:1-slim-bookworm /usr/local/rustup /usr/local/rustup
 COPY --from=rust:1-slim-bookworm /usr/local/cargo /usr/local/cargo
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=oven/bun:1-debian /usr/local/bin/bun /usr/local/bin/bun
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/home/node/.cargo \
     PATH=/usr/local/cargo/bin:/usr/local/go/bin:/home/node/go/bin:$PATH
 # Deploys pass the versions npm calls latest, so a cached layer never holds an old CLI.
