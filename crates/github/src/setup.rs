@@ -85,6 +85,9 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
             "metadata": "read",
             // Who is on which team, for the reviews asked of a team.
             "members": "read",
+            // GitHub refuses an App's push that changes `.github/workflows` without it: the rebase
+            // or fix of a PR that edits a workflow.
+            "workflows": "write",
         },
     })
 }
@@ -92,7 +95,7 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
 /// The hosted App: the same App, public, so any account can install it.
 pub fn hosted_manifest(public_url: &str) -> Value {
     let mut m = manifest(public_url, "");
-    m["name"] = json!("MergeLoop");
+    m["name"] = json!("Merge Loop");
     m["public"] = json!(true);
     m
 }
