@@ -1927,7 +1927,11 @@ async fn test_and_merge(
             break Tested::Stale(why);
         }
         let checks = checks_verdict(gh, key, head, opened).await?;
-        let missing = unreported.missing(checks.unreported, opened);
+        let silent = checks
+            .unreported
+            .into_iter()
+            .map(|name| (head.clone(), name));
+        let missing = unreported.missing(silent.collect(), opened);
         match checks.verdict {
             (CheckState::Passed, _) => break Tested::Passed,
             (CheckState::Failed, names) => {
@@ -2105,24 +2109,25 @@ struct HeadChecks {
     unreported: Vec<String>,
 }
 
-/// Since when a job's heads have had required checks that never reported, with no other check
-/// running.
+/// Since when each required check has gone unreported on each of a job's heads, with no other
+/// check running there. Each head and check has its own clock: in a stack, one layer's missing
+/// check does not start another's.
 #[derive(Default)]
-struct Unreported(Option<Instant>);
+struct Unreported(HashMap<(String, String), Instant>);
 
 impl Unreported {
-    /// The required checks that have gone unreported for `CHECKS_MISSING_FOR`, counted from no
-    /// earlier than `published`: empty until then, and once they report.
-    fn missing(&mut self, unreported: Vec<String>, published: Instant) -> Vec<String> {
-        if unreported.is_empty() {
-            self.0 = None;
-            return Vec::new();
+    /// The required checks, as (head, check), that have gone unreported for `CHECKS_MISSING_FOR`,
+    /// counted from no earlier than `published`: empty until then, and once they report.
+    fn missing(&mut self, unreported: Vec<(String, String)>, published: Instant) -> Vec<String> {
+        self.0.retain(|key, _| unreported.contains(key));
+        let mut missing = Vec::new();
+        for key in unreported {
+            let since = (*self.0.entry(key.clone()).or_insert_with(Instant::now)).max(published);
+            if since.elapsed() >= CHECKS_MISSING_FOR && !missing.contains(&key.1) {
+                missing.push(key.1);
+            }
         }
-        let since = (*self.0.get_or_insert_with(Instant::now)).max(published);
-        match since.elapsed() >= CHECKS_MISSING_FOR {
-            true => unreported,
-            false => Vec::new(),
-        }
+        missing
     }
 }
 
@@ -2341,7 +2346,7 @@ async fn run_job(
                     let mut silent = Vec::new();
                     for (i, head) in heads.iter().enumerate() {
                         let checks = checks_verdict(gh, key, head, published_at).await?;
-                        silent.extend(checks.unreported);
+                        silent.extend(checks.unreported.into_iter().map(|n| (head.clone(), n)));
                         match checks.verdict {
                             (CheckState::Failed, names) => {
                                 failing = i;

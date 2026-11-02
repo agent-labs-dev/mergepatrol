@@ -3603,3 +3603,38 @@ async fn a_required_check_whose_workflow_is_queued_is_waited_for_past_the_missin
     assert!(start.elapsed() >= CHECKS_MISSING_FOR);
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_layer_gets_its_own_missing_check_clock() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.required = vec!["ci".into(), "sift".into()];
+        s.checks.insert("sift".into(), CheckState::Passed);
+    }));
+    // Layer 1 misses `sift` while layer 2's `ci` runs. At minute 29, layer 1 reports `sift`
+    // just as layer 2 finishes `ci` without it: layer 2's 30 minutes start only then.
+    let start = tokio::time::Instant::now();
+    let handover = Duration::from_secs(29 * 60);
+    let polls = 2 * (handover + CHECKS_MISSING_FOR).as_secs() / CHECKS_POLL.as_secs() + 40;
+    for _ in 0..polls {
+        run.gh.then(move |s| {
+            let ci = |state| ("ci".to_owned(), state);
+            let sift = ("sift".to_owned(), CheckState::Passed);
+            let (lower, upper) = match start.elapsed() < handover {
+                true => (vec![ci(CheckState::Passed)], vec![ci(CheckState::Pending)]),
+                false => (
+                    vec![ci(CheckState::Passed), sift],
+                    vec![ci(CheckState::Passed)],
+                ),
+            };
+            let (h1, h2) = (s.head(1), s.head(2));
+            s.checks_on.insert(h1, lower.into_iter().collect());
+            s.checks_on.insert(h2, upper.into_iter().collect());
+        });
+    }
+    run.tick().await;
+    assert!(start.elapsed() >= handover + CHECKS_MISSING_FOR);
+    assert!(start.elapsed() < handover + CHECKS_MISSING_FOR + Duration::from_secs(60));
+    assert_eq!(run.kinds(2).last().unwrap(), "ejected");
+    assert!(last_comment(&run).contains("finished: sift."));
+}
