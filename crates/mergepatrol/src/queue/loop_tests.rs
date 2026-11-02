@@ -81,6 +81,8 @@ struct State {
     stacks: BTreeMap<PrNumber, Vec<PrNumber>>,
     /// How many PR reads fail next, as in a GitHub outage.
     outage: u32,
+    /// How many comments fail next.
+    failing_comments: u32,
     /// How many label removals fail next.
     failing_label_removals: u32,
     /// How many snapshots fail next, as when GraphQL is rate limited.
@@ -564,11 +566,12 @@ impl GitHub for Fake {
     }
 
     async fn sticky_comment(&self, _: &RepoName, number: PrNumber, body: &str) -> Result<()> {
-        self.state
-            .lock()
-            .unwrap()
-            .comments
-            .push((number, body.into()));
+        let mut s = self.state.lock().unwrap();
+        if s.failing_comments > 0 {
+            s.failing_comments -= 1;
+            bail!("POST /issues/{number}/comments: 502 Bad Gateway");
+        }
+        s.comments.push((number, body.into()));
         Ok(())
     }
 }
@@ -3466,4 +3469,101 @@ async fn prs_into_another_branch_are_tested_together() {
     assert_eq!(run.merged(), [1, 2]);
     assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "trunk-0");
+}
+
+/// The states of the entries of the lane into `trunk`, as saved.
+fn saved_lane(store: &Mem, trunk: &str) -> Option<Vec<(PrNumber, EntryState)>> {
+    let lanes = store.lanes.lock().unwrap();
+    let lane = lanes.iter().find(|(key, _)| key.trunk == trunk)?.1;
+    Some(
+        lane.entries
+            .iter()
+            .map(|e| (e.number, e.state.clone()))
+            .collect(),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn while_a_pr_waits_for_checks_the_other_lanes_sync_but_not_one_a_restart_cut_short() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_branch("release");
+        s.add_branch("hotfix");
+        s.config = Some("version: 1\nbranches: [release, hotfix]\n".into());
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Pending);
+    }));
+    // A batch into `hotfix` that a restart cut short: its own tick sees it through.
+    let hotfix = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "hotfix".into(),
+    };
+    let cut_short = Lane {
+        batch_branch: Some("mergepatrol/batch-9".into()),
+        ..Lane::default()
+    };
+    run.store.lanes.lock().unwrap().insert(hotfix, cut_short);
+    run.gh.then(|s| {
+        s.add_pr(2);
+        s.retarget(2, "release");
+        s.add_pr(3);
+        s.retarget(3, "hotfix");
+    });
+    for _ in 0..8 {
+        run.gh.then(|_| {});
+    }
+    let store = run.store.clone();
+    run.gh.then(move |s| {
+        assert_eq!(
+            saved_lane(&store, "main"),
+            Some(vec![(1, EntryState::Active)])
+        );
+        assert_eq!(
+            saved_lane(&store, "release"),
+            Some(vec![(2, EntryState::Waiting)])
+        );
+        assert_eq!(saved_lane(&store, "hotfix"), Some(vec![]));
+        s.checks.insert("ci".into(), CheckState::Passed);
+    });
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+    // PR 2 joined while PR 1's job ran; PR 3 only once `hotfix` had its own turn.
+    let events = run.store.events.lock().unwrap().clone();
+    let at = |n: PrNumber, kind: &str| events.iter().position(|(m, k, _)| *m == n && k == kind);
+    assert!(at(2, "enqueued").unwrap() < at(1, "merged").unwrap());
+    assert!(at(3, "enqueued").unwrap() > at(1, "merged").unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_sync_that_fails_partway_while_a_pr_runs_is_done_again_whole() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Pending);
+    }));
+    // PR 2 is labeled as a draft: it joins, held, and its comment fails the first time.
+    run.gh.then(|s| {
+        s.add_pr(2);
+        s.prs.get_mut(&2).unwrap().is_draft = true;
+        s.failing_comments = 1;
+    });
+    for _ in 0..12 {
+        run.gh.then(|_| {});
+    }
+    run.gh.then(|s| {
+        s.checks.insert("ci".into(), CheckState::Passed);
+    });
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+    let comments: Vec<String> = run.gh.with(|s| {
+        s.comments
+            .iter()
+            .filter(|(n, _)| *n == 2)
+            .map(|(_, body)| body.clone())
+            .collect()
+    });
+    assert_eq!(comments, [on_hold(&Hold::Draft)]);
+    assert_eq!(
+        saved_lane(&run.store, "main"),
+        Some(vec![(2, EntryState::Held(Hold::Draft))])
+    );
 }

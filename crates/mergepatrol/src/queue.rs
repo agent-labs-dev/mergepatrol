@@ -951,7 +951,7 @@ impl SyncWhileRunning {
 
     /// Syncs the repo's lanes with GitHub, if a poll has passed since the last time, so a PR
     /// labeled while the job waits shows its place in the queue. The job's own entries in `lane`
-    /// stay as they are: the job sees to them. A failure leaves the lanes as they were, for the
+    /// stay as they are: the job sees to them. A lane whose sync fails stays as it was, for the
     /// next time: it is no failure of the job.
     async fn poll(&mut self, ctx: &Ctx, gh: &dyn GitHub, key: &LaneKey, lane: &mut Lane) {
         if self.0.elapsed() < ctx.config.poll {
@@ -978,8 +978,12 @@ async fn sync_while_running(
         let units = read.units_into(&trunk);
         let snap = lane_snapshot(gh, &key.repo, &read, &trunk, &units).await?;
         if trunk == key.trunk {
+            // On a copy: one that fails partway must not leave its entries for the job to save,
+            // or the next sync would find them and say nothing of them.
             let running = lane.active();
-            sync_lane(ctx, gh, &read, &snap, key, lane, &units, &running).await?;
+            let mut synced = lane.clone();
+            sync_lane(ctx, gh, &read, &snap, key, &mut synced, &units, &running).await?;
+            *lane = synced;
             continue;
         }
         let mut other = read.lane(&trunk);

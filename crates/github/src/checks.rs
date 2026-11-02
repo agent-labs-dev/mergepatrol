@@ -58,9 +58,10 @@ impl Checks {
 
     /// The `required` checks that never reported on the commit, once no check that did is still
     /// running: CI is done, and does not run them, as when a PR renames one. Empty while any
-    /// check runs, as a job that waits for another creates its check only when it starts.
+    /// check runs, as a job that waits for another creates its check only when it starts. Empty
+    /// too while no check has reported at all: CI may not have started, as in an outage.
     pub fn unreported(&self, required: &[String]) -> Vec<String> {
-        if self.by_name.values().any(|s| *s == CheckState::Pending) {
+        if self.by_name.is_empty() || self.by_name.values().any(|s| *s == CheckState::Pending) {
             return Vec::new();
         }
         required
@@ -507,6 +508,11 @@ mod tests {
         let done = checks(&[("test", CheckState::Passed), ("build", CheckState::Failed)]);
         assert_eq!(done.unreported(&required), ["sift"]);
         assert!(done.unreported(&[]).is_empty());
+    }
+
+    #[test]
+    fn with_no_check_reported_at_all_none_is_unreported_yet() {
+        assert!(checks(&[]).unreported(&["sift".into()]).is_empty());
     }
 
     #[test]
