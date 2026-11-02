@@ -148,18 +148,19 @@ g builds submit --region="$REGION" --config=deploy/gcp/cloudbuild.yaml \
 
 ADDRESS=$(g compute addresses describe mergepatrol --global --format='value(address)')
 echo
-echo "Deployed. Left to do by hand, in each domain's DNS, as DNS only records: a Cloudflare proxy"
-echo "blocks Google's certificate."
+echo "Deployed. Left to do by hand, in each domain's DNS. The certificate's CNAME stays DNS only:"
+echo "a Cloudflare proxy blocks Google's certificate."
 for h in $HOST $LEGACY_HOST; do
   n=${h%%.*}
   CHALLENGE_NAME=$(g certificate-manager dns-authorizations describe "$n" --format='value(dnsResourceRecord.name)')
   CHALLENGE_DATA=$(g certificate-manager dns-authorizations describe "$n" --format='value(dnsResourceRecord.data)')
+  if [ "$h" = "$HOST" ]; then proxy="DNS only"; else proxy="proxied, to redirect its pages (rebrand.md)"; fi
   cat <<EOF
   $h:
     1. A CNAME that proves the domain for the certificate: $CHALLENGE_NAME -> $CHALLENGE_DATA
        Then wait until this says ACTIVE:
          gcloud certificate-manager certificates describe $n --project=$PROJECT
-    2. An A record: $h -> $ADDRESS
+    2. An A record, $proxy: $h -> $ADDRESS
 EOF
 done
 cat <<EOF

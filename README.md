@@ -388,7 +388,7 @@ In production the job containers use gVisor (`runsc`) on a network that cannot r
 
 The job image has git, the Claude and Codex CLIs, Rust, Go, Python, and Node with pnpm, for the verify commands.
 
-Each release publishes both images, tagged with its version and `latest`: `ghcr.io/agent-labs-dev/mergepatrol`, the orchestrator, and `ghcr.io/agent-labs-dev/mergepatrol-job`. To run a release instead of building, set `MERGEPATROL_JOB_IMAGE=ghcr.io/agent-labs-dev/mergepatrol-job:<version>`.
+Each release publishes both images, tagged with its version and `latest`: `ghcr.io/agent-labs-dev/mergeloop`, the orchestrator, and `ghcr.io/agent-labs-dev/mergeloop-job`. To run a release instead of building, set `MERGEPATROL_JOB_IMAGE=ghcr.io/agent-labs-dev/mergeloop-job:<version>`. Releases before the repo's rename to `mergeloop` published them as `ghcr.io/agent-labs-dev/mergepatrol` and `-job`, which get no new tags.
 
 ## On GCP
 
