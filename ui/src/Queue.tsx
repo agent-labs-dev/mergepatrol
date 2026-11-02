@@ -627,7 +627,9 @@ const stateBadge: Record<Item["state"], [string, string]> = {
 function State({ entry }: { entry: Item }) {
   const [label, style] =
     (entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
-    stateBadge[entry.state];
+    (entry.state === "held" && entry.hold?.reason === "review_required"
+      ? ["Needs a reviewer", stateBadge.held[1]]
+      : stateBadge[entry.state]);
   return (
     <span
       className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}

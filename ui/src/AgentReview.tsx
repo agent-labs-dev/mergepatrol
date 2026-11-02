@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { capture } from "./analytics";
-import { answerAgentReview, askAgent, askReviewers, fetchAgentReview } from "./api";
+import { answerAgentReview, askAgent, askReviewers, fetchAgentReview, fetchSession } from "./api";
 import type { AgentReviewView } from "./api/AgentReviewView";
 import type { AnswerView } from "./api/AnswerView";
 import type { CodeLineView } from "./api/CodeLineView";
@@ -654,6 +654,9 @@ function Answering({
   const changes = asks.filter((x) => calls[x.id]?.call === "change").length;
   const sendsBack = asks.length ? changes > 0 : sendBack;
   const who = author ? `@${author}` : "the author";
+  const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login;
+  // GitHub takes no approval from a PR's author: theirs queues it, for a reviewer to approve.
+  const mine = !!author && !!me && author.toLowerCase() === me.toLowerCase();
 
   const submit = useMutation({
     mutationFn: () =>
@@ -771,7 +774,9 @@ function Answering({
                 ? `${asks.length - decided} still to answer`
                 : sendsBack
                   ? `Send back to ${who}`
-                  : "Approve it into the queue"}
+                  : mine
+                    ? "Put it in the queue"
+                    : "Approve it into the queue"}
             </h2>
             <p className="mt-2 text-muted">
               {r.error
@@ -784,7 +789,9 @@ function Answering({
                           ? "1 change, on its line"
                           : `${changes} changes, each on its line`
                       }. The PR keeps its place; on ${who}'s next push the agent reviews it again.`
-                    : "Posts your approval on GitHub, and the PR takes its place in the queue."}
+                    : mine
+                      ? "You opened this PR, so GitHub won't take your approval and none is posted. It takes its place in the queue; if the repo needs an approval to merge, it waits there for a reviewer's."
+                      : "Posts your approval on GitHub, and the PR takes its place in the queue."}
             </p>
             <ul className="mt-6 space-y-2">
               {asks.map((x, i) => {
@@ -880,7 +887,9 @@ function Answering({
                   ? "Posting…"
                   : sendsBack
                     ? "Send back"
-                    : "Approve, into the queue"}
+                    : mine
+                      ? "Into the queue"
+                      : "Approve, into the queue"}
               </button>
             </div>
             <ErrorText error={submit.error} />
