@@ -252,7 +252,7 @@ function NoKeyBanner({ workspace, account }: { workspace: number; account: strin
         <path d="M8.9 1.5a1 1 0 0 0-1.8 0L.6 13a1 1 0 0 0 .9 1.5h13a1 1 0 0 0 .9-1.5L8.9 1.5ZM7.25 6h1.5v4h-1.5V6Zm0 5.25h1.5v1.5h-1.5v-1.5Z" />
       </svg>
       <span className="min-w-0 flex-1">
-        <span className="font-semibold">No API key.</span> Without one, Mergepatrol can't resolve
+        <span className="font-semibold">No API key.</span> Without one, MergeLoop can't resolve
         rebase conflicts or fix failed checks, so those PRs leave the queue.
       </span>
       {!onSettings && (

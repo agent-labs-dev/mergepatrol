@@ -77,7 +77,7 @@ export function UpdateToast() {
     toasts.add({
       id: "update",
       type: "update",
-      title: "Mergepatrol was updated",
+      title: "MergeLoop was updated",
       description: <News news={news} />,
       timeout: 0,
       onClose: () => setLater(next),

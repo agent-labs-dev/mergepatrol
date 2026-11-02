@@ -1,4 +1,4 @@
-//! Local git, through the `git` CLI. Mergepatrol never pushes: `fetch` is the only network call,
+//! Local git, through the `git` CLI. MergeLoop never pushes: `fetch` is the only network call,
 //! and the `github` crate publishes the commits.
 
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Committer of the local rebase. The published commits get GitHub's bot identity instead.
-const COMMITTER: (&str, &str) = ("mergepatrol", "mergepatrol@users.noreply.github.com");
+const COMMITTER: (&str, &str) = ("MergeLoop", "mergepatrol@users.noreply.github.com");
 
 #[derive(Clone, Copy, Default)]
 pub struct Git;
@@ -325,7 +325,7 @@ impl Git {
             .is_empty())
     }
 
-    /// Commits every change in the worktree, untracked files included, as Mergepatrol.
+    /// Commits every change in the worktree, untracked files included, as MergeLoop.
     pub async fn commit_all(&self, wt: &Path, message: &str) -> Result<()> {
         self.run(wt, &["add", "-A"]).await?;
         let author = format!("{} <{}>", COMMITTER.0, COMMITTER.1);

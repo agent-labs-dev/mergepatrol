@@ -24,7 +24,7 @@ impl StatusItem {
         let button = item.button(mtm).expect("status items have a button");
         let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
             &NSString::from_str("arrow.triangle.merge"),
-            Some(&NSString::from_str("Mergepatrol")),
+            Some(&NSString::from_str("MergeLoop")),
         );
         if let Some(image) = image {
             image.setTemplate(true);
@@ -58,7 +58,7 @@ type Callback = Box<dyn Fn()>;
 define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "MergepatrolTrayStatusItemTarget"]
+    #[name = "MergeLoopTrayStatusItemTarget"]
     #[ivars = Callback]
     struct ClickTarget;
 

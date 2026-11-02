@@ -184,8 +184,8 @@ function UpdateSkill({ workspace, repo }: { workspace: number; repo: string }) {
         title={
           update.error?.message ??
           (s.state === "missing"
-            ? "The repo has no mergepatrol agent skill: open a PR that adds it"
-            : "The repo's agent skill is older than Mergepatrol's: open a PR that updates it")
+            ? "The repo has no MergeLoop agent skill: open a PR that adds it"
+            : "The repo's agent skill is older than MergeLoop's: open a PR that updates it")
         }
         className={primary}
       >

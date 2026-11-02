@@ -1,4 +1,4 @@
-//! Has GitHub send the webhook deliveries that failed again, as when Mergepatrol was down or
+//! Has GitHub send the webhook deliveries that failed again, as when MergeLoop was down or
 //! restarting: the queue reads only what webhooks say changed, so a lost one leaves a read stale
 //! until the queue reads the whole repo again.
 

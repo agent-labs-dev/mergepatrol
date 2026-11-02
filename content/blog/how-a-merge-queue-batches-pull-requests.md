@@ -1,6 +1,6 @@
 ---
 title: How a merge queue batches pull requests, and finds the one that broke the build
-description: Testing queued PRs one at a time merges a few an hour. Here is how Mergepatrol tests them together in one CI run, and bisects a failed batch.
+description: Testing queued PRs one at a time merges a few an hour. Here is how MergeLoop tests them together in one CI run, and bisects a failed batch.
 date: 2026-10-30
 ---
 
@@ -13,7 +13,7 @@ many people are waiting. A busy team ends up with a queue longer than its day.
 
 ## Test them together
 
-Mergepatrol's answer is batching. When several queued PRs have each passed their own checks, it
+MergeLoop's answer is batching. When several queued PRs have each passed their own checks, it
 tests them as one:
 
 1. It merges them, in queue order, onto a fresh branch at the base branch, named
@@ -28,7 +28,7 @@ Four PRs that would have taken four CI runs now take one.
 
 ## When a batch fails
 
-A failed batch says that one of its PRs broke something. It does not say which. So Mergepatrol
+A failed batch says that one of its PRs broke something. It does not say which. So MergeLoop
 splits it: it tests half of the batch next, and keeps halving down to a single PR. That PR runs
 alone, rebased with its own checks, and is ejected. The rest merge.
 
@@ -41,7 +41,7 @@ Batching is not always safe, so some PRs skip it:
 
 - A PR whose own checks have not passed yet.
 - A PR that conflicts with the PRs ahead of it.
-- Any PR into a base branch that requires PRs to be up to date before they merge. Mergepatrol
+- Any PR into a base branch that requires PRs to be up to date before they merge. MergeLoop
   reads that from your rulesets and branch protection.
 - A PR from a fork. A batch's draft PR runs CI with the repo's secrets, which a fork's author
   should not reach.
@@ -54,5 +54,5 @@ pushed, and the result must change no file the PR did not already change.
 
 ## Try it
 
-Mergepatrol is free for public repos. [Sign in with GitHub](/auth/login), install the App, and
+MergeLoop is free for public repos. [Sign in with GitHub](/auth/login), install the App, and
 add the `mergepatrol` label to a pull request.

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Sets up Mergepatrol's one environment on GCP, then deploys it: a GKE Autopilot cluster that
+# Sets up MergeLoop's one environment on GCP, then deploys it: a GKE Autopilot cluster that
 # runs the orchestrator, and each rebase job in a gVisor sandbox from an Agent Sandbox warm pool.
 # Safe to run again.
 #
-#   PROJECT=mergepatrol REGION=us-west1 PUBLIC_URL=https://mergepatrol.ai deploy/gcp/bootstrap.sh
+#   PROJECT=mergepatrol REGION=us-west1 PUBLIC_URL=https://mergeloop.ai deploy/gcp/bootstrap.sh
 #
 # The project must exist with billing linked. After this, deploys run from cloudbuild.yaml.
 set -euo pipefail
 
 PROJECT=${PROJECT:-mergepatrol}
 REGION=${REGION:-us-west1}
-PUBLIC_URL=${PUBLIC_URL:-https://mergepatrol.ai}
+PUBLIC_URL=${PUBLIC_URL:-https://mergeloop.ai}
 # Pushes to this repo's main deploy, through GitHub Actions.
 REPO=${REPO:-agent-labs-dev/mergepatrol}
 SQL=mergepatrol
@@ -130,6 +130,7 @@ g certificate-manager maps entries describe mergepatrol --map=mergepatrol >/dev/
     --certificates=mergepatrol
 sed -e "s#__PROJECT__#$PROJECT#g" -e "s#__REGION__#$REGION#g" -e "s#__HOST__#$HOST#g" \
   "$(dirname "$0")/k8s/cluster.yaml" | kubectl apply -f -
+sed -e "s#__HOST__#$HOST#g" "$(dirname "$0")/k8s/routes.yaml" | kubectl apply -f -
 
 # The hosted GitHub App: made once, in the browser.
 secret mergepatrol-github-app-id || ORG="${REPO%%/*}" PROJECT="$PROJECT" PUBLIC_URL="$PUBLIC_URL" \

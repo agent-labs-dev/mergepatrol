@@ -514,10 +514,9 @@ pub struct AnswerAgentReview {
     pub request_changes: bool,
 }
 
-/// Ends what the dashboard posts for a review's answers, so a delivery of it is not read as a
-/// reply to the review.
+/// Hidden in answers so deliveries are not read as new replies. Keep the pre-rebrand markers:
+/// an old revision still serves webhooks while the new revision rolls out.
 pub(crate) const ANSWERED_MARK: &str = "Answered Mergepatrol's review.";
-/// Starts the end of each change the dashboard asks for on a line.
 pub(crate) const LINE_MARK: &str = "<sub>On Mergepatrol's review:";
 
 /// Answers what the review asks: posts a review of the PR as the caller, with each change asked
@@ -561,7 +560,7 @@ pub(crate) async fn answer_agent_review(
         .filter(|f| matches!(answers.get(&f.finding.id), Some(Answer::Fine)))
         .collect();
     if !fine.is_empty() {
-        text.push_str("Fine as they are, of what Mergepatrol's review asked about:\n");
+        text.push_str("Fine as they are, of what MergeLoop's review asked about:\n");
         for f in fine {
             text.push_str(&format!("- {}\n", f.finding.title));
         }
@@ -572,14 +571,19 @@ pub(crate) async fn answer_agent_review(
         let Some(Answer::Change { note }) = answers.get(&f.finding.id) else {
             continue;
         };
-        let body = format!("{note}\n\n{LINE_MARK} {}</sub>", f.finding.title);
+        let body = format!(
+            "{note}\n\n<sub>On MergeLoop's review: {}</sub><!-- {LINE_MARK} -->",
+            f.finding.title
+        );
         match (&f.finding.file, f.finding.line) {
             (Some(path), Some(line)) => comments.push(LineComment { path, line, body }),
             _ => unplaced.push_str(&format!("\n\n**{}**\n{note}", f.finding.title)),
         }
     }
     text.push_str(&unplaced);
-    text.push_str(&format!("\n\n<sub>{ANSWERED_MARK}</sub>"));
+    text.push_str(&format!(
+        "\n\n<sub>Answered MergeLoop's review.</sub><!-- {ANSWERED_MARK} -->"
+    ));
     // GitHub takes neither an approval nor a request for changes from the PR's author, so
     // theirs goes as a comment. The gate holds a PR sent back by its `Changes` status, not by
     // GitHub's review, so the author's request holds it for their next push all the same.

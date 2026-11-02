@@ -193,7 +193,7 @@ function KeyForm({ workspace, apiKey }: { workspace: number; apiKey: ApiKeyView 
         </p>
         {provider.id === "anthropic" && (
           <p className="mt-1 text-muted">
-            Create a key for Mergepatrol alone, in an{" "}
+            Create a key for MergeLoop alone, in an{" "}
             <a
               href="https://platform.claude.com/settings/workspaces"
               target="_blank"
@@ -291,8 +291,8 @@ function ChatGptForm({ workspace, chatgpt }: { workspace: number; chatgpt: ChatG
         <h2 className="font-semibold">ChatGPT plan</h2>
         <p className="mt-1 text-muted">
           Codex runs on your ChatGPT plan instead of the OpenAI API key, in repos whose config
-          chooses OpenAI. Mergepatrol signs in the way the Codex CLI does, which OpenAI could stop
-          at any time: keep an API key to switch back to.
+          chooses OpenAI. MergeLoop signs in the way the Codex CLI does, which OpenAI could stop at
+          any time: keep an API key to switch back to.
         </p>
         {sign_in && (
           <div className="mt-4 flex flex-col gap-2">

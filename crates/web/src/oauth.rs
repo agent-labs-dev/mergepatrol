@@ -1,5 +1,5 @@
-//! OAuth for MCP clients, as the MCP spec's authorization asks: Mergepatrol is the authorization
-//! server, and signs the user in with GitHub. The access token is a Mergepatrol session, as the
+//! OAuth for MCP clients, as the MCP spec's authorization asks: MergeLoop is the authorization
+//! server, and signs the user in with GitHub. The access token is a MergeLoop session, as the
 //! menu bar app's is, so the user's GitHub token stays on the server.
 //!
 //! Clients register themselves (RFC 7591), and must redirect to a loopback address (RFC 8252):
@@ -53,7 +53,7 @@ pub(crate) async fn register(Json(r): Json<Registration>) -> Response {
     if r.redirect_uris.is_empty() || !r.redirect_uris.iter().all(|u| loopback(u)) {
         return oauth_error(
             "invalid_redirect_uri",
-            "Mergepatrol redirects only to a loopback address, such as http://127.0.0.1:<port>/callback.",
+            "MergeLoop redirects only to a loopback address, such as http://127.0.0.1:<port>/callback.",
         );
     }
     let client = json!({

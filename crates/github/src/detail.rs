@@ -208,7 +208,7 @@ fn review_thread(t: &Value) -> ThreadSummary {
 }
 
 /// A comment's first line that says something, without Markdown's bold, cut to 140 chars. A
-/// Mergepatrol finding's first line is its label, so its title is the next one.
+/// MergeLoop finding's first line is its label, so its title is the next one.
 fn thread_title(text: &str) -> String {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
     let mut line = lines.next().unwrap_or_default();

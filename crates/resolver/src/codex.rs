@@ -52,7 +52,7 @@ impl CodexResolver {
                 &format!("model_reasoning_effort={}", toml(&self.effort)),
             ])
             .args(["-c", "model_provider=\"mergepatrol\""])
-            .args(["-c", "model_providers.mergepatrol.name=\"Mergepatrol\""])
+            .args(["-c", "model_providers.mergepatrol.name=\"MergeLoop\""])
             .args([
                 "-c",
                 &format!(

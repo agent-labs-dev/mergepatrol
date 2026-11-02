@@ -11,7 +11,7 @@ export type SkillView = { state: SkillStateView,
  */
 paths: Array<string>, default_branch: string, 
 /**
- * Mergepatrol's open PR that updates it.
+ * MergeLoop's open PR that updates it.
  */
 pull_request: PullRequestRef | null, 
 /**

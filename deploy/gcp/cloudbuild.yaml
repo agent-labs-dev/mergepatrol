@@ -1,12 +1,12 @@
-# Builds both images and deploys Mergepatrol's one environment to the GKE cluster `mergepatrol`:
+# Builds both images and deploys MergeLoop's one environment to the GKE cluster `mergepatrol`:
 # the job sandboxes' template, then the orchestrator, with deploy/gcp/deploy.sh.
 # deploy/gcp/bootstrap.sh sets up what this needs.
 substitutions:
   _REGION: us-west1
-  _PUBLIC_URL: https://mergepatrol.ai
+  _PUBLIC_URL: https://mergeloop.ai
   # The PostHog project `mergepatrol`, in the agent-labs organization. Public: browsers send it.
   _POSTHOG_KEY: phc_kw3KfV5JfjGbGjoZ4CHDNEyE4NePf8g5c5xJsJJNDtqT
-  # The live Stripe price per seat, in the product `Mergepatrol`. Not secret.
+  # The live Stripe price per seat, in the product `MergeLoop`. Not secret.
   _STRIPE_PRICE: price_1UVzi1PwOsXo1dyk78nfPqCb
   _REPO: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/mergepatrol
 options:

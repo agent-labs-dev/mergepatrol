@@ -33,7 +33,7 @@ branch protection, so a repository admin has to act.
 
 The useful way to read a migration is by what stays recognisable:
 
-| bors-ng | Mergepatrol |
+| bors-ng | MergeLoop |
 | --- | --- |
 | `bors r+` in a comment | add the `mergepatrol` label to the pull request |
 | `bors r+ p=1` sets a priority | `mergepatrol:priority` jumps the queue |
@@ -54,7 +54,7 @@ Two differences are worth stating plainly rather than smoothing over:
 ## What migration actually involves
 
 1. **Install the App** on the repositories bors was serving, at
-   [mergepatrol.ai](https://mergepatrol.ai).
+   [mergeloop.ai](https://mergeloop.ai).
 2. **Merge the setup pull request** that adds `.mergepatrol/mergepatrol.yml` to the default branch.
    This is the switch: a pull request cannot change its own queue settings, so the config lands by
    review.
@@ -83,9 +83,9 @@ Nothing about your CI has to change. The batch is tested on a draft pull request
 
 ## What it costs
 
-Hosted Mergepatrol is free on public repositories. Private repositories are $15 per seat per month
+Hosted MergeLoop is free on public repositories. Private repositories are $15 per seat per month
 after a 14-day trial that needs no card, where a seat is a developer whose pull request joined a
-private repository's queue. If you were self-hosting bors, self-hosting Mergepatrol costs no
+private repository's queue. If you were self-hosting bors, self-hosting MergeLoop costs no
 licence fee either: it is Apache-2.0, `docker compose up` starts it, and production jobs run in
 gVisor sandboxes on a host you control.
 

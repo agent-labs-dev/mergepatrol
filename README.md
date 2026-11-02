@@ -1,19 +1,23 @@
-<img src="assets/banner.svg" alt="Mergepatrol: a merge queue for GitHub, with an agent on conflicts" width="100%">
+<img src="assets/banner.svg" alt="MergeLoop: a merge queue for GitHub, with an agent on conflicts" width="100%">
 
-Mergepatrol is a merge queue for GitHub. Add a label to a pull request, and Mergepatrol rebases it onto its base branch, waits for the required checks, and merges it.
+MergeLoop is a merge queue for GitHub. Add a label to a pull request, and MergeLoop rebases it onto its base branch, waits for the required checks, and merges it.
 
 Status: early. Expect rough edges, and [tell us](https://github.com/agent-labs-dev/mergepatrol/issues/new/choose) what breaks.
 
-This README is also the website's docs, at [mergepatrol.ai/docs](https://mergepatrol.ai/docs). `DOCS` in `crates/web/src/docs.rs` picks its `##` sections by heading, and a test fails when one is renamed.
+This README is also the website's docs, at [mergeloop.ai/docs](https://mergeloop.ai/docs). `DOCS` in `crates/web/src/docs.rs` picks its `##` sections by heading, and a test fails when one is renamed.
+
+MergeLoop was previously called Mergepatrol. Existing queue labels, `.mergepatrol/mergepatrol.yml`,
+installed `mergepatrol` agent skills, environment variables and API fields retain their names
+so existing repos and clients continue to work. The source repo remains `agent-labs-dev/mergepatrol`.
 
 ## Try it
 
-The hosted Mergepatrol at https://mergepatrol.ai runs the public GitHub App `Mergepatrol`. You bring your own model API key.
+The hosted MergeLoop at https://mergeloop.ai runs the public GitHub App `MergeLoop`. You bring your own model API key.
 
-1. Sign in with GitHub at https://mergepatrol.ai.
+1. Sign in with GitHub at https://mergeloop.ai.
 2. Install the App on your organization or account, and choose its repos. GitHub sends you back to the dashboard.
-3. In **Repos**, **Set up** a repo. Mergepatrol opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
-4. In **Settings**, add an Anthropic or OpenAI API key. Create one for Mergepatrol alone, with a spend limit.
+3. In **Repos**, **Set up** a repo. MergeLoop opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
+4. In **Settings**, add an Anthropic or OpenAI API key. Create one for MergeLoop alone, with a spend limit.
 5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue. The dashboard puts the label on as you, so it takes triage access to the repo.
 6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review or your team's, those the queue holds first. Approve, request changes or comment there, as you. A review waits 5 seconds before it goes to GitHub, so you can undo it.
 
@@ -26,10 +30,10 @@ Public repos are free. Private repos cost $15 a seat a month, after a free trial
 A labeled PR keeps its place in line, on hold, until GitHub would merge it and the queue can take it:
 
 - It is not a draft.
-- It has the reviews its branch protection or rulesets require, and no requested changes from a required reviewer. Mergepatrol reads GitHub's review decision, so a repo that requires no review needs none.
+- It has the reviews its branch protection or rulesets require, and no requested changes from a required reviewer. MergeLoop reads GitHub's review decision, so a repo that requires no review needs none.
 - It targets the default branch, or a branch in `branches` of the config file.
 - With **Automatic review** on, the agent's review holds nothing, and every review thread on the PR is resolved: its author fixed or answered each comment, and a human answered anything the review asked.
-- On the hosted Mergepatrol, a private repo has a subscription, and a public repo's workspace is under the [fair-use limit](#pricing).
+- On the hosted MergeLoop, a private repo has a subscription, and a public repo's workspace is under the [fair-use limit](#pricing).
 
 Then it runs, rebased alone or tested in a [batch](#batches), and merges once its checks pass. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
 
@@ -61,32 +65,32 @@ A PR retargeted to another branch leaves its queue, and joins the other branch's
 
 ### Batches
 
-A queue that runs CI once per PR merges a few PRs an hour. So when several queued PRs have passed their own checks, Mergepatrol tests them together:
+A queue that runs CI once per PR merges a few PRs an hour. So when several queued PRs have passed their own checks, MergeLoop tests them together:
 
 1. It merges them, in queue order, onto a branch `mergepatrol/batch-<PRs>` at the base branch, and opens a draft PR from it, so the repo's `pull_request` CI runs on the combination. The draft's title is the first PR's title, plus a note, so a PR title check passes.
 2. When the required checks pass, it merges the PRs one by one, as they are: no rebase, and no second CI run. Each merge must leave the base branch at the tree that the batch tested, else it stops.
 3. It deletes the branch, which closes the draft PR.
 
-When a batch fails, Mergepatrol tests half of it next, and so on down to one PR, which runs alone: rebased, with its own checks. That PR is ejected; the rest merge.
+When a batch fails, MergeLoop tests half of it next, and so on down to one PR, which runs alone: rebased, with its own checks. That PR is ejected; the rest merge.
 
-A PR runs alone when its own checks have not passed, when it conflicts with the PRs ahead of it, and on a base branch that requires PRs to be up to date before they merge. Mergepatrol reads that setting from the rulesets, and from classic branch protection with the App's `administration: read` permission. Without the permission, every base branch counts as requiring it. An App created before this permission existed must be given it on GitHub.
+A PR runs alone when its own checks have not passed, when it conflicts with the PRs ahead of it, and on a base branch that requires PRs to be up to date before they merge. MergeLoop reads that setting from the rulesets, and from classic branch protection with the App's `administration: read` permission. Without the permission, every base branch counts as requiring it. An App created before this permission existed must be given it on GitHub.
 
 ### Stacks
 
-A stack of PRs, made with `gh stack`, is one item of the queue: the label on any of its PRs queues the whole stack, and Mergepatrol merges it all at once, with GitHub's asynchronous merge. Either every PR of the stack merges, or none does. GitHub merges a stack only when the required checks of each of its PRs passed.
+A stack of PRs, made with `gh stack`, is one item of the queue: the label on any of its PRs queues the whole stack, and MergeLoop merges it all at once, with GitHub's asynchronous merge. Either every PR of the stack merges, or none does. GitHub merges a stack only when the required checks of each of its PRs passed.
 
 - The stack waits while any of its PRs is a draft or waits for a review.
 - In a batch, the stack is one step: its top PR holds every layer below it.
-- Alone, Mergepatrol rebases each layer onto the one below it, the bottom onto the base branch, and waits for each layer's checks. A failed check is fixed on the layer it failed on, and the layers above it are rebased onto the fix.
+- Alone, MergeLoop rebases each layer onto the one below it, the bottom onto the base branch, and waits for each layer's checks. A failed check is fixed on the layer it failed on, and the layers above it are rebased onto the fix.
 - A failed stack is ejected whole.
 
-Every merge goes through the asynchronous merge API, stacked or not. A merge still pending when Mergepatrol restarts is waited for, not requested again.
+Every merge goes through the asynchronous merge API, stacked or not. A merge still pending when MergeLoop restarts is waited for, not requested again.
 
 ### PRs from forks
 
 A maintainer queues a PR from a fork with the label, as any other. Its author is not trusted as the repo's own are, so the queue treats it differently:
 
-- It merges the PR only as it was when the label went on. Mergepatrol reads that head from the `labeled` webhook, or, without webhooks, from when it first sees the PR. If the author pushes after that, the PR leaves the queue, and a maintainer adds the label again to queue the new commits.
+- It merges the PR only as it was when the label went on. MergeLoop reads that head from the `labeled` webhook, or, without webhooks, from when it first sees the PR. If the author pushes after that, the PR leaves the queue, and a maintainer adds the label again to queue the new commits.
 - It never tests the PR in a batch, whose draft PR runs CI with the repo's secrets. The PR runs alone, with the fork's own CI.
 - It runs no agent on the PR: a plain `git rebase` only. A conflict, or a failed required check, ejects the PR, for its author to fix.
 - It pushes the rebase to the fork, which GitHub allows while the author allows edits by maintainers. Without that, a PR that needs a rebase waits on hold until they allow it. GitHub does not let the App push to a fork that an organization owns, nor push changes to workflow files to a fork: such a PR that needs a rebase is ejected, for its author to rebase.
@@ -94,36 +98,36 @@ A maintainer queues a PR from a fork with the label, as any other. Its author is
 
 A stack with a PR from a fork is not supported yet.
 
-The You tab reads Mergepatrol's own database, never GitHub, when you open it. Webhooks tell Mergepatrol which PRs changed, and it reads those again from GitHub as the App. It also reads every open PR of each repo once a day, in case a webhook got lost. Without webhooks, as on a self-hosted http URL, it reads them every 10 minutes. Team review requests need the App's `members: read` permission, which each organization's owner accepts. An App created before this permission existed must be given it on GitHub, along with the `pull_request_review_comment`, `issue_comment`, `membership` and `team` events. Until then, only review requests made to you directly show.
+The You tab reads MergeLoop's own database, never GitHub, when you open it. Webhooks tell MergeLoop which PRs changed, and it reads those again from GitHub as the App. It also reads every open PR of each repo once a day, in case a webhook got lost. Without webhooks, as on a self-hosted http URL, it reads them every 10 minutes. Team review requests need the App's `members: read` permission, which each organization's owner accepts. An App created before this permission existed must be given it on GitHub, along with the `pull_request_review_comment`, `issue_comment`, `membership` and `team` events. Until then, only review requests made to you directly show.
 
 ## Pricing
 
-The hosted Mergepatrol is free on public repos. Private repos cost $15 a month per seat, after a free trial of 14 days that needs no card. Either way, the agent runs on your own model API key.
+The hosted MergeLoop is free on public repos. Private repos cost $15 a month per seat, after a free trial of 14 days that needs no card. Either way, the agent runs on your own model API key.
 
 - **Public repos** have a fair-use limit across a workspace: 100 PRs joining a queue, and 50 jobs (rebases and fixes), an hour. Over it, waiting PRs go on hold, keep their place, and go on once the last hour is under the limit. A PR already running finishes.
 - **Private repos** need a subscription, started from the dashboard's Settings. Without one, their waiting PRs go on hold, with a comment that links there.
 - **A seat** is a developer whose PR joined a private repo's queue. They take it with their first such PR, and keep it until removed in Settings. A seat added mid-month is charged for the rest of it; a removed one drops off the next bill. A PR authored by an App, such as Dependabot, takes no seat.
 
-A self-hosted Mergepatrol has no limits, and bills no one.
+A self-hosted MergeLoop has no limits, and bills no one.
 
 ## Run it
 
-GitHub webhooks wake a queue as soon as something changes, but GitHub only delivers them to a public https URL. On localhost, Mergepatrol polls.
+GitHub webhooks wake a queue as soon as something changes, but GitHub only delivers them to a public https URL. On localhost, MergeLoop polls.
 
-1. Generate the secret key. It encrypts the GitHub App and the model API keys in the database. Keep it: without it, you must set Mergepatrol up again.
+1. Generate the secret key. It encrypts the GitHub App and the model API keys in the database. Keep it: without it, you must set MergeLoop up again.
 
    ```bash
    export MERGEPATROL_SECRET_KEY=$(openssl rand -base64 32)
    ```
 
-2. Start Mergepatrol:
+2. Start MergeLoop:
 
    ```bash
    docker compose up --build -d
    docker compose logs mergepatrol | grep setup_token
    ```
 
-   Or without Docker for Mergepatrol itself, with Rust (`rust-toolchain.toml` picks the version) and Node 24 with pnpm:
+   Or without Docker for MergeLoop itself, with Rust (`rust-toolchain.toml` picks the version) and Node 24 with pnpm:
 
    ```bash
    docker compose -f compose.dev.yml up -d   # or any Postgres 17
@@ -136,18 +140,18 @@ GitHub webhooks wake a queue as soon as something changes, but GitHub only deliv
 
 3. Open http://localhost:8080 and do the setup in the dashboard:
    1. Enter the setup token from the logs.
-   2. Create the GitHub App. GitHub creates it with the permissions Mergepatrol needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
+   2. Create the GitHub App. GitHub creates it with the permissions MergeLoop needs. If the button does nothing, the name is taken, even by an App you deleted: change it.
    3. Install the App on your organization or account, and choose its repos. GitHub sends you back to sign in.
    4. In **Repos**, set up the repos to queue. Each gets a PR that adds its config file: see [Repo settings](#repo-settings). Merge it, and the repo queues.
-   5. In **Settings**, add your Anthropic or OpenAI API key. Mergepatrol checks it with the provider, then stores it encrypted. Create a key for Mergepatrol alone, with a spend limit (for Anthropic, in a workspace with one), so a leaked key costs at most the limit. For OpenAI, you can **Sign in with ChatGPT** instead, and Codex runs on your ChatGPT plan. Mergepatrol signs in the way the Codex CLI does, which OpenAI does not support for other apps and could stop at any time: keep an API key to switch back to.
+   5. In **Settings**, add your Anthropic or OpenAI API key. MergeLoop checks it with the provider, then stores it encrypted. Create a key for MergeLoop alone, with a spend limit (for Anthropic, in a workspace with one), so a leaked key costs at most the limit. For OpenAI, you can **Sign in with ChatGPT** instead, and Codex runs on your ChatGPT plan. MergeLoop signs in the way the Codex CLI does, which OpenAI does not support for other apps and could stop at any time: keep an API key to switch back to.
 
-4. Add the `mergepatrol` label to a PR to queue it. Mergepatrol creates the queue labels on each repo it queues.
+4. Add the `mergepatrol` label to a PR to queue it. MergeLoop creates the queue labels on each repo it queues.
 
 Anyone with a GitHub account can sign in. Each installation of the App is a workspace, with its own repos and its own model API keys. A user sees the workspaces that GitHub lets them access. A session reads them from GitHub again every hour, so a new installation shows up, and a lost one goes, within the hour. A session lasts 30 days from its last use, and ends when GitHub stops taking the user's token: when they revoke it, or after 6 months, when GitHub's refresh token expires.
 
 ### Environment variables
 
-If you reach Mergepatrol at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
+If you reach MergeLoop at another address than http://localhost:8080, set `MERGEPATROL_PUBLIC_URL` before you create the App: GitHub sends users back to it, and delivers webhooks there when it is https. To get webhooks on your machine, run a tunnel such as `cloudflared tunnel --url http://localhost:8080` and use its URL.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -167,7 +171,7 @@ If you reach Mergepatrol at another address than http://localhost:8080, set `MER
 
 ## Run it with an App you made yourself
 
-The hosted Mergepatrol uses one public GitHub App, which we create by hand on GitHub, rather than with the setup in the dashboard. A self-hosted Mergepatrol can do the same. Set the App's credentials, and the setup token and the App creation are skipped:
+The hosted MergeLoop uses one public GitHub App, which we create by hand on GitHub, rather than with the setup in the dashboard. A self-hosted MergeLoop can do the same. Set the App's credentials, and the setup token and the App creation are skipped:
 
 | Variable | What it is |
 | --- | --- |
@@ -175,13 +179,13 @@ The hosted Mergepatrol uses one public GitHub App, which we create by hand on Gi
 | `MERGEPATROL_GITHUB_APP_PRIVATE_KEY` | The private key, PEM |
 | `MERGEPATROL_GITHUB_CLIENT_ID` | The OAuth client ID |
 | `MERGEPATROL_GITHUB_CLIENT_SECRET` | The OAuth client secret |
-| `MERGEPATROL_GITHUB_WEBHOOK_SECRET` | The webhook secret. Optional: without it, Mergepatrol only polls |
+| `MERGEPATROL_GITHUB_WEBHOOK_SECRET` | The webhook secret. Optional: without it, MergeLoop only polls |
 
 The App needs the permissions in `crates/github/src/setup.rs` (`manifest`), the callback URL `<public URL>/auth/callback`, the setup URL `<public URL>/setup/installed`, and the webhook URL `<public URL>/webhooks/github`, subscribed to the events in `WEBHOOK_EVENTS` in the same file.
 
 ### Rotate the secret key
 
-Generate a new key, and set it in front of the old one, separated by a comma: `MERGEPATROL_SECRET_KEY=<new>,<old>`. Restart Mergepatrol. At startup, it re-encrypts every stored secret with the new key, and logs how many. Then set only the new key, and restart again. Each session's GitHub token is re-encrypted at its next hourly check; a session idle through the whole rotation signs out.
+Generate a new key, and set it in front of the old one, separated by a comma: `MERGEPATROL_SECRET_KEY=<new>,<old>`. Restart MergeLoop. At startup, it re-encrypts every stored secret with the new key, and logs how many. Then set only the new key, and restart again. Each session's GitHub token is re-encrypted at its next hourly check; a session idle through the whole rotation signs out.
 
 On GCP, a deploy runs the old revision beside the new one for a while, and each must read what the other writes. Add each step as a version of the `mergepatrol-secret-key` secret, and deploy it:
 
@@ -192,7 +196,7 @@ On GCP, a deploy runs the old revision beside the new one for a while, and each 
 
 ## Repo settings
 
-Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. Mergepatrol reads the file from there, so a PR cannot change its own settings. A setting the file leaves out takes the instance's default: on a self-hosted Mergepatrol, the `MERGEPATROL_*` variables in [Environment variables](#environment-variables).
+Each repo sets its queue in `.mergepatrol/mergepatrol.yml` on its default branch. MergeLoop reads the file from there, so a PR cannot change its own settings. A setting the file leaves out takes the instance's default: on a self-hosted MergeLoop, the `MERGEPATROL_*` variables in [Environment variables](#environment-variables).
 
 ```yaml
 version: 1
@@ -223,7 +227,7 @@ The verify commands run after an agent resolution or fix, before the publish.
 
 A fix runs in the sandbox, like a rebase, while the PR keeps its place at the head of the queue. It may change any file except those under `.github/` and `.mergepatrol/`. The agent gets each failed check's output and annotations, and for a GitHub Actions job, the end of its log. The log needs the App's `actions: read` permission: an App created before this permission existed must be given it on GitHub, or the agent works from the output alone.
 
-A repo queues once its default branch has the file. Mergepatrol looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Repos** override the file, until you choose **Follow the config file**.
+A repo queues once its default branch has the file. MergeLoop looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Repos** override the file, until you choose **Follow the config file**.
 
 The dashboard edits the file through PRs. **Set up** opens a PR that adds the file with the defaults, and the `mergepatrol` agent skill at `.agents/skills/mergepatrol/SKILL.md` and `.claude/skills/mergepatrol/SKILL.md`, so coding agents in the repo queue their PRs rather than merge them. **Settings** opens one that changes the file. Both come from the branch `mergepatrol/config`: a second change updates the open PR. The queue uses the new settings once the PR merges.
 
@@ -231,29 +235,29 @@ When the file does not parse, the queue pauses, and **Repos** shows why, until t
 
 ## From an agent, or the API
 
-Mergepatrol serves an MCP server at `/mcp`, so a coding agent can do anything the dashboard does: queue a PR, take it out, read where it is, review it, read the queue's history, change a repo's settings. Every call acts as a GitHub user or bot: Mergepatrol puts the labels on, comments, and reviews with their token, so GitHub checks they may.
+MergeLoop serves an MCP server at `/mcp`, so a coding agent can do anything the dashboard does: queue a PR, take it out, read where it is, review it, read the queue's history, change a repo's settings. Every call acts as a GitHub user or bot: MergeLoop puts the labels on, comments, and reviews with their token, so GitHub checks they may.
 
 An MCP client that supports OAuth signs in with GitHub in the browser, as the dashboard does:
 
 ```sh
-claude mcp add --transport http mergepatrol https://mergepatrol.ai/mcp
+claude mcp add --transport http mergeloop https://mergeloop.ai/mcp
 ```
 
-The client gets a Mergepatrol session, and the GitHub token stays on the server. Mergepatrol sends the sign-in back only to a loopback address, where native clients such as Claude Code, Codex and Cursor listen.
+The client gets a MergeLoop session, and the GitHub token stays on the server. MergeLoop sends the sign-in back only to a loopback address, where native clients such as Claude Code, Codex and Cursor listen.
 
-An agent without a browser, such as one in CI, passes a GitHub token instead: one from `gh auth token`, a personal access token, or a workflow's `GITHUB_TOKEN`. A fine-grained token also needs write access to issues or pull requests. Mergepatrol never stores the token. It remembers its hash, in memory for 5 minutes, so calls in a row do not each ask GitHub again.
+An agent without a browser, such as one in CI, passes a GitHub token instead: one from `gh auth token`, a personal access token, or a workflow's `GITHUB_TOKEN`. A fine-grained token also needs write access to issues or pull requests. MergeLoop never stores the token. It remembers its hash, in memory for 5 minutes, so calls in a row do not each ask GitHub again.
 
 ```sh
-claude mcp add --transport http mergepatrol https://mergepatrol.ai/mcp \
+claude mcp add --transport http mergeloop https://mergeloop.ai/mcp \
   --header "Authorization: Bearer $(gh auth token)"
 ```
 
-A GitHub token reaches only the repos GitHub lets it read: Mergepatrol cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID, which `get_session` lists.
+A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID, which `get_session` lists.
 
 <!-- tools: the order of `ROUTES` in crates/web/src/routes.rs -->
 | Tool | Does | Sign-in |
 | --- | --- | --- |
-| `get_changelog` | Mergepatrol's newest changelog entries | |
+| `get_changelog` | MergeLoop's newest changelog entries | |
 | `get_session` | Who you are signed in as, and your workspaces | |
 | `get_inbox` | Your PRs, and the PRs that ask for your review, across workspaces | Yes |
 | `list_queue` | The queues, in the order they take PRs: a repo's, or the workspace's | Without `repo` |
@@ -302,18 +306,18 @@ Each tool calls a route of the JSON API under `/api`, which the dashboard uses. 
 
 ```sh
 curl -H "Authorization: Bearer $(gh auth token)" \
-  https://mergepatrol.ai/api/w/<installation ID>/repos/<owner>/<name>/pulls/<number>/status
+  https://mergeloop.ai/api/w/<installation ID>/repos/<owner>/<name>/pulls/<number>/status
 ```
 
 ## Read a PR's state from another app
 
-An app that shows PRs, such as a PR list in an editor, reads what Mergepatrol knows of them from `/api/v1`, instead of working it out from labels and the config file. It authenticates as the API above does: `Authorization: Bearer` with the viewer's GitHub token (OAuth, personal access token, or an App installation token) or a Mergepatrol session. GitHub decides what the token can read. A repo it cannot read is a 404, the same as a repo that does not exist. A repo it can read is a 200, also when Mergepatrol does not run there.
+An app that shows PRs, such as a PR list in an editor, reads what MergeLoop knows of them from `/api/v1`, instead of working it out from labels and the config file. It authenticates as the API above does: `Authorization: Bearer` with the viewer's GitHub token (OAuth, personal access token, or an App installation token) or a MergeLoop session. GitHub decides what the token can read. A repo it cannot read is a 404, the same as a repo that does not exist. A repo it can read is a 200, also when MergeLoop does not run there.
 
 ```sh
 curl -H "Authorization: Bearer $(gh auth token)" \
-  https://mergepatrol.ai/api/v1/repos/acme/widgets/pulls/42
+  https://mergeloop.ai/api/v1/repos/acme/widgets/pulls/42
 curl -H "Authorization: Bearer $(gh auth token)" \
-  "https://mergepatrol.ai/api/v1/repos/acme/widgets/pulls?numbers=42,43,44"
+  "https://mergeloop.ai/api/v1/repos/acme/widgets/pulls?numbers=42,43,44"
 ```
 
 The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the order asked. Each PR reads:
@@ -322,7 +326,7 @@ The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the 
 {
   "repo": "acme/widgets",
   "number": 42,
-  "url": "https://mergepatrol.ai/acme/widgets/pull/42",
+  "url": "https://mergeloop.ai/acme/widgets/pull/42",
   "mergepatrol": {
     "state": "on",
     "installed": true,
@@ -350,7 +354,7 @@ The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the 
 
 | Field | Says |
 | --- | --- |
-| `url` | The PR in the dashboard. It opens the PR's lane while queued, its history once merged or ejected, the repo's settings while Mergepatrol is off there, and the repo's open PRs otherwise |
+| `url` | The PR in the dashboard. It opens the PR's lane while queued, its history once merged or ejected, the repo's settings while MergeLoop is off there, and the repo's open PRs otherwise |
 | `mergepatrol.state` | `on`, `off` (no App on the repo, no config file, or turned off), or `paused` (the config file does not parse: `config_error` says why) |
 | `mergepatrol.override` | `on` or `off` when turned so in the dashboard, whatever the config file says. `null` follows the file |
 | `queue` | `null` unless queued. `state` is `waiting`, `running` or `held`. `position` counts from 1 in the order the queue takes PRs. `stack` is `{ number, layers }` for a stack. `batch_pr` is the draft PR testing it, while it runs in a batch |
@@ -361,7 +365,7 @@ Every response has an `ETag`: send it back as `If-None-Match` for a `304` when n
 
 ## How jobs are isolated
 
-A rebase job runs the repo's code (the verify commands) and an agent with a shell. Mergepatrol treats it as untrusted:
+A rebase job runs the repo's code (the verify commands) and an agent with a shell. MergeLoop treats it as untrusted:
 
 - The **orchestrator** holds the GitHub App key and the queue. It never runs repo code.
 - Each **job** runs `mergepatrol job` in its own container, from the job image. It gets a GitHub token that can only read the one repo, and revokes it once it has fetched the repo. It returns a git bundle.
@@ -401,7 +405,7 @@ A job that needs another host fails until the host is added there. The proxy log
 
 The orchestrator hands the sandbox its link, `http://<orchestrator pod IP>:8081/jobs/<token>`, over HTTP, since a claim that sets env would skip the warm pool. With that link, the job fetches its spec once, uploads its result in chunks, and reports that it is done.
 
-This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public App `Mergepatrol`, which any account can install; each workspace brings its own Anthropic or OpenAI API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
+This is the hosted MergeLoop at `https://mergeloop.ai`. It runs the public App `MergeLoop`, which any account can install; each workspace brings its own Anthropic or OpenAI API key. `deploy/gcp/hosted-app.sh` creates the App once and stores its credentials in Secret Manager.
 
 | Variable | What it is |
 | --- | --- |
@@ -414,7 +418,7 @@ This is the hosted Mergepatrol at `https://mergepatrol.ai`. It runs the public A
 
 Billing runs through Stripe, and is off unless the three `MERGEPATROL_STRIPE_*` variables below are set. In Stripe, create:
 
-1. A product, with a recurring price of $15 a month per unit: `MERGEPATROL_STRIPE_PRICE`. Mergepatrol keeps each subscription's quantity at the workspace's seats.
+1. A product, with a recurring price of $15 a month per unit: `MERGEPATROL_STRIPE_PRICE`. MergeLoop keeps each subscription's quantity at the workspace's seats.
 2. A webhook endpoint at `<public URL>/webhooks/stripe`, for `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`: its signing secret is `MERGEPATROL_STRIPE_WEBHOOK_SECRET`.
 3. The customer portal's settings, where a customer adds a card, sees invoices, or cancels.
 
@@ -428,7 +432,7 @@ A workspace's first subscription starts with Stripe's trial, without a card. One
 
 ### Analytics
 
-With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics to PostHog. Without it, as when self-hosted, it sends nothing, and the dashboard does not load PostHog.
+With `MERGEPATROL_POSTHOG_KEY`, the hosted MergeLoop sends product analytics to PostHog. Without it, as when self-hosted, it sends nothing, and the dashboard does not load PostHog.
 
 - A person is a GitHub login. The dashboard identifies the signed-in user, and the server sends `signed in`.
 - A `workspace` group is an installation of the App, keyed by its installation ID, with the account's name. The dashboard groups what the user does under the workspace in view.
@@ -448,14 +452,14 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted Mergepatrol sends product analytics t
 | `executor` | Runs a rebase job: as a local process, or in a container. The job protocol |
 | `store` | The `Store` trait, Postgres, and the encrypted secrets. Tests need the dev Postgres from `compose.dev.yml` |
 | `web` | The HTTP server: JSON API and the dashboard |
-| `analytics` | Product analytics in PostHog, for the hosted Mergepatrol |
+| `analytics` | Product analytics in PostHog, for the hosted MergeLoop |
 | `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
 
 ## Compared to GitHub's merge queue
 
-GitHub's [merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) also tests PRs together before they merge. What Mergepatrol adds:
+GitHub's [merge queue](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue) also tests PRs together before they merge. What MergeLoop adds:
 
-| | Mergepatrol |
+| | MergeLoop |
 | --- | --- |
 | A PR that conflicts with its base | An agent resolves the conflict, and the PR stays in the queue |
 | A required check that fails | An agent commits a fix on the PR, up to `fix_ci.attempts` times, before the PR is ejected |
@@ -464,7 +468,7 @@ GitHub's [merge queue](https://docs.github.com/en/repositories/configuring-branc
 | CI | Runs on the repo's `pull_request` workflows, on a draft PR per batch. No `merge_group` trigger to add |
 | Queueing a PR | A label, so people and coding agents queue the same way |
 
-For Mergify, Graphite, Aviator and Trunk as well, see [mergepatrol.ai/compare](https://mergepatrol.ai/compare).
+For Mergify, Graphite, Aviator and Trunk as well, see [mergeloop.ai/compare](https://mergeloop.ai/compare).
 
 ## Contributing
 

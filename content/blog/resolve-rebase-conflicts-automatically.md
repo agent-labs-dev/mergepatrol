@@ -114,14 +114,14 @@ notes](https://raylabs.app/articles/handling-git-merge-conflicts-in-multi-agent-
 criticism is correct about an unverified prompt-and-pray setup. It is an argument for the
 guardrails above, not against the approach.
 
-## Setting it up with Mergepatrol
+## Setting it up with MergeLoop
 
-Mergepatrol is a label-driven merge queue for GitHub, and conflict resolution is the part it was
+MergeLoop is a label-driven merge queue for GitHub, and conflict resolution is the part it was
 built around. The behaviour above is the default rather than a configuration exercise.
 
 1. **Sign in and install the App** on the repositories you want queued, at
-   [mergepatrol.ai](https://mergepatrol.ai).
-2. **Set up a repo.** Mergepatrol opens a pull request that adds `.mergepatrol/mergepatrol.yml` on
+   [mergeloop.ai](https://mergeloop.ai).
+2. **Set up a repo.** MergeLoop opens a pull request that adds `.mergepatrol/mergepatrol.yml` on
    the default branch. Merging it is what turns the queue on; a pull request cannot change its own
    queue settings.
 3. **Add your model key** in Settings. Anthropic or OpenAI, your account, your spend limit. The
@@ -178,7 +178,7 @@ It works inside one. The queue provides the ordering and the combined test; the 
 the rebase conflict the queue would otherwise hand back to you.
 
 **Can I keep conflicts away from the model entirely?**
-Yes. Without a model key Mergepatrol runs the plain `git rebase` only, ejecting on a real
+Yes. Without a model key MergeLoop runs the plain `git rebase` only, ejecting on a real
 conflict. Some teams start there and turn the agent on for one repository at a time.
 
 **What does it cost to run?**

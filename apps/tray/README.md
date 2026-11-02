@@ -1,6 +1,6 @@
-# Mergepatrol menu bar app
+# MergeLoop menu bar app
 
-Mergepatrol's merge queues in the macOS menu bar. The menu bar shows `3▸5 ⚠1`: PRs in flight,
+MergeLoop's merge queues in the macOS menu bar. The menu bar shows `3▸5 ⚠1`: PRs in flight,
 PRs waiting, and PRs that need a human. The panel lists what is merging now and how far along
 it is, what is on hold, what is next, and what left the queue today. Click a row to open its PR.
 
@@ -11,7 +11,7 @@ It is its own Cargo workspace, so the server's CI, on Linux, never builds GPUI.
 
 ## Install it
 
-Download [Mergepatrol.zip](https://github.com/agent-labs-dev/mergepatrol/releases/download/tray-latest/Mergepatrol.zip),
+Download [the menu bar app](https://github.com/agent-labs-dev/mergepatrol/releases/download/tray-latest/Mergepatrol.zip),
 also linked from the dashboard's header. CI rebuilds it from each push to main that touches the
 app. It is ad-hoc signed, not notarized, so macOS blocks the first launch: open System Settings ›
 Privacy & Security and click **Open Anyway**.
@@ -19,9 +19,9 @@ Privacy & Security and click **Open Anyway**.
 ## Run it
 
 ```bash
-cargo run --manifest-path apps/tray/Cargo.toml                     # against https://mergepatrol.ai
+cargo run --manifest-path apps/tray/Cargo.toml                     # against https://mergeloop.ai
 MERGEPATROL_URL=http://localhost:8080 cargo run --manifest-path apps/tray/Cargo.toml
-apps/tray/package.sh                                               # dist/Mergepatrol.app
+apps/tray/package.sh                                               # dist/MergeLoop.app
 ```
 
 ## Signing in

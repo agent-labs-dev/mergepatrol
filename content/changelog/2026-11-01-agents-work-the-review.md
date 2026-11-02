@@ -9,4 +9,4 @@ The review stays adversarial. On the next push, it reads the author's replies. A
 
 **Require resolved comments**, on by default in **Settings**, holds a queued PR while any review thread on it is unresolved, whoever started it. Each kind's bar now sets how sure the review must be to send a change back to the author: a lower bar sends back more, and a change under it is a note that holds nothing. The defaults are 60% for security, 70% for dependencies and public APIs, and 80% for everything else.
 
-The Mergepatrol skill that setup adds to a repo has coding agents work every comment after they queue: fixed, dismissed with a reason, or needing a human. They resolve each one as they go, and keep one review ledger comment up to date.
+The MergeLoop skill that setup adds to a repo has coding agents work every comment after they queue: fixed, dismissed with a reason, or needing a human. They resolve each one as they go, and keep one review ledger comment up to date.

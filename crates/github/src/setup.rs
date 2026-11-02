@@ -53,11 +53,11 @@ pub const WEBHOOK_EVENTS: [&str; 14] = [
     "repository_ruleset",
 ];
 
-/// The App that Mergepatrol needs. GitHub only delivers webhooks to a public URL, so on
+/// The App that MergeLoop needs. GitHub only delivers webhooks to a public URL, so on
 /// http (localhost) the webhook is off and the queue only polls.
 pub fn manifest(public_url: &str, owner: &str) -> Value {
     // App names are unique across GitHub, and at most 34 characters.
-    let mut name = format!("mergepatrol-{owner}");
+    let mut name = format!("mergeloop-{owner}");
     name.truncate(34);
     json!({
         "name": name,
@@ -92,7 +92,7 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
 /// The hosted App: the same App, public, so any account can install it.
 pub fn hosted_manifest(public_url: &str) -> Value {
     let mut m = manifest(public_url, "");
-    m["name"] = json!("Mergepatrol");
+    m["name"] = json!("MergeLoop");
     m["public"] = json!(true);
     m
 }
@@ -727,11 +727,11 @@ mod tests {
 
     #[test]
     fn the_hosted_app_is_public() {
-        let m = hosted_manifest("https://mergepatrol.ai");
+        let m = hosted_manifest("https://mergeloop.ai");
         assert_eq!(m["public"], true);
         assert_eq!(
             m["hook_attributes"]["url"],
-            "https://mergepatrol.ai/webhooks/github"
+            "https://mergeloop.ai/webhooks/github"
         );
     }
 

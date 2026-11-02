@@ -177,7 +177,7 @@ impl Installation {
                 .to_owned(),
             text: None,
         };
-        // A fork's PR may have a branch of the same name: only the repo's own is Mergepatrol's,
+        // A fork's PR may have a branch of the same name: only the repo's own is MergeLoop's,
         // as `open_pr_from` finds it.
         let pull_request = r["pullRequests"]["nodes"]
             .as_array()
@@ -262,7 +262,7 @@ impl Installation {
     }
 
     /// Commits the files on `branch`, from the default branch's head, and opens a PR from it, or
-    /// updates the one open. The branch is Mergepatrol's: whatever was on it is replaced.
+    /// updates the one open. The branch is MergeLoop's: whatever was on it is replaced.
     pub async fn propose_file(&self, repo: &RepoName, p: Proposal<'_>) -> Result<PullRef> {
         let mut entries = Vec::with_capacity(p.files.len());
         for (path, text) in p.files {

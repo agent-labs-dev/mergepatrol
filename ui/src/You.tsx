@@ -70,7 +70,7 @@ export function You() {
   const { folder = "review", pr, answer } = useSearch({ from: "/$account/you" });
   const navigate = useNavigate({ from: "/$account/you" });
   const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login ?? "";
-  // Read from Mergepatrol's own database, not GitHub: cheap to read often.
+  // Read from MergeLoop's own database, not GitHub: cheap to read often.
   const you = useQuery({ queryKey: ["you"], queryFn: fetchYou, refetchInterval: 5000 });
   const client = useQueryClient();
   const [clicks, setClicks] = useState(new Map<string, Click>());
@@ -935,7 +935,7 @@ const stateSections: Record<State, string> = {
   failing: "Checks failing",
   comments: "Open review comments",
   ready: "Ready to queue",
-  off: "Ready to merge: Mergepatrol is off in the repo",
+  off: "Ready to merge: MergeLoop is off in the repo",
   queued: "In the queue",
   waiting: "Waiting on others",
   draft: "Drafts",
@@ -972,9 +972,9 @@ const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? o
 
 /** Where the author's PR stands, and so its section. `click`: a queue click not caught up with.
  *
- * In a repo Mergepatrol runs on, a PR whose checks still run, or that waits on a review, is ready
+ * In a repo MergeLoop runs on, a PR whose checks still run, or that waits on a review, is ready
  * to queue: the queue tests it and waits for its review itself, so queueing it is the author's
- * only move. Only where Mergepatrol is off does it wait on others. */
+ * only move. Only where MergeLoop is off does it wait on others. */
 function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
   if (click === "queueing") return { state: "queued", label: "Queueing…" };
   if (click === "dequeueing") return { state: "queued", label: "Leaving the queue…" };
@@ -1019,7 +1019,7 @@ function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
         detail: reviewers ? `from ${reviewers}` : undefined,
       };
     if (running) return { state: "waiting", label: "Checks running" };
-    return { state: "off", label: "Ready to merge", detail: "Mergepatrol is not on in this repo" };
+    return { state: "off", label: "Ready to merge", detail: "MergeLoop is not on in this repo" };
   }
   const waits = [
     running && "its checks",
@@ -1464,7 +1464,7 @@ function OwnerBar({
           search={{ repo: p.repo }}
           className={solid}
         >
-          Turn on Mergepatrol
+          Turn on MergeLoop
         </Link>
       ) : (
         !p.draft && (

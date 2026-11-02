@@ -646,7 +646,7 @@ mod tests {
         let res = json_of(mcp(&router, auth, init("2025-03-26")).await).await;
         assert_eq!(res["id"], "a");
         assert_eq!(res["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(res["result"]["serverInfo"]["name"], "mergepatrol");
+        assert_eq!(res["result"]["serverInfo"]["name"], "mergeloop");
         // A version it does not know gets the newest it does.
         let res = json_of(mcp(&router, auth, init("1999-01-01")).await).await;
         assert_eq!(res["result"]["protocolVersion"], "2025-06-18");
