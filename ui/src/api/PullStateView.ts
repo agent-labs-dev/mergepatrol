@@ -5,7 +5,7 @@ import type { QueueView } from "./QueueView";
 import type { RepoStatusView } from "./RepoStatusView";
 
 /**
- * What Mergepatrol knows of a PR. `queue`, `merged` and `ejected` are all null for a PR that
+ * What MergeLoop knows of a PR. `queue`, `merged` and `ejected` are all null for a PR that
  * was never in a queue.
  */
 export type PullStateView = { 
@@ -19,7 +19,7 @@ repo: string, number: number,
  */
 url: string, 
 /**
- * Whether the repo uses Mergepatrol.
+ * Whether the repo uses MergeLoop.
  */
 mergepatrol: RepoStatusView, 
 /**

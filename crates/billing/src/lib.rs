@@ -1,5 +1,5 @@
-//! Billing for the hosted Mergepatrol, through Stripe. Off without Stripe's keys, so a
-//! self-hosted Mergepatrol has no limits.
+//! Billing for the hosted MergeLoop, through Stripe. Off without Stripe's keys, so a
+//! self-hosted MergeLoop has no limits.
 //!
 //! Public repos are free, within a fair-use limit on each workspace: `FAIR_USE_PRS` PRs joining
 //! a queue, and `FAIR_USE_JOBS` jobs, an hour. Private repos need a subscription, which starts
@@ -126,16 +126,16 @@ impl Billing {
         let url = self.settings_url(account);
         let what = match tried {
             false => format!(
-                "Mergepatrol on private repos needs a subscription. Start a free trial of {TRIAL_DAYS} days in the [dashboard]({url}), with no card"
+                "MergeLoop on private repos needs a subscription. Start a free trial of {TRIAL_DAYS} days in the [dashboard]({url}), with no card"
             ),
             true => format!(
-                "the Mergepatrol subscription for private repos has ended. Subscribe again in the [dashboard]({url})"
+                "the MergeLoop subscription for private repos has ended. Subscribe again in the [dashboard]({url})"
             ),
         };
         Hold {
             reason: mergepatrol_core::Hold::NoSubscription,
             comment: format!(
-                "On hold: {what}. Public repos stay free, and private ones cost ${PRICE_USD} a month per seat: a developer whose PRs Mergepatrol queues. It keeps its place in the queue, and goes on once subscribed."
+                "On hold: {what}. Public repos stay free, and private ones cost ${PRICE_USD} a month per seat: a developer whose PRs MergeLoop queues. It keeps its place in the queue, and goes on once subscribed."
             ),
         }
     }
@@ -276,7 +276,7 @@ fn fair_use_hold(account: &str, prs: u64, jobs: u64) -> Option<Hold> {
     (prs >= FAIR_USE_PRS || jobs >= FAIR_USE_JOBS).then(|| Hold {
         reason: mergepatrol_core::Hold::FairUseLimit,
         comment: format!(
-            "On hold: `{account}`'s public repos queued {FAIR_USE_PRS} PRs, or ran {FAIR_USE_JOBS} jobs, in the last hour: Mergepatrol's fair-use limit. It keeps its place in the queue, and goes on once the last hour is under the limit."
+            "On hold: `{account}`'s public repos queued {FAIR_USE_PRS} PRs, or ran {FAIR_USE_JOBS} jobs, in the last hour: MergeLoop's fair-use limit. It keeps its place in the queue, and goes on once the last hour is under the limit."
         ),
     })
 }

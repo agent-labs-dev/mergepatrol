@@ -1208,12 +1208,12 @@ async fn fork_pin(
         },
         None => Pin::Drop {
             kind: "unpinned",
-            why: "GitHub sent no webhook for its label, so Mergepatrol cannot tell which commits were queued".into(),
+            why: "GitHub sent no webhook for its label, so MergeLoop cannot tell which commits were queued".into(),
         },
     })
 }
 
-/// Whether GitHub delivers webhooks to this Mergepatrol: it does only with a secret, and to https.
+/// Whether GitHub delivers webhooks to this MergeLoop: it does only with a secret, and to https.
 pub(crate) async fn webhooks(ctx: &Ctx) -> Result<bool> {
     let secret = app_credentials(ctx)
         .await?
@@ -1236,7 +1236,7 @@ async fn drop_fork(
     gh.remove_label(&key.repo, number, &labels.trigger).await?;
     gh.remove_label(&key.repo, number, &labels.priority).await?;
     let comment = format!(
-        "Dequeued: {why}. Mergepatrol merges a PR from a fork only as it was when its label went on. Add `{}` again to queue it as it is now.",
+        "Dequeued: {why}. MergeLoop merges a PR from a fork only as it was when its label went on. Add `{}` again to queue it as it is now.",
         labels.trigger
     );
     gh.sticky_comment(&key.repo, number, &comment).await
@@ -1274,10 +1274,10 @@ async fn fork_block(
         .map(|r| r.owner.kind == "Organization");
     Ok(match org {
         None => Some(Block::Eject(format!(
-            "it is behind `{trunk}`, and its fork is gone, so Mergepatrol cannot push a rebase"
+            "it is behind `{trunk}`, and its fork is gone, so MergeLoop cannot push a rebase"
         ))),
         Some(true) => Some(Block::Eject(format!(
-            "it is behind `{trunk}`, and Mergepatrol cannot push to a fork that an organization owns: {rebase_it}"
+            "it is behind `{trunk}`, and MergeLoop cannot push to a fork that an organization owns: {rebase_it}"
         ))),
         Some(false)
             if gh
@@ -1285,7 +1285,7 @@ async fn fork_block(
                 .await? =>
         {
             Some(Block::Eject(format!(
-                "it is behind `{trunk}`, and it changes workflow files, which GitHub does not let Mergepatrol push to a fork: {rebase_it}"
+                "it is behind `{trunk}`, and it changes workflow files, which GitHub does not let MergeLoop push to a fork: {rebase_it}"
             )))
         }
         Some(false) if !pr.maintainer_can_modify => Some(Block::Hold(Hold::ForkEditsOff {
@@ -1766,13 +1766,9 @@ async fn test_and_merge(
                 .map(|pr| format!("- `#{}` {}", pr.number, pr.title))
                 .collect();
             let first = &batch.steps[0].0.layers[0];
-            let title = format!(
-                "{} (+{} in a Mergepatrol batch)",
-                first.title,
-                list.len() - 1
-            );
+            let title = format!("{} (+{} in a MergeLoop batch)", first.title, list.len() - 1);
             let body = format!(
-                "Mergepatrol tests these PRs together, then merges them one by one. It closes this PR when it is done: do not merge it.\n\n{}",
+                "MergeLoop tests these PRs together, then merges them one by one. It closes this PR when it is done: do not merge it.\n\n{}",
                 list.join("\n")
             );
             let draft = gh
@@ -1833,7 +1829,7 @@ async fn test_and_merge(
                 async move {
                     record_all(ctx, key, &unit.prs(), "batch-failed", why).await?;
                     let comment = format!(
-                        "The batch with {} failed: {why}. Mergepatrol now tests these PRs in smaller batches, to find the one that broke it.",
+                        "The batch with {} failed: {why}. MergeLoop now tests these PRs in smaller batches, to find the one that broke it.",
                         batch.others(unit)
                     );
                     comment_all(gh, repo, &unit.prs(), &comment).await
@@ -2653,7 +2649,7 @@ async fn rebase_and_publish(
         return Ok(Event::RebaseFailed(match (unit.stacked, unit.fork()) {
             (true, _) => format!("#{}: {e:#}", unit.layers[failed].number),
             (false, true) => format!(
-                "{e:#}. Mergepatrol runs no agent on a PR from a fork, so rebase it onto `{}` yourself",
+                "{e:#}. MergeLoop runs no agent on a PR from a fork, so rebase it onto `{}` yourself",
                 key.trunk
             ),
             (false, false) => format!("{e:#}"),

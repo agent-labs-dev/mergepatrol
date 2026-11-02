@@ -37,7 +37,7 @@ pub struct Collection {
 pub const BLOG: Collection = Collection {
     prefix: "blog",
     heading: "Blog",
-    description: "Merge queues, rebases and CI, from the people who build Mergepatrol.",
+    description: "Merge queues, rebases and CI, from the people who build MergeLoop.",
     schema: "BlogPosting",
     get: <Articles as RustEmbed>::get,
     files: <Articles as RustEmbed>::iter,
@@ -46,7 +46,7 @@ pub const BLOG: Collection = Collection {
 pub const COMPARE: Collection = Collection {
     prefix: "compare",
     heading: "Compare",
-    description: "How Mergepatrol compares with GitHub's merge queue and the other merge queues for GitHub.",
+    description: "How MergeLoop compares with GitHub's merge queue and the other merge queues for GitHub.",
     schema: "Article",
     get: <Comparisons as RustEmbed>::get,
     files: <Comparisons as RustEmbed>::iter,
@@ -235,7 +235,7 @@ impl Collection {
         // The pages are written by the team, not signed by a person, so the site is the author too.
         let publisher = serde_json::json!({
             "@type": "Organization",
-            "name": "Mergepatrol",
+            "name": "MergeLoop",
             "url": format!("{public_url}/"),
             "logo": { "@type": "ImageObject", "url": format!("{public_url}/apple-touch-icon.png") },
         });
@@ -312,10 +312,7 @@ pub(crate) fn page(
     public_url: &str,
     analytics: Analytics,
 ) -> String {
-    let (title, description) = (
-        escape(&format!("{title} | Mergepatrol")),
-        escape(description),
-    );
+    let (title, description) = (escape(&format!("{title} | MergeLoop")), escape(description));
     let image = format!("{public_url}/og/mergepatrol-og-1200x630.png");
     let tracking = analytics.map(tracking).unwrap_or_default();
     format!(
@@ -327,13 +324,13 @@ pub(crate) fn page(
 <title>{title}</title>
 <meta name="description" content="{description}" />
 <link rel="canonical" href="{url}" />
-<meta property="og:site_name" content="Mergepatrol" />
+<meta property="og:site_name" content="MergeLoop" />
 <meta property="og:url" content="{url}" />
 <meta property="og:title" content="{title}" />
 <meta property="og:description" content="{description}" />
 <meta property="og:image" content="{image}" />
-<meta property="og:image:width" content="1200" />
-<meta property="og:image:height" content="630" />
+<meta property="og:image:width" content="1731" />
+<meta property="og:image:height" content="909" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="{title}" />
 <meta name="twitter:description" content="{description}" />
@@ -346,7 +343,7 @@ pub(crate) fn page(
 {tracking}
 </head>
 <body>
-<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />Mergepatrol</a><nav><a href="/docs">Docs</a><a href="/compare">Compare</a><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
+<header><a href="/" class="brand"><img src="/logo.svg" alt="" width="20" height="20" />MergeLoop</a><nav><a href="/docs">Docs</a><a href="/compare">Compare</a><a href="/blog">Blog</a><a href="/changelog">Changelog</a></nav></header>
 <main>{main}</main>
 {FOOTER}
 </body>
@@ -458,9 +455,9 @@ mod tests {
             "---\ntitle: <b>\"T\"\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        let html = BLOG.article_page(&a, "https://mergepatrol.ai", None);
-        assert!(html.contains("<title>&lt;b&gt;&quot;T&quot; | Mergepatrol</title>"));
-        assert!(html.contains("<link rel=\"canonical\" href=\"https://mergepatrol.ai/blog/x\" />"));
+        let html = BLOG.article_page(&a, "https://mergeloop.ai", None);
+        assert!(html.contains("<title>&lt;b&gt;&quot;T&quot; | MergeLoop</title>"));
+        assert!(html.contains("<link rel=\"canonical\" href=\"https://mergeloop.ai/blog/x\" />"));
     }
 
     #[test]
@@ -470,7 +467,7 @@ mod tests {
             "---\ntitle: T\ndescription: D\ndate: 2026-10-30\n---\nbody\n",
         )
         .unwrap();
-        let html = BLOG.article_page(&a, "https://mergepatrol.ai", None);
+        let html = BLOG.article_page(&a, "https://mergeloop.ai", None);
         let json = html
             .split("<script type=\"application/ld+json\">")
             .nth(1)
@@ -478,7 +475,7 @@ mod tests {
             .unwrap();
         let ld: serde_json::Value = serde_json::from_str(json).unwrap();
         for key in ["author", "publisher"] {
-            assert_eq!(ld[key]["name"], "Mergepatrol", "{key} in {json}");
+            assert_eq!(ld[key]["name"], "MergeLoop", "{key} in {json}");
         }
         assert_eq!(ld["datePublished"], "2026-10-30");
     }
@@ -492,7 +489,7 @@ mod tests {
         .unwrap();
         assert!(
             !BLOG
-                .article_page(&a, "https://mergepatrol.ai", None)
+                .article_page(&a, "https://mergeloop.ai", None)
                 .contains("posthog")
         );
         for (host, script) in [
@@ -505,7 +502,7 @@ mod tests {
                 "https://ph.example.com/static/array.js",
             ),
         ] {
-            let html = BLOG.article_page(&a, "https://mergepatrol.ai", Some(("phc_x", host)));
+            let html = BLOG.article_page(&a, "https://mergeloop.ai", Some(("phc_x", host)));
             assert!(html.contains(&format!("src=\"{script}\"")), "{html}");
             assert!(html.contains("posthog.init(&quot;phc_x&quot;"), "{html}");
         }

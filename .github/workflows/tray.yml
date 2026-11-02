@@ -57,7 +57,7 @@ jobs:
           workspaces: apps/tray
       - run: ./package.sh
       # ditto keeps the bundle's signature, which zip does not.
-      - run: ditto -c -k --keepParent dist/Mergepatrol.app dist/Mergepatrol.zip
+      - run: ditto -c -k --keepParent dist/MergeLoop.app dist/Mergepatrol.zip
       # One rolling prerelease, so the download URL never changes and a v* release stays Latest.
       - run: |
           if gh release view "$TAG" >/dev/null 2>&1; then

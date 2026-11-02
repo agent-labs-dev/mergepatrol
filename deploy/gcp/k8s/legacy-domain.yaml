@@ -1,0 +1,50 @@
+# Keep installed API/MCP clients and webhook senders on their existing HTTPS endpoints.
+# A 302 can turn a POST into a GET and drop its body, so these never pass through it.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mergepatrol-legacy
+  namespace: mergepatrol
+spec:
+  parentRefs:
+    - name: mergepatrol
+      sectionName: https
+  hostnames: [mergepatrol.ai]
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+        - path:
+            type: PathPrefix
+            value: /mcp
+        - path:
+            type: PathPrefix
+            value: /webhooks
+      backendRefs:
+        - name: mergepatrol
+          port: 80
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            hostname: mergeloop.ai
+            statusCode: 302
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mergepatrol-legacy-http
+  namespace: mergepatrol
+spec:
+  parentRefs:
+    - name: mergepatrol
+      sectionName: http
+  hostnames: [mergepatrol.ai]
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            hostname: mergeloop.ai
+            statusCode: 302

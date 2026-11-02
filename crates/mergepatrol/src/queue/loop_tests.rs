@@ -2092,7 +2092,7 @@ async fn green_prs_are_tested_together_and_merged_without_a_rebase() {
     assert_eq!(run.gh.with(|s| s.tree(&s.trunk)), "t-1-2-3");
     assert_eq!(
         run.gh.with(|s| s.drafts.clone()),
-        ["PR 1 (+2 in a Mergepatrol batch)"]
+        ["PR 1 (+2 in a MergeLoop batch)"]
     );
     // The batch's branch is gone, which closes its draft PR.
     assert_eq!(
@@ -2193,7 +2193,7 @@ async fn a_batch_stops_at_the_first_conflict() {
     assert_eq!(run.merged(), [1, 2]);
     assert_eq!(
         run.gh.with(|s| s.drafts.clone()),
-        ["PR 1 (+1 in a Mergepatrol batch)"]
+        ["PR 1 (+1 in a MergeLoop batch)"]
     );
     // 3 conflicts even as the first of a batch, so it is rebased alone.
     run.tick().await;
@@ -2495,7 +2495,7 @@ async fn a_green_stack_is_tested_in_a_batch_and_merged_at_once() {
     assert_eq!(run.gh.with(|s| s.tree(&s.trunk)), "t-1-2-3-4");
     assert_eq!(
         run.gh.with(|s| s.drafts.clone()),
-        ["PR 1 (+3 in a Mergepatrol batch)"]
+        ["PR 1 (+3 in a MergeLoop batch)"]
     );
     assert_eq!(
         run.gh.with(|s| s.deleted.clone()),
@@ -2668,7 +2668,7 @@ async fn a_fork_pr_is_never_tested_in_a_batch() {
     // batch needs two.
     assert_eq!(
         run.gh.with(|s| s.drafts.clone()),
-        ["PR 1 (+1 in a Mergepatrol batch)"]
+        ["PR 1 (+1 in a MergeLoop batch)"]
     );
     assert!(run.kinds(3).contains(&"rebasing".to_owned()));
 }
@@ -2730,7 +2730,7 @@ async fn a_fork_pr_goes_by_its_pull_ref_which_the_pr_lags_behind() {
     assert_eq!(run.merged(), [1]);
 }
 
-/// A Mergepatrol that GitHub delivers webhooks to.
+/// A MergeLoop that GitHub delivers webhooks to.
 fn with_webhooks(run: &mut Run) {
     run.ctx.config.public_url = "https://mergepatrol.example".into();
     run.ctx.hosted_app = Some(AppCredentials {

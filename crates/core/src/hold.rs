@@ -118,7 +118,7 @@ impl fmt::Display for Hold {
             }
             Hold::ForkEditsOff { trunk } => write!(
                 f,
-                "it is behind `{trunk}`, and Mergepatrol can push the rebase to its fork only once its author allows edits by maintainers"
+                "it is behind `{trunk}`, and MergeLoop can push the rebase to its fork only once its author allows edits by maintainers"
             ),
             Hold::NoQueue { base, queues } => {
                 let queues: Vec<String> = queues.iter().map(|b| format!("`{b}`")).collect();
@@ -128,7 +128,7 @@ impl fmt::Display for Hold {
                     queues.join(", ")
                 )
             }
-            Hold::NoSubscription => f.write_str("private repos need a Mergepatrol subscription"),
+            Hold::NoSubscription => f.write_str("private repos need a MergeLoop subscription"),
             Hold::FairUseLimit => f.write_str("over the fair-use limit of public repos"),
             Hold::Reviewing => f.write_str("the agent is reviewing it"),
             Hold::ReviewAsks => {

@@ -1,4 +1,4 @@
-//! Mergepatrol in the macOS menu bar: what is merging, what needs a human, what just landed.
+//! MergeLoop in the macOS menu bar: what is merging, what needs a human, what just landed.
 //! The shell (GPUI, the status item, the glass dropdown) comes from jnsdls/slopify.
 
 mod api;
@@ -23,7 +23,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use crate::model::{AppModel, Auth};
 use crate::status_item::StatusItem;
 
-const DEFAULT_SERVER: &str = "https://mergepatrol.ai";
+const DEFAULT_SERVER: &str = "https://mergeloop.ai";
 
 fn main() {
     let mut log =

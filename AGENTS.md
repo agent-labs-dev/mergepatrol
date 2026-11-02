@@ -1,4 +1,4 @@
-# Mergepatrol
+# MergeLoop
 
 See `CONTRIBUTING.md` for how to build, test, and open a PR.
 
@@ -13,4 +13,4 @@ The dashboard does nothing but call the JSON API under `/api`. Every route is in
 
 ## Changes users see go in the changelog
 
-A PR whose change Mergepatrol's users can see or feel adds an entry to `content/changelog/`, with a picture from the PR's screenshots when there is one to show. `content/changelog/README.md` says when and how.
+A PR whose change MergeLoop's users can see or feel adds an entry to `content/changelog/`, with a picture from the PR's screenshots when there is one to show. `content/changelog/README.md` says when and how.

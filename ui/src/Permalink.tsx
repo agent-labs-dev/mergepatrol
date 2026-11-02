@@ -25,7 +25,7 @@ export const permalinkAfterSignIn = () => params(sessionStorage.getItem(AFTER_SI
 export const permalinkAt = (path: string) => (PERMALINK.test(path) ? params(path) : null);
 
 /** Where `/{owner}/{repo}/pull/{n}` leads: the PR in its lane while queued, its exit in the
- * history once merged or ejected, the repo's settings while Mergepatrol is off there, or else
+ * history once merged or ejected, the repo's settings while MergeLoop is off there, or else
  * the PR among the repo's open PRs. */
 export function Permalink({ workspace }: { workspace: number }) {
   const { account, repo, number } = useParams({ from: "/$account/$repo/pull/$number" });
@@ -102,8 +102,8 @@ export function NotHere({
     <div className="mx-auto max-w-md p-8 text-sm">
       <p className="font-medium">
         {login
-          ? `No Mergepatrol workspace for ${account} on your account.`
-          : `Mergepatrol has nothing to show you for ${account}/${repo}#${number}.`}
+          ? `No MergeLoop workspace for ${account} on your account.`
+          : `MergeLoop has nothing to show you for ${account}/${repo}#${number}.`}
       </p>
       <p className="mt-2 text-muted">
         {login

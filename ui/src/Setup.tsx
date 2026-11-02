@@ -4,14 +4,14 @@ import { startManifest, unlock } from "./api";
 import type { AppView } from "./api/AppView";
 import { ErrorText, field, Mark, primary } from "./ui";
 
-/** The first run's steps on a self-hosted Mergepatrol, which shows its progress. */
+/** The first run's steps on a self-hosted MergeLoop, which shows its progress. */
 const setupSteps = 2;
 
 function Card({ step, title, children }: { step?: number; title: string; children: ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center px-4">
       <div className="mb-6 flex items-center gap-2 font-semibold">
-        <Mark /> Mergepatrol
+        <Mark /> MergeLoop
       </div>
       <section className="w-full max-w-md rounded-xl border border-line bg-surface p-6 shadow-sm sm:p-8">
         {step && (
@@ -48,10 +48,9 @@ export function UnlockSetup() {
     mutation.mutate(token);
   };
   return (
-    <Card step={1} title="Set up Mergepatrol">
+    <Card step={1} title="Set up MergeLoop">
       <Body>
-        Enter the setup token. Mergepatrol prints it in its logs when it starts without a GitHub
-        App:
+        Enter the setup token. MergeLoop prints it in its logs when it starts without a GitHub App:
       </Body>
       <pre className="mt-3 overflow-x-auto rounded-md bg-sunken px-3 py-2 font-mono text-xs">
         docker compose logs mergepatrol | grep setup_token
@@ -112,7 +111,7 @@ export function CreateApp() {
   return (
     <Card step={2} title="Create the GitHub App">
       <Body>
-        Mergepatrol acts on GitHub as its own App. GitHub creates it for you, then asks where to
+        MergeLoop acts on GitHub as its own App. GitHub creates it for you, then asks where to
         install it.
       </Body>
       <form onSubmit={submit} className="mt-5 space-y-3">

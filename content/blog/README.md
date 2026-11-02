@@ -1,6 +1,6 @@
 # Blog articles
 
-Each `.md` file here is an article at `https://mergepatrol.ai/blog/<file name>`. The server
+Each `.md` file here is an article at `https://mergeloop.ai/blog/<file name>`. The server
 renders it with one shared template (`crates/web/src/blog.rs`), so an article is only its text:
 no layout code, no route, no sitemap edit.
 

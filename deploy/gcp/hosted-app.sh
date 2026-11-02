@@ -4,12 +4,12 @@
 # the org: it opens GitHub's App form in the browser and catches the result on localhost, so the
 # key never passes through a terminal or a file.
 #
-#   ORG=agent-labs-dev PROJECT=mergepatrol PUBLIC_URL=https://mergepatrol.ai deploy/gcp/hosted-app.sh
+#   ORG=agent-labs-dev PROJECT=mergepatrol PUBLIC_URL=https://mergeloop.ai deploy/gcp/hosted-app.sh
 set -euo pipefail
 
 ORG=${ORG:-agent-labs-dev}
 PROJECT=${PROJECT:-mergepatrol}
-PUBLIC_URL=${PUBLIC_URL:-https://mergepatrol.ai}
+PUBLIC_URL=${PUBLIC_URL:-https://mergeloop.ai}
 
 MANIFEST=$(cargo run -q -p mergepatrol -- hosted-manifest "$PUBLIC_URL")
 

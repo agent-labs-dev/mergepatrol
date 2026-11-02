@@ -12,7 +12,7 @@ use crate::Installation;
 use crate::app::AsUser;
 use crate::codeowners::{self, CodeOwners};
 
-/// Marks the one comment per PR that Mergepatrol keeps up to date.
+/// Marks the one comment per PR that MergeLoop keeps up to date.
 const STICKY_MARKER: &str = "<!-- mergepatrol:status -->";
 
 #[derive(Debug, Clone)]
@@ -1148,7 +1148,7 @@ impl Installation {
                     return Ok(MergeOutcome::Merged { sha });
                 }
                 Some("failed") => return Ok(MergeOutcome::Rejected(rejection(&result))),
-                // `direct_merge` never queues, so this is not a merge Mergepatrol asked for.
+                // `direct_merge` never queues, so this is not a merge MergeLoop asked for.
                 Some("enqueued") => {
                     return Ok(MergeOutcome::Rejected(
                         "the PR is in GitHub's merge queue".into(),
@@ -1311,7 +1311,7 @@ impl Installation {
         Ok(())
     }
 
-    /// The PR's review threads that start with a comment holding `mark`, up to 100: Mergepatrol's
+    /// The PR's review threads that start with a comment holding `mark`, up to 100: MergeLoop's
     /// own, as its reviews post them.
     pub async fn threads_marked(
         &self,
@@ -1481,7 +1481,7 @@ impl Installation {
         ))
     }
 
-    /// Writes the status comment: edits the one Mergepatrol posted before, or posts it.
+    /// Writes the status comment: edits the one MergeLoop posted before, or posts it.
     pub async fn sticky_comment(
         &self,
         repo: &RepoName,

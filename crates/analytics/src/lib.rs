@@ -1,9 +1,9 @@
-//! Product analytics for the hosted Mergepatrol, in PostHog. Off without a project key, so a
-//! self-hosted Mergepatrol sends nothing.
+//! Product analytics for the hosted MergeLoop, in PostHog. Off without a project key, so a
+//! self-hosted MergeLoop sends nothing.
 //!
 //! A person is a GitHub login: a signed-in user, or the author of a queued PR. A group of type
 //! `workspace` is an installation of the App, keyed by its installation ID: the organization or
-//! account that uses Mergepatrol.
+//! account that uses MergeLoop.
 
 use std::sync::Arc;
 

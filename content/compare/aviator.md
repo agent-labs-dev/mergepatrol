@@ -1,18 +1,18 @@
 ---
-title: Mergepatrol vs Aviator MergeQueue
-description: Aviator MergeQueue offers parallel mode and affected targets for monorepos. Mergepatrol adds an agent that resolves conflicts and fixes failed checks. How the two compare.
+title: MergeLoop vs Aviator MergeQueue
+description: Aviator MergeQueue offers parallel mode and affected targets for monorepos. MergeLoop adds an agent that resolves conflicts and fixes failed checks. How the two compare.
 date: 2026-10-31
 ---
 
 [Aviator](https://www.aviator.co) sells MergeQueue alongside stacked-PR tooling (the open-source
-`av` CLI) and other developer workflow products. Mergepatrol is a merge queue only, with a coding
+`av` CLI) and other developer workflow products. MergeLoop is a merge queue only, with a coding
 agent for conflicts and failed checks. Checked against Aviator's
 [docs](https://docs.aviator.co/mergequeue/concepts/parallel-mode) and
 [pricing](https://www.aviator.co/pricing) on 31 October 2026.
 
 ## At a glance
 
-| | Aviator MergeQueue | Mergepatrol |
+| | Aviator MergeQueue | MergeLoop |
 | --- | --- | --- |
 | Price | Team $20 a developer a month (parallel queues, batching); Scale $50 (affected targets); Enterprise custom. A free plan covers up to 3 repos; the pricing page does not say it includes MergeQueue | Public repos free; private repos $15 a seat a month after a 14-day trial; self-hosted free |
 | Parallel testing | Parallel mode: a draft PR per queued PR, stacked on the ones ahead | No speculative builds: one batch of up to `batch_size` PRs (8 by default) |
@@ -29,9 +29,9 @@ agent for conflicts and failed checks. Checked against Aviator's
   mode runs a build per queued PR.
 - **You already stack with `av`.**
 
-## Where Mergepatrol is the better fit
+## Where MergeLoop is the better fit
 
-- **Conflicts and failed checks are what slow your queue,** not CI throughput. Mergepatrol's agent
+- **Conflicts and failed checks are what slow your queue,** not CI throughput. MergeLoop's agent
   keeps those pull requests in line instead of sending them back.
 - **You want no CI changes.** Batches run on a draft PR with your existing `pull_request`
   workflows.
