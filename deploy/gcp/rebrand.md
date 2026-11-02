@@ -65,8 +65,13 @@ The public GitHub App's name and the Stripe product's name (including receipts a
 portal branding) also need updating in their owner settings. This repo sends no outbound
 email itself. Keep the existing Stripe product/price IDs and subscription records.
 
-Compatibility names intentionally retained in code: the GitHub repo, Rust packages
-and binaries, container images and GCP resources, `MERGEPATROL_*` settings, `mergepatrol`
+The GitHub repo is now `agent-labs-dev/mergeloop`; GitHub redirects the old name, and the
+deploy's workload identity matches the repo's ID, not its name. Releases name their
+container images after the repo, so the next one publishes `ghcr.io/agent-labs-dev/mergeloop`
+and `-job`; the `mergepatrol` images keep their tags but get no new ones.
+
+Compatibility names intentionally retained in code: Rust packages and binaries, the
+Artifact Registry images and GCP resources, `MERGEPATROL_*` settings, `mergepatrol`
 queue labels, `.mergepatrol/mergepatrol.yml`, API fields, Git refs, comment markers, the
 `mergepatrol` skill name and installed paths, the menu bar app's bundle ID and Keychain
 service, and the rolling `Mergepatrol.zip` download URL. Its bundle is now `MergeLoop.app`.
