@@ -411,6 +411,7 @@ impl AsUser {
 const INBOX_FIELDS: &str = concat!(
     summary_fields!(),
     " updatedAt closedAt mergedAt repository { nameWithOwner }
+  reviewThreads(first: 100) { nodes { isResolved } }
   teamRequests: reviewRequests(first: 20) { nodes { requestedReviewer { ... on Team { slug } } } }
   activity: timelineItems(last: 50, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW]) {
     nodes { ... on IssueComment { createdAt author { login } } ... on PullRequestReview { createdAt author { login } } }

@@ -241,6 +241,8 @@ pub struct InboxPullView {
     /// Until when the user snoozed it, RFC 3339. A snooze is over once someone else says
     /// something on the PR.
     pub snoozed_until: Option<String>,
+    /// Its review threads no one resolved yet, of the first 100.
+    pub unresolved_threads: u32,
     #[serde(flatten)]
     pub pull: PullView,
 }
@@ -1717,6 +1719,7 @@ pub(crate) async fn you(
                         .snoozed
                         .filter(|(at, _)| unread(&p.activity, user.login(), Some(at)) == 0)
                         .map(|(_, until)| until),
+                    unresolved_threads: p.pr.unresolved_threads,
                     pull: p.pr.summary().into(),
                     updated_at: p.updated_at,
                     repo: p.repo.to_string(),

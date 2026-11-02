@@ -26,18 +26,14 @@ import { entryOf, QueueActivity, QueueGate } from "./Queue";
 import { Countdown, toasts } from "./Toasts";
 import { Avatar, RepoIcon, timeAgo } from "./ui";
 
-/** Needs you, then the user's own PRs by whose move it is, then those merged lately, then
- * those snoozed. */
-export const FOLDERS = ["needs", "turn", "queue", "others", "drafts", "merged", "snoozed"] as const;
+/** The reviews asked of the user, then all their open PRs by what each needs, then those merged
+ * lately, then those snoozed. */
+export const FOLDERS = ["review", "opened", "merged", "snoozed"] as const;
 export type Folder = (typeof FOLDERS)[number];
-type Own = Exclude<Folder, "needs" | "merged" | "snoozed">;
 
 const folderNames: Record<Folder, string> = {
-  needs: "Needs you",
-  turn: "Your turn",
-  queue: "In the queue",
-  others: "Waiting on others",
-  drafts: "Drafts",
+  review: "Review requested",
+  opened: "Opened",
   merged: "Merged",
   snoozed: "Snoozed",
 };
@@ -70,7 +66,7 @@ type Held = {
 /** Three panes, as the Queue page: the folders, the PRs in one, the selected PR with the review
  * box or its author's moves under it. Every repo of every workspace, as webhooks keep them. */
 export function You() {
-  const { folder = "needs", pr, answer } = useSearch({ from: "/$account/you" });
+  const { folder = "review", pr, answer } = useSearch({ from: "/$account/you" });
   const navigate = useNavigate({ from: "/$account/you" });
   const me = useQuery({ queryKey: ["session"], queryFn: fetchSession }).data?.user?.login ?? "";
   // Read from Mergepatrol's own database, not GitHub: cheap to read often.
@@ -291,17 +287,15 @@ export function You() {
     .filter(awake)
     // The queue's first, then those back for another look; each updated last first.
     .sort((a, b) => reasonRank[reasonOf(a, me).kind] - reasonRank[reasonOf(b, me).kind]);
-  const own = (data?.authored ?? []).filter(awake).map((p) => ({ p, step: stepOf(p, clickOf(p)) }));
-  const lists: Record<Folder, InboxPullView[]> = {
-    needs,
+  const stepFor = (p: InboxPullView) => stepOf(p, clickOf(p));
+  const opened = (data?.authored ?? [])
+    .filter(awake)
     // In its sections' order, so j and k walk them top to bottom.
-    turn: own
-      .filter((o) => o.step.folder === "turn")
-      .sort((a, b) => turnRank(a.step) - turnRank(b.step))
-      .map((o) => o.p),
-    queue: own.filter((o) => o.step.folder === "queue").map((o) => o.p),
-    others: own.filter((o) => o.step.folder === "others").map((o) => o.p),
-    drafts: own.filter((o) => o.step.folder === "drafts").map((o) => o.p),
+    .sort((a, b) => stateRank(stepFor(a).state) - stateRank(stepFor(b).state));
+  const yourMove = opened.filter((p) => needsYou(stepFor(p).state)).length;
+  const lists: Record<Folder, InboxPullView[]> = {
+    review: needs,
+    opened,
     merged: data?.merged ?? [],
     // The first back first.
     snoozed: [...(data?.review_requested ?? []), ...(data?.authored ?? [])]
@@ -364,17 +358,18 @@ export function You() {
           k: () => select(list[Math.max(i - 1, 0)]),
           a: () =>
             pull &&
-            folder === "needs" &&
+            folder === "review" &&
             hold(pull, {
               kind: "review",
               review: { verdict: "approve", body: drafts.get(keyOf(pull)) ?? "", queue: false },
             }),
-          r: () => pull && folder === "needs" && document.getElementById("review-body")?.focus(),
+          r: () => pull && folder === "review" && document.getElementById("review-body")?.focus(),
           u: () => newest && undo(newest),
           q: () =>
             pull &&
-            folder !== "needs" &&
-            stepOf(pull, clickOf(pull)).ready &&
+            folder === "opened" &&
+            canQueue(pull) &&
+            !clickOf(pull) &&
             queue.mutate({ p: pull, priority: false }),
           s: () => pull && folder !== "merged" && setSnoozing(true),
           ...Object.fromEntries(FOLDERS.map((f, n) => [String(n + 1), () => open(f)])),
@@ -399,36 +394,41 @@ export function You() {
       <nav
         className={`flex shrink-0 flex-col gap-0.5 border-line p-2 max-lg:flex-row max-lg:overflow-x-auto max-lg:border-b lg:overflow-y-auto lg:border-r ${picked ? "max-lg:hidden" : ""}`}
       >
-        {FOLDERS.map((f, n) => (
-          <div key={f} className="max-lg:shrink-0">
-            {n === 1 && (
-              <p className="mt-4 px-2 py-2 text-xs font-medium text-muted max-lg:hidden">
-                Your PRs · {own.length}
-              </p>
-            )}
-            {f === "snoozed" && <div className="mt-4 max-lg:hidden" />}
-            <button
-              type="button"
-              onClick={() => open(f)}
-              className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left max-lg:w-auto ${
-                folder === f ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
-              }`}
-            >
-              <span className={n === 0 ? "font-medium" : "text-fg-2"}>{folderNames[f]}</span>
-              {lists[f].length > 0 && (
-                <span
-                  className={`text-xs tabular-nums ${
-                    f === "needs" || f === "turn"
-                      ? "rounded-full bg-hot px-1.5 font-semibold text-white"
-                      : "text-faint"
-                  }`}
-                >
-                  {lists[f].length}
-                </span>
-              )}
-            </button>
-          </div>
-        ))}
+        {FOLDERS.map((f) => {
+          // What waits on the user: every review asked, and the PRs of theirs that need a move.
+          const hot = f === "review" ? lists.review.length : f === "opened" ? yourMove : 0;
+          return (
+            <div key={f} className="max-lg:shrink-0">
+              {f === "merged" && <div className="mt-4 max-lg:hidden" />}
+              <button
+                type="button"
+                onClick={() => open(f)}
+                title={
+                  f === "opened" && yourMove
+                    ? `${yourMove} of your ${opened.length} open PRs need you`
+                    : undefined
+                }
+                className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left max-lg:w-auto ${
+                  folder === f ? "bg-surface shadow-xs ring-1 ring-line" : "hover:bg-sunken"
+                }`}
+              >
+                <span className={hot ? "font-medium" : "text-fg-2"}>{folderNames[f]}</span>
+                {lists[f].length > 0 && (
+                  <span className="flex items-center gap-1.5 text-xs tabular-nums">
+                    {hot > 0 && (
+                      <span className="rounded-full bg-hot px-1.5 font-semibold text-white">
+                        {hot}
+                      </span>
+                    )}
+                    {hot !== lists[f].length && (
+                      <span className="text-faint">{lists[f].length}</span>
+                    )}
+                  </span>
+                )}
+              </button>
+            </div>
+          );
+        })}
         <dl className="mt-auto grid grid-cols-[auto_1fr] items-center gap-x-2 gap-y-1.5 px-2 py-3 text-xs text-muted max-lg:hidden">
           <dt>
             <Kbd>j</Kbd> <Kbd>k</Kbd>
@@ -455,7 +455,7 @@ export function You() {
           </dt>
           <dd>snooze</dd>
           <dt>
-            <Kbd>1</Kbd>–<Kbd>7</Kbd>
+            <Kbd>1</Kbd>–<Kbd>4</Kbd>
           </dt>
           <dd>folders</dd>
         </dl>
@@ -467,15 +467,13 @@ export function You() {
         <div className="sticky top-0 z-10 border-b border-line bg-surface px-4 py-3">
           <p className="font-medium">{folderNames[folder]}</p>
           <p className="text-xs text-muted">
-            {folder === "needs"
-              ? "PRs that ask for your review, or your team's, in every repo. Those the queue holds come first."
+            {folder === "review"
+              ? "PRs that ask for your review, or your team's, in every repo: unblock these first. Those the queue holds come first."
               : folder === "merged"
                 ? "Yours, merged in the last week."
                 : folder === "snoozed"
                   ? "Out of the way until their time is up, or until someone else comments or reviews."
-                  : folder === "turn"
-                    ? "Your open PRs that wait on you, by what they need. Those the queue holds come first."
-                    : "Your open PRs, in every repo."}
+                  : "All your open PRs, in every repo, by what each needs. What needs you comes first."}
           </p>
         </div>
         {error && (
@@ -494,25 +492,29 @@ export function You() {
         {data && list.length === 0 && (
           <div className="px-6 py-16 text-center">
             <p className="font-medium">
-              {folder === "needs" ? "Nothing waits on your review" : "Nothing here"}
+              {folder === "review"
+                ? "Nothing waits on your review"
+                : folder === "opened"
+                  ? "No open PRs of yours"
+                  : "Nothing here"}
             </p>
-            {folder !== "turn" && lists.turn.length > 0 && (
+            {folder !== "opened" && yourMove > 0 && (
               <button
                 type="button"
-                onClick={() => open("turn")}
+                onClick={() => open("opened")}
                 className="mt-1 text-muted underline underline-offset-2 hover:text-fg"
               >
-                {lists.turn.length} of your PRs need a move
+                {yourMove} of your PRs need you
               </button>
             )}
           </div>
         )}
         <Groups
           sections={
-            folder === "needs"
+            folder === "review"
               ? reasonSections(list, me)
-              : folder === "turn"
-                ? turnSectionsOf(list, (p) => stepOf(p, clickOf(p)))
+              : folder === "opened"
+                ? stateSectionsOf(list, stepFor)
                 : undefined
           }
           list={list}
@@ -523,7 +525,7 @@ export function You() {
               pull={p}
               selected={p === pull}
               line={
-                folder === "needs" ? (
+                folder === "review" ? (
                   <Reason pull={p} me={me} />
                 ) : folder === "merged" ? (
                   <span className="text-ok">Merged {p.merged_at && timeAgo(p.merged_at)}</span>
@@ -532,7 +534,20 @@ export function You() {
                     Snoozed until {p.snoozed_until && untilText(Date.parse(p.snoozed_until))}
                   </span>
                 ) : (
-                  <StepLine step={stepOf(p, clickOf(p))} />
+                  <StepLine step={stepFor(p)} />
+                )
+              }
+              actions={
+                folder === "opened" && (
+                  <RowActions
+                    pull={p}
+                    step={stepFor(p)}
+                    busy={!!clickOf(p)}
+                    publishing={publish.isPending && publish.variables === p}
+                    onQueue={() => queue.mutate({ p, priority: false })}
+                    onDequeue={() => dequeue.mutate(p)}
+                    onPublish={() => publish.mutate(p)}
+                  />
                 )
               }
               onClick={() => select(p)}
@@ -584,7 +599,7 @@ export function You() {
                   onClose={() => hold(pull, { kind: "close" })}
                 />
               );
-              if (folder === "needs")
+              if (folder === "review")
                 return (
                   <ReviewBox
                     pull={pull}
@@ -621,7 +636,7 @@ export function You() {
               return (
                 <OwnerBar
                   pull={pull}
-                  step={stepOf(pull, clickOf(pull))}
+                  step={stepFor(pull)}
                   busy={!!clickOf(pull)}
                   onQueue={(priority) => queue.mutate({ p: pull, priority })}
                   onDequeue={() => dequeue.mutate(pull)}
@@ -893,98 +908,122 @@ function Groups({
 
 // ── What the author's next move is ───────────────────────────────────────────
 
-/** Why a PR of yours is your turn: its section of Your turn. */
-type Turn = "held" | "ready" | "changes" | "failing" | "off";
+/** Where a PR of yours stands: its section of Opened. */
+type State =
+  | "held"
+  | "changes"
+  | "failing"
+  | "comments"
+  | "ready"
+  | "off"
+  | "queued"
+  | "waiting"
+  | "draft";
 
-type Step = { label: string; detail?: string; ready?: boolean } & (
-  | { folder: Exclude<Own, "turn"> }
-  | { folder: "turn"; turn: Turn }
-);
+type Step = { state: State; label: string; detail?: string };
 
-/** Your turn's sections, in order: what holds up the queue, what you can queue, what needs work,
- * then what Mergepatrol can't queue. */
-const turnSections: Record<Turn, string> = {
+/** Opened's sections, in order: what needs you, from what holds up the queue to what you can
+ * merge; then what is on its way, and what waits on others or is not ready. */
+const stateSections: Record<State, string> = {
   held: "Held in the queue: needs your decision",
-  ready: "Ready to queue",
   changes: "Changes requested",
   failing: "Checks failing",
-  off: "Not queued: Mergepatrol is off in the repo",
+  comments: "Open review comments",
+  ready: "Ready to queue",
+  off: "Ready to merge: Mergepatrol is off in the repo",
+  queued: "In the queue",
+  waiting: "Waiting on others",
+  draft: "Drafts",
 };
-const turnOrder = Object.keys(turnSections) as Turn[];
-const turnRank = (s: Step) => (s.folder === "turn" ? turnOrder.indexOf(s.turn) : turnOrder.length);
+const stateOrder = Object.keys(stateSections) as State[];
+const stateRank = (s: State) => stateOrder.indexOf(s);
+/** The states whose next move is the author's. */
+const needsYou = (s: State) => stateRank(s) <= stateRank("off");
 
-const turnSectionsOf = (list: InboxPullView[], step: (p: InboxPullView) => Step): Section[] =>
-  turnOrder.map((turn) => ({
-    key: turn,
-    label: turnSections[turn],
-    ps: list.filter((p) => {
-      const s = step(p);
-      return s.folder === "turn" && s.turn === turn;
-    }),
+const stateSectionsOf = (list: InboxPullView[], step: (p: InboxPullView) => Step): Section[] =>
+  stateOrder.map((state) => ({
+    key: state,
+    label: stateSections[state],
+    ps: list.filter((p) => step(p).state === state),
   }));
+
+/** Whether the author can queue it now. */
+const canQueue = (p: InboxPullView) => !p.queue && p.queues && !p.draft;
 
 const ordinal = (n: number) =>
   `${n}${["th", "st", "nd", "rd"][n % 100 >= 11 && n % 100 <= 13 ? 0 : n % 10 > 3 ? 0 : n % 10]}`;
 
-/** Where the author's PR stands, and so its folder. `click`: a queue click not caught up with. */
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** Where the author's PR stands, and so its section. `click`: a queue click not caught up with.
+ *
+ * In a repo Mergepatrol runs on, a PR whose checks still run, or that waits on a review, is ready
+ * to queue: the queue tests it and waits for its review itself, so queueing it is the author's
+ * only move. Only where Mergepatrol is off does it wait on others. */
 function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
-  if (click === "queueing") return { folder: "queue", label: "Queueing…" };
-  if (click === "dequeueing") return { folder: "queue", label: "Leaving the queue…" };
+  if (click === "queueing") return { state: "queued", label: "Queueing…" };
+  if (click === "dequeueing") return { state: "queued", label: "Leaving the queue…" };
   const q = p.queue;
   if (q?.state === "active")
-    return { folder: "queue", label: "Testing", detail: "merges if its checks pass" };
+    return { state: "queued", label: "Testing", detail: "merges if its checks pass" };
   if (q?.state === "waiting")
     return {
-      folder: "queue",
+      state: "queued",
       label: `${ordinal(q.place)} of ${q.of} in line`,
       detail: q.priority ? "priority" : undefined,
     };
   if (q?.state === "held")
-    return {
-      folder: "turn",
-      turn: "held",
-      label: "Held in the queue",
-      detail: q.detail ?? undefined,
-    };
-  if (p.draft) return { folder: "drafts", label: "Draft" };
+    return { state: "held", label: "Held in the queue", detail: q.detail ?? undefined };
+  if (p.draft) return { state: "draft", label: "Draft" };
   if (p.review_decision === "changes_requested") {
     const who = p.reviews.filter((r) => !r.approved).map((r) => r.reviewer.login);
     return {
-      folder: "turn",
-      turn: "changes",
+      state: "changes",
       label: "Changes requested",
       detail: who.length ? `by ${who.join(", ")}` : undefined,
     };
   }
-  if (p.checks === "failed") return { folder: "turn", turn: "failing", label: "Checks failing" };
-  if (p.review_decision === "review_required")
+  if (p.checks === "failed") return { state: "failing", label: "Checks failing" };
+  if (p.unresolved_threads > 0)
     return {
-      folder: "others",
-      label: "Waiting on a review",
-      detail: p.requested.length ? `from ${p.requested.map((r) => r.login).join(", ")}` : undefined,
+      state: "comments",
+      label: plural(p.unresolved_threads, "open review comment"),
+      detail: "answer or resolve them",
     };
-  if (p.checks === "pending") return { folder: "others", label: "Checks running" };
-  return p.queues
-    ? { folder: "turn", turn: "ready", label: "Ready to queue", ready: true }
-    : {
-        folder: "turn",
-        turn: "off",
-        label: "Ready to merge",
-        detail: "Mergepatrol is not on in this repo",
+  const reviewers = p.requested.map((r) => r.login).join(", ");
+  const review = p.review_decision === "review_required";
+  const running = p.checks === "pending";
+  if (!p.queues) {
+    if (review)
+      return {
+        state: "waiting",
+        label: "Waiting on a review",
+        detail: reviewers ? `from ${reviewers}` : undefined,
       };
+    if (running) return { state: "waiting", label: "Checks running" };
+    return { state: "off", label: "Ready to merge", detail: "Mergepatrol is not on in this repo" };
+  }
+  const waits = [
+    running && "its checks",
+    review && (reviewers ? `a review from ${reviewers}` : "a required review"),
+  ].filter(Boolean);
+  return {
+    state: "ready",
+    label: "Ready to queue",
+    detail: waits.length ? `the queue waits for ${waits.join(" and ")}` : undefined,
+  };
 }
+
+const stateStyle: Partial<Record<State, string>> = {
+  queued: "text-blue-600 dark:text-blue-400",
+  ready: "text-ok",
+  waiting: "text-muted",
+  draft: "text-muted",
+};
 
 function StepLine({ step }: { step: Step }) {
   return (
-    <span
-      className={`truncate ${
-        step.folder === "turn"
-          ? "text-hot"
-          : step.folder === "queue"
-            ? "text-blue-600 dark:text-blue-400"
-            : "text-muted"
-      }`}
-    >
+    <span className={`truncate ${stateStyle[step.state] ?? "text-hot"}`}>
       {step.label}
       {step.detail && <span className="text-muted"> · {step.detail}</span>}
     </span>
@@ -993,25 +1032,32 @@ function StepLine({ step }: { step: Step }) {
 
 // ── Rows and bars ────────────────────────────────────────────────────────────
 
+/** A PR in a list. A click selects it; `actions`, its moves done in place, sit above that. */
 function Row({
   pull: p,
   selected,
   line,
+  actions,
   onClick,
 }: {
   pull: InboxPullView;
   selected: boolean;
   line: ReactNode;
+  actions?: ReactNode;
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex w-full flex-col gap-1 border-b border-line-soft px-4 py-3 text-left ${
+    <div
+      className={`relative flex w-full flex-col gap-1 border-b border-line-soft px-4 py-3 text-left ${
         selected ? "lg:bg-page lg:shadow-[inset_2px_0_0_0_var(--color-fg)]" : "hover:bg-page"
       }`}
     >
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={`${p.repo}#${p.number}: ${p.title}`}
+        className="absolute inset-0"
+      />
       <span className="flex items-center justify-between gap-3 text-xs text-muted">
         <span className="flex min-w-0 items-center gap-1.5">
           <RepoIcon repo={p.repo} size="size-4" />
@@ -1041,8 +1087,73 @@ function Row({
             <span className="text-ok">+{p.additions}</span>{" "}
             <span className="text-bad">−{p.deletions}</span>
           </span>
+          {actions && <span className="relative flex items-center gap-1">{actions}</span>}
         </span>
       </span>
+    </div>
+  );
+}
+
+const small =
+  "inline-flex h-6 shrink-0 items-center rounded px-2 text-xs font-medium transition-colors disabled:opacity-40";
+
+/** A PR of yours' main move, in its row: queue it, take it out, or publish a draft. */
+function RowActions({
+  pull: p,
+  step,
+  busy,
+  publishing,
+  onQueue,
+  onDequeue,
+  onPublish,
+}: {
+  pull: InboxPullView;
+  step: Step;
+  /** A queue click not caught up with. */
+  busy: boolean;
+  publishing: boolean;
+  onQueue: () => void;
+  onDequeue: () => void;
+  onPublish: () => void;
+}) {
+  if (p.draft)
+    return (
+      <button
+        type="button"
+        disabled={publishing}
+        onClick={onPublish}
+        title="Mark it ready for review on GitHub, as you"
+        className={`${small} border border-line-strong bg-surface text-fg-2 hover:bg-sunken hover:text-fg`}
+      >
+        Publish
+      </button>
+    );
+  if (p.queue || step.state === "queued")
+    return (
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onDequeue}
+        title="Take it out of the queue"
+        className={`${small} text-muted hover:bg-sunken hover:text-fg`}
+      >
+        Dequeue
+      </button>
+    );
+  if (!canQueue(p)) return null;
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onQueue}
+      title="Queue it to merge (q)"
+      className={`${small} ${
+        step.state === "ready"
+          ? "bg-fg text-surface hover:bg-fg-2"
+          : "border border-line-strong bg-surface text-fg-2 hover:bg-sunken hover:text-fg"
+      }`}
+    >
+      Queue
     </button>
   );
 }
@@ -1289,7 +1400,7 @@ function OwnerBar({
         {step.detail && <span className="block truncate text-xs text-muted">{step.detail}</span>}
       </span>
       {later}
-      {step.folder === "others" && p.requested.length > 0 && (
+      {!p.queue && p.requested.length > 0 && (
         <button
           type="button"
           disabled={!onNudge}
@@ -1353,7 +1464,7 @@ function OwnerBar({
               type="button"
               disabled={busy}
               onClick={() => onQueue(false)}
-              className={step.ready ? solid : plain}
+              className={step.state === "ready" ? solid : plain}
             >
               Queue
             </button>

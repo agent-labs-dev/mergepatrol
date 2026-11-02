@@ -1660,6 +1660,7 @@ mod tests {
             "changedFiles": 1, "author": { "__typename": "User", "login": author, "avatarUrl": "a" },
             "latestOpinionatedReviews": { "nodes": [] }, "reviewRequests": { "nodes": [] },
             "commits": { "nodes": [] }, "repository": { "nameWithOwner": "o/r" },
+            "reviewThreads": { "nodes": [{ "isResolved": false }, { "isResolved": true }] },
             "teamRequests": { "nodes": [{ "requestedReviewer": { "slug": "core" } }] },
             "activity": { "nodes": [{ "createdAt": "2026-10-02T00:00:00Z", "author": { "login": "ann" } }] },
         })
@@ -1731,7 +1732,17 @@ mod tests {
             (asked["workspace"].as_u64(), asked["unread"].as_u64()),
             (Some(1), Some(1))
         );
+        assert_eq!(asked["unresolved_threads"], 1);
         assert_eq!(view["authored"], serde_json::json!([]));
+
+        // A thread resolved marks its PR.
+        let resolved = r#"{"action":"resolved","installation":{"id":1},"repository":{"full_name":"o/r"},"pull_request":{"number":8}}"#;
+        deliver_event(&router, "pull_request_review_thread", resolved).await;
+        let stale = store
+            .inbox_stale(std::time::Duration::ZERO, 10)
+            .await
+            .unwrap();
+        assert_eq!(stale.iter().map(|s| s.number).collect::<Vec<_>>(), [8]);
 
         // Opened here: read.
         let seen = Request::put("/api/w/1/repos/o/r/pulls/5/seen")

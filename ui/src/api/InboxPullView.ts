@@ -35,7 +35,11 @@ unread: number,
  * Until when the user snoozed it, RFC 3339. A snooze is over once someone else says
  * something on the PR.
  */
-snoozed_until: string | null, title: string, url: string, 
+snoozed_until: string | null, 
+/**
+ * Its review threads no one resolved yet, of the first 100.
+ */
+unresolved_threads: number, title: string, url: string, 
 /**
  * `None` for a deleted account.
  */
