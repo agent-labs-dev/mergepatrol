@@ -11,11 +11,10 @@ metadata:
   namespace: mergepatrol
 spec:
   replicas: 1
-  # The load balancer sends to a new pod only once its own health checks pass, minutes after
-  # Kubernetes counts the pod ready. Until then the old pod keeps serving: without this, a
-  # deploy left the load balancer no backend for over two minutes ("unconditional drop
-  # overload").
-  minReadySeconds: 180
+  # The pod's load-balancer readiness gate holds it unready until the load balancer's own health
+  # check passes, and the zone pin below keeps that gate working. The few seconds after are for
+  # the load balancer to start sending to it before the old pod stops.
+  minReadySeconds: 10
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -30,6 +29,12 @@ spec:
         app: mergepatrol
     spec:
       serviceAccountName: mergepatrol
+      # One zone, so a new pod joins the network endpoint group the old one is in. In a zone whose
+      # group is empty, GKE skips the readiness gate (LoadBalancerNegWithoutHealthCheck) and counts
+      # the pod ready before the load balancer sends to it, which left a deploy no backend for
+      # over two minutes. If the zone goes down, change it here and deploy.
+      nodeSelector:
+        topology.kubernetes.io/zone: us-west1-b
       # The Service `mergepatrol` would set MERGEPATROL_SERVICE_HOST, MERGEPATROL_PORT and others,
       # in the orchestrator's own namespace of variables.
       enableServiceLinks: false

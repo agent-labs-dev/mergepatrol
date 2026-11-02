@@ -26,13 +26,16 @@ COPY --from=plan /src/recipe.json recipe.json
 RUN cargo chef cook --release --locked -p mergepatrol --recipe-path recipe.json
 COPY . .
 COPY --from=ui /src/ui/dist ui/dist
-RUN cargo build --release --locked -p mergepatrol
+# The binary moves out and target goes in the same step: the registry cache keeps every layer,
+# and this one changes every deploy, so only the binary is worth exporting.
+RUN cargo build --release --locked -p mergepatrol \
+    && mv target/release/mergepatrol /usr/local/bin/mergepatrol && rm -rf target
 
 FROM debian:bookworm-slim AS orchestrator
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=build /src/target/release/mergepatrol /usr/local/bin/mergepatrol
+COPY --from=build /usr/local/bin/mergepatrol /usr/local/bin/mergepatrol
 ENV MERGEPATROL_DATA_DIR=/data MERGEPATROL_BIND=0.0.0.0:8080
 VOLUME /data
 EXPOSE 8080
@@ -54,7 +57,7 @@ ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/home/node/.cargo \
 # Deploys pass the versions npm calls latest, so a cached layer never holds an old CLI.
 ARG CLAUDE_CODE_VERSION=latest CODEX_VERSION=latest
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} @openai/codex@${CODEX_VERSION}
-COPY --from=build /src/target/release/mergepatrol /usr/local/bin/mergepatrol
+COPY --from=build /usr/local/bin/mergepatrol /usr/local/bin/mergepatrol
 RUN mkdir /out && chown node /out
 USER node
 WORKDIR /home/node
