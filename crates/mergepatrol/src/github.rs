@@ -28,6 +28,9 @@ pub trait GitHub: Send + Sync {
     async fn changes_under(&self, repo: &RepoName, number: PrNumber, dir: &str) -> Result<bool>;
     async fn branch_rules(&self, repo: &RepoName, branch: &str) -> Result<BranchRules>;
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks>;
+    /// Whether a workflow run on `sha` has yet to finish: queued, waiting for an approval, or
+    /// running.
+    async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool>;
     /// What GitHub shows of why the checks `names` failed on `sha`.
     async fn check_failures(
         &self,
@@ -110,6 +113,9 @@ impl GitHub for Installation {
     }
     async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         Installation::checks(self, repo, sha).await
+    }
+    async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool> {
+        Installation::workflows_running(self, repo, sha).await
     }
     async fn check_failures(
         &self,

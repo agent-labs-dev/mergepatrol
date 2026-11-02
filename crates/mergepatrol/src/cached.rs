@@ -340,6 +340,10 @@ impl GitHub for Cached<'_> {
             .value(repo, key, Some(READ_ALL_EVERY), SETTLE, read)
             .await
     }
+    /// Read only while a required check goes unreported, so not kept.
+    async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool> {
+        GitHub::workflows_running(self.gh, repo, sha).await
+    }
     async fn check_failures(
         &self,
         repo: &RepoName,
