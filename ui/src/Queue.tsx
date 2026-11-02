@@ -262,7 +262,16 @@ export function Queue({ workspace }: { workspace: number }) {
                   workspace={workspace}
                   lane={lane}
                   entry={{ ...entry, state: entry.state }}
-                  onReview={() => setAnswer(true)}
+                  onReview={() =>
+                    navigate({
+                      search: (s) => ({
+                        ...s,
+                        lane: laneKey(lane),
+                        pr: entry.number,
+                        answer: true,
+                      }),
+                    })
+                  }
                 />
               )
             }
