@@ -101,19 +101,22 @@ export function ErrorText({ error }: { error: Error | null }) {
   return error ? <p className="mt-2 text-sm text-bad">{error.message}</p> : null;
 }
 
-/** A single centred column: the layout of every page but the queue. */
+/** A single centred column: the layout of every page but the queue. `wide` fits a list beside
+ * its detail. */
 export function Narrow({
   title,
   sub,
+  wide,
   children,
 }: {
   title: string;
   sub: ReactNode;
+  wide?: boolean;
   children: ReactNode;
 }) {
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto max-w-2xl px-4 py-6 sm:px-6 sm:py-10">
+      <div className={`mx-auto px-4 py-6 sm:px-6 sm:py-10 ${wide ? "max-w-5xl" : "max-w-2xl"}`}>
         <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         <p className="mt-1 mb-6 text-muted">{sub}</p>
         {children}
