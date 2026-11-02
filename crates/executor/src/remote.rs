@@ -317,6 +317,7 @@ mod tests {
                 timeout_secs: 1,
                 max_turns: 1,
                 api: None,
+                settings_url: None,
             },
             task: Default::default(),
         }

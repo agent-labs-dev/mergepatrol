@@ -72,6 +72,15 @@ impl Provider {
         }
     }
 
+    /// What the agent runs the provider's models with, which a workspace adds in its settings.
+    pub fn credential(self) -> &'static str {
+        match self {
+            Provider::Anthropic => "Anthropic API key",
+            Provider::OpenAi => "OpenAI API key or ChatGPT login",
+            Provider::OpenRouter => "OpenRouter API key",
+        }
+    }
+
     /// The models the settings offer, the one to start from first. The file may name any other.
     pub fn models(self) -> &'static [Model] {
         const ANTHROPIC: &[Model] = &[

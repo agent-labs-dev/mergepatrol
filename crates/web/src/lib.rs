@@ -1886,17 +1886,29 @@ mod tests {
     /// said that token, and `ghp_y`, read `o/r` (installation 1) and `o/off` (no installation),
     /// and that `ghp_y`'s user administers `o/r`. `ghp_z` reads `o/r` too, without admin.
     async fn v1_router(pool: PgPool) -> (Router, Arc<dyn Store>) {
-        let (store, vault) = store_and_vault(pool).await;
+        v1_router_billed(pool, false).await
+    }
+
+    /// `v1_router`, with billing on when `billed`.
+    async fn v1_router_billed(pool: PgPool, billed: bool) -> (Router, Arc<dyn Store>) {
+        let pg = Arc::new(PgStore::migrate(pool).await.unwrap());
+        let store: Arc<dyn Store> = pg.clone();
+        let vault = Vault::new(store.clone(), KEY).unwrap();
         let live = UserToken {
             expires_at: Some(now() + 3600),
             ..expired_token()
         };
         old_session(&*store, &vault, now() - 60, Some(live)).await;
-        let state = state(
-            store.clone(),
-            Arc::new(vault),
-            web_config(Some(app(None)), Arc::default()),
-        );
+        let mut config = web_config(Some(app(None)), Arc::default());
+        if billed {
+            let stripe = mergepatrol_billing::StripeConfig {
+                secret_key: "sk_test".into(),
+                webhook_secret: "whsec".into(),
+                price: "price".into(),
+            };
+            config.billing = Some(Arc::new(Billing::new(pg, stripe, "http://localhost:8080")));
+        }
+        let state = state(store.clone(), Arc::new(vault), config);
         for token in ["ghu_x", "ghp_y"] {
             let r = |name: &str| RepoName::parse(name).unwrap();
             state.seen.assume(token, &r("o/r"), Some(1));
@@ -1985,6 +1997,8 @@ mod tests {
                     "has_config": true,
                     "override": null,
                     "config_error": null,
+                    "hold": null,
+                    "missing_key": null,
                 },
                 "queue": {
                     "trunk": "main",
@@ -2078,6 +2092,102 @@ mod tests {
             (&turned_off["state"], &turned_off["override"]),
             (&"off".into(), &"off".into())
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn v1_says_what_holds_or_stops_a_pr_before_it_is_queued(pool: PgPool) {
+        use mergepatrol_core::{Provider, SpendTask};
+        use mergepatrol_store::{AgentTask, CHATGPT_LOGIN, api_key_secret};
+        let (router, store) = v1_router_billed(pool, true).await;
+        let vault = Vault::new(store.clone(), KEY).unwrap();
+        let repo = RepoName::parse("o/r").unwrap();
+        let status = || async {
+            let res = v1_get(&router, "/api/v1/repos/o/r/pulls/1", &[BEARER]).await;
+            assert_eq!(res.status(), StatusCode::OK);
+            json_of(res).await["mergepatrol"].clone()
+        };
+        store.set_has_config(1, &repo, true).await.unwrap();
+        // Before the queue first read the repo, nothing is known to hold it.
+        let unread = status().await;
+        assert_eq!(
+            (&unread["hold"], &unread["missing_key"]),
+            (&null(), &null())
+        );
+
+        let task = |task, provider| AgentTask { task, provider };
+        let agent = [
+            task(SpendTask::Rebase, Provider::Anthropic),
+            task(SpendTask::Fix, Provider::Anthropic),
+            task(SpendTask::Review, Provider::OpenAi),
+        ];
+        store.set_repo_read(1, &repo, true, &agent).await.unwrap();
+        let private = status().await;
+        assert_eq!(private["state"], "on");
+        assert_eq!(
+            private["hold"],
+            serde_json::json!({
+                "reason": "no_subscription",
+                "layer": null,
+                "message": "private repos need a MergeLoop subscription",
+            })
+        );
+        assert_eq!(
+            private["missing_key"],
+            serde_json::json!({
+                "tasks": [
+                    { "task": "rebase", "provider": "anthropic" },
+                    { "task": "fix", "provider": "anthropic" },
+                    { "task": "review", "provider": "openai" },
+                ],
+                "message": "the workspace has no Anthropic API key for the agent to resolve a rebase's conflicts or fix failed checks, and no OpenAI API key or ChatGPT login for the agent to review PRs: add one in the dashboard's settings, http://localhost:8080/o/settings",
+                "settings_url": "http://localhost:8080/o/settings",
+            })
+        );
+
+        // A key for Anthropic, and a ChatGPT plan for OpenAI's models.
+        let scope = Scope::Installation(1);
+        let anthropic = api_key_secret(Provider::Anthropic);
+        vault.set(scope, anthropic, "sk-ant").await.unwrap();
+        let review_only = status().await["missing_key"]["tasks"].clone();
+        assert_eq!(
+            review_only,
+            serde_json::json!([{ "task": "review", "provider": "openai" }])
+        );
+        vault.set(scope, CHATGPT_LOGIN, "{}").await.unwrap();
+        assert_eq!(status().await["missing_key"], null());
+
+        // A public repo, under the fair-use limit, needs no subscription.
+        store.set_repo_read(1, &repo, false, &agent).await.unwrap();
+        assert_eq!(status().await["hold"], null());
+        // Nor does anything hold a PR where the queue is off.
+        store.set_repo_read(1, &repo, true, &agent).await.unwrap();
+        store.set_repo_enabled(1, &repo, Some(false)).await.unwrap();
+        assert_eq!(status().await["hold"], null());
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn v1_holds_nothing_for_a_subscription_without_billing(pool: PgPool) {
+        use mergepatrol_store::AgentTask;
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_has_config(1, &repo, true).await.unwrap();
+        let rebase = AgentTask {
+            task: mergepatrol_core::SpendTask::Rebase,
+            provider: Default::default(),
+        };
+        store
+            .set_repo_read(1, &repo, true, &[rebase])
+            .await
+            .unwrap();
+        let res = v1_get(&router, "/api/v1/repos/o/r/pulls/1", &[BEARER]).await;
+        let status = json_of(res).await["mergepatrol"].clone();
+        // Self-hosted, a private repo queues; the workspace still needs its own key.
+        assert_eq!(status["hold"], null());
+        assert_eq!(status["missing_key"]["tasks"][0]["task"], "rebase");
+    }
+
+    fn null() -> serde_json::Value {
+        serde_json::Value::Null
     }
 
     #[sqlx::test(migrations = false)]

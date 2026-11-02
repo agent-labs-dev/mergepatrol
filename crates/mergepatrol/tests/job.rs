@@ -11,6 +11,9 @@ use mergepatrol_executor::protocol::{
 };
 use mergepatrol_executor::{Executor, LocalExecutor};
 
+/// Where the spec says the workspace adds a key.
+const SETTINGS: &str = "https://mergeloop.test/acme/settings";
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
@@ -65,6 +68,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
             timeout_secs: 60,
             max_turns: 5,
             api: None,
+            settings_url: Some(SETTINGS.into()),
         },
         task: Default::default(),
     }
@@ -172,7 +176,9 @@ async fn conflict_without_a_key_fails_with_the_reason() {
     let JobOutcome::Failed { reason } = result.outcome else {
         panic!("{result:?}")
     };
+    // Whose key it needs, and where to add it.
     assert!(reason.contains("no Anthropic API key"), "{reason}");
+    assert!(reason.contains(SETTINGS), "{reason}");
     assert_eq!(result.events[0].kind, "conflict");
     assert!(!out.join(BUNDLE_FILE).exists());
 }

@@ -10,6 +10,7 @@ import {
   fetchSession,
   fetchYou,
   nudgePull,
+  queuedWarning,
   queuePull,
   readyPull,
   reviewPull,
@@ -207,10 +208,11 @@ export function You() {
     mutationFn: ({ p, priority }: { p: InboxPullView; priority: boolean }) =>
       queuePull(p.workspace, p.repo, p.number, priority),
     onMutate: ({ p }) => click(p, "queueing"),
-    onSuccess: (_, { p, priority }) => {
+    onSuccess: (queued, { p, priority }) => {
       toasts.add({
         type: "success",
         title: `${priority ? "Queued at the front:" : "Queued"} ${shortRef(p)}`,
+        description: queuedWarning(queued),
       });
       client.invalidateQueries({ queryKey: ["you"] });
     },

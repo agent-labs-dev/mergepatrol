@@ -281,7 +281,7 @@ A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell
 | `get_pull` | A PR's description, labels, checks, and timeline | |
 | `get_pull_diff` | A PR's changes, or one commit's | |
 | `pull_status` | Where a PR is, as `/api/v1` below says, and its latest events | |
-| `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front | |
+| `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front. Says when it goes on hold whatever the PR, or the agent has no model key | |
 | `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
 | `close_pull` | Closes a PR | |
 | `ready_pull` | Publishes a draft PR: marks it ready for review | |
@@ -342,7 +342,9 @@ The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the 
     "installed": true,
     "has_config": true,
     "override": null,
-    "config_error": null
+    "config_error": null,
+    "hold": null,
+    "missing_key": null
   },
   "queue": {
     "trunk": "main",
@@ -367,6 +369,8 @@ The second form reads up to 100 PRs of one repo, as `{ "pulls": [...] }` in the 
 | `url` | The PR in the dashboard. It opens the PR's lane while queued, its history once merged or ejected, the repo's settings while MergeLoop is off there, and the repo's open PRs otherwise |
 | `mergepatrol.state` | `on`, `off` (no App on the repo, no config file, or turned off), or `paused` (the config file does not parse: `config_error` says why) |
 | `mergepatrol.override` | `on` or `off` when turned so in the dashboard, whatever the config file says. `null` follows the file |
+| `mergepatrol.hold` | Why any PR queued now goes on hold, before it is queued: `{ reason, layer, message }` as in `queue.hold`, with `reason` `no_subscription` (a private repo on the hosted MergeLoop, without a subscription) or `fair_use_limit`. `null` when nothing about the repo holds it |
+| `mergepatrol.missing_key` | The agent's tasks on this repo that the workspace has no model key for: `{ tasks, message, settings_url }`, each task `{ task, provider }` with `task` `rebase` (resolving a rebase's conflicts), `fix` (fixing failed checks) or `review`. Without the key, a conflict or a failed check ejects the PR. `settings_url` is where to add the key. `null` when the workspace has a key for each task |
 | `queue` | `null` unless queued. `state` is `waiting`, `running` or `held`. `position` counts from 1 in the order the queue takes PRs. `stack` is `{ number, layers }` for a stack. `batch_pr` is the draft PR testing it, while it runs in a batch |
 | `queue.hold.reason` | `draft`, `review_required`, `changes_requested`, `workflow_approval` (a fork PR's runs wait for approval), `fork_edits_off` (a fork PR behind its trunk that does not allow edits by maintainers), `no_queue` (it targets a branch without a queue), `no_subscription`, `fair_use_limit`, `reviewing` (the agent's automatic review runs), `review_asks` (that review waits for a human's answers) `review_changes` (it sent findings back to the author, or a human answering it asked for changes, and it waits for the author) or `unresolved_threads` (review threads on it are unresolved, and the gate waits for them all). `layer` is the stack's PR that holds it |
 | `merged`, `ejected` | How it last left the queue: `{ at, sha }` or `{ at, reason }`. Both `null` while it is queued, and when it left otherwise |

@@ -222,11 +222,16 @@ async fn rebase(
     while let RebaseStep::Conflict { commit, files } = step {
         event(events, "conflict", files.join(", "));
         if spec.resolver.api.is_none() {
-            bail!(
-                "it conflicts in {}, and the job has no {} API key for an agent to resolve that",
-                files.join(", "),
-                spec.resolver.provider.name()
-            );
+            let files = files.join(", ");
+            let credential = spec.resolver.provider.credential();
+            match &spec.resolver.settings_url {
+                Some(url) => bail!(
+                    "it conflicts in {files}, and the workspace has no {credential} for an agent to resolve that: add one in the dashboard's settings, {url}"
+                ),
+                None => bail!(
+                    "it conflicts in {files}, and the job has no {credential} for an agent to resolve that"
+                ),
+            }
         }
         let commit_message = git.commit_message(dir, &commit).await?;
         let transcript = out

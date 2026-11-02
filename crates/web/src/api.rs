@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::auth::Caller;
+use crate::v1::{RepoStateView, RepoStatusView};
 use crate::{ApiError, AppState, Wake};
 
 #[derive(Serialize, TS)]
@@ -1567,14 +1568,51 @@ pub(crate) async fn queue_pull(
     caller: Caller,
     Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
     Json(body): Json<QueuePull>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Json<QueuedView>, ApiError> {
     let repo = repo_name(owner, name)?;
     let id = caller.repo(&app, id, &repo).await?;
     let token = caller.github_token(&app)?;
     let gh = installation(&app, id).await?;
     queue(&app, &gh, &token, &repo, number, body.priority).await?;
     tracing::info!(installation = id, %repo, number, priority = body.priority, "queued from the dashboard");
-    Ok(StatusCode::NO_CONTENT)
+    let state = app.store.repo_state(id, &repo).await?;
+    let status = RepoStatusView::read(&app, &repo, Some(id), state.as_ref()).await?;
+    Ok(Json(QueuedView::new(status)))
+}
+
+/// A PR just queued: what the repo's status says will become of it.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct QueuedView {
+    /// "Queued.", or that it goes on hold, or what the agent cannot do for it, and why.
+    pub message: String,
+    /// As `GET /api/v1` says it.
+    pub mergepatrol: RepoStatusView,
+}
+
+impl QueuedView {
+    fn new(status: RepoStatusView) -> Self {
+        let mut message = match (status.state, &status.hold) {
+            (RepoStateView::Off, _) => {
+                "Labeled, but MergeLoop is off on this repo: nothing merges it.".to_owned()
+            }
+            (RepoStateView::Paused, _) => format!(
+                "Queued, but the queue is paused: {}.",
+                status.config_error.as_deref().unwrap_or_default()
+            ),
+            (RepoStateView::On, Some(hold)) => {
+                format!("Queued, but it goes on hold: {}.", hold.message)
+            }
+            (RepoStateView::On, None) => "Queued.".to_owned(),
+        };
+        if let Some(missing) = &status.missing_key {
+            message.push_str(&format!(" Also, {}.", missing.message));
+        }
+        QueuedView {
+            message,
+            mergepatrol: status,
+        }
+    }
 }
 
 /// Takes the PR out of the queue, and its stack if it is in one, as the user.
@@ -2626,7 +2664,33 @@ pub(crate) async fn delete_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mergepatrol_core::PrSummary;
+    use mergepatrol_core::{Hold, PrSummary};
+
+    #[test]
+    fn queueing_says_what_will_hold_or_stop_the_pr() {
+        let status = |hold: Option<Hold>, missing: Option<&str>| RepoStatusView {
+            state: RepoStateView::On,
+            installed: true,
+            has_config: true,
+            forced: None,
+            config_error: None,
+            hold: hold.as_ref().map(crate::v1::HoldView::from),
+            missing_key: missing.map(|m| crate::v1::MissingKeyView {
+                tasks: Vec::new(),
+                message: m.into(),
+                settings_url: String::new(),
+            }),
+        };
+        assert_eq!(QueuedView::new(status(None, None)).message, "Queued.");
+        assert_eq!(
+            QueuedView::new(status(Some(Hold::NoSubscription), None)).message,
+            "Queued, but it goes on hold: private repos need a MergeLoop subscription."
+        );
+        assert_eq!(
+            QueuedView::new(status(None, Some("the workspace has no key"))).message,
+            "Queued. Also, the workspace has no key."
+        );
+    }
 
     /// What the settings form sends: each task's model reaches the file, and a caller from
     /// before overrides still writes a file whose tasks run the default model.

@@ -9,12 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use mergepatrol_core::{EntryState, Hold, PrNumber, RepoName};
-use mergepatrol_store::{ExitRecord, LaneKey, RepoState};
+use mergepatrol_core::{EntryState, Hold, PrNumber, Provider, RepoName, SpendTask};
+use mergepatrol_store::{AgentTask, ExitRecord, LaneKey, RepoState, Scope};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::api::in_merge_order;
+use crate::api::{SpendTaskView, in_merge_order};
 use crate::auth::{Caller, hash, session_token};
 use crate::{ApiError, AppState};
 
@@ -59,6 +59,33 @@ pub struct RepoStatusView {
     pub forced: Option<SwitchView>,
     /// Why the queue is paused: the config file does not parse.
     pub config_error: Option<String>,
+    /// Why a PR queued now goes on hold, whatever the PR, as `queue.hold` says it once it is
+    /// queued: `no_subscription` or `fair_use_limit`. Null when nothing about the repo holds it.
+    pub hold: Option<HoldView>,
+    /// The agent's tasks on this repo that the workspace has no model key for. Null when it has
+    /// one for each.
+    pub missing_key: Option<MissingKeyView>,
+}
+
+/// What the agent cannot do on a repo, for want of the workspace's model key: a PR whose rebase
+/// conflicts, or whose checks fail, is ejected instead.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct MissingKeyView {
+    pub tasks: Vec<AgentTaskView>,
+    /// What is missing, and where to add it.
+    pub message: String,
+    /// The dashboard's settings, where the workspace adds a key.
+    pub settings_url: String,
+}
+
+/// A task the agent runs, with the provider whose key it needs.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AgentTaskView {
+    pub task: SpendTaskView,
+    /// As in the config file: `anthropic`, `openai` or `openrouter`.
+    pub provider: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
@@ -207,6 +234,52 @@ impl From<&Hold> for HoldView {
 }
 
 impl RepoStatusView {
+    /// The repo's status, with what would hold or stop a PR queued now.
+    pub(crate) async fn read(
+        app: &AppState,
+        repo: &RepoName,
+        installation: Option<u64>,
+        state: Option<&RepoState>,
+    ) -> Result<Self, ApiError> {
+        let mut view = Self::new(installation.is_some(), state);
+        let (Some(id), Some(state)) = (installation, state) else {
+            return Ok(view);
+        };
+        if view.state == RepoStateView::Off {
+            return Ok(view);
+        }
+        // The queue's own gate, as its next tick decides it.
+        if let (Some(billing), Some(private)) = (&app.billing, state.private) {
+            let gate = billing.gate(id, &repo.owner, private, unix_now() as i64);
+            view.hold = gate.await?.map(|g| HoldView::from(&g.reason));
+        }
+        let mut missing = Vec::new();
+        for t in &state.agent {
+            if !app
+                .vault
+                .has_model_key(Scope::Installation(id), t.provider)
+                .await?
+            {
+                missing.push(*t);
+            }
+        }
+        if !missing.is_empty() {
+            let settings_url = format!("{}/{}/settings", app.public_url, repo.owner);
+            view.missing_key = Some(MissingKeyView {
+                message: missing_key(&missing, &settings_url),
+                tasks: missing
+                    .iter()
+                    .map(|t| AgentTaskView {
+                        task: t.task.into(),
+                        provider: t.provider.as_str().into(),
+                    })
+                    .collect(),
+                settings_url,
+            });
+        }
+        Ok(view)
+    }
+
     fn new(installed: bool, state: Option<&RepoState>) -> Self {
         let on = installed && state.is_some_and(RepoState::on);
         let config_error = state.and_then(|s| s.config_error.clone());
@@ -223,8 +296,44 @@ impl RepoStatusView {
                 false => SwitchView::Off,
             }),
             config_error,
+            hold: None,
+            missing_key: None,
         }
     }
+}
+
+/// What the workspace lacks for `missing`, the agent's tasks without a key, by provider, and
+/// where to add it.
+fn missing_key(missing: &[AgentTask], settings_url: &str) -> String {
+    let mut providers: Vec<Provider> = Vec::new();
+    for t in missing {
+        if !providers.contains(&t.provider) {
+            providers.push(t.provider);
+        }
+    }
+    let lacks: Vec<String> = providers
+        .iter()
+        .map(|&p| {
+            let tasks: Vec<&str> = missing
+                .iter()
+                .filter(|t| t.provider == p)
+                .map(|t| match t.task {
+                    SpendTask::Rebase => "resolve a rebase's conflicts",
+                    SpendTask::Fix => "fix failed checks",
+                    SpendTask::Review => "review PRs",
+                })
+                .collect();
+            format!(
+                "no {} for the agent to {}",
+                p.credential(),
+                tasks.join(" or ")
+            )
+        })
+        .collect();
+    format!(
+        "the workspace has {}: add one in the dashboard's settings, {settings_url}",
+        lacks.join(", and ")
+    )
 }
 
 /// What MergeLoop knows of each of `numbers`, PRs of `repo`, which the App's `installation`
@@ -258,7 +367,7 @@ pub(crate) async fn statuses(
         ),
         None => (None, Vec::new(), Vec::new()),
     };
-    let mergepatrol = RepoStatusView::new(installation.is_some(), state.as_ref());
+    let mergepatrol = RepoStatusView::read(app, repo, installation, state.as_ref()).await?;
     let lanes: Vec<_> = lanes
         .into_iter()
         .map(|(trunk, lane)| (trunk, lane.batch_pr, in_merge_order(lane.entries)))

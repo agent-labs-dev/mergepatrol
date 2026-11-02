@@ -109,6 +109,10 @@ pub struct ResolverSpec {
     /// before other providers, while a deploy rolls out the job image first.
     #[serde(alias = "anthropic")]
     pub api: Option<ApiAccess>,
+    /// The dashboard's settings, where the workspace adds the provider's key, for the error when
+    /// `api` is none. `None` for a fork PR's job, which gets no agent, key or not.
+    #[serde(default)]
+    pub settings_url: Option<String>,
 }
 
 /// The job calls the provider's API at `base_url` with `token`, which the proxy swaps for the
