@@ -143,7 +143,7 @@ export function Section({
   return (
     <section
       id={id}
-      className="grid scroll-mt-6 grid-cols-[minmax(0,1fr)] gap-4 py-8 first:pt-0 lg:grid-cols-[240px_minmax(0,1fr)] lg:gap-8"
+      className="grid scroll-mt-6 grid-cols-[minmax(0,1fr)] gap-4 py-8 first:pt-0 xl:grid-cols-[240px_minmax(0,1fr)] xl:gap-8"
     >
       <div>
         <div className="flex items-center justify-between gap-3">

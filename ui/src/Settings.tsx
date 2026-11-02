@@ -51,7 +51,7 @@ export function Settings({ workspace }: { workspace: number }) {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-6xl gap-10 px-4 py-6 sm:px-6 sm:py-8">
-        <nav className="sticky top-0 h-fit w-44 shrink-0 max-lg:hidden">
+        <nav className="sticky top-0 h-fit w-44 shrink-0 max-xl:hidden">
           <h1 className="mb-3 text-xl font-semibold tracking-tight">Settings</h1>
           {SECTIONS.map(([id, label]) => (
             <a
@@ -64,7 +64,7 @@ export function Settings({ workspace }: { workspace: number }) {
           ))}
         </nav>
         <div className="min-w-0 flex-1 divide-y divide-line">
-          <h1 className="pb-6 text-xl font-semibold tracking-tight lg:hidden">Settings</h1>
+          <h1 className="pb-6 text-xl font-semibold tracking-tight xl:hidden">Settings</h1>
           {billing.data && <Billing workspace={workspace} billing={billing.data} />}
           <Section
             id="models"
