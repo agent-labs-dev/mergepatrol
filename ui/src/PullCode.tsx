@@ -20,17 +20,21 @@ export default function PullCode({
   repo,
   number,
   commits,
+  tips,
 }: {
   workspace: number;
   repo: string;
   number: number;
   /** The PR's commits, oldest first, to show one at a time. */
   commits: Commit[];
+  /** The PR's head and base commits: what the whole PR's diff is of. */
+  tips?: { head: string; base: string };
 }) {
   const [commit, setCommit] = useState<string>();
+  const of = commit ? { commit } : tips;
   const diff = useQuery({
-    queryKey: ["pull-diff", workspace, repo, number, commit],
-    queryFn: () => fetchPullDiff(workspace, repo, number, commit),
+    queryKey: ["pull-diff", workspace, repo, number, of],
+    queryFn: () => fetchPullDiff(workspace, repo, number, of),
     staleTime: 30_000,
   });
   const files = useMemo(

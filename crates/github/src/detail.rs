@@ -2,7 +2,7 @@
 //! runs, timeline and diff. Read as the user, on their own rate limit.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +17,10 @@ use crate::app::AsUser;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PullDetail {
+    /// The head commit's SHA.
+    pub head: String,
+    /// The base branch's commit, by SHA.
+    pub base: String,
     /// The description as GitHub renders it, sanitized by GitHub, its images signed as
     /// [`SignedImages`] says.
     pub body_html: String,
@@ -116,6 +120,7 @@ const DETAIL: &str = "query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     isPrivate
     pullRequest(number: $number) {
+      headRefOid baseRefOid
       bodyHTML
       labels(first: 20) { nodes { name color } }
       reviewThreads(first: 100) { totalCount nodes { isResolved path line
@@ -291,23 +296,140 @@ impl AsUser {
         None
     }
 
-    /// The PR's diff, or one commit's with `commit`. `None` when GitHub will not make one this
-    /// large: over 300 files or 20,000 lines.
+    /// A PR's diff, or one commit's, as [`DiffOf`] says, from `kept` when it has it. `None` when
+    /// GitHub will not make one this large: over 300 files or 20,000 lines.
     pub async fn pull_diff(
         &self,
         repo: &RepoName,
         number: PrNumber,
-        commit: Option<&str>,
-    ) -> Result<Option<String>> {
-        let path = match commit {
-            Some(sha) => format!("/repos/{repo}/commits/{sha}"),
-            None => format!("/repos/{repo}/pulls/{number}"),
+        of: DiffOf<'_>,
+        kept: &PullDiffs,
+    ) -> Result<Arc<Option<String>>> {
+        let key = of.key(number).map(|of| Diff {
+            viewer: Sha256::digest(self.token.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+            repo: repo.clone(),
+            of,
+        });
+        if let Some(diff) = key.as_ref().and_then(|k| kept.get(k)) {
+            return Ok(diff);
+        }
+        let path = match of {
+            DiffOf::Commit(sha) => format!("/repos/{repo}/commits/{sha}"),
+            DiffOf::Pull(_) => format!("/repos/{repo}/pulls/{number}"),
         };
         let (status, diff) = self.get_text(&path, "application/vnd.github.diff").await?;
-        match status {
-            s if s.is_success() => Ok(Some(diff)),
-            StatusCode::NOT_ACCEPTABLE => Ok(None),
+        let diff = Arc::new(match status {
+            s if s.is_success() => Some(diff),
+            StatusCode::NOT_ACCEPTABLE => None,
             s => bail!("GET {path} as a diff: {s} {diff}"),
+        });
+        if let Some(key) = key {
+            kept.put(key, diff.clone());
+        }
+        Ok(diff)
+    }
+}
+
+/// Which diff of a PR.
+#[derive(Debug, Clone, Copy)]
+pub enum DiffOf<'a> {
+    /// The whole PR. With its head and base commits as [`PullDetail`] has them, it is kept: a
+    /// push or a moved base makes another. Without, it is read every time.
+    Pull(Option<(&'a str, &'a str)>),
+    /// One of its commits, by SHA, which never changes.
+    Commit(&'a str),
+}
+
+impl DiffOf<'_> {
+    fn key(self, number: PrNumber) -> Option<Of> {
+        match self {
+            Self::Pull(Some((head, base))) => Some(Of::Pull {
+                number,
+                head: head.into(),
+                base: base.into(),
+            }),
+            Self::Pull(None) => None,
+            Self::Commit(sha) => Some(Of::Commit(sha.into())),
+        }
+    }
+}
+
+/// How long a diff is kept. What it is of never changes, so this bounds only how long a viewer
+/// who loses access to the repo still reads what they read before.
+const DIFF_KEPT_FOR: Duration = Duration::from_secs(15 * 60);
+/// The most patch text kept, all viewers together. The oldest go first.
+const DIFFS_MAX_BYTES: usize = 64 << 20;
+/// A diff larger than this is not kept, so one cannot push out all the others.
+const DIFF_MAX_BYTES: usize = DIFFS_MAX_BYTES / 8;
+
+/// A diff, by viewer: the hash of their token. Each viewer reads only what GitHub gave them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Diff {
+    viewer: String,
+    repo: RepoName,
+    of: Of,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Of {
+    Pull {
+        number: PrNumber,
+        head: String,
+        base: String,
+    },
+    Commit(String),
+}
+
+/// The diffs viewers read lately, so a PR's Code tab opened again, or another of its commits
+/// looked at and back, reads GitHub once.
+#[derive(Default)]
+pub struct PullDiffs(Mutex<Kept>);
+
+#[derive(Default)]
+struct Kept {
+    diffs: HashMap<Diff, (Instant, Arc<Option<String>>)>,
+    /// Of the patches in `diffs`.
+    bytes: usize,
+}
+
+fn size(diff: &Option<String>) -> usize {
+    diff.as_ref().map_or(0, String::len)
+}
+
+impl PullDiffs {
+    fn get(&self, key: &Diff) -> Option<Arc<Option<String>>> {
+        let kept = self.0.lock().unwrap();
+        let (at, diff) = kept.diffs.get(key)?;
+        (at.elapsed() < DIFF_KEPT_FOR).then(|| diff.clone())
+    }
+
+    fn put(&self, key: Diff, diff: Arc<Option<String>>) {
+        let bytes = size(&diff);
+        if bytes > DIFF_MAX_BYTES {
+            return;
+        }
+        let mut kept = self.0.lock().unwrap();
+        kept.diffs.retain(|_, (at, _)| at.elapsed() < DIFF_KEPT_FOR);
+        kept.bytes = kept.diffs.values().map(|(_, d)| size(d)).sum();
+        while kept.bytes + bytes > DIFFS_MAX_BYTES {
+            let Some(oldest) = kept
+                .diffs
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((_, d)) = kept.diffs.remove(&oldest) {
+                kept.bytes -= size(&d);
+            }
+        }
+        kept.bytes += bytes;
+        if let Some((_, d)) = kept.diffs.insert(key, (Instant::now(), diff)) {
+            kept.bytes -= size(&d);
         }
     }
 }
@@ -356,6 +478,8 @@ fn pull_detail(pr: &Value) -> Result<PullDetail> {
     let nodes = |v: &Value| v["nodes"].as_array().cloned().unwrap_or_default();
     let contexts = nodes(&pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]);
     Ok(PullDetail {
+        head: str_of(&pr["headRefOid"]),
+        base: str_of(&pr["baseRefOid"]),
         body_html: str_of(&pr["bodyHTML"]),
         labels: nodes(&pr["labels"]).iter().map(label).collect(),
         checks: contexts.iter().filter_map(check_run).collect(),
@@ -816,5 +940,93 @@ mod tests {
     #[test]
     fn a_missing_pull_request_fails() {
         assert!(pull_detail(&Value::Null).is_err());
+    }
+
+    const HEAD: &str = "1111111111111111111111111111111111111111";
+    const BASE: &str = "2222222222222222222222222222222222222222";
+
+    #[tokio::test]
+    async fn a_diff_is_read_once_per_viewer_while_it_keeps() {
+        let (mut gh, requests) = crate::fake::as_user(vec![
+            (200, "", "commit diff"),
+            (200, "", "pull diff"),
+            (200, "", "pushed diff"),
+            (200, "", "commit diff"),
+        ])
+        .await;
+        let kept = PullDiffs::default();
+        let commit = DiffOf::Commit(HEAD);
+        let pull = DiffOf::Pull(Some((HEAD, BASE)));
+        let pushed = DiffOf::Pull(Some((BASE, BASE)));
+        let read = async |gh: &AsUser, of| {
+            gh.pull_diff(&repo(), 7, of, &kept)
+                .await
+                .unwrap()
+                .as_deref()
+                .map(str::to_owned)
+        };
+        for _ in 0..2 {
+            assert_eq!(read(&gh, commit).await.as_deref(), Some("commit diff"));
+            assert_eq!(read(&gh, pull).await.as_deref(), Some("pull diff"));
+        }
+        // A push is another head: GitHub again.
+        assert_eq!(read(&gh, pushed).await.as_deref(), Some("pushed diff"));
+        assert_eq!(read(&gh, pull).await.as_deref(), Some("pull diff"));
+        // Another viewer reads it from GitHub, as themselves.
+        gh.token = "u".into();
+        assert_eq!(read(&gh, commit).await.as_deref(), Some("commit diff"));
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                format!("GET /repos/acme/app/commits/{HEAD} HTTP/1.1"),
+                "GET /repos/acme/app/pulls/7 HTTP/1.1".into(),
+                "GET /repos/acme/app/pulls/7 HTTP/1.1".into(),
+                format!("GET /repos/acme/app/commits/{HEAD} HTTP/1.1"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_diff_too_large_is_kept_and_one_without_its_commits_is_not() {
+        let (gh, requests) = crate::fake::as_user(vec![
+            (406, "", "too large"),
+            (200, "", "pull diff"),
+            (200, "", "pull diff"),
+        ])
+        .await;
+        let kept = PullDiffs::default();
+        for _ in 0..2 {
+            let of = DiffOf::Pull(Some((HEAD, BASE)));
+            assert_eq!(*gh.pull_diff(&repo(), 7, of, &kept).await.unwrap(), None);
+        }
+        for _ in 0..2 {
+            let diff = gh.pull_diff(&repo(), 7, DiffOf::Pull(None), &kept).await;
+            assert_eq!(diff.unwrap().as_deref(), Some("pull diff"));
+        }
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn the_oldest_diffs_go_past_the_bound_and_one_too_large_is_not_kept() {
+        let kept = PullDiffs::default();
+        let key = |sha: &str| Diff {
+            viewer: "v".into(),
+            repo: repo(),
+            of: Of::Commit(sha.into()),
+        };
+        let largest = Arc::new(Some("x".repeat(DIFF_MAX_BYTES)));
+        for i in 0..DIFFS_MAX_BYTES / DIFF_MAX_BYTES {
+            kept.put(key(&i.to_string()), largest.clone());
+        }
+        assert!(kept.get(&key("0")).is_some());
+        kept.put(key("last"), largest.clone());
+        assert!(kept.get(&key("0")).is_none());
+        assert!(kept.get(&key("1")).is_some());
+        assert!(kept.get(&key("last")).is_some());
+        assert_eq!(kept.0.lock().unwrap().bytes, DIFFS_MAX_BYTES);
+
+        kept.put(key("huge"), Arc::new(Some("x".repeat(DIFF_MAX_BYTES + 1))));
+        assert!(kept.get(&key("huge")).is_none());
+        assert!(kept.get(&key("1")).is_some());
     }
 }

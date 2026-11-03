@@ -9,7 +9,7 @@ use mergepatrol_core::{
     TaskModel, WorkspaceDefaults, current_step,
 };
 use mergepatrol_github::{
-    App, AsUser, BranchFile, CheckRunState, GitObject, InboxPull, Installation, Proposal,
+    App, AsUser, BranchFile, CheckRunState, DiffOf, GitObject, InboxPull, Installation, Proposal,
     PullDetail, PullRef, SYMLINK_MODE, TimelineEvent, setup,
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
@@ -1381,6 +1381,10 @@ pub(crate) async fn open_pulls(
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct PullDetailView {
+    /// The head commit's SHA.
+    pub head: String,
+    /// The base branch's commit, by SHA. With `head`, what the PR's diff is of.
+    pub base: String,
     /// The description as GitHub renders it, sanitized by GitHub. In a private repo, images of
     /// its own files carry short-lived signed URLs, so any page can load them.
     pub body_html: String,
@@ -1523,6 +1527,8 @@ impl From<PullDetail> for PullDetailView {
             })
             .collect();
         PullDetailView {
+            head: d.head,
+            base: d.base,
             review_threads: ReviewThreadsView {
                 open: open_threads.len() as u32,
                 total: d.thread_count.max(read),
@@ -1608,6 +1614,10 @@ pub(crate) async fn pull_detail(
 pub(crate) struct PullDiffQuery {
     /// One of the PR's commits. The whole PR without one.
     commit: Option<String>,
+    /// The whole PR's head and base commits, as `pull_detail` gives them: with both, its diff
+    /// is kept until they change.
+    head: Option<String>,
+    base: Option<String>,
 }
 
 /// A PR's changes, or one commit's, as `git diff` prints them.
@@ -1617,7 +1627,8 @@ pub struct PullDiffView {
     pub patch: String,
 }
 
-/// An open PR's diff, or one of its commits', read as the user.
+/// An open PR's diff, or one of its commits', read as the user. Each user's diffs are kept by
+/// what they are of, so a read again costs GitHub nothing.
 pub(crate) async fn pull_diff(
     State(app): State<AppState>,
     caller: Caller,
@@ -1626,17 +1637,30 @@ pub(crate) async fn pull_diff(
 ) -> Result<Json<PullDiffView>, ApiError> {
     let repo = repo_name(owner, name)?;
     caller.repo(&app, id, &repo).await?;
-    if let Some(sha) = &q.commit
-        && (sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()))
-    {
-        return Err(ApiError::bad_request("commit must be a commit SHA"));
+    fn sha<'a>(name: &str, sha: &'a Option<String>) -> Result<Option<&'a str>, ApiError> {
+        match sha {
+            Some(s) if s.len() != 40 || !s.bytes().all(|b| b.is_ascii_hexdigit()) => Err(
+                ApiError::bad_request(&format!("{name} must be a commit SHA")),
+            ),
+            _ => Ok(sha.as_deref()),
+        }
     }
+    let of = match (
+        sha("commit", &q.commit)?,
+        sha("head", &q.head)?,
+        sha("base", &q.base)?,
+    ) {
+        (Some(commit), _, _) => DiffOf::Commit(commit),
+        (None, Some(head), Some(base)) => DiffOf::Pull(Some((head, base))),
+        (None, None, None) => DiffOf::Pull(None),
+        _ => return Err(ApiError::bad_request("head and base go together")),
+    };
     let gh = AsUser::new(caller.github_token(&app)?)?;
     let patch = as_user(
-        gh.pull_diff(&repo, number, q.commit.as_deref()).await,
+        gh.pull_diff(&repo, number, of, &app.pull_diffs).await,
         &repo,
-    )?
-    .ok_or_else(|| {
+    )?;
+    let patch = patch.as_ref().clone().ok_or_else(|| {
         ApiError::Status(
             StatusCode::UNPROCESSABLE_ENTITY,
             "This diff is too large to show here.".into(),
@@ -3511,6 +3535,8 @@ mod tests {
             comments: 1,
         };
         let detail = |threads, thread_count| PullDetail {
+            head: String::new(),
+            base: String::new(),
             body_html: String::new(),
             labels: Vec::new(),
             checks: Vec::new(),
