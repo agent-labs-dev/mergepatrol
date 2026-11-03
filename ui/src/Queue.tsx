@@ -1,12 +1,13 @@
 import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Activity } from "./Activity";
 import { AgentReviewScreen, Gate, reviewBadge, reviewedPr, reviewLine } from "./AgentReview";
 import {
   closePull,
   dequeuePull,
   fetchEvents,
+  fetchExits,
   fetchLanes,
   fetchOpenPulls,
   fetchSession,
@@ -53,6 +54,13 @@ export function Queue({ workspace }: { workspace: number }) {
     // Read as the user, on their own rate limit. A label change shows sooner through the lane.
     refetchInterval: 30_000,
   });
+  const exits = useQuery({
+    queryKey: ["ejected", workspace, current?.repo],
+    queryFn: () =>
+      fetchExits(workspace, { repo: current?.repo, days: EJECTED_DAYS, outcome: "ejected" }),
+    enabled: current !== undefined,
+    refetchInterval: 30_000,
+  });
   const actions = useActions(workspace, current, open.data, open.dataUpdatedAt);
 
   if (lanes.isError) return <p className="p-6 text-bad">Could not load the queue.</p>;
@@ -80,13 +88,20 @@ export function Queue({ workspace }: { workspace: number }) {
   const leaving = [...pending.values()].flatMap((p) =>
     p.kind === "removing" ? [{ ...p.item, state: "open" as const, priority: false }] : [],
   );
-  // What the filters narrow: the open PRs, without any the lane or `leaving` has already.
-  const notQueued = (open.data ?? []).filter(
+  const outside = (open.data ?? []).filter(
     (p) =>
       ![...queued, ...leaving].some((e) => e.number === p.number || e.layers.includes(p.number)),
   );
+  // Newest first, so a PR ejected twice shows why it was last.
+  const whyEjected = (n: number) => exits.data?.exits.find((x) => x.number === n)?.detail;
+  const ejected: Item[] = outside.flatMap((p) => {
+    const why = whyEjected(p.number);
+    return why ? [{ ...asItem(p), detail: why.replace(/^Ejected: /, ""), ejected: true }] : [];
+  });
+  // What the filters narrow: the open PRs that are in no list above them.
+  const notQueued = outside.filter((p) => !whyEjected(p.number));
   const unqueued = [...leaving, ...notQueued.filter(matches(filter, me)).map(asItem)];
-  const items: Item[] = [...queued, ...unqueued];
+  const items: Item[] = [...queued, ...ejected, ...unqueued];
   // A link to a stack's layer, as the agent's review gives, picks its stack.
   const entry =
     items.find((e) => e.number === pr) ??
@@ -95,6 +110,9 @@ export function Queue({ workspace }: { workspace: number }) {
   // The queue lists the active PRs first, so the batch is the head of the lane.
   const batched = lane.batch === null ? [] : queued.filter((e) => e.state === "active");
   const rest = queued.slice(batched.length);
+  const inLine = rest.filter((e) => e.state !== "held");
+  const reviewing = rest.filter(heldByReview).sort((a, b) => Number(asks(b)) - Number(asks(a)));
+  const held = rest.filter((e) => e.state === "held" && !heldByReview(e));
   const picked =
     entry !== undefined && (entry.number === pr || (!!pr && entry.layers.includes(pr)));
   if (answer && picked && entry.state !== "open")
@@ -162,7 +180,7 @@ export function Queue({ workspace }: { workspace: number }) {
       >
         <div className="sticky top-0 border-b border-line bg-surface px-4 py-3">
           <p className="font-medium">{lane.repo}</p>
-          <p className="text-xs text-muted">Merge order into {lane.trunk}</p>
+          <p className="text-xs text-muted">Into {lane.trunk}</p>
         </div>
         {actions.error && (
           <p className="flex items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-red-800 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
@@ -176,7 +194,16 @@ export function Queue({ workspace }: { workspace: number }) {
             </button>
           </p>
         )}
-        {queued.length === 0 && <p className="p-4 text-faint">Nothing queued</p>}
+        {queued.length === 0 && ejected.length === 0 && (
+          <p className="p-4 text-faint">Nothing queued</p>
+        )}
+        {(batched.length > 0 || inLine.length > 0) && (
+          <ListHead
+            title="Merge lane"
+            note="one at a time"
+            count={batched.length + inLine.length}
+          />
+        )}
         <ol>
           {lane.batch !== null && (
             <li className="border-b border-line-soft">
@@ -199,10 +226,19 @@ export function Queue({ workspace }: { workspace: number }) {
               </ol>
             </li>
           )}
-          {rest.map((e) => (
+          {inLine.map((e) => (
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
+        <Rows title="Getting ready" note="the agent's review, then the line" items={reviewing}>
+          {row}
+        </Rows>
+        <Rows title="Held" note="until GitHub would merge it" items={held}>
+          {row}
+        </Rows>
+        <Rows title="Ejected" note="queue it again to retry" items={ejected}>
+          {row}
+        </Rows>
         {open.isError && (
           <p className="mt-6 border-y border-line bg-sunken px-4 py-2 text-xs text-bad">
             Could not load the open PRs: {open.error.message}
@@ -341,7 +377,20 @@ export function Queue({ workspace }: { workspace: number }) {
 }
 
 /** A PR in the list: queued, or open and not queued. An open one has no priority or place. */
-type Item = Omit<EntryView, "state"> & { state: EntryView["state"] | "open" };
+type Item = Omit<EntryView, "state"> & {
+  state: EntryView["state"] | "open";
+  /** Open, because the queue ejected it: `detail` says why. */
+  ejected?: boolean;
+};
+
+/** How far back an open PR still lists as ejected, rather than as just not queued. */
+const EJECTED_DAYS = 7;
+
+/** A held PR that waits on the agent's review or its threads, not on GitHub. */
+const heldByReview = (e: Item) =>
+  e.state !== "open" && reviewBadge({ ...e, state: e.state }) !== null;
+/** A PR the agent's review asks a human about: the one thing here that a person can move. */
+const asks = (e: Item) => e.hold?.reason === "review_asks";
 
 /** An open PR as the list shows it: `detail` says what the queue would do with it. */
 const asItem = (p: OpenPullView): Item => ({
@@ -398,7 +447,7 @@ function withClicks(lane: LaneView, pending: ReadonlyMap<number, Pending>): Item
   });
   for (const p of pending.values())
     if (p.kind === "queueing" && !entryOf(lane, p.item.number))
-      entries.push({ ...p.item, state: "waiting", detail: null });
+      entries.push({ ...p.item, state: "waiting", detail: null, ejected: false });
   // Stable: each keeps its place within its rank.
   return entries.sort((a, b) => rank(a) - rank(b));
 }
@@ -640,18 +689,61 @@ const stateBadge: Record<Item["state"], [string, string]> = {
   ],
 };
 
+const ejectedBadge = [
+  "Ejected",
+  "bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-400/10 dark:text-red-300 dark:ring-red-400/30",
+];
+
 function State({ entry }: { entry: Item }) {
-  const [label, style] =
-    (entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
-    (entry.state === "held" && entry.hold?.reason === "review_required"
-      ? ["Needs a reviewer", stateBadge.held[1]]
-      : stateBadge[entry.state]);
+  const [label, style] = entry.ejected
+    ? ejectedBadge
+    : ((entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
+      (entry.state === "held" && entry.hold?.reason === "review_required"
+        ? ["Needs a reviewer", stateBadge.held[1]]
+        : stateBadge[entry.state]));
   return (
     <span
       className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}
     >
       {label}
     </span>
+  );
+}
+
+/** A band over a list of PRs. */
+function ListHead({ title, note, count }: { title: string; note: string; count: number }) {
+  return (
+    <p className="flex items-center justify-between border-b border-line bg-sunken px-4 py-2 text-xs text-muted">
+      <span>
+        <span className="font-medium text-fg-2">{title}</span> · {note}
+      </span>
+      <span className="tabular-nums">{count}</span>
+    </p>
+  );
+}
+
+/** A list of PRs below the lane, with its band. Nothing when it is empty. */
+function Rows({
+  title,
+  note,
+  items,
+  children,
+}: {
+  title: string;
+  note: string;
+  items: Item[];
+  children: (item: Item) => ReactNode;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div className="mt-6 border-t border-line">
+      <ListHead title={title} note={note} count={items.length} />
+      <ol>
+        {items.map((e) => (
+          <li key={e.number}>{children(e)}</li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
