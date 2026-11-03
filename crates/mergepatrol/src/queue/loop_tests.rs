@@ -1825,7 +1825,7 @@ async fn a_conflict_the_agent_resolved_needs_a_review_and_a_clean_rebase_keeps_i
         let (run, key, settings) = (&run, &key, &settings);
         async move {
             let heads = [(number, head, 0)];
-            review_hold(&run.ctx, key, settings, false, &heads)
+            review_hold(&run.ctx, key, settings, false, &heads, &mut false)
                 .await
                 .unwrap()
         }

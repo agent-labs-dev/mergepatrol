@@ -234,6 +234,8 @@ mod tests {
             repo: RepoName::parse("o/r").unwrap(),
             number: 5,
             head_sha: "h1".into(),
+            since_head: None,
+            agent_fixed: false,
             status,
             error: None,
             attempts: 0,
