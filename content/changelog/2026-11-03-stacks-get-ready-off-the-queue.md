@@ -1,6 +1,7 @@
 ---
 title: Stacks get ready without holding up the queue
 kind: improved
+pr: 216
 ---
 
 A stack now gets ready the way a single PR does: its conflicts are resolved, its checks run and the agent fixes what fails, all off the queue, so no other PR waits for it.
