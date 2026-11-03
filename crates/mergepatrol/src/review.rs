@@ -22,7 +22,7 @@ use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
 
 use crate::github::GitHub;
-use crate::queue::{Ctx, app_credentials, fix_findings, job_spec, record, unix_now};
+use crate::queue::{Ctx, LOCK_EVERY, app_credentials, fix_findings, job_spec, record, unix_now};
 
 /// Reviews running at once, across workspaces. Each also takes one of the sandbox's job slots.
 const REVIEWS_AT_ONCE: usize = 4;
@@ -31,6 +31,9 @@ const POLL: Duration = Duration::from_secs(5);
 /// A run taken this long ago lost its worker, as to a panic: it runs again. A restart needs no
 /// such wait: the next worker lets go of everything at the start of `run`.
 const STALE: Duration = Duration::from_secs(45 * 60);
+/// How long a worker whose instance lost the queue lock may run on: `lead` waits `LOCK_EVERY` to
+/// check the lock, and as long again for the check.
+const HANDOVER: Duration = LOCK_EVERY.saturating_mul(2);
 /// How many runs may fail on errors outside the PR before a human reviews it instead.
 const ATTEMPTS: u32 = 3;
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -43,6 +46,7 @@ const CODEOWNERS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWN
 /// Runs reviews and questions as they come, until the queue lock is lost: dropping the future
 /// stops the runs it started.
 pub async fn run(ctx: Arc<Ctx>) {
+    tokio::time::sleep(HANDOVER).await;
     match ctx.store.release_reviews().await {
         Ok(0) => {}
         Ok(released) => tracing::info!(released, "took back reviews a restart cut short"),

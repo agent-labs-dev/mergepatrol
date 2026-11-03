@@ -48,7 +48,7 @@ const CHECKS_POLL: Duration = Duration::from_secs(15);
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
 /// How often the instance running the queues checks that it still holds the queue lock, and
 /// how often the others try to take it.
-const LOCK_EVERY: Duration = Duration::from_secs(5);
+pub(crate) const LOCK_EVERY: Duration = Duration::from_secs(5);
 /// How often to delete what nothing reads anymore.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 /// How long a job's output, with its agent's transcript, stays on disk: to look into a job.

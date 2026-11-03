@@ -964,6 +964,8 @@ mod tests {
 
         assert_eq!(store.release_reviews().await.unwrap(), 2);
 
+        // The run it let go of can no longer end the review.
+        assert!(!store.finish_review(cut.id, &done).await.unwrap());
         let again = store.claim_review(stale).await.unwrap().unwrap();
         assert_eq!(again.id, cut.id);
         let (r, _) = store.claim_question(stale).await.unwrap().unwrap();
