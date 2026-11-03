@@ -1708,7 +1708,7 @@ async fn a_conflict_the_lane_finds_goes_back_off_it_and_the_next_pr_goes_on() {
 
     // Its job ended with the head as it was: the lane's word on that head is used up.
     run.ctx.prep.take(&repo());
-    run.ctx.prep.finish(&(1, repo(), 1), None);
+    drop(prep::Running::new(&run.ctx.prep, (1, repo(), 1)));
     run.rebase.conflicts_on.clear();
     run.tick().await;
     assert!(run.ctx.prep.asked().is_empty());
