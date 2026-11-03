@@ -1,6 +1,7 @@
 //! The agent: resolves the conflicts of one commit in a stopped rebase, fixes the failed
 //! checks of a PR, or reviews a PR. It edits files only: the caller checks the result and
-//! commits it. A review edits nothing: its answer is its last message.
+//! commits it. A review may run the repo and write tests to show what it finds, which the caller
+//! throws away but for its evidence: its answer is its last message.
 
 mod chatgpt;
 mod claude;
@@ -58,6 +59,8 @@ pub struct ReviewRequest<'a> {
     /// What the agent sent back to the author on the last head, to check the fix of, with the
     /// author's replies.
     pub sent_back: &'a [SentBack],
+    /// The repo's verify commands: how it runs its checks, which a review's evidence builds on.
+    pub verify_commands: &'a [String],
     /// What the queue's agent committed on a version already approved, as "sha subject". When
     /// any, only these need reading.
     pub queue_commits: &'a [String],
@@ -107,7 +110,7 @@ pub trait Resolver: Send + Sync {
 
     async fn fix(&self, req: FixRequest<'_>) -> Result<Resolution>;
 
-    /// Reads the PR and answers with a review, as `review_prompt` asks. Changes nothing.
+    /// Reviews the PR and answers, as `review_prompt` asks. It may run the repo and write tests.
     async fn review(&self, req: ReviewRequest<'_>) -> Result<Resolution>;
 
     /// Answers a human's question about a finding. Changes nothing.
@@ -144,6 +147,21 @@ fn verify_section(commands: &[String], after: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("After you {after}, run these commands. They must pass:\n{cmds}")
+}
+
+/// How a review learns to run the repo's checks, to build its evidence on.
+fn checks_section(commands: &[String]) -> String {
+    if commands.is_empty() {
+        return "This repo has no verify commands: find how it runs its tests in its docs and \
+config."
+            .to_owned();
+    }
+    let cmds = commands
+        .iter()
+        .map(|c| format!("- `{c}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("The repo checks itself with these commands, which already pass on this PR:\n{cmds}")
 }
 
 pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
@@ -207,8 +225,20 @@ fn fix_review_prompt(req: &FixRequest<'_>) -> String {
                 (Some(file), None) => format!(" ({file})"),
                 _ => String::new(),
             };
+            let shown = match &f.evidence {
+                Some(e) if e.failed => match e.files.as_slice() {
+                    [] => format!("\n\n`{}` fails on this head.", e.command),
+                    files => format!(
+                        "\n\n`{}` fails on this head, with the review's test, which is in place \
+in {}.",
+                        e.command,
+                        files.join(", ")
+                    ),
+                },
+                _ => String::new(),
+            };
             format!(
-                "## {}{place}\n\n{}\n\nThe change asked for: {}",
+                "## {}{place}\n\n{}\n\nThe change asked for: {}{shown}",
                 f.title,
                 f.finding.trim(),
                 f.suggestion.trim()
@@ -237,7 +267,10 @@ Rules:
 - Make the smallest change that settles each finding, in the spirit of the pull request. Prefer \
 deleting or narrowing code over a new lock, cache, helper or option.
 - Fix the case the finding names, not its neighbours.
-- When a finding is about behaviour, add one focused test that fails without the fix.
+- A finding that names a command that fails is fixed once that command passes. Leave the files \
+the review wrote for it as they are: MergeLoop runs the command after your fix, and rejects the \
+fix if it still fails or if those files changed. They are committed with the fix.
+- When another finding is about behaviour, add one focused test that fails without the fix.
 - Do not delete, skip or weaken tests or checks.
 - Do not edit `.github/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
 - Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
@@ -332,7 +365,7 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "checked": ["What you verified, so a human need not"],
       "would_clear": "What would have let you decide alone",
       "suggestion": "The change you would ask the author for. Empty when there is none.",
-      "evidence": "What shows the change is needed: a failing test, a command and what it printed, or a repro. Empty when there is none.",
+      "evidence": { "command": "cargo test -p core retry_stops", "files": ["crates/core/tests/retry.rs"] },
       "needs_human": false,
       "related": [{ "file": "path", "line": 41, "why": "What this code told you" }]
     }
@@ -385,7 +418,11 @@ check whether it was made.\n{items}\n"
                     (false, "") => String::new(),
                     (false, r) => format!(" The author replied: {r}"),
                 };
-                format!("- {}{place}: {}{reply}", f.title, f.suggestion)
+                let shown = match &f.evidence {
+                    Some(e) if e.failed => format!(" `{}` failed on it.", e.command),
+                    _ => String::new(),
+                };
+                format!("- {}{place}: {}{shown}{reply}", f.title, f.suggestion)
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -418,7 +455,11 @@ Pull request: {title}
 {answered}{sent_back}{queue_commits}
 Its changes are `git diff {base}..HEAD`. Read them, and read the code around them that you need \
 to judge them: callers, tests, config, deploy files, earlier migrations, docs. Use `git log`, \
-`git show` and `git diff`, and read files. Change nothing.
+`git show` and `git diff`, and read files. You may run the repo's tests and tools, and write \
+tests: MergeLoop throws your changes away after the review, all but the files a finding's \
+`evidence` names. Do not commit.
+
+{verify}
 
 Report what a careful senior reviewer would look at, each as a finding:
 - What could be wrong: bugs, security holes, data loss, broken deploys, breaking changes to what \
@@ -439,12 +480,16 @@ the code does not show you: a policy, how production is set up, what the author 
 in `unsure`. Do not inflate it: a change you are sure enough of goes back to the author, often \
 the agent that wrote the PR, who must fix it before the PR can merge.
 
-Every finding you lean `change` on, except a `security` one, must carry `evidence`: the failing \
-test, the command you ran and what it printed, or the repro, that shows the change is needed. \
-Without one it does not go back to the author: MergeLoop shows it as a note that holds nothing. \
-If nothing you can point to shows it, lean `fine` and say in `unsure` what you could not check. \
-A `security` finding needs none: the code showing the hole is enough to close it. A finding you \
-report again for a fix that is still missing carries the same `evidence` again.
+Every finding you lean `change` on, except a `security` one, must carry `evidence`: a command, \
+run from the repo's root, that fails on this PR because of what the finding says, and the files \
+you wrote for it, most often one focused test. Write the test, run the command, and see it fail \
+for that reason before you report it. After the review MergeLoop runs each command on the PR \
+alone, with only the files it names, and a command it does not see fail does not go back to the \
+author: MergeLoop shows the finding as a note that holds nothing. So name every file the command \
+needs, and keep each finding's files apart from the others'. If you cannot make a command fail, \
+lean `fine` and say in `unsure` what you could not show. A `security` finding needs none: the \
+code showing the hole is enough to close it. A finding you report again for a fix that is still \
+missing carries its `evidence` again, written anew.
 
 Set `needs_human` to true only for a change the author cannot make from the PR and its \
 description: a call on scope, product or design that the PR does not settle, access or \
@@ -464,6 +509,7 @@ Reply with the JSON alone, in this shape, and nothing else:
         title = req.pr_title,
         body = req.pr_body,
         base = req.base,
+        verify = checks_section(req.verify_commands),
     )
 }
 
@@ -541,6 +587,7 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             queue_commits: &[],
+            verify_commands: &["cargo test".into()],
             transcript: Path::new("t"),
         });
         assert!(review.contains("what its description sets out to do"));
@@ -548,6 +595,8 @@ mod prompt_tests {
         assert!(review.contains("`fine`, however sure you are"));
         // A change of a kind other than security needs something showing it, or it is a note.
         assert!(review.contains("must carry `evidence`"));
+        assert!(review.contains("see it fail"));
+        assert!(review.contains("- `cargo test`"));
         assert!(review.contains("`security` finding needs none"));
     }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
-    Answered, Event, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings,
+    Answered, Event, Evidence, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings,
     ReviewStatus, SentBack, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
@@ -787,6 +787,32 @@ fn still(f: &Judged) -> String {
     }
 }
 
+/// How long a finding's test may be for its thread to show it: GitHub takes a comment of up to
+/// 65536 characters.
+const PATCH_BYTES: usize = 40_000;
+
+/// What MergeLoop ran to show a finding, and what it printed: the author runs the same.
+fn shows_it(e: &Evidence) -> String {
+    let mut text = format!(
+        "**Shows it:** MergeLoop ran `{}` on this head and it failed:\n\n```\n{}\n```\n\n",
+        e.command,
+        e.output.trim_end()
+    );
+    let files = e.files.join(", ");
+    match e.patch.len() {
+        0 => {}
+        // Whole, so the author can apply it: a part of a patch does not apply.
+        n if n <= PATCH_BYTES => text.push_str(&format!(
+            "<details><summary>With the test it wrote, in {files}</summary>\n\n```diff\n{}\n```\n\n</details>\n\n",
+            e.patch.trim_end(),
+        )),
+        _ => text.push_str(&format!(
+            "With the test it wrote, in {files}, too long to show here.\n\n"
+        )),
+    }
+    text
+}
+
 /// The comment that starts a finding's thread.
 fn thread_body(f: &Judged) -> String {
     let to = match f.asked {
@@ -797,9 +823,9 @@ fn thread_body(f: &Judged) -> String {
         None => " (about the whole PR)",
         Some(_) => "",
     };
-    let shows = match f.finding.evidence.trim() {
-        "" => String::new(),
-        e => format!("**Shows it:** {e}\n\n"),
+    let shows = match &f.finding.evidence {
+        Some(e) if e.failed => shows_it(e),
+        _ => String::new(),
     };
     format!(
         "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{shows}{}\n\n{MARK}{} -->",
@@ -967,7 +993,11 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: "fix it".into(),
-            evidence: "a test shows it".into(),
+            evidence: Some(mergepatrol_core::Evidence {
+                command: "cargo test".into(),
+                failed: true,
+                ..Default::default()
+            }),
             needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
@@ -1007,6 +1037,13 @@ mod tests {
     fn a_findings_thread_carries_its_title_for_the_next_review_to_find() {
         let mut f = review(1, true, None).findings.remove(0);
         f.finding.title = "Retry loop has no cap --> ever".into();
+        f.finding.evidence = Some(Evidence {
+            command: "cargo test retry_stops".into(),
+            files: vec!["tests/retry.rs".into()],
+            patch: "+fn retry_stops() {}".into(),
+            output: "test retry_stops ... FAILED".into(),
+            failed: true,
+        });
         let thread = ReviewThread {
             id: "t".into(),
             resolved: false,
@@ -1020,8 +1057,18 @@ mod tests {
         );
         assert!(thread.body.contains("Sent back to the author"));
         assert!(thread.body.contains("Then resolve this thread."));
-        // What shows the change is needed, so the author knows what to run and what to see change.
-        assert!(thread.body.contains("**Shows it:** a test shows it"));
+        // What MergeLoop ran and saw fail, so the author knows what to run and what to see change.
+        assert!(
+            thread
+                .body
+                .contains("ran `cargo test retry_stops` on this head and it failed")
+        );
+        assert!(thread.body.contains("test retry_stops ... FAILED"));
+        assert!(thread.body.contains("in tests/retry.rs"));
+        assert!(thread.body.contains("+fn retry_stops() {}"));
+        // What the agent only says it ran shows nothing.
+        f.finding.evidence.as_mut().unwrap().failed = false;
+        assert!(!thread_body(&f).contains("Shows it"));
     }
 
     #[test]

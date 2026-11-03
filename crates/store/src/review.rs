@@ -811,7 +811,11 @@ mod tests {
                 checked: vec!["c".into()],
                 would_clear: "w".into(),
                 suggestion: "s".into(),
-                evidence: "a test shows it".into(),
+                evidence: Some(mergepatrol_core::Evidence {
+                    command: "cargo test".into(),
+                    failed: true,
+                    ..Default::default()
+                }),
                 needs_human: false,
                 code: Vec::new(),
                 related: Vec::new(),

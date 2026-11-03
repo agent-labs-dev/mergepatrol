@@ -20,8 +20,9 @@ pub use repo_config::{
     RepoSettings, TaskModel, WorkspaceDefaults,
 };
 pub use review::{
-    Answer, Answered, Bar, CodeLine, Finding, Judged, Kind, Lean, LineKind, Question, Related,
-    ReviewOverrides, ReviewSettings, ReviewStatus, Route, SentBack, review_status, review_url,
+    Answer, Answered, Bar, CodeLine, Evidence, Finding, Judged, Kind, Lean, LineKind, Question,
+    Related, ReviewOverrides, ReviewSettings, ReviewStatus, Route, SentBack, review_status,
+    review_url,
 };
 pub use spend::{Spend, SpendTask};
 pub use steps::{Step, StepTimes, current_step, step_times};

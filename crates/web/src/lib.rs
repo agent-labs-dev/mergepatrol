@@ -1364,7 +1364,7 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: String::new(),
-            evidence: String::new(),
+            evidence: None,
             needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
