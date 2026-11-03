@@ -349,7 +349,7 @@ async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
         Work::Rebase => {
             let onto = format!("onto {}", key.trunk);
             record(ctx, key, pr.number, "rebasing", &onto).await?;
-            rebase_and_publish(ctx, gh, key, snap, unit, 0, settings, true).await
+            rebase_and_publish(ctx, gh, key, snap, unit, 0, settings, true, true).await
         }
         Work::Fix { failed } => {
             let head = &pr.head_ref_oid;
@@ -363,7 +363,10 @@ async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
             let failures = GitHub::check_failures(gh, &key.repo, head, failed).await?;
             let trunk = gh.branch_sha(&key.repo, &key.trunk).await?;
             let task = Task::FixChecks { failures };
-            fix_and_publish(ctx, gh, key, snap, unit, 0, settings, head, &trunk, task).await
+            fix_and_publish(
+                ctx, gh, key, snap, unit, 0, settings, head, &trunk, task, true,
+            )
+            .await
         }
     };
     JobSandbox { ctx, gh }.published(key, event).await

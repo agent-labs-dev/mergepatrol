@@ -2674,6 +2674,7 @@ impl JobSandbox<'_> {
                 layer + 1,
                 settings,
                 true,
+                false,
             )
             .await?
             {
@@ -2709,6 +2710,7 @@ impl JobSandbox<'_> {
             Task::FixChecks {
                 failures: failures.to_vec(),
             },
+            false,
         )
         .await?;
         self.restack(key, snap, unit, layer, settings, fixed).await
@@ -2725,8 +2727,10 @@ impl Sandbox for JobSandbox<'_> {
         settings: &RepoSettings,
         agent: bool,
     ) -> Result<Event> {
-        let event =
-            rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings, agent).await;
+        let event = rebase_and_publish(
+            self.ctx, self.gh, key, snap, unit, 0, settings, agent, false,
+        )
+        .await;
         self.published(key, event).await
     }
 
@@ -2999,6 +3003,7 @@ async fn fix_and_publish(
     head: &str,
     base: &str,
     task: Task,
+    beside_lane: bool,
 ) -> Result<Event> {
     let repo = &key.repo;
     let git = Git;
@@ -3027,12 +3032,8 @@ async fn fix_and_publish(
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         let _cache = ctx.caches.lock(repo).await;
-        // A review's fix runs beside the lane, which would not see the PR leave the queue.
-        if matches!(spec.task, Task::FixReview { .. }) {
-            let now = GitHub::pull_request(gh, repo, pr.number).await?;
-            if !still_fixable(&now, &settings.label, &key.trunk, head) {
-                return anyhow::Ok(Err(Event::HeadMoved));
-            }
+        if beside_lane && !still_queued(gh, key, settings, pr, head).await? {
+            return anyhow::Ok(Err(Event::HeadMoved));
         }
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
         let published =
@@ -3055,6 +3056,19 @@ async fn fix_and_publish(
     })
 }
 
+/// Whether PR `pr` is as a job beside the lane found it, and still queued: the lane, which
+/// would see it leave, is not watching.
+async fn still_queued(
+    gh: &Installation,
+    key: &LaneKey,
+    settings: &RepoSettings,
+    pr: &PullRequest,
+    head: &str,
+) -> Result<bool> {
+    let now = GitHub::pull_request(gh, &key.repo, pr.number).await?;
+    Ok(still_fixable(&now, &settings.label, &key.trunk, head))
+}
+
 /// Has the agent fix what the review of PR `pr`, at `head`, sent back to its author, and pushes
 /// the fix, for a new review to check.
 pub(crate) async fn fix_findings(
@@ -3075,7 +3089,10 @@ pub(crate) async fn fix_findings(
         stacked: false,
     };
     let task = Task::FixReview { findings };
-    let event = fix_and_publish(ctx, gh, key, &snap, &unit, 0, settings, head, &base, task).await;
+    let event = fix_and_publish(
+        ctx, gh, key, &snap, &unit, 0, settings, head, &base, task, true,
+    )
+    .await;
     JobSandbox { ctx, gh }.published(key, event).await
 }
 
@@ -3124,6 +3141,7 @@ async fn rebase_and_publish(
     from: usize,
     settings: &RepoSettings,
     agent: bool,
+    beside_lane: bool,
 ) -> Result<Event> {
     let git = Git;
     let (cache, heads, trunk) = {
@@ -3189,6 +3207,9 @@ async fn rebase_and_publish(
         return Ok(event);
     }
 
+    if beside_lane && !still_queued(gh, key, settings, unit.top(), &heads[0]).await? {
+        return Ok(Event::HeadMoved);
+    }
     // Every layer, so that the update also fails if an author pushed to one left as it is: a
     // layer's update to the head it has is its lease.
     let moves: Vec<(&str, &str, &str)> = unit
