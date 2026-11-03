@@ -369,6 +369,32 @@ pub async fn user_installations(token: &str) -> Result<Vec<UserInstallation>> {
     Ok(all)
 }
 
+/// The repos of installation `id` that the user can read: those they own, collaborate on, or
+/// reach through their organization membership. `Revoked` when GitHub does not take the token.
+pub async fn user_installation_repos(token: &str, id: u64) -> Result<Vec<String>> {
+    let mut all = Vec::new();
+    for page in 1.. {
+        let res: Value = user_get(
+            token,
+            &format!("/user/installations/{id}/repositories?per_page=100&page={page}"),
+        )
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+        let batch = res["repositories"].as_array().cloned().unwrap_or_default();
+        all.extend(
+            batch
+                .iter()
+                .filter_map(|r| Some(r["full_name"].as_str()?.to_owned())),
+        );
+        if batch.len() < 100 {
+            break;
+        }
+    }
+    Ok(all)
+}
+
 /// A 401 is `Revoked`: GitHub no longer takes the token.
 async fn user_get(token: &str, path: &str) -> Result<reqwest::Response> {
     let res = client()?

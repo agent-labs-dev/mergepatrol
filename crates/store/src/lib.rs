@@ -79,6 +79,8 @@ pub struct StepStats {
 pub struct Slice<'a> {
     /// `None` for every repo of the workspace.
     pub repo: Option<&'a RepoName>,
+    /// Only these repos, as `owner/name`, such as those a user can read. `None` for every repo.
+    pub within: Option<&'a [String]>,
     /// A GitHub login. `None` for every author.
     pub author: Option<&'a str>,
 }
@@ -747,6 +749,7 @@ impl Store for PgStore {
                 AND ($4::INT IS NULL OR at > now() - make_interval(days => $4))
                 AND ($5::BIGINT IS NULL OR id < $5)
                 AND ($8::BIGINT IS NULL OR pr = $8)
+                AND ($9::TEXT[] IS NULL OR repo = ANY($9))
              ORDER BY id DESC LIMIT $6"#,
         )
         .bind(q.installation_id as i64)
@@ -757,6 +760,7 @@ impl Store for PgStore {
         .bind(q.limit as i64)
         .bind(q.slice.author)
         .bind(q.pr.map(|pr| pr as i64))
+        .bind(q.slice.within)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(exit_record).collect()
@@ -805,6 +809,7 @@ impl Store for PgStore {
              WHERE installation_id = $1
                 AND ($4::TEXT IS NULL OR repo = $4)
                 AND ($5::TEXT IS NULL OR summary->'author'->>'login' = $5)
+                AND ($6::TEXT[] IS NULL OR repo = ANY($6))
                 AND at > now() - make_interval(days => $2)
                 AND at <= now() - make_interval(days => $3)
              GROUP BY GROUPING SETS ((repo), ())
@@ -815,6 +820,7 @@ impl Store for PgStore {
         .bind(to_days as i32)
         .bind(slice.repo.map(|r| r.to_string()))
         .bind(slice.author)
+        .bind(slice.within)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -851,6 +857,7 @@ impl Store for PgStore {
                 AND ($3::TEXT IS NULL OR summary->'author'->>'login' = $3)
                 AND summary->'author'->>'login' IS NOT NULL
                 AND at > now() - make_interval(days => $4)
+                AND ($5::TEXT[] IS NULL OR repo = ANY($5))
              GROUP BY login
              ORDER BY login",
         )
@@ -858,6 +865,7 @@ impl Store for PgStore {
         .bind(slice.repo.map(|r| r.to_string()))
         .bind(slice.author)
         .bind(days as i32)
+        .bind(slice.within)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter()
@@ -888,12 +896,14 @@ impl Store for PgStore {
              WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
                 AND ($4::TEXT IS NULL OR summary->'author'->>'login' = $4)
                 AND outcome = 'merged' AND at > now() - make_interval(days => $3)
+                AND ($5::TEXT[] IS NULL OR repo = ANY($5))
              GROUP BY s.key",
         )
         .bind(installation_id as i64)
         .bind(slice.repo.map(|r| r.to_string()))
         .bind(days as i32)
         .bind(slice.author)
+        .bind(slice.within)
         .fetch_all(&self.pool)
         .await?;
         let mut stats: Vec<StepStats> = rows
@@ -921,6 +931,7 @@ impl Store for PgStore {
             "SELECT kind, message FROM events e
              WHERE installation_id = $1 AND ($2::TEXT IS NULL OR repo = $2)
                 AND kind = ANY($3) AND at > now() - make_interval(days => $4)
+                AND ($6::TEXT[] IS NULL OR repo = ANY($6))
                 AND ($5::TEXT IS NULL OR EXISTS (
                     SELECT 1 FROM exits x
                     WHERE x.installation_id = e.installation_id AND x.repo = e.repo
@@ -933,6 +944,7 @@ impl Store for PgStore {
         .bind(SpendTask::event_kinds())
         .bind(days as i32)
         .bind(slice.author)
+        .bind(slice.within)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -952,6 +964,7 @@ impl Store for PgStore {
              FROM generate_series(0, $3 - 1) AS ago
              LEFT JOIN exits e ON e.installation_id = $1 AND ($2::TEXT IS NULL OR e.repo = $2)
                 AND ($4::TEXT IS NULL OR e.summary->'author'->>'login' = $4)
+                AND ($5::TEXT[] IS NULL OR e.repo = ANY($5))
                 AND e.outcome = 'merged'
                 AND e.at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
                     - make_interval(days => ago)
@@ -963,6 +976,7 @@ impl Store for PgStore {
         .bind(slice.repo.map(|r| r.to_string()))
         .bind(days as i32)
         .bind(slice.author)
+        .bind(slice.within)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
@@ -1513,14 +1527,14 @@ mod tests {
     fn repo(key: &LaneKey) -> Slice<'_> {
         Slice {
             repo: Some(&key.repo),
-            author: None,
+            ..Slice::default()
         }
     }
 
     fn by(login: &str) -> Slice<'_> {
         Slice {
-            repo: None,
             author: Some(login),
+            ..Slice::default()
         }
     }
 
@@ -2142,6 +2156,29 @@ mod tests {
             [0, 0, 1]
         );
         assert_eq!(store.merged_by_day(1, repo(&b), 2).await.unwrap(), [0, 0]);
+
+        // Only the repos a user can read.
+        let only_b = &["o/b".to_owned()][..];
+        let within_b = Slice {
+            within: Some(only_b),
+            ..Slice::default()
+        };
+        let in_b = ExitQuery {
+            slice: within_b,
+            ..query.clone()
+        };
+        assert_eq!(prs(&store, in_b).await, [4, 3, 2]);
+        let stats = store.exit_stats(1, within_b, 30, 0).await.unwrap();
+        let counts: Vec<_> = stats
+            .iter()
+            .map(|s| (s.repo.as_deref(), s.merged))
+            .collect();
+        assert_eq!(counts, [(Some("o/b"), 0), (None, 0)]);
+        assert!(store.step_stats(1, within_b, 30).await.unwrap().is_empty());
+        assert_eq!(
+            store.merged_by_day(1, within_b, 3).await.unwrap(),
+            [0, 0, 0]
+        );
 
         // PR 2 joined again, and left again: its last exit counts.
         store.record(&b, 2, "enqueued", "").await.unwrap();

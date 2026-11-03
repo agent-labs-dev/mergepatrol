@@ -194,7 +194,11 @@ mod tests {
         }
     }
 
-    /// A router, and the cookie of a user who can access installation 1 only.
+    /// The repos of installation 1 that the GitHub tokens of the test sessions read.
+    const READABLE: [&str; 3] = ["o/r", "o/y", "acme/app"];
+
+    /// A router, and the cookie of a user who can access installation 1 only, and in it the
+    /// `READABLE` repos only.
     async fn signed_in(pool: PgPool) -> (Router, String) {
         with_app(pool, None, Arc::default()).await
     }
@@ -220,17 +224,32 @@ mod tests {
             avatar_url: String::new(),
             installations: vec![1],
         };
+        let github = UserToken {
+            access_token: "ghu_tok".into(),
+            expires_at: Some(now() + 3600),
+            refresh_token: None,
+        };
+        let sealed = vault
+            .seal(
+                &format!("session/{}", auth::hash("tok")),
+                &serde_json::to_string(&github).unwrap(),
+            )
+            .unwrap();
         let session = Session {
             kind,
             expires_at,
             checked_at: now(),
-            github: None,
+            github: Some(sealed),
         };
         store
             .create_session(&auth::hash("tok"), &session)
             .await
             .unwrap();
-        (router(store, vault, config), "mp_session=tok".into())
+        let state = state(store, vault, config);
+        for token in ["ghu_tok", "ghu_x"] {
+            state.seen.assume_repos(token, 1, &READABLE);
+        }
+        (serve(state), "mp_session=tok".into())
     }
 
     fn web_config(hosted_app: Option<AppCredentials>, wake: Arc<Woken>) -> WebConfig {
@@ -498,19 +517,31 @@ mod tests {
     async fn a_session_checked_lately_or_from_before_is_not_checked(pool: PgPool) {
         let (router, _) = signed_in(pool.clone()).await;
         let (store, vault) = store_and_vault(pool).await;
-        // An hour has not passed: the token, which GitHub would refuse, is not even read.
+        // An hour has not passed: the session is not checked, though GitHub would refuse its
+        // token. The token does not read the repos.
         old_session(&*store, &vault, now() - 60, Some(expired_token())).await;
         assert_eq!(
-            get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
+            get(&router, "/api/w/1/settings", Some("mp_session=old")).await,
             StatusCode::OK
         );
-        // A session from before sessions kept the token lasts out its time as it is.
+        assert_eq!(
+            get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A session from before sessions kept the token lasts out its time as it is, but
+        // signs in again to see which repos it can read.
         store.delete_session(&auth::hash("old")).await.unwrap();
         old_session(&*store, &vault, 0, None).await;
         assert_eq!(
-            get(&router, "/api/w/1/lanes", Some("mp_session=old")).await,
+            get(&router, "/api/w/1/settings", Some("mp_session=old")).await,
             StatusCode::OK
         );
+        for path in ["/api/w/1/lanes", "/api/w/1/events?repo=o/r"] {
+            assert_eq!(
+                get(&router, path, Some("mp_session=old")).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
     }
 
     #[sqlx::test(migrations = false)]
@@ -533,21 +564,23 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         // Without the user's GitHub token, nothing can act as them: not the App in their stead.
+        old_session(&*store, &vault, now() - 60, None).await;
         for method in ["PUT", "DELETE"] {
             assert_eq!(
-                status(method, 1, "mp_session=tok").await,
+                status(method, 1, "mp_session=old").await,
                 StatusCode::UNAUTHORIZED
             );
         }
         // Nor can it close a PR.
         let close = Request::post("/api/w/1/repos/acme/app/pulls/7/close")
-            .header("cookie", "mp_session=tok")
+            .header("cookie", "mp_session=old")
             .body(Body::empty())
             .unwrap();
         assert_eq!(
             send(&router, close).await.status(),
             StatusCode::UNAUTHORIZED
         );
+        store.delete_session(&auth::hash("old")).await.unwrap();
         old_session(&*store, &vault, now() - 60, Some(expired_token())).await;
         assert_eq!(
             status("PUT", 1, "mp_session=old").await,
@@ -621,7 +654,22 @@ mod tests {
 
     #[sqlx::test(migrations = false)]
     async fn mcp_takes_a_github_token_or_a_session_that_holds_one(pool: PgPool) {
-        let router = mcp_router(pool).await;
+        let router = mcp_router(pool.clone()).await;
+        let (store, _) = store_and_vault(pool).await;
+        let bare = Session {
+            kind: SessionKind::User {
+                login: "ada".into(),
+                avatar_url: String::new(),
+                installations: vec![1],
+            },
+            expires_at: now() + 600,
+            checked_at: now(),
+            github: None,
+        };
+        store
+            .create_session(&auth::hash("bare"), &bare)
+            .await
+            .unwrap();
         let ping = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" });
         let res = mcp(&router, None, ping.clone()).await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -638,7 +686,7 @@ mod tests {
             .unwrap();
         assert_eq!(send(&router, req).await.status(), StatusCode::UNAUTHORIZED);
         // A session without a GitHub token cannot act: the client signs in again.
-        let res = mcp(&router, Some("Bearer tok"), ping.clone()).await;
+        let res = mcp(&router, Some("Bearer bare"), ping.clone()).await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let res = mcp(&router, Some("Bearer old"), ping).await;
         assert_eq!(json_of(res).await["result"], serde_json::json!({}));
@@ -1113,6 +1161,98 @@ mod tests {
         assert_eq!(stripe(off, "t=1,v1=00").await, StatusCode::NOT_FOUND);
         let on = billed(pool).await;
         assert_eq!(stripe(on, "t=1,v1=00").await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_user_reaches_only_the_repos_they_can_read(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Lane, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, cookie) = signed_in(pool.clone()).await;
+        let (store, _) = store_and_vault(pool).await;
+        // `o/r` the user reads; `o/secret`, in the same workspace, they do not.
+        for (repo, number) in [("o/r", 1), ("o/secret", 2)] {
+            let key = LaneKey {
+                installation_id: 1,
+                repo: RepoName::parse(repo).unwrap(),
+                trunk: "main".into(),
+            };
+            let summary = PrSummary {
+                title: format!("PR of {repo}"),
+                ..PrSummary::default()
+            };
+            let lane = Lane {
+                entries: vec![Entry {
+                    number,
+                    priority: false,
+                    state: EntryState::Waiting,
+                    summary: summary.clone(),
+                    layers: Vec::new(),
+                    heads: Vec::new(),
+                    recheck: None,
+                }],
+                ..Lane::default()
+            };
+            store.save_lane(&key, &lane).await.unwrap();
+            store.record(&key, number, "enqueued", "").await.unwrap();
+            store
+                .record_exit(&key, number + 10, "merged", "abc", &summary)
+                .await
+                .unwrap();
+        }
+        let read = |path: &'static str| {
+            let (router, cookie) = (router.clone(), cookie.clone());
+            async move { json(&router, "GET", path, &cookie, None).await }
+        };
+        let repos_in = |list: &serde_json::Value, field: &str| -> Vec<String> {
+            let list = list.as_array().unwrap().iter();
+            list.filter_map(|v| v[field].as_str().map(str::to_owned))
+                .collect()
+        };
+
+        let (status, lanes) = read("/api/w/1/lanes").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(repos_in(&lanes, "repo"), ["o/r"]);
+        let (_, history) = read("/api/w/1/history?days=30").await;
+        assert_eq!(repos_in(&history["exits"], "repo"), ["o/r"]);
+        let (_, history) = read("/api/w/1/history?days=30&repo=o/secret").await;
+        assert_eq!(history["exits"], serde_json::json!([]));
+        let (_, stats) = read("/api/w/1/history/stats?days=30").await;
+        assert_eq!(repos_in(&stats["current"], "repo"), ["o/r"]);
+
+        for (path, of_a) in [
+            ("/api/w/1/lanes?repo=o/secret", "/api/w/1/lanes?repo=o/r"),
+            ("/api/w/1/events?repo=o/secret", "/api/w/1/events?repo=o/r"),
+            // GitHub's repo names ignore case.
+            ("/api/w/1/events?repo=O/Secret", "/api/w/1/events?repo=O/R"),
+        ] {
+            assert_eq!(read(path).await.0, StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(read(of_a).await.0, StatusCode::OK, "{of_a}");
+        }
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        for path in [
+            format!("/api/w/1/fix?repo=o/secret&sha={sha}"),
+            "/api/w/1/repos/o/secret/config".into(),
+            "/api/w/1/repos/o/secret/skill".into(),
+            "/api/w/1/repos/o/secret/open".into(),
+            "/api/w/1/repos/o/secret/pulls/2".into(),
+            "/api/w/1/repos/o/secret/pulls/2/diff".into(),
+            "/api/w/1/repos/o/secret/pulls/2/status".into(),
+            "/api/w/1/repos/o/secret/pulls/2/agent-review".into(),
+        ] {
+            assert_eq!(
+                get(&router, &path, Some(&cookie)).await,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        for path in [
+            "/api/w/1/repos/o/secret/update",
+            "/api/w/1/repos/o/secret/skill",
+        ] {
+            let req = Request::post(path).header("cookie", &cookie);
+            let res = send(&router, req.body(Body::empty()).unwrap()).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[sqlx::test(migrations = false)]
@@ -1935,6 +2075,7 @@ mod tests {
             config.billing = Some(Arc::new(Billing::new(pg, stripe, "http://localhost:8080")));
         }
         let state = state(store.clone(), Arc::new(vault), config);
+        state.seen.assume_repos("ghu_x", 1, &READABLE);
         for token in ["ghu_x", "ghp_y"] {
             let r = |name: &str| RepoName::parse(name).unwrap();
             state.seen.assume(token, &r("o/r"), Some(1));

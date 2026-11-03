@@ -270,7 +270,7 @@ claude mcp add --transport http mergeloop https://mergeloop.ai/mcp \
   --header "Authorization: Bearer $(gh auth token)"
 ```
 
-A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID, which `get_session` lists.
+A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in, and show only the workspace's repos you can read. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID, which `get_session` lists.
 
 <!-- tools: the order of `ROUTES` in crates/web/src/routes.rs -->
 | Tool | Does | Sign-in |
