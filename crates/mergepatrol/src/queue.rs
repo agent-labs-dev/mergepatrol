@@ -20,7 +20,7 @@ use mergepatrol_core::{
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
-    ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
+    ApiAccess, BUNDLE_FILE, JobEvent, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
 };
 use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
@@ -846,6 +846,22 @@ async fn carry_reviews(ctx: &Ctx, key: &LaneKey, moved: &[(PrNumber, &str, &str)
             .carry_review(key.installation_id, &key.repo, *number, before, after)
             .await?;
     }
+    Ok(())
+}
+
+/// The queue's agent changed PR `number` from `before` to `after`: an approval holds only once
+/// the agent reviewed that change.
+async fn review_change(
+    ctx: &Ctx,
+    key: &LaneKey,
+    number: PrNumber,
+    before: &str,
+    after: &str,
+) -> Result<()> {
+    ctx.store
+        .review_queue_change(key.installation_id, &key.repo, number, before, after)
+        .await?;
+    ctx.reviews.notify_one();
     Ok(())
 }
 
@@ -2793,7 +2809,7 @@ pub(crate) async fn job_spec(
     Ok((spec, granted))
 }
 
-/// Runs a job in the sandbox, with its output in `out`. `Err` says why it failed.
+/// Runs a job in the sandbox, with its output in `out`: what it told of. `Err` says why it failed.
 async fn run_sandboxed(
     ctx: &Ctx,
     key: &LaneKey,
@@ -2802,7 +2818,7 @@ async fn run_sandboxed(
     spec: &JobSpec,
     out: &Path,
     private: bool,
-) -> Result<()> {
+) -> Result<Vec<JobEvent>> {
     let _ = tokio::fs::remove_dir_all(out).await;
     record(ctx, key, number, "job", job_id).await?;
     if let Some(b) = &ctx.billing {
@@ -2820,7 +2836,7 @@ async fn run_sandboxed(
     if let JobOutcome::Failed { reason } = result.outcome {
         bail!("{reason}");
     }
-    Ok(())
+    Ok(result.events)
 }
 
 /// Publishes the commits `base..local_head` to the PR branch, if it is still at `head`.
@@ -2902,7 +2918,7 @@ async fn fix_and_publish(
         let published =
             publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await?;
         if let Ok(sha) = &published {
-            carry_reviews(ctx, key, &[(pr.number, head, sha)]).await?;
+            review_change(ctx, key, pr.number, head, sha).await?;
         }
         anyhow::Ok(published)
     };
@@ -2971,6 +2987,7 @@ async fn rebase_and_publish(
     }
     let mut rebased: Vec<String> = heads[..from].to_vec();
     let mut moved: Vec<usize> = Vec::new();
+    let mut resolved: Vec<usize> = Vec::new();
     let result = rebase_layers(
         ctx,
         gh,
@@ -2984,6 +3001,7 @@ async fn rebase_and_publish(
         &trunk,
         &mut rebased,
         &mut moved,
+        &mut resolved,
     )
     .await;
     for i in &moved {
@@ -3036,6 +3054,7 @@ async fn rebase_and_publish(
     }
     let carried: Vec<(PrNumber, &str, &str)> = moved
         .iter()
+        .filter(|i| !resolved.contains(i))
         .map(|&i| {
             (
                 unit.layers[i].number,
@@ -3045,6 +3064,9 @@ async fn rebase_and_publish(
         })
         .collect();
     carry_reviews(ctx, key, &carried).await?;
+    for &i in &resolved {
+        review_change(ctx, key, unit.layers[i].number, &heads[i], &rebased[i]).await?;
+    }
     Ok(Event::Rebased {
         head: rebased.pop().expect("a unit has a PR"),
         base: trunk,
@@ -3113,7 +3135,8 @@ fn restack_branch(pr: &PullRequest) -> String {
 }
 
 /// Rebases each layer from `rebased.len()` up, and creates its commits on GitHub: pushes its new
-/// head to `rebased`, and its index to `moved` when it changed.
+/// head to `rebased`, its index to `moved` when it changed, and to `resolved` when the agent
+/// resolved a conflict in it.
 #[allow(clippy::too_many_arguments)]
 async fn rebase_layers(
     ctx: &Ctx,
@@ -3128,6 +3151,7 @@ async fn rebase_layers(
     trunk: &str,
     rebased: &mut Vec<String>,
     moved: &mut Vec<usize>,
+    resolved: &mut Vec<usize>,
 ) -> Result<()> {
     let repo = &key.repo;
     for i in rebased.len()..unit.layers.len() {
@@ -3157,7 +3181,13 @@ async fn rebase_layers(
         let out = ctx.config.data_dir.join("jobs").join(&job_id);
         let (spec, _granted) =
             job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
-        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        let events = run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        if events
+            .iter()
+            .any(|e| e.kind == SpendTask::Rebase.event_kind(true))
+        {
+            resolved.push(i);
+        }
         let local_head = check_job_output(
             git,
             cache,

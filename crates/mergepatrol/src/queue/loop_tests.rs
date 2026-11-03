@@ -606,6 +606,8 @@ struct Scripted {
     recheck_passes: bool,
     /// CI skips the recheck's commit, which changes nothing.
     recheck_skipped: bool,
+    /// A PR rebased once sits on the trunk: a later rebase leaves it as it is.
+    rebases_once: bool,
 }
 
 impl Scripted {
@@ -621,6 +623,7 @@ impl Scripted {
             fix_gives_up: None,
             recheck_passes: false,
             recheck_skipped: false,
+            rebases_once: false,
         }
     }
 
@@ -655,6 +658,11 @@ impl Sandbox for Scripted {
         };
         if let Some(reason) = &self.fail {
             return Ok(Event::RebaseFailed(reason.clone()));
+        }
+        if self.rebases_once && n > 1 {
+            let s = self.gh.state.lock().unwrap();
+            let (head, base) = (s.head(unit.top().number), s.trunk_of(&key.trunk));
+            return Ok(Event::Rebased { head, base });
         }
         let mut moved = Vec::new();
         let (head, base) = {
@@ -718,18 +726,26 @@ impl Sandbox for Scripted {
         if let Some(reason) = &self.fix_gives_up {
             return Ok(Event::FixGaveUp(reason.clone()));
         }
-        let mut s = self.gh.state.lock().unwrap();
-        let mut top = format!("{head}-f{n}");
-        s.push(unit.layers[layer].number, &top);
-        if self.fix_works {
-            let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
-            s.checks_on.insert(top.clone(), passing);
-        }
-        // The layers above go onto the fix.
-        for pr in &unit.layers[layer + 1..] {
-            top = format!("{}-s{n}", s.head(pr.number));
-            s.push(pr.number, &top);
-        }
+        let number = unit.layers[layer].number;
+        let (fixed, top) = {
+            let mut s = self.gh.state.lock().unwrap();
+            let fixed = format!("{head}-f{n}");
+            s.push(number, &fixed);
+            if self.fix_works {
+                let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+                s.checks_on.insert(fixed.clone(), passing);
+            }
+            // The layers above go onto the fix.
+            let mut top = fixed.clone();
+            for pr in &unit.layers[layer + 1..] {
+                top = format!("{}-s{n}", s.head(pr.number));
+                s.push(pr.number, &top);
+            }
+            (fixed, top)
+        };
+        self.store
+            .review_queue_change(1, &repo(), number, head, &fixed)
+            .await?;
         Ok(Event::Fixed { head: top })
     }
 }
@@ -762,6 +778,13 @@ impl Mem {
             .find(|r| r.number == number)
             .unwrap();
         r.status = status;
+    }
+
+    /// The newest head of PR `number` with a review, and the head that review goes on from.
+    fn newest_review(&self, number: PrNumber) -> (String, Option<String>) {
+        let reviews = self.reviews.lock().unwrap();
+        let r = reviews.iter().rev().find(|r| r.number == number).unwrap();
+        (r.head_sha.clone(), r.since_head.clone())
     }
 
     /// Changes a finding of the PR's newest review, which has one from then on.
@@ -857,6 +880,7 @@ impl ReviewStore for Mem {
             repo: repo.clone(),
             number: pr,
             head_sha: head.to_owned(),
+            since_head: None,
             status: ReviewStatus::Pending,
             error: None,
             attempts: 0,
@@ -884,6 +908,34 @@ impl ReviewStore for Mem {
     }
     async fn stale_review(&self, _: i64) -> Result<()> {
         unreachable!()
+    }
+    async fn review_queue_change(
+        &self,
+        _: u64,
+        _: &RepoName,
+        pr: PrNumber,
+        before: &str,
+        after: &str,
+    ) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        let from = reviews
+            .iter()
+            .find(|r| r.number == pr && r.head_sha == before)
+            .filter(|r| r.status == ReviewStatus::Approved || r.since_head.is_some())
+            .cloned();
+        if let Some(r) = from {
+            reviews.push(ReviewRecord {
+                id: r.id + 100,
+                head_sha: after.to_owned(),
+                since_head: match r.status {
+                    ReviewStatus::Approved => Some(r.head_sha),
+                    _ => r.since_head,
+                },
+                status: ReviewStatus::Pending,
+                ..r
+            });
+        }
+        Ok(())
     }
     async fn carry_review(
         &self,
@@ -1472,6 +1524,32 @@ async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
     }));
     run.tick().await;
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_agents_fix_needs_a_review_of_itself_before_the_pr_merges() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.rebases_once = true;
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    run.tick().await;
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.tick().await;
+    assert!(run.merged().is_empty(), "the fix has no review yet");
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+    let (head, since) = run.store.newest_review(1);
+    assert!(head.contains("-f"), "{head}");
+    assert_eq!(
+        since.as_deref(),
+        Some("pr-1-r1"),
+        "only the fix needs reading"
+    );
+
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
 }
 
 #[tokio::test(start_paused = true)]

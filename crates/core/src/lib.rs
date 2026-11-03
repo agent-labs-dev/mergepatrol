@@ -32,6 +32,8 @@ pub type PrNumber = u64;
 
 /// The trailer on every commit the fix agent makes, before the agent's name.
 pub const FIXED_BY: &str = "Fixed-by: mergepatrol";
+/// The trailer of a commit whose conflict the agent resolved in a rebase.
+pub const RESOLVED_BY: &str = "Resolved-by: mergepatrol";
 
 /// Who runs the agent's model, with the workspace's own key.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

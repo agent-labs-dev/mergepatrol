@@ -56,6 +56,9 @@ pub struct ReviewRequest<'a> {
     /// What the agent sent back to the author on the last head, to check the fix of, with the
     /// author's replies.
     pub sent_back: &'a [SentBack],
+    /// What the queue's agent committed on a version already approved, as "sha subject". When
+    /// any, only these need reading.
+    pub queue_commits: &'a [String],
     pub transcript: &'a Path,
 }
 
@@ -318,13 +321,24 @@ title and say why the reply does not hold. One that was neither fixed nor answer
 with the same title, so the author can tell it is the same one, and say what is still missing.\n{items}\n"
         )
     };
+    let queue_commits = if req.queue_commits.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
+changed it, to fix failed checks or resolve a conflict in a rebase. Review only these commits, \
+with `git show`, and read the rest of the PR only to judge them. Report nothing about the rest of \
+the PR unless one of these breaks it.\n{}\n",
+            req.queue_commits.join("\n")
+        )
+    };
     format!(
         "You are reviewing a pull request before a merge queue merges it into `{trunk}`.
 
 Pull request: {title}
 
 {body}
-{answered}{sent_back}
+{answered}{sent_back}{queue_commits}
 Its changes are `git diff {base}..HEAD`. Read them, and read the code around them that you need \
 to judge them: callers, tests, config, deploy files, earlier migrations, docs. Use `git log`, \
 `git show` and `git diff`, and read files. Change nothing.

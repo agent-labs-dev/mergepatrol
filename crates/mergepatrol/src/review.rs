@@ -209,6 +209,7 @@ async fn run_review(
         let task = Task::Review {
             answered,
             sent_back,
+            since: r.since_head.clone(),
         };
         let (spec, granted) =
             job_spec(ctx, gh, key, pr, settings, &r.head_sha, &trunk, None, task).await?;
@@ -746,6 +747,7 @@ mod tests {
             related: Vec::new(),
         };
         ReviewRecord {
+            since_head: None,
             id,
             installation_id: 1,
             repo: RepoName::parse("o/r").unwrap(),

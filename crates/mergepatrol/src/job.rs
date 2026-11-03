@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, SentBack, Spend, SpendTask,
+    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, RESOLVED_BY, SentBack, Spend,
+    SpendTask,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -163,8 +164,10 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
         Task::Review {
             answered,
             sent_back,
+            since,
         } => {
-            return review(spec, &git, resolver, answered, sent_back, dir, out, events).await;
+            let earlier = (answered.as_slice(), sent_back.as_slice(), since.as_deref());
+            return review(spec, &git, resolver, earlier, dir, out, events).await;
         }
         Task::Question {
             finding,
@@ -287,10 +290,7 @@ async fn rebase(
         }
         resolved_any = true;
         step = git
-            .continue_resolution(
-                dir,
-                &format!("Resolved-by: mergepatrol, {}", resolver.name()),
-            )
+            .continue_resolution(dir, &format!("{RESOLVED_BY}, {}", resolver.name()))
             .await?;
     }
 
@@ -387,13 +387,23 @@ async fn review(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    answered: &[Answered],
-    sent_back: &[SentBack],
+    (answered, sent_back, since): (&[Answered], &[SentBack], Option<&str>),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
+    let queue_commits = match since {
+        Some(since) => {
+            // A rebase replays the PR, and leaves the head it went on from behind.
+            let on_it = git.is_ancestor(dir, since, &spec.head_sha).await;
+            let from = if on_it.unwrap_or(false) { since } else { &base };
+            let trailers = [FIXED_BY, RESOLVED_BY];
+            git.commits_with(dir, from, &spec.head_sha, &trailers)
+                .await?
+        }
+        None => Vec::new(),
+    };
     event(
         events,
         "reviewing",
@@ -411,6 +421,7 @@ async fn review(
             trunk: &spec.trunk,
             answered,
             sent_back,
+            queue_commits: &queue_commits,
             transcript: &transcript,
         })
         .await

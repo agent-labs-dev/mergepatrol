@@ -892,6 +892,7 @@ mod tests {
 
     fn record(findings: Vec<Judged>, answers: BTreeMap<String, Answer>) -> ReviewRecord {
         ReviewRecord {
+            since_head: None,
             id: 1,
             installation_id: 1,
             repo: RepoName::parse("o/r").unwrap(),

@@ -368,6 +368,47 @@ async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
 }
 
 #[tokio::test]
+async fn a_review_since_an_approval_names_only_the_queues_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    let trunk = commit(&origin, "app.rs", "one\n");
+    git(&origin, &["checkout", "-q", "-b", "pr"]);
+    let approved = commit(&origin, "app.rs", "two\n");
+    std::fs::write(origin.join("app.rs"), "three\n").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-qm", "Fix ci\n\nFixed-by: mergepatrol, a"],
+    );
+    let head = git(&origin, &["rev-parse", "HEAD"]);
+
+    let seen = tmp.path().join("prompt");
+    let keep = format!("printf '%s' \"$*\" > {}", seen.display());
+    let answer = r#"{"summary":"s","findings":[]}"#;
+    let executor = with_fake_claude_running(tmp.path(), &keep, answer);
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(mergepatrol_executor::protocol::ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "t".into(),
+    });
+    spec.task = Task::Review {
+        answered: Vec::new(),
+        sent_back: Vec::new(),
+        since: Some(approved),
+    };
+    let result = executor
+        .run("t6", &spec, &tmp.path().join("out"))
+        .await
+        .unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+    let prompt = std::fs::read_to_string(&seen).unwrap();
+    assert!(prompt.contains("Review only these commits"), "{prompt}");
+    assert!(prompt.contains("Fix ci"), "{prompt}");
+}
+
+#[tokio::test]
 async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");
@@ -397,6 +438,7 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     spec.task = Task::Review {
         answered: Vec::new(),
         sent_back: Vec::new(),
+        since: None,
     };
     let out = tmp.path().join("out");
     // The fake CLI echoes its answer, so one line: `echo` would break a `\n`.
@@ -460,6 +502,7 @@ async fn a_review_the_agent_cannot_give_fails_and_says_why() {
     spec.task = Task::Review {
         answered: Vec::new(),
         sent_back: Vec::new(),
+        since: None,
     };
     let out = tmp.path().join("out");
     let result = with_fake_claude(tmp.path(), "Looks good to me!")

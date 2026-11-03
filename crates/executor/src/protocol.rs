@@ -62,6 +62,10 @@ pub enum Task {
         answered: Vec<Answered>,
         #[serde(default)]
         sent_back: Vec<SentBack>,
+        /// The approved head it goes on from: only what the queue's agent changed since needs
+        /// reading.
+        #[serde(default)]
+        since: Option<String>,
     },
     /// Answer a question about a finding of the review, and write `ANSWER_FILE`. `sent_back`:
     /// the finding went back to the author, and this is their reply, which it may withdraw on.
