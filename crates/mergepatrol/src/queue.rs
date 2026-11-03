@@ -2156,10 +2156,17 @@ async fn checks_verdict(
             }
         }
     }
+    // A check that skipped what failed proves nothing of it.
+    let skipped: Vec<String> = rechecking
+        .iter()
+        .filter(|name| checks.skipped.contains(*name))
+        .cloned()
+        .collect();
     let verdict = match checks.verdict(&required) {
         (CheckState::Passed, _) if none_required && published.elapsed() < NO_CHECKS_GRACE => {
             (CheckState::Pending, vec![])
         }
+        (CheckState::Passed, _) if !skipped.is_empty() => (CheckState::Failed, skipped),
         v => v,
     };
     let mut unreported = checks.unreported(&required);

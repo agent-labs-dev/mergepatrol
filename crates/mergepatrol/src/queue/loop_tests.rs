@@ -55,6 +55,8 @@ struct State {
     strict: bool,
     /// The merge methods a ruleset allows, if one narrows them. The repo's default is `merge`.
     merge_methods: Option<Vec<String>>,
+    /// The checks that pass without running.
+    skipped: Vec<String>,
     /// The fixes each PR's commits already used.
     fixes_used: HashMap<PrNumber, u32>,
     /// The merge methods the repo's settings allow, if they narrow them.
@@ -442,6 +444,7 @@ impl GitHub for Fake {
         }
         Ok(Checks {
             by_name: s.checks_of(sha),
+            skipped: s.skipped.iter().cloned().collect(),
             workflows_running: None,
         })
     }
@@ -2549,6 +2552,17 @@ async fn a_recheck_waits_out_the_grace_with_no_required_checks() {
     run.tick().await;
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
     assert!(start.elapsed() >= NO_CHECKS_GRACE, "{:?}", start.elapsed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_whose_check_is_skipped_does_not_pass() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_passes = true;
+    run.gh.with_mut(|s| s.skipped = vec!["ci".into()]);
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 #[tokio::test(start_paused = true)]
