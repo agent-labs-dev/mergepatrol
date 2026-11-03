@@ -197,14 +197,16 @@ pub(crate) async fn conclude(
     let Some((held, done)) = finish(ctx, gh, key, pr, r, settings, bars, output).await? else {
         return Ok(());
     };
-    let fixed = fix_sent_back(ctx, gh, key, pr, settings, r.id, held)
+    let fix = fix_sent_back(ctx, gh, key, pr, settings, r.id, held)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not fix the review's findings");
-            false
+            Fix::Unfixed
         });
-    if fixed {
-        return ctx.store.settle_review(r.id, r.claim).await;
+    match fix {
+        Fix::Pushed => return ctx.store.settle_review(r.id, r.claim).await,
+        Fix::Superseded => return ctx.store.stale_review(r.id, r.claim).await,
+        Fix::Unfixed => {}
     }
     // The PR moved while the fix ran: a pushed or retargeted head gets its own review, and one
     // no longer queued gets none. What this one found would be out of date.
@@ -259,9 +261,18 @@ pub(crate) async fn hold_for_fix(
     }))
 }
 
+/// How the agent's fix of what a review sent back ended.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Fix {
+    Pushed,
+    /// The PR's branch moved under the fix: the review is of a head it no longer has.
+    Superseded,
+    /// No fix: the findings wait for the author.
+    Unfixed,
+}
+
 /// While the PR has fixes left, the agent's fix goes first, while `held`. Without one, or if the
-/// agent cannot fix it, the findings wait for the author, as they would anyway. Whether it pushed
-/// a fix.
+/// agent cannot fix it, the findings wait for the author, as they would anyway.
 pub(crate) async fn fix_sent_back(
     ctx: &Ctx,
     gh: &Installation,
@@ -270,23 +281,27 @@ pub(crate) async fn fix_sent_back(
     settings: &RepoSettings,
     review: i64,
     held: HeldForFix,
-) -> Result<bool> {
+) -> Result<Fix> {
     let Some(r) = ctx.store.review(review).await? else {
-        return Ok(false);
+        return Ok(Fix::Unfixed);
     };
     let findings = fixable(&r, pr.is_cross_repository);
     if findings.is_empty() {
-        return Ok(false);
+        return Ok(Fix::Unfixed);
     }
     // The review took a while: the PR may have moved on.
     let to_fix = held.unit.to_fix(gh, key, settings, r.number, &r.head_sha);
     let Some((now, layer)) = to_fix.await? else {
-        return Ok(false);
+        return Ok(Fix::Unfixed);
     };
     let what = format!("{} sent back", findings.len());
     record(ctx, key, r.number, "review-fixing", &what).await?;
     let event = fix_findings(ctx, gh, key, &now, layer, settings, findings).await;
-    let fixed = matches!(event, Ok(Event::Fixed { .. }));
+    let fix = match event {
+        Ok(Event::Fixed { .. }) => Fix::Pushed,
+        Ok(Event::HeadMoved) => Fix::Superseded,
+        _ => Fix::Unfixed,
+    };
     let (kind, message) = match event {
         Ok(Event::Fixed { head }) => {
             ctx.store.mark_agent_fixed(r.id).await?;
@@ -298,7 +313,7 @@ pub(crate) async fn fix_sent_back(
     };
     record(ctx, key, r.number, kind, &message).await?;
     ctx.reviews.notify_one();
-    Ok(fixed)
+    Ok(fix)
 }
 
 const NO_KEY: &str = "No model API key";

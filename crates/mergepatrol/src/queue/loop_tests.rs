@@ -69,6 +69,9 @@ struct State {
     comments: Vec<(PrNumber, String)>,
     /// The reviews posted on each PR: their body, and how many threads they start.
     reviews: Vec<(PrNumber, String, usize)>,
+    /// The review threads those started, in order: their first comment, the replies in them, and
+    /// whether they are resolved.
+    threads: Vec<(String, Vec<String>, bool)>,
     merges: u32,
     /// Merged PRs stay, closed, as on GitHub.
     merged: Vec<PrNumber>,
@@ -804,6 +807,8 @@ struct Mem {
     reviews: Mutex<Vec<ReviewRecord>>,
     /// The reviews whose findings the agent fixes first, with nothing posted yet.
     fixing: Mutex<std::collections::HashSet<i64>>,
+    /// Reading a review fails, as when the database is down.
+    review_reads_fail: Mutex<bool>,
     review_settings: Mutex<Option<ReviewSettings>>,
     repo_defaults: Mutex<Option<WorkspaceDefaults>>,
 }
@@ -869,6 +874,9 @@ impl Mem {
 #[async_trait]
 impl ReviewStore for Mem {
     async fn review(&self, id: i64) -> Result<Option<ReviewRecord>> {
+        if *self.review_reads_fail.lock().unwrap() {
+            anyhow::bail!("the database is down");
+        }
         let reviews = self.reviews.lock().unwrap();
         Ok(reviews.iter().find(|r| r.id == id).cloned())
     }

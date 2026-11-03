@@ -225,8 +225,30 @@ fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
     }
     let s = gh.state.lock().unwrap();
     if query.contains("reviewThreads(first: 100) { nodes { id isResolved") {
-        let none = json!({ "reviewThreads": { "nodes": [] } });
-        return json!({ "data": { "repository": { "pullRequest": none } } });
+        // Thread `i` starts with comment `i + 1`; its replies are numbered after it.
+        let comment = |id: usize, body: &str| json!({ "nodes": [{ "databaseId": id, "body": body, "author": { "login": "mergeloop" } }] });
+        let nodes: Vec<Value> = s
+            .threads
+            .iter()
+            .enumerate()
+            .map(|(i, (first, replies, resolved))| {
+                let last = match replies.last() {
+                    Some(reply) => comment(1000 * (i + 1) + replies.len(), reply),
+                    None => comment(i + 1, first),
+                };
+                json!({ "id": format!("t{i}"), "isResolved": resolved,
+                        "first": comment(i + 1, first), "last": last })
+            })
+            .collect();
+        let threads = json!({ "reviewThreads": { "nodes": nodes } });
+        return json!({ "data": { "repository": { "pullRequest": threads } } });
+    }
+    if query.contains("ReviewThread(input") {
+        drop(s);
+        let i: usize = vars["id"].as_str().unwrap()[1..].parse().unwrap();
+        let resolved = query.contains("resolveReviewThread") && !query.contains("unresolve");
+        gh.with_mut(|s| s.threads[i].2 = resolved);
+        return json!({ "data": {} });
     }
     if query.contains("pullRequests(") {
         return json!({ "data": { "repository": repository_node(&s.trunk) } });
@@ -319,10 +341,26 @@ fn answer(gh: &Fake, origin: &Path, method: &str, path: &str, body: &str) -> (u1
         .strip_prefix("pulls/")
         .and_then(|r| r.strip_suffix("/reviews"))
     {
-        let threads = body["comments"].as_array().map_or(0, Vec::len);
+        let comments = body["comments"].as_array().cloned().unwrap_or_default();
         let text = body["body"].as_str().unwrap_or_default().to_owned();
-        gh.with_mut(|s| s.reviews.push((number.parse().unwrap(), text, threads)));
+        gh.with_mut(|s| {
+            s.reviews
+                .push((number.parse().unwrap(), text, comments.len()));
+            for c in &comments {
+                let first = c["body"].as_str().unwrap().to_owned();
+                s.threads.push((first, Vec::new(), false));
+            }
+        });
         return (200, "{}".into());
+    }
+    if let Some(reply) = rest
+        .strip_prefix("pulls/1/comments/")
+        .and_then(|r| r.strip_suffix("/replies"))
+    {
+        let i = reply.parse::<usize>().unwrap() - 1;
+        let text = body["body"].as_str().unwrap().to_owned();
+        gh.with_mut(|s| s.threads[i].1.push(text));
+        return (201, "{}".into());
     }
     match (method, rest) {
         ("POST", "git/blobs") => {
@@ -1213,11 +1251,57 @@ async fn a_pr_pushed_to_during_the_fix_gets_no_out_of_date_review() {
 }
 
 #[tokio::test]
-async fn a_review_that_clears_everything_posts_nothing() {
+async fn a_review_that_clears_everything_posts_nothing_but_resolves_what_it_found_fixed() {
     let world = World::one_pr("feature.txt", "other.txt").await;
     world.review_on();
     world.tick().await;
+    // A finding the author was left with, in a thread.
+    let job = world.ctx.prep.claim(&world.key(), 1).unwrap();
+    world.conclude(100).await;
+    drop(job);
+    assert_eq!(world.posted(), [1]);
+
+    // The author pushes, and the next review clears everything.
+    world.gh.with_mut(|s| s.push(1, "fixed"));
     world.conclude(10).await;
     assert!(world.did(1, "review-approved"), "{:?}", world.kinds(1));
+    assert_eq!(world.posted(), [1], "no summary");
+    let (_, replies, resolved) = world.gh.with(|s| s.threads[0].clone());
+    assert!(resolved, "the thread it found fixed");
+    assert!(
+        replies[0].starts_with("Cleared by the review"),
+        "{replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_finding_is_posted_when_the_fix_errors() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    *world.store.review_reads_fail.lock().unwrap() = true;
+    let review = world.conclude(100).await;
+    assert!(world.tasks().is_empty(), "no fix");
+    assert_eq!(world.posted(), [1]);
+    assert!(!world.fixing(review));
+}
+
+#[tokio::test]
+async fn a_fix_whose_branch_moves_under_it_gets_no_out_of_date_review() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    // The branch moves, though the PR GitHub shows still has the reviewed head.
+    let gh = world.gh.clone();
+    world.during(async move {
+        gh.with_mut(|s| {
+            let elsewhere = s.trunk.clone();
+            s.branches.insert("pr-1".into(), elsewhere);
+        });
+    });
+    let review = world.conclude(100).await;
+    assert!(!world.did(1, "review-fixed"), "{:?}", world.kinds(1));
     assert_eq!(world.posted(), Vec::<usize>::new());
+    let r = world.store.review(review).await.unwrap().unwrap();
+    assert_eq!(r.status, ReviewStatus::Stale);
 }
