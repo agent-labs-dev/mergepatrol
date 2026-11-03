@@ -946,7 +946,7 @@ async fn tick_lane(
 
     // GitHub merges a PR behind the trunk, which a batch's PRs are, unless the trunk is strict.
     if next.len() > 1 && !rules.strict {
-        let ready = batchable(ctx, gh, &key, &units, &rules.checks, &next).await?;
+        let ready = batchable(gh, repo, &units, &rules.checks, &next).await?;
         if let Some(batch) = build_batch(ctx, gh, &key, &snap, &mut lane, &ready).await? {
             run_batch(ctx, &settings, gh, &key, &snap, &mut lane, batch).await?;
             return Ok(Ran::Job);
@@ -1651,9 +1651,8 @@ async fn comment_all(gh: &dyn GitHub, repo: &RepoName, prs: &[PrNumber], body: &
 /// The units of `next` that can join a batch as they are, in order, up to the first that cannot:
 /// GitHub must merge each without a rebase, so the required checks of each of its PRs passed.
 async fn batchable(
-    ctx: &Ctx,
     gh: &dyn GitHub,
-    key: &LaneKey,
+    repo: &RepoName,
     units: &[Unit],
     required: &[String],
     next: &[PrNumber],
@@ -1667,13 +1666,8 @@ async fn batchable(
         if unit.fork() {
             break;
         }
-        // What a recheck off the lane pushed must really run what failed: the lane checks that.
-        let top = &unit.top().head_ref_oid;
-        if ctx.prep.recheck_of(key, unit.number, top).is_some() {
-            break;
-        }
         for pr in &unit.layers {
-            let checks = gh.checks(&key.repo, &pr.head_ref_oid).await?;
+            let checks = gh.checks(repo, &pr.head_ref_oid).await?;
             if checks.verdict(required).0 != CheckState::Passed {
                 break 'next;
             }
@@ -2469,13 +2463,6 @@ async fn run_job(
     let mut job = Job::start(unit.number, fix_attempts);
     if fix_attempts > 0 {
         job.fixes += unit.fixes_used(gh, repo).await?;
-    }
-    // A recheck off the lane pushed this head: a failure on it now is the PR's.
-    let top = &unit.top().head_ref_oid;
-    if let Some(failed) = ctx.prep.recheck_of(key, unit.number, top) {
-        job.rechecked = true;
-        lane.set_recheck(unit.number, top.clone(), failed);
-        ctx.store.save_lane(key, lane).await?;
     }
     let mut published_at = Instant::now();
     // Each layer's head as published, bottom to top, and the layer whose checks failed.
