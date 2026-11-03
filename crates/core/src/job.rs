@@ -127,6 +127,8 @@ pub enum Event {
         base: String,
     },
     RebaseFailed(String),
+    /// It conflicts with the trunk, and the lane left that for off the lane.
+    RebaseConflict,
     ChecksPassed,
     ChecksFailed(Vec<String>),
     /// These required checks are still pending, `CHECKS_TIMEOUT` after the publish.
@@ -191,6 +193,7 @@ impl Job {
         match (&self.phase, event) {
             (P::Rebasing, E::Rebased { head, base }) => self.with(P::AwaitingChecks { head, base }),
             (P::Rebasing, E::RebaseFailed(r)) => Transition::Ejected(EjectReason::RebaseFailed(r)),
+            (P::Rebasing, E::RebaseConflict) => Transition::Held(Hold::PrepRebasing),
 
             (P::AwaitingChecks { head, .. }, E::ChecksPassed) => {
                 let head = head.clone();
@@ -307,6 +310,14 @@ mod tests {
         };
         assert_eq!(job.phase, Phase::Merging { head: "h1".into() });
         assert_eq!(job.step(Event::Merged), Transition::Merged);
+    }
+
+    #[test]
+    fn a_conflict_left_for_off_the_lane_holds_the_pr() {
+        assert_eq!(
+            Job::start(7, 2).step(Event::RebaseConflict),
+            Transition::Held(Hold::PrepRebasing)
+        );
     }
 
     #[test]

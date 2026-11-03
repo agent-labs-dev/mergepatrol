@@ -61,6 +61,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
         pr_title: "t".into(),
         pr_body: String::new(),
         verify: Vec::new(),
+        leave_conflicts: false,
         resolver: ResolverSpec {
             provider: Default::default(),
             model: "claude-opus-5-5".into(),
@@ -180,6 +181,25 @@ async fn a_rebase_that_leaves_nothing_says_so() {
         reason.contains("its changes are already on main"),
         "{reason}"
     );
+}
+
+#[tokio::test]
+async fn a_conflict_left_for_off_the_lane_stops_with_no_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "shared.txt", "shared.txt");
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.leave_conflicts = true;
+    let result = executor()
+        .run("t8", &spec, &tmp.path().join("out"))
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(reason.starts_with("it conflicts in shared.txt"), "{reason}");
 }
 
 #[tokio::test]

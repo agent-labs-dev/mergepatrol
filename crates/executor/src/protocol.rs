@@ -41,6 +41,9 @@ pub struct JobSpec {
     pub pr_body: String,
     /// The repo's verify commands, from its config file.
     pub verify: Vec<String>,
+    /// A rebase stops at a conflict, with no agent: it is the job's to get ready off the lane.
+    #[serde(default)]
+    pub leave_conflicts: bool,
     pub resolver: ResolverSpec,
     #[serde(default)]
     pub task: Task,

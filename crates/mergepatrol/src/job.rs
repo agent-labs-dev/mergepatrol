@@ -255,6 +255,9 @@ async fn rebase(
         .await?;
     while let RebaseStep::Conflict { commit, files } = step {
         event(events, "conflict", files.join(", "));
+        if spec.leave_conflicts {
+            bail!("{LEFT_CONFLICT} in {}", files.join(", "));
+        }
         if spec.resolver.api.is_none() {
             let files = files.join(", ");
             let credential = spec.resolver.provider.credential();
@@ -324,6 +327,9 @@ async fn rebase(
     }
     Ok(())
 }
+
+/// How a rebase's failure starts when it stopped at a conflict, as `leave_conflicts` asks.
+pub(crate) const LEFT_CONFLICT: &str = "it conflicts";
 
 /// How a fix's failure starts when the agent found nothing in the code to fix: the orchestrator
 /// reads it from the job's reason.

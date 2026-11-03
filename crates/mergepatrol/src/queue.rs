@@ -38,7 +38,7 @@ use crate::cached::{Cached, Reader};
 use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
-use crate::job::GAVE_UP;
+use crate::job::{GAVE_UP, LEFT_CONFLICT};
 use crate::publish::{Publish, create_commits, publish};
 use crate::review::still_fixable;
 
@@ -2349,6 +2349,8 @@ async fn run_job(
         true => 0,
         false => settings.fix_ci.allowed(),
     };
+    // A conflict in the lane would hold up every PR behind it, while the agent resolves it.
+    let agent = !ctx.prep.takes_conflicts(ctx, key, unit);
     let mut job = Job::start(unit.number, fix_attempts);
     if fix_attempts > 0 {
         for pr in &unit.layers {
@@ -2406,7 +2408,11 @@ async fn run_job(
                 record_all(ctx, key, &prs, "rebasing", &format!("onto {}", key.trunk)).await?;
                 let comment = format!("Rebasing onto `{}`.", key.trunk);
                 comment_all(gh, repo, &prs, &comment).await?;
-                let event = sandbox.rebase(key, snap, &now, settings).await?;
+                let event = sandbox.rebase(key, snap, &now, settings, agent).await?;
+                if event == Event::RebaseConflict {
+                    ctx.prep
+                        .conflicted(key, unit.number, &now.top().head_ref_oid);
+                }
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
                     if now.fork() {
@@ -2585,6 +2591,7 @@ trait Sandbox: Send + Sync {
         snap: &RepoSnapshot,
         unit: &Unit,
         settings: &RepoSettings,
+        agent: bool,
     ) -> Result<Event>;
 
     /// Commits a fix for `failures` on top of `head`, the head of `unit.layers[layer]`, which
@@ -2651,8 +2658,17 @@ impl JobSandbox<'_> {
         }
         // The layers above the fix go onto it.
         Ok(
-            match rebase_and_publish(self.ctx, self.gh, key, snap, unit, layer + 1, settings)
-                .await?
+            match rebase_and_publish(
+                self.ctx,
+                self.gh,
+                key,
+                snap,
+                unit,
+                layer + 1,
+                settings,
+                true,
+            )
+            .await?
             {
                 Event::Rebased { head, .. } => Event::Fixed { head },
                 Event::RebaseFailed(r) => Event::FixFailed(format!("restacking after it: {r}")),
@@ -2700,8 +2716,10 @@ impl Sandbox for JobSandbox<'_> {
         snap: &RepoSnapshot,
         unit: &Unit,
         settings: &RepoSettings,
+        agent: bool,
     ) -> Result<Event> {
-        let event = rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await;
+        let event =
+            rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings, agent).await;
         self.published(key, event).await
     }
 
@@ -2834,6 +2852,7 @@ pub(crate) async fn job_spec(
         pr_title: pr.title.clone(),
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
+        leave_conflicts: false,
         resolver: ResolverSpec {
             provider,
             model: model.to_owned(),
@@ -3087,7 +3106,8 @@ async fn push_recheck(
 /// The layers' branches move together, in one atomic update at the end. Until then a rebased
 /// layer is on a branch of its own, for the next layer's job to fetch. So a restart, or an
 /// author's push, never leaves a layer rebased under one that is not: each layer's own commits
-/// still start at the layer below, as it is on GitHub.
+/// still start at the layer below, as it is on GitHub. Without `agent`, a conflict stops it.
+#[allow(clippy::too_many_arguments)]
 async fn rebase_and_publish(
     ctx: &Ctx,
     gh: &Installation,
@@ -3096,6 +3116,7 @@ async fn rebase_and_publish(
     unit: &Unit,
     from: usize,
     settings: &RepoSettings,
+    agent: bool,
 ) -> Result<Event> {
     let git = Git;
     let (cache, heads, trunk) = {
@@ -3118,6 +3139,7 @@ async fn rebase_and_publish(
         snap,
         unit,
         settings,
+        agent,
         &heads,
         &trunk,
         &mut rebased,
@@ -3130,6 +3152,9 @@ async fn rebase_and_publish(
             .await?;
     }
     if let Err(e) = result {
+        if !agent && format!("{e:#}").starts_with(LEFT_CONFLICT) {
+            return Ok(Event::RebaseConflict);
+        }
         let failed = rebased.len();
         return Ok(Event::RebaseFailed(match (unit.stacked, unit.fork()) {
             (true, _) => format!("#{}: {e:#}", unit.layers[failed].number),
@@ -3255,6 +3280,7 @@ async fn rebase_layers(
     snap: &RepoSnapshot,
     unit: &Unit,
     settings: &RepoSettings,
+    agent: bool,
     heads: &[String],
     trunk: &str,
     rebased: &mut Vec<String>,
@@ -3287,8 +3313,9 @@ async fn rebase_layers(
         let upstream = below.as_ref().map(|b| b.upstream.to_owned());
         let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
         let out = ctx.config.data_dir.join("jobs").join(&job_id);
-        let (spec, _granted) =
+        let (mut spec, _granted) =
             job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
+        spec.leave_conflicts = !agent;
         let events = run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         if agent_resolved(&events) {
             resolved.push(i);

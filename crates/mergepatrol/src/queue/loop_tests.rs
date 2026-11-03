@@ -613,6 +613,8 @@ struct Scripted {
     recheck_passes: bool,
     /// CI skips the recheck's commit, which changes nothing.
     recheck_skipped: bool,
+    /// These PRs conflict with the trunk, which GitHub has yet to say.
+    conflicts_on: Vec<PrNumber>,
     /// A PR rebased once sits on the trunk: a later rebase leaves it as it is.
     rebases_once: bool,
 }
@@ -630,6 +632,7 @@ impl Scripted {
             fix_gives_up: None,
             recheck_passes: false,
             recheck_skipped: false,
+            conflicts_on: Vec::new(),
             rebases_once: false,
         }
     }
@@ -652,6 +655,7 @@ impl Sandbox for Scripted {
         _: &RepoSnapshot,
         unit: &Unit,
         _: &RepoSettings,
+        agent: bool,
     ) -> Result<Event> {
         let n = {
             let mut n = self.rebases.lock().unwrap();
@@ -665,6 +669,12 @@ impl Sandbox for Scripted {
         };
         if let Some(reason) = &self.fail {
             return Ok(Event::RebaseFailed(reason.clone()));
+        }
+        if self.conflicts_on.contains(&unit.number) {
+            return Ok(match agent {
+                true => Event::RebaseFailed("the agent could not resolve it".into()),
+                false => Event::RebaseConflict,
+            });
         }
         if self.rebases_once && n > 1 {
             let s = self.gh.state.lock().unwrap();
@@ -1682,6 +1692,37 @@ async fn a_conflict_is_rebased_off_the_lane() {
     assert_eq!(run.lane(), [(1, "Held(PrepRebasing)".into())]);
     assert_eq!(run.ctx.prep.asked(), [(1, prep::Work::Rebase)]);
     assert_eq!(run.rebase.count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_lane_finds_goes_back_off_it_and_the_next_pr_goes_on() {
+    let mut run = prep_run(prs(&[1, 2]));
+    run.rebase.conflicts_on = vec![1];
+    run.tick().await;
+    assert_eq!(run.lane()[0], (1, "Held(PrepRebasing)".into()));
+    assert!(!run.kinds(1).contains(&"ejected".to_owned()));
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked(), [(1, prep::Work::Rebase)]);
+    assert_eq!(run.merged(), [2]);
+    assert_eq!(run.lane(), [(1, "Held(PrepRebasing)".into())]);
+
+    // Its job ended with the head as it was: the lane's word on that head is used up.
+    run.ctx.prep.take(&repo());
+    run.ctx.prep.finish(&(1, repo(), 1), None);
+    run.rebase.conflicts_on.clear();
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.merged(), [2, 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_prep_could_not_settle_is_the_lanes_to_eject() {
+    let mut run = prep_run(prs(&[1]));
+    run.rebase.conflicts_on = vec![1];
+    let head = run.gh.with(|s| s.head(1));
+    run.ctx.prep.leave_to_lane((1, repo(), 1), &head);
+    run.tick().await;
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 #[tokio::test(start_paused = true)]

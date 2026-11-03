@@ -67,6 +67,8 @@ pub struct Prep {
     next_claim: AtomicU64,
     /// The head of each PR left to the lane: its job could not settle it.
     left: Mutex<HashMap<PrId, String>>,
+    /// The head of each PR the lane found a conflict on, which GitHub may not say yet.
+    conflicts: Mutex<HashMap<PrId, String>>,
     /// Each PR's head that its checks hold, and since when.
     since: Mutex<HashMap<PrId, (String, Instant)>>,
 }
@@ -79,6 +81,27 @@ impl Prep {
 
     fn left_to_lane(&self, id: &PrId, head: &str) -> bool {
         self.left.lock().unwrap().get(id).is_some_and(|h| h == head)
+    }
+
+    /// Whether a conflict of `unit`'s is for here to resolve, and not its job in the lane.
+    pub(super) fn takes_conflicts(&self, ctx: &Ctx, key: &LaneKey, unit: &Unit) -> bool {
+        let id = (key.installation_id, key.repo.clone(), unit.number);
+        ctx.config.prep
+            && !unit.stacked
+            && !unit.fork()
+            && !self.left_to_lane(&id, &unit.top().head_ref_oid)
+    }
+
+    /// The lane found a conflict on the PR's `head`.
+    pub(super) fn conflicted(&self, key: &LaneKey, number: PrNumber, head: &str) {
+        let id = (key.installation_id, key.repo.clone(), number);
+        self.conflicts.lock().unwrap().insert(id, head.to_owned());
+    }
+
+    /// Whether the lane found a conflict on `head`, which it asks only once.
+    fn take_conflict(&self, id: &PrId, head: &str) -> bool {
+        let mut conflicts = self.conflicts.lock().unwrap();
+        conflicts.remove_entry(id).is_some_and(|(_, h)| h == head)
     }
 
     /// Asks for `wanted`, or, if a job has the PR since the tick looked, holds it for that one.
@@ -146,7 +169,7 @@ impl Prep {
     }
 
     /// The PR's job ended, for its claim to stop holding it. `left`: the head it could not settle.
-    fn finish(&self, id: &PrId, left: Option<String>) {
+    pub(super) fn finish(&self, id: &PrId, left: Option<String>) {
         if let Some(head) = left {
             self.left.lock().unwrap().insert(id.clone(), head);
         }
@@ -203,7 +226,7 @@ pub(super) async fn hold(
         work,
         token: 0,
     };
-    if pr.conflicting {
+    if ctx.prep.take_conflict(&id, head) || pr.conflicting {
         let wanted = want(Work::Rebase);
         return Ok(Some(ctx.prep.want(id, Hold::PrepRebasing, wanted)));
     }
@@ -300,7 +323,7 @@ async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
         Work::Rebase => {
             let onto = format!("onto {}", key.trunk);
             record(ctx, key, pr.number, "rebasing", &onto).await?;
-            rebase_and_publish(ctx, gh, key, snap, unit, 0, settings).await
+            rebase_and_publish(ctx, gh, key, snap, unit, 0, settings, true).await
         }
         Work::Fix { failed } => {
             let head = &pr.head_ref_oid;

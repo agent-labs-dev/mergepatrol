@@ -39,7 +39,7 @@ A labeled PR keeps its place in line, on hold, until GitHub would merge it and t
 
 Then it runs, rebased alone or tested in a [batch](#batches), and merges once its checks pass. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
 
-When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
+When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts. A conflict found in the queue goes back to getting ready, keeping its place, so the agent holds up no other PR.
 
 When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After three fixes that do not make the checks pass, the PR is ejected. A PR gets three fixes in all, for its checks and its review together, and a push from its author earns new ones. When the agent gives up because the failure is not the PR's to fix, as with a flaky test, an outage or a title since changed, an empty commit runs the checks once more, and a failure then ejects the PR.
 
