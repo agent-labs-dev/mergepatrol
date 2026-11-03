@@ -187,6 +187,11 @@ impl Job {
         }
     }
 
+    /// Whether failed checks may still be fixed.
+    pub fn can_fix(&self) -> bool {
+        self.fixes < self.fix_attempts && !self.rechecked
+    }
+
     pub fn step(self, event: Event) -> Transition {
         use Event as E;
         use Phase as P;
@@ -199,9 +204,7 @@ impl Job {
                 let head = head.clone();
                 self.with(P::Merging { head })
             }
-            (P::AwaitingChecks { head, base }, E::ChecksFailed(failed))
-                if self.fixes < self.fix_attempts && !self.rechecked =>
-            {
+            (P::AwaitingChecks { head, base }, E::ChecksFailed(failed)) if self.can_fix() => {
                 let phase = P::Fixing {
                     head: head.clone(),
                     base: base.clone(),

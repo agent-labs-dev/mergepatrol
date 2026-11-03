@@ -91,8 +91,8 @@ impl Prep {
         self.left.lock().unwrap().get(id).is_some_and(|h| h == head)
     }
 
-    /// Whether a conflict of `unit`'s is for here to resolve, and not its job in the lane.
-    pub(super) fn takes_conflicts(&self, ctx: &Ctx, key: &LaneKey, unit: &Unit) -> bool {
+    /// Whether what `unit` needs of an agent is for here to do, and not its job in the lane.
+    pub(super) fn takes_agent_work(&self, ctx: &Ctx, key: &LaneKey, unit: &Unit) -> bool {
         let id = (key.installation_id, key.repo.clone(), unit.number);
         ctx.config.prep && !unit.fork() && !self.left_to_lane(&id, &unit.top().head_ref_oid)
     }
