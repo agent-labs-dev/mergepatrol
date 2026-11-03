@@ -1911,6 +1911,7 @@ async fn a_failure_the_lane_finds_goes_back_off_it_and_the_next_pr_goes_on() {
 
     run.tick().await;
     let fix = prep::Work::Fix {
+        layer: 0,
         failed: vec!["ci".into()],
     };
     assert_eq!(run.ctx.prep.asked(), [(1, fix)]);
@@ -1937,7 +1938,7 @@ async fn a_failure_in_the_lane_with_no_fixes_left_ejects() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_stacks_failure_is_fixed_in_the_lane() {
+async fn a_stacks_failure_goes_back_off_the_lane_on_the_layer_that_failed() {
     let run = prep_run(|s| {
         s.add_stack(10, &[1, 2], &[2]);
         s.required = vec!["ci".into()];
@@ -1946,7 +1947,14 @@ async fn a_stacks_failure_is_fixed_in_the_lane() {
             .insert("pr-1-r1".into(), [("ci".into(), CheckState::Failed)].into());
     });
     run.tick().await;
-    assert_eq!(run.rebase.fixed(), [["ci"]]);
+    assert!(run.rebase.fixed().is_empty(), "no agent in the lane");
+    assert_eq!(run.lane()[0].1, "Held(PrepFixing)");
+    run.tick().await;
+    let fix = prep::Work::Fix {
+        layer: 0,
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(run.lane()[0].0, fix)]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -3766,7 +3774,7 @@ async fn a_green_stack_is_tested_in_a_batch_and_merged_at_once() {
 
 #[tokio::test(start_paused = true)]
 async fn a_stack_that_breaks_a_batch_is_one_suspect_and_is_ejected_whole() {
-    let run = Run::batching(Fake::new(|s| {
+    let run = Run::batching_on_the_lane(Fake::new(|s| {
         prs(&[1])(s);
         s.add_stack(10, &[2, 3], &[3]);
         s.add_pr(4);
@@ -3791,7 +3799,7 @@ async fn a_stack_that_breaks_a_batch_is_one_suspect_and_is_ejected_whole() {
 
 #[tokio::test(start_paused = true)]
 async fn a_failed_check_on_a_layer_is_fixed_there_and_the_layers_above_go_onto_the_fix() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_stack(10, &[1, 2], &[2]);
         s.required = vec!["ci".into()];
         s.checks_on
