@@ -172,6 +172,13 @@ impl std::fmt::Display for RepoName {
     }
 }
 
+/// Whether a PR has been told to merge, the only state in which the queue acts on it: it is
+/// open, it carries the repo's trigger label, and its lane holds a place for it. Autonomous work
+/// never starts on a PR being opened, pushed to, labeled otherwise, reviewed or checked.
+pub fn merge_requested(open: bool, labeled: bool, in_lane: bool) -> bool {
+    open && labeled && in_lane
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +191,16 @@ mod tests {
         let rewritten = format!("{RECHECK_MESSAGE}\n\nCo-authored-by: a <a@example.com>");
         assert_eq!(fixes_used([rewritten.as_str(), fix]), 1);
         assert_eq!(fixes_used([]), 0);
+    }
+
+    #[test]
+    fn a_merge_request_is_state_three_things_all_holding() {
+        assert!(merge_requested(true, true, true));
+        // Not told to merge: no label, or no place in the lane.
+        assert!(!merge_requested(true, false, true));
+        assert!(!merge_requested(true, true, false));
+        // Closed, or merged: never.
+        assert!(!merge_requested(false, true, true));
+        assert!(!merge_requested(false, false, false));
     }
 }

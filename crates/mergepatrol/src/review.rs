@@ -139,6 +139,11 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
     }
     let key = lane_key(&r, &pr);
     let settings = settings(ctx, &gh, &r.repo).await?;
+    // Only a PR told to merge gets the agent's review: no label, or no place in the lane, and the
+    // review is dropped rather than run. Nothing is run and nothing is posted.
+    if !gate(ctx, &r, &pr, &settings).await? {
+        return ctx.store.stale_review(r.id).await;
+    }
     let workspace = ctx
         .store
         .review_settings(r.installation_id)
@@ -158,10 +163,10 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
             return Ok(());
         }
         Err(why) => {
-            return finish(ctx, &gh, &key, &pr, &r, &bars, Err(why)).await;
+            return finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Err(why)).await;
         }
     };
-    finish(ctx, &gh, &key, &pr, &r, &bars, Ok(output)).await?;
+    finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Ok(output)).await?;
     fix_sent_back(ctx, &gh, &key, &pr, &settings, r.id).await
 }
 
@@ -231,6 +236,25 @@ async fn fix_sent_back(
     record(ctx, key, r.number, kind, &message).await?;
     ctx.reviews.notify_one();
     Ok(())
+}
+
+/// Whether the review may act on the PR: it has a merge request, and its lane holds a place for
+/// it. A PR opened, pushed to, labeled otherwise, reviewed or checked is not one.
+fn may_act(pr: &PullRequest, trigger: &str, in_lane: bool) -> bool {
+    mergepatrol_core::merge_requested(pr.state == "OPEN", pr.has_label(trigger), in_lane)
+}
+
+/// Whether the review may run or post: the PR is told to merge, and its lane holds a place for
+/// it, alone or as a layer of a stack.
+async fn gate(
+    ctx: &Ctx,
+    r: &ReviewRecord,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+) -> Result<bool> {
+    let in_lane =
+        mergepatrol_web::in_lane(ctx.store.as_ref(), r.installation_id, &r.repo, r.number).await?;
+    Ok(may_act(pr, &settings.label, in_lane))
 }
 
 const NO_KEY: &str = "No model API key";
@@ -404,9 +428,15 @@ async fn finish(
     key: &LaneKey,
     pr: &PullRequest,
     r: &ReviewRecord,
+    settings: &RepoSettings,
     bars: &ReviewSettings,
     output: std::result::Result<ReviewOutput, String>,
 ) -> Result<()> {
+    // The merge request may have gone while the agent ran: then the review posts nothing and the
+    // PR ends no hold. It is dropped, for a review of a later head to take its place.
+    if !gate(ctx, r, pr, settings).await? {
+        return ctx.store.stale_review(r.id).await;
+    }
     let (summary, mut findings, error) = match output {
         Ok(o) => (o.summary, bars.judge(o.findings), None),
         Err(why) => (String::new(), Vec::new(), Some(why)),
@@ -801,6 +831,45 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
 mod tests {
     use super::*;
     use mergepatrol_core::{Bar, Kind, Lean};
+
+    fn pr(state: &str, labels: &[&str]) -> PullRequest {
+        PullRequest {
+            number: 7,
+            state: state.into(),
+            title: "t".into(),
+            body: String::new(),
+            is_draft: false,
+            is_cross_repository: false,
+            review_decision: None,
+            base_ref_name: "main".into(),
+            head_ref_name: "b".into(),
+            head_ref_oid: "h".into(),
+            labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+            files: Vec::new(),
+            awaits_code_owner: false,
+            fix_commits: 0,
+            conflicting: false,
+            stack: None,
+            maintainer_can_modify: false,
+            head_repository: None,
+            unresolved_threads: 0,
+            details: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_review_runs_only_on_a_pr_told_to_merge() {
+        let label = "mergepatrol";
+        // Open, labeled, in a lane: told to merge, so the review runs.
+        assert!(may_act(&pr("OPEN", &[label]), label, true));
+        // Opened or pushed with no label: state only, no review.
+        assert!(!may_act(&pr("OPEN", &[]), label, true));
+        // Labeled but not in a lane, as after it left the queue: no review.
+        assert!(!may_act(&pr("OPEN", &[label]), label, false));
+        // Closed or merged: never, whatever it carries.
+        assert!(!may_act(&pr("CLOSED", &[label]), label, true));
+        assert!(!may_act(&pr("MERGED", &[label]), label, true));
+    }
 
     fn review(id: i64, sent_back: bool, answered_by: Option<&str>) -> ReviewRecord {
         let finding = Finding {

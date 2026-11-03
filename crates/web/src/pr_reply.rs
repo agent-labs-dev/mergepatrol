@@ -6,12 +6,15 @@
 //! on GitHub, where they go, so nobody waits on a hold they think they cleared.
 
 use anyhow::{Context, Result};
-use mergepatrol_core::{Answer, PrNumber, RepoName, ReviewStatus, review_url};
-use mergepatrol_github::App;
+use mergepatrol_core::{
+    Answer, PrNumber, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewStatus, review_url,
+};
+use mergepatrol_github::{App, Installation, PullRequest};
 use mergepatrol_store::{ReviewAnswers, ReviewRecord};
 use serde_json::Value;
 
 use crate::AppState;
+use crate::gate::merge_requested;
 use crate::review::{ANSWERED_MARK, LINE_MARK};
 
 /// A human's word on a PR, as a delivery brings it.
@@ -96,6 +99,12 @@ pub(crate) async fn heard(
         .await?
         .context("no GitHub App is set up")?;
     let gh = App::from_credentials(&creds)?.installation(installation);
+    // The queue acts on a PR only after the PR has been told to merge. A review or a comment on
+    // one that has not is state only: nothing is nudged, and nothing is approved.
+    let pr = gh.pull_request(repo, reply.number).await?;
+    if !may_act(&review, told_to_merge(app, &gh, repo, &pr).await?) {
+        return Ok(());
+    }
     // The dashboard takes answers only from those who may push; so does this.
     let missed = match &reply.kind {
         ReplyKind::Said => Missed::Said,
@@ -111,7 +120,6 @@ pub(crate) async fn heard(
         return Ok(());
     }
     let posted = async {
-        let pr = gh.pull_request(repo, reply.number).await?;
         let url = review_url(&app.public_url, repo, pr.merges_into(), reply.number);
         let body = nudge(&review, &reply.login, &missed, &url);
         gh.comment(repo, reply.number, &body).await
@@ -123,6 +131,26 @@ pub(crate) async fn heard(
     }
     tracing::info!(installation, %repo, number = reply.number, by = %reply.login, "told the PR to answer the agent's review in MergeLoop");
     Ok(())
+}
+
+/// Whether a human's reply may act on the review at all: it is the PR's newest one and still
+/// waits for answers, and the PR has a merge request. Anything else is state only.
+fn may_act(review: &ReviewRecord, merge_requested: bool) -> bool {
+    review.status == ReviewStatus::Asks && merge_requested
+}
+
+/// Whether the PR has been told to merge: open, carrying the repo's trigger label, and holding a
+/// place in its lane.
+async fn told_to_merge(
+    app: &AppState,
+    gh: &Installation,
+    repo: &RepoName,
+    pr: &PullRequest,
+) -> Result<bool> {
+    let defaults = app.store.inherited(gh.id, &app.repo_defaults).await?;
+    let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
+    let settings = RepoSettings::from_file(file.text.as_deref(), &defaults).unwrap_or(defaults);
+    merge_requested(app.store.as_ref(), gh.id, repo, pr, &settings.label).await
 }
 
 /// Approves the review for an approval of its head on GitHub: every ask is fine.
@@ -198,6 +226,38 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn review(status: ReviewStatus) -> ReviewRecord {
+        ReviewRecord {
+            id: 1,
+            installation_id: 1,
+            repo: RepoName::parse("o/r").unwrap(),
+            number: 5,
+            head_sha: "h1".into(),
+            status,
+            error: None,
+            attempts: 0,
+            summary: String::new(),
+            findings: Vec::new(),
+            asked: Vec::new(),
+            answers: Default::default(),
+            answered_by: None,
+            note: String::new(),
+            questions: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_reply_acts_only_on_a_review_that_waits_and_a_pr_told_to_merge() {
+        // The review waits, but the PR has no merge request: nothing is nudged or approved.
+        assert!(!may_act(&review(ReviewStatus::Asks), false));
+        assert!(may_act(&review(ReviewStatus::Asks), true));
+        // A review that is not waiting is not answered, whatever the PR's state.
+        assert!(!may_act(&review(ReviewStatus::Approved), true));
+        assert!(!may_act(&review(ReviewStatus::Changes), true));
+    }
 
     #[test]
     fn a_human_reply_on_a_pr_is_read_and_the_rest_is_not() {
