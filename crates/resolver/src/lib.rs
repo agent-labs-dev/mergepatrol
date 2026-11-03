@@ -220,11 +220,14 @@ What the review found:
 
 {findings}
 
-Change the code so that each finding no longer applies. Use `git log`, `git show` and \
-`git diff {trunk}...HEAD` to see what the pull request changes.
+Check each finding against the code first, then change the code so that none applies any more. \
+Use `git log`, `git show` and `git diff {trunk}...HEAD` to see what the pull request changes.
 
 Rules:
-- Make the smallest change that settles each finding, in the spirit of the pull request.
+- Make the smallest change that settles each finding, in the spirit of the pull request. Prefer \
+deleting or narrowing code over a new lock, cache, helper or option.
+- Fix the case the finding names, not its neighbours.
+- When a finding is about behaviour, add one focused test that fails without the fix.
 - Do not delete, skip or weaken tests or checks.
 - Do not edit `.github/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
 - Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
@@ -408,8 +411,14 @@ others use, missing tests for risky code.
 - What you checked and found sound, which a reviewer would otherwise check themselves. Keep these \
 short.
 
-For each finding give `lean`: `fine` if it can merge as it is, `change` if the author should \
-change it. Give `confidence`, 50 to 100: how sure you are that your lean is right, such that a \
+Judge the PR against what its description sets out to do. Note code, tests or guards it does not \
+need.
+
+For each finding give `lean`. `change` means the author must change it before it merges: the case \
+the PR sets out to handle is wrong, or those who use this code will hit a real bug, a security \
+hole, data loss, a broken deploy or a breaking change, or risky code has no test. Anything else is \
+`fine`, however sure you are: style, a rare path that does little harm, a small cost, extra \
+compatibility, code the PR did not need. Give `confidence`, 50 to 100: how sure you are that your lean is right, such that a \
 careful senior reviewer who knows this project would agree. Below 100 when it rests on something \
 the code does not show you: a policy, how production is set up, what the author meant. Say what \
 in `unsure`. Do not inflate it: a change you are sure enough of goes back to the author, often \
@@ -491,6 +500,31 @@ code cannot tell.",
         question = req.question,
         base = req.base,
     )
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn a_review_holds_a_pr_only_for_what_must_change() {
+        let review = review_prompt(&ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            queue_commits: &[],
+            transcript: Path::new("t"),
+        });
+        assert!(review.contains("what its description sets out to do"));
+        assert!(review.contains("must change it before it merges"));
+        assert!(review.contains("`fine`, however sure you are"));
+    }
 }
 
 #[cfg(test)]
