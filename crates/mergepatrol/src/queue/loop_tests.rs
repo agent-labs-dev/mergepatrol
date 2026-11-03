@@ -3718,7 +3718,7 @@ async fn a_failed_check_on_a_layer_is_fixed_there_and_the_layers_above_go_onto_t
 
 #[tokio::test(start_paused = true)]
 async fn a_push_to_a_lower_layer_while_checks_run_rebases_the_stack_again() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_stack(10, &[1, 2], &[2]);
         s.required = vec!["ci".into()];
         s.checks_on.insert(
@@ -4532,7 +4532,7 @@ async fn a_required_check_whose_workflow_is_queued_is_waited_for_past_the_missin
 
 #[tokio::test(start_paused = true)]
 async fn a_stack_layer_gets_its_own_missing_check_clock() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_stack(10, &[1, 2], &[2]);
         s.required = vec!["ci".into(), "sift".into()];
         s.checks.insert("sift".into(), CheckState::Passed);

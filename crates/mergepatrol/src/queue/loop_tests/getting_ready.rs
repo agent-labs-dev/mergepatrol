@@ -301,6 +301,15 @@ fn answer(gh: &Fake, origin: &Path, method: &str, path: &str, body: &str) -> (u1
         let runs = json!({ "check_runs": failed, "total_count": total });
         return (200, runs.to_string());
     }
+    if let Some(stack) = rest.strip_prefix("stacks/") {
+        let s = gh.state.lock().unwrap();
+        let layers = &s.stacks[&stack.parse::<PrNumber>().unwrap()];
+        let prs: Vec<Value> = layers
+            .iter()
+            .map(|n| json!({ "number": n, "state": s.prs[n].state.to_lowercase() }))
+            .collect();
+        return (200, json!({ "pull_requests": prs }).to_string());
+    }
     match (method, rest) {
         ("POST", "git/blobs") => {
             let content = body["content"].as_str().unwrap();
@@ -866,7 +875,22 @@ async fn approved_stack(
     upper: &'static str,
     trunk_file: &'static str,
 ) -> World {
-    let world = World::new(
+    let world = stack(lower, upper, trunk_file).await;
+    for n in [1, 2] {
+        let head = world.pr(n).head_ref_oid;
+        let r = world
+            .store
+            .start_review(1, &repo(), n, &head)
+            .await
+            .unwrap();
+        world.store.finish_review(r.number, ReviewStatus::Approved);
+    }
+    world
+}
+
+/// A stack of `pr-1` under `pr-2`, as stack 1. The trunk changes `trunk_file`.
+async fn stack(lower: &'static str, upper: &'static str, trunk_file: &'static str) -> World {
+    World::new(
         |o| {
             commit(o, "shared.txt", "base\n", "start");
             git(o, &["checkout", "-q", "-b", "pr-1"]);
@@ -882,17 +906,95 @@ async fn approved_stack(
             point_at_branch(s, 2, o);
         },
     )
-    .await;
-    for n in [1, 2] {
-        let head = world.pr(n).head_ref_oid;
-        let r = world
-            .store
-            .start_review(1, &repo(), n, &head)
-            .await
-            .unwrap();
-        world.store.finish_review(r.number, ReviewStatus::Approved);
-    }
-    world
+    .await
+}
+
+/// Whether `head` is a fix the agent committed.
+fn a_fix(world: &World, head: &str) -> bool {
+    let message = git(&world.origin, &["log", "-1", "--format=%B", head]);
+    message.contains(FIXED_BY)
+}
+
+/// The commit the layer above sits on.
+fn under_upper(world: &World) -> String {
+    git(&world.origin, &["rev-parse", "pr-2~1"])
+}
+
+#[tokio::test]
+async fn a_stack_s_lower_layer_is_fixed_off_the_lane_and_the_layer_above_goes_onto_it() {
+    let world = stack("lower.txt", "upper.txt", "other.txt").await;
+    world.gh.with_mut(|s| checks_fail(s, 1));
+    let _drain = world.drain().await;
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(PrepFixing)".into())]);
+
+    let key = world.key();
+    world.until(|w| w.ctx.prep.claim(&key, 1).is_some()).await;
+    assert!(matches!(
+        world.tasks()[..],
+        [Task::FixChecks { .. }, Task::Rebase]
+    ));
+    let lower = world.branch("pr-1");
+    assert!(a_fix(&world, &lower));
+    assert_eq!(under_upper(&world), lower, "the layer above is on the fix");
+    assert!(world.did(1, "published") && world.did(2, "published"));
+
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    assert_eq!(world.merged(), [1, 2]);
+}
+
+#[tokio::test]
+async fn a_review_s_fix_on_a_lower_layer_moves_the_layer_above_onto_it() {
+    let world = stack("lower.txt", "upper.txt", "other.txt").await;
+    let review = world.sent_back().await;
+    world.fix_review(review).await;
+    assert!(matches!(
+        world.tasks()[..],
+        [Task::FixReview { .. }, Task::Rebase]
+    ));
+    let lower = world.branch("pr-1");
+    assert!(a_fix(&world, &lower));
+    assert_eq!(under_upper(&world), lower);
+    assert!(world.did(1, "review-fixed"), "{:?}", world.kinds(1));
+    let first = world.store.review(review).await.unwrap().unwrap();
+    assert!(first.agent_fixed);
+    assert!(world.ctx.prep.claim(&world.key(), 1).is_some());
+}
+
+#[tokio::test]
+async fn a_push_to_the_layer_above_while_a_fix_runs_stops_its_push() {
+    let world = stack("lower.txt", "upper.txt", "other.txt").await;
+    let lower = world.branch("pr-1");
+    let gh = world.gh.clone();
+    world.during(async move { gh.with_mut(|s| s.push(2, "pushed")) });
+    let review = world.sent_back().await;
+    world.fix_review(review).await;
+    assert_eq!(world.tasks().len(), 1);
+    assert_eq!(world.branch("pr-1"), lower);
+    assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
+}
+
+#[tokio::test]
+async fn a_restack_that_fails_after_the_fix_leaves_the_stack_to_the_lane() {
+    let world = stack("lower.txt", "upper.txt", "other.txt").await;
+    let old = world.branch("pr-1");
+    let agent = world.agent.clone();
+    world.during(async {});
+    world.during(async move { *agent.fails.lock().unwrap() = Some("the agent broke".into()) });
+    let review = world.sent_back().await;
+    world.fix_review(review).await;
+    let lower = world.branch("pr-1");
+    assert!(a_fix(&world, &lower), "the fix is published");
+    assert_eq!(under_upper(&world), old, "the layer above is not");
+    assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
+    assert!(world.ctx.prep.claim(&world.key(), 1).is_some());
+
+    // The lane rebases the whole stack, the layer above onto the fix.
+    *world.agent.fails.lock().unwrap() = None;
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    assert_eq!(world.merged(), [1, 2]);
+    assert_eq!(under_upper(&world), world.branch("pr-1"));
+    assert!(git(&world.origin, &["log", "--format=%B", "main..pr-2"]).contains(FIXED_BY));
 }
 
 async fn rebase_stack(world: &World) -> Event {
