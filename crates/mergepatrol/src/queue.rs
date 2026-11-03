@@ -40,6 +40,7 @@ use crate::credentials::ChatGpt;
 use crate::github::GitHub;
 use crate::job::GAVE_UP;
 use crate::publish::{Publish, create_commits, publish};
+use crate::review::still_fixable;
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
@@ -2986,6 +2987,13 @@ async fn fix_and_publish(
     let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        // A review's fix runs beside the lane, which would not see the PR leave the queue.
+        if matches!(spec.task, Task::FixReview { .. }) {
+            let now = GitHub::pull_request(gh, repo, pr.number).await?;
+            if !still_fixable(&now, &settings.label, &key.trunk, head) {
+                return anyhow::Ok(Err(Event::HeadMoved));
+            }
+        }
         let _cache = ctx.caches.lock(repo).await;
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
         let published =

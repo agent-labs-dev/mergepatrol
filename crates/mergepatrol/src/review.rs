@@ -35,8 +35,6 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How many reviews in a row may send findings back to the author before the next asks a human
 /// about them instead: the author and the agent disagree, or the fix keeps missing.
 const ROUNDS: usize = 3;
-/// How many of a PR's reviews to read: the author's rounds, each with the agent's fixes between.
-const HISTORY: u32 = 30;
 /// Where GitHub looks for CODEOWNERS, in its order.
 const CODEOWNERS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
@@ -182,7 +180,7 @@ fn fixable(r: &ReviewRecord, fork: bool, stacked: bool) -> Vec<Finding> {
 }
 
 /// Whether the PR is as the review left it, and still queued.
-fn still_fixable(pr: &PullRequest, label: &str, trunk: &str, head: &str) -> bool {
+pub(crate) fn still_fixable(pr: &PullRequest, label: &str, trunk: &str, head: &str) -> bool {
     pr.is_open()
         && pr.has_label(label)
         && pr.stack.is_none()
@@ -331,7 +329,7 @@ async fn run_job(
 async fn earlier_reviews(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<ReviewRecord>> {
     let mut earlier = ctx
         .store
-        .reviews_of(r.installation_id, &r.repo, r.number, HISTORY)
+        .reviews_of(r.installation_id, &r.repo, r.number, u32::MAX)
         .await?;
     earlier.retain(|e| {
         e.id != r.id
