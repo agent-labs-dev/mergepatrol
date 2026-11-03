@@ -1639,6 +1639,17 @@ async fn a_pr_the_lane_is_running_gets_no_job_off_it() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_queue_that_starts_over_forgets_the_jobs_it_stopped() {
+    let run = prep_run(failing_ci);
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1);
+    run.ctx.prep.start_over(&repo());
+    assert!(run.ctx.prep.asked().is_empty());
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1, "it asks again");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_conflict_is_rebased_off_the_lane() {
     let run = prep_run(|s| {
         s.add_pr(1);

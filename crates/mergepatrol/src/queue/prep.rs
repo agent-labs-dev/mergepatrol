@@ -65,6 +65,15 @@ impl Prep {
         hold
     }
 
+    /// A queue starts on `repo`: nothing of its jobs from before runs, as stopping stopped them.
+    fn reset(&self, repo: &RepoName) {
+        self.wanted.lock().unwrap().retain(|w| w.key.repo != *repo);
+        self.running
+            .lock()
+            .unwrap()
+            .retain(|(_, r, _), _| r != repo);
+    }
+
     /// The jobs asked for on `repo`.
     fn take(&self, repo: &RepoName) -> Vec<Wanted> {
         let mut wanted = self.wanted.lock().unwrap();
@@ -92,6 +101,11 @@ impl Prep {
         if let Some(head) = left {
             self.left.lock().unwrap().insert(id.clone(), head);
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn start_over(&self, repo: &RepoName) {
+        self.reset(repo);
     }
 
     /// What was asked for, for tests of the tick.
@@ -172,6 +186,7 @@ pub(super) async fn hold(
 
 /// Starts what the ticks of `repo` ask for, until the queue stops, which stops the jobs too.
 pub(super) async fn drain(ctx: std::sync::Arc<Ctx>, gh: Installation, repo: RepoName) {
+    ctx.prep.reset(&repo);
     let mut jobs = JoinSet::new();
     loop {
         for wanted in ctx.prep.take(&repo) {

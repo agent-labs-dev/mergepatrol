@@ -24,6 +24,7 @@ services:
       MERGEPATROL_MODEL: ${MERGEPATROL_MODEL:-}
       MERGEPATROL_EFFORT: ${MERGEPATROL_EFFORT:-}
       MERGEPATROL_MAX_JOBS: ${MERGEPATROL_MAX_JOBS:-}
+      MERGEPATROL_PREP: ${MERGEPATROL_PREP:-}
       MERGEPATROL_EXECUTOR: docker
       MERGEPATROL_JOB_IMAGE: mergepatrol-job:latest
       # On Linux with gVisor installed (see deploy/sandbox-host.sh): runsc, mergepatrol-jobs,
