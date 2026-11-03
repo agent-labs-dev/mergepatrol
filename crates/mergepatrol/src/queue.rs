@@ -2290,6 +2290,7 @@ async fn forget_refs(ctx: &Ctx, key: &LaneKey, number: PrNumber) {
     let patterns =
         ["pr", "result", "publish"].map(|kind| format!("refs/mergepatrol/{kind}/{number}"));
     let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let _cache = ctx.caches.lock(&key.repo).await;
     if let Err(e) = Git.delete_refs(&cache, &patterns).await {
         tracing::warn!(repo = %key.repo, pr = number, error = %format!("{e:#}"), "could not delete the PR's refs");
     }

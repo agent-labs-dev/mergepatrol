@@ -35,6 +35,8 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 /// How many reviews in a row may send findings back to the author before the next asks a human
 /// about them instead: the author and the agent disagree, or the fix keeps missing.
 const ROUNDS: usize = 3;
+/// How many of a PR's reviews to read: the author's rounds, each with the agent's fixes between.
+const HISTORY: u32 = 30;
 /// Where GitHub looks for CODEOWNERS, in its order.
 const CODEOWNERS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"];
 
@@ -179,6 +181,15 @@ fn fixable(r: &ReviewRecord, fork: bool, stacked: bool) -> Vec<Finding> {
         .collect()
 }
 
+/// Whether the PR is as the review left it, and still queued.
+fn still_fixable(pr: &PullRequest, label: &str, trunk: &str, head: &str) -> bool {
+    pr.is_open()
+        && pr.has_label(label)
+        && pr.stack.is_none()
+        && pr.merges_into() == trunk
+        && pr.head_ref_oid == head
+}
+
 /// While the PR has fixes left, the agent's fix goes first. Without one, or if the agent cannot
 /// fix it, the findings wait for the author, as they would anyway.
 async fn fix_sent_back(
@@ -193,7 +204,12 @@ async fn fix_sent_back(
         return Ok(());
     };
     let findings = fixable(&r, pr.is_cross_repository, pr.stack.is_some());
-    if findings.is_empty()
+    if findings.is_empty() {
+        return Ok(());
+    }
+    // The review took a while: the PR may have moved on.
+    let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
+    if !still_fixable(&now, &settings.label, &key.trunk, &r.head_sha)
         || GitHub::fixes_used(gh, &r.repo, r.number).await? >= settings.fix_ci.allowed()
     {
         return Ok(());
@@ -315,7 +331,7 @@ async fn run_job(
 async fn earlier_reviews(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<ReviewRecord>> {
     let mut earlier = ctx
         .store
-        .reviews_of(r.installation_id, &r.repo, r.number, 10)
+        .reviews_of(r.installation_id, &r.repo, r.number, HISTORY)
         .await?;
     earlier.retain(|e| {
         e.id != r.id
@@ -849,6 +865,37 @@ mod tests {
         );
         assert!(thread.body.contains("Sent back to the author"));
         assert!(thread.body.contains("Then resolve this thread."));
+    }
+
+    #[test]
+    fn a_fix_starts_only_on_a_pr_as_the_review_left_it() {
+        let pr = |state: &str, label: &str, oid: &str, stack: serde_json::Value| -> PullRequest {
+            serde_json::from_value(serde_json::json!({
+                "number": 7, "state": state, "title": "t", "body": "", "isDraft": false,
+                "isCrossRepository": false, "reviewDecision": null, "baseRefName": "main",
+                "headRefName": "b", "headRefOid": oid, "stack": stack,
+                "labels": { "nodes": [{ "name": label }] }, "files": { "nodes": [] },
+                "url": "u", "createdAt": "c", "additions": 0, "deletions": 0, "changedFiles": 0,
+                "author": null, "latestOpinionatedReviews": { "nodes": [] },
+                "reviewRequests": { "nodes": [] }, "commits": { "nodes": [] },
+            }))
+            .unwrap()
+        };
+        let fixable = |p: &PullRequest| still_fixable(p, "q", "main", "h");
+        assert!(fixable(&pr("OPEN", "q", "h", serde_json::Value::Null)));
+        assert!(!fixable(&pr("CLOSED", "q", "h", serde_json::Value::Null)));
+        assert!(!fixable(&pr("OPEN", "other", "h", serde_json::Value::Null)));
+        assert!(!fixable(&pr(
+            "OPEN",
+            "q",
+            "pushed",
+            serde_json::Value::Null
+        )));
+        let stacked = serde_json::json!({ "number": 9, "baseRefName": "main" });
+        assert!(!fixable(&pr("OPEN", "q", "h", stacked)));
+        let mut retargeted = pr("OPEN", "q", "h", serde_json::Value::Null);
+        retargeted.base_ref_name = "release".into();
+        assert!(!fixable(&retargeted));
     }
 
     #[test]
