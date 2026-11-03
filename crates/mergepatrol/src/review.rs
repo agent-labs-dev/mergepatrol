@@ -169,33 +169,54 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
         false => run_review(ctx, &gh, &key, &pr, &settings, &r).await,
     };
     let output = match found {
-        Ok(output) => output,
+        Ok(output) => Ok(output),
         Err(why) if r.attempts + 1 < ATTEMPTS && !why.starts_with(NO_KEY) => {
             ctx.store
                 .retry_review(r.id, r.claim, &why, RETRY_AFTER)
                 .await?;
             return Ok(());
         }
-        Err(why) => {
-            finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Err(why)).await?;
-            return Ok(());
-        }
+        Err(why) => Err(why),
     };
-    // The author hears of the findings only if the agent's fix does not take them on.
-    if let Some((held, done)) =
-        finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Ok(output)).await?
-    {
-        let fixed = fix_sent_back(ctx, &gh, &key, &pr, &settings, r.id, held)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not fix the review's findings");
-                false
-            });
-        if !fixed {
-            publish(ctx, &gh, &key, &pr, &r, &done).await?;
-        }
+    conclude(ctx, &gh, &key, &pr, &r, &settings, &bars, output).await
+}
+
+/// Ends the review, and posts it on GitHub only for what it leaves a person to do: what it sent
+/// back goes to the agent's fix first, and the author hears only of what the fix left them.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn conclude(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    r: &ReviewRecord,
+    settings: &RepoSettings,
+    bars: &ReviewSettings,
+    output: std::result::Result<ReviewOutput, String>,
+) -> Result<()> {
+    let Some((held, done)) = finish(ctx, gh, key, pr, r, settings, bars, output).await? else {
+        return Ok(());
+    };
+    let fixed = fix_sent_back(ctx, gh, key, pr, settings, r.id, held)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not fix the review's findings");
+            false
+        });
+    if fixed {
+        return ctx.store.settle_review(r.id, r.claim).await;
     }
-    Ok(())
+    // The PR moved while the fix ran: a pushed or retargeted head gets its own review, and one
+    // no longer queued gets none. What this one found would be out of date.
+    let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
+    if (!now.is_cross_repository && now.head_ref_oid != r.head_sha)
+        || now.merges_into() != key.trunk
+        || !merge_requested(ctx.store.as_ref(), gh, &r.repo, &now, &settings.label).await?
+    {
+        return ctx.store.stale_review(r.id, r.claim).await;
+    }
+    publish(ctx, gh, key, &now, r, &done).await?;
+    ctx.store.settle_review(r.id, r.claim).await
 }
 
 /// What the agent's fix can take on from a review: what it sent back to the author, not what a
@@ -499,7 +520,11 @@ async fn finish(
             }),
         _ => None,
     };
-    if !ctx.store.finish_review(r.id, r.claim, &done).await? {
+    if !ctx
+        .store
+        .finish_review(r.id, r.claim, &done, held.is_some())
+        .await?
+    {
         return Ok(None);
     }
     let (kind, message) = match (&error, status) {
