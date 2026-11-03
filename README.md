@@ -270,13 +270,13 @@ claude mcp add --transport http mergeloop https://mergeloop.ai/mcp \
   --header "Authorization: Bearer $(gh auth token)"
 ```
 
-A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID, which `get_session` lists.
+A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID. `get_session` lists those IDs for a sign-in; with a GitHub token it answers `status: "signed_out"`, with no workspaces, so a token's calls name a `repo`.
 
 <!-- tools: the order of `ROUTES` in crates/web/src/routes.rs -->
 | Tool | Does | Sign-in |
 | --- | --- | --- |
 | `get_changelog` | MergeLoop's newest changelog entries | |
-| `get_session` | Who you are signed in as, and your workspaces | |
+| `get_session` | Who a sign-in is for, and its workspaces: `signed_out` for a GitHub token | |
 | `get_inbox` | Your PRs, and the PRs that ask for your review, across workspaces | Yes |
 | `list_queue` | The queues, in the order they take PRs: a repo's, or the workspace's | Without `repo` |
 | `list_events` | A repo's queue events, newest first | |
