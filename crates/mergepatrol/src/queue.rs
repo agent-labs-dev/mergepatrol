@@ -794,6 +794,7 @@ async fn review_hold(
     review: &ReviewSettings,
     stacked: bool,
     heads: &[(PrNumber, &str, u32)],
+    started: &mut bool,
 ) -> Result<Option<Hold>> {
     if !review.enabled {
         return Ok(None);
@@ -827,7 +828,8 @@ async fn review_hold(
                     .store
                     .start_review(key.installation_id, &key.repo, number, head)
                     .await?;
-                ctx.reviews.notify_one();
+                // Woken by the caller once the lane is saved: a PR just queued is in it then.
+                *started = true;
                 r.status
             }
         };
@@ -1086,6 +1088,9 @@ async fn sync_lane(
         .filter(|u| !running.contains(&u.number))
         .collect();
 
+    // A review this tick starts waits for the lane it is in: the worker is woken after the save.
+    let mut started = false;
+
     let mut candidates = Vec::new();
     for &unit in &units {
         if unit.stacked && unit.layers.iter().any(|pr| pr.is_cross_repository) {
@@ -1129,7 +1134,7 @@ async fn sync_lane(
                     false => (pr.number, pr.head_ref_oid.as_str(), pr.unresolved_threads),
                 })
                 .collect();
-            review_hold(ctx, key, &read.review, unit.stacked, &heads).await?
+            review_hold(ctx, key, &read.review, unit.stacked, &heads, &mut started).await?
         } {
             Some(reason)
         } else if let Some(reason) = unit.hold_reason() {
@@ -1228,7 +1233,11 @@ async fn sync_lane(
             comment_all(gh, repo, &prs, &comment).await?;
         }
     }
-    ctx.store.save_lane(key, lane).await
+    ctx.store.save_lane(key, lane).await?;
+    if started {
+        ctx.reviews.notify_one();
+    }
+    Ok(())
 }
 
 /// What the queue merges as one: a PR, or a stack of PRs, which GitHub merges all at once.
@@ -2563,9 +2572,15 @@ async fn run_job(
                     .collect();
                 if let Some(reason) = now.hold_reason() {
                     Event::OnHold(reason)
-                } else if let Some(reason) =
-                    review_hold(ctx, key, review, now.stacked, &reviewed).await?
-                {
+                } else if let Some(reason) = {
+                    let mut started = false;
+                    let hold =
+                        review_hold(ctx, key, review, now.stacked, &reviewed, &mut started).await?;
+                    if started {
+                        ctx.reviews.notify_one();
+                    }
+                    hold
+                } {
                     Event::OnHold(reason)
                 } else {
                     let top = now.top().number;

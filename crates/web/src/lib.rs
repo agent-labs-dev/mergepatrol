@@ -7,6 +7,7 @@ mod billing;
 mod blog;
 mod changelog;
 mod docs;
+mod gate;
 mod mcp;
 mod oauth;
 mod pr_reply;
@@ -35,6 +36,7 @@ pub use auth::{
     UserView,
 };
 pub use billing::{AccessView, BillingView, PricingView, RedirectView};
+pub use gate::merge_requested;
 pub use review::*;
 pub use webhook::Wake;
 
