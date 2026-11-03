@@ -3605,6 +3605,7 @@ async fn import_job_output(
 }
 
 mod prep;
+pub(crate) use prep::Claim;
 
 #[cfg(test)]
 mod loop_tests;

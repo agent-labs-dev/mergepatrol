@@ -17,7 +17,7 @@ use tokio::sync::Barrier;
 
 use super::*;
 use crate::job::LEFT_CONFLICT;
-use crate::review::fix_sent_back;
+use crate::review::{fix_sent_back, hold_for_fix};
 
 /// How long a scenario may take to end. It ends far sooner, or it is stuck.
 const SETTLES_WITHIN: Duration = Duration::from_secs(60);
@@ -545,13 +545,20 @@ impl World {
 
     /// What the review worker does with a review that sent findings back.
     async fn fix_review(&self, review: i64) {
+        let (key, pr) = (self.key(), self.pr(1));
+        let held = hold_for_fix(&self.ctx, &self.installation, &key, &pr);
+        let Some(held) = held.await.unwrap() else {
+            return;
+        };
+        let settings = &self.ctx.config.repo_defaults;
         fix_sent_back(
             &self.ctx,
             &self.installation,
-            &self.key(),
-            &self.pr(1),
-            &self.ctx.config.repo_defaults,
+            &key,
+            &pr,
+            settings,
             review,
+            held,
         )
         .await
         .unwrap();

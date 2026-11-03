@@ -22,7 +22,9 @@ use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
 
 use crate::github::GitHub;
-use crate::queue::{Alive, Ctx, app_credentials, fix_findings, job_spec, record, units, unix_now};
+use crate::queue::{
+    Alive, Claim, Ctx, Unit, app_credentials, fix_findings, job_spec, record, units, unix_now,
+};
 
 /// Reviews running at once, across workspaces. Each also takes one of the sandbox's job slots.
 const REVIEWS_AT_ONCE: usize = 4;
@@ -175,11 +177,25 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
             return Ok(());
         }
         Err(why) => {
-            return finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Err(why)).await;
+            finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Err(why)).await?;
+            return Ok(());
         }
     };
-    finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Ok(output)).await?;
-    fix_sent_back(ctx, &gh, &key, &pr, &settings, r.id).await
+    // The author hears of the findings only if the agent's fix does not take them on.
+    if let Some((held, done)) =
+        finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Ok(output)).await?
+    {
+        let fixed = fix_sent_back(ctx, &gh, &key, &pr, &settings, r.id, held)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not fix the review's findings");
+                false
+            });
+        if !fixed {
+            publish(ctx, &gh, &key, &pr, &r, &done).await?;
+        }
+    }
+    Ok(())
 }
 
 /// What the agent's fix can take on from a review: what it sent back to the author, not what a
@@ -195,8 +211,36 @@ fn fixable(r: &ReviewRecord, fork: bool) -> Vec<Finding> {
         .collect()
 }
 
-/// While the PR has fixes left, the agent's fix goes first. Without one, or if the agent cannot
-/// fix it, the findings wait for the author, as they would anyway.
+/// The PR, or the stack it is a layer of, held for the agent's fix of what a review sent back.
+pub(crate) struct HeldForFix {
+    /// Whose budget the fix shares, and whose layers above it move.
+    unit: Unit,
+    _claim: Claim,
+}
+
+/// Holds the PR for the agent's fix, as its review ends, so it goes from reviewing to fixing:
+/// `None` on a fork's, or while a job has it, as a fix of its checks on this head.
+pub(crate) async fn hold_for_fix(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+) -> Result<Option<HeldForFix>> {
+    if pr.is_cross_repository {
+        return Ok(None);
+    }
+    let Some(unit) = units(gh, &key.repo, std::slice::from_ref(pr)).await?.pop() else {
+        return Ok(None);
+    };
+    Ok(ctx.prep.claim(key, unit.number).map(|claim| HeldForFix {
+        unit,
+        _claim: claim,
+    }))
+}
+
+/// While the PR has fixes left, the agent's fix goes first, while `held`. Without one, or if the
+/// agent cannot fix it, the findings wait for the author, as they would anyway. Whether it pushed
+/// a fix.
 pub(crate) async fn fix_sent_back(
     ctx: &Ctx,
     gh: &Installation,
@@ -204,30 +248,24 @@ pub(crate) async fn fix_sent_back(
     pr: &PullRequest,
     settings: &RepoSettings,
     review: i64,
-) -> Result<()> {
+    held: HeldForFix,
+) -> Result<bool> {
     let Some(r) = ctx.store.review(review).await? else {
-        return Ok(());
+        return Ok(false);
     };
     let findings = fixable(&r, pr.is_cross_repository);
     if findings.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
-    // The PR, or the stack it is a layer of, whose budget it shares and whose layers above move.
-    let Some(unit) = units(gh, &r.repo, std::slice::from_ref(pr)).await?.pop() else {
-        return Ok(());
-    };
-    // A fix of its checks may be on this head: the next review gets its turn.
-    let Some(_claim) = ctx.prep.claim(key, unit.number) else {
-        return Ok(());
-    };
     // The review took a while: the PR may have moved on.
-    let to_fix = unit.to_fix(gh, key, settings, r.number, &r.head_sha);
+    let to_fix = held.unit.to_fix(gh, key, settings, r.number, &r.head_sha);
     let Some((now, layer)) = to_fix.await? else {
-        return Ok(());
+        return Ok(false);
     };
     let what = format!("{} sent back", findings.len());
     record(ctx, key, r.number, "review-fixing", &what).await?;
     let event = fix_findings(ctx, gh, key, &now, layer, settings, findings).await;
+    let fixed = matches!(event, Ok(Event::Fixed { .. }));
     let (kind, message) = match event {
         Ok(Event::Fixed { head }) => {
             ctx.store.mark_agent_fixed(r.id).await?;
@@ -239,7 +277,7 @@ pub(crate) async fn fix_sent_back(
     };
     record(ctx, key, r.number, kind, &message).await?;
     ctx.reviews.notify_one();
-    Ok(())
+    Ok(fixed)
 }
 
 const NO_KEY: &str = "No model API key";
@@ -405,7 +443,8 @@ fn rounds_spent(earlier: &[ReviewRecord]) -> bool {
 
 /// Ends the review: approved when it holds nothing, sent back to the author when it found what
 /// they should fix, else it asks the people who own the code in question. `Err` is why the
-/// agent could not review: a human reviews the whole PR.
+/// agent could not review: a human reviews the whole PR. A review the agent's fix may take on
+/// is not posted: it comes back held for the fix, which goes first.
 #[allow(clippy::too_many_arguments)]
 async fn finish(
     ctx: &Ctx,
@@ -416,13 +455,14 @@ async fn finish(
     settings: &RepoSettings,
     bars: &ReviewSettings,
     output: std::result::Result<ReviewOutput, String>,
-) -> Result<()> {
+) -> Result<Option<(HeldForFix, ReviewDone)>> {
     // The merge request may have gone while the agent ran: then the review posts nothing and the
     // PR ends no hold. It is dropped, for a review of a later head to take its place. `pr` is from
     // before the run, so the gate reads the PR anew.
     let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
     if !merge_requested(ctx.store.as_ref(), gh, &r.repo, &now, &settings.label).await? {
-        return ctx.store.stale_review(r.id, r.claim).await;
+        ctx.store.stale_review(r.id, r.claim).await?;
+        return Ok(None);
     }
     let (summary, mut findings, error) = match output {
         Ok(o) => (o.summary, bars.judge(o.findings), None),
@@ -449,8 +489,18 @@ async fn finish(
         findings,
         asked,
     };
+    // Held before the review ends: the PR goes from reviewing to fixing, never by "sent back".
+    let held = match status {
+        ReviewStatus::Changes => hold_for_fix(ctx, gh, key, &now)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not hold the PR for a fix");
+                None
+            }),
+        _ => None,
+    };
     if !ctx.store.finish_review(r.id, r.claim, &done).await? {
-        return Ok(());
+        return Ok(None);
     }
     let (kind, message) = match (&error, status) {
         (Some(why), _) => ("review-failed", why.clone()),
@@ -474,12 +524,28 @@ async fn finish(
         ),
     };
     record(ctx, key, r.number, kind, &message).await?;
+    match held {
+        Some(held) => Ok(Some((held, done))),
+        None => {
+            publish(ctx, gh, key, pr, r, &done).await?;
+            Ok(None)
+        }
+    }
+}
 
-    // GitHub hears of it too, where the PR's people are: each finding that holds the PR in a
-    // thread on its line, which its author resolves. Failing to post loses no state, but a
-    // finding with no thread waits for a push. A comment, never an approval: an App's approval
-    // could meet a rule that asks for a human's.
-    match post(ctx, gh, key, pr, r, &done).await {
+/// GitHub hears of the review where the PR's people are: each finding that holds the PR in a
+/// thread on its line, which its author resolves. Failing to post loses no state, but a finding
+/// with no thread waits for a push. A comment, never an approval: an App's approval could meet a
+/// rule that asks for a human's.
+async fn publish(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    r: &ReviewRecord,
+    done: &ReviewDone,
+) -> Result<()> {
+    match post(ctx, gh, key, pr, r, done).await {
         Ok(threaded) if !threaded.is_empty() => {
             ctx.store.mark_threaded(r.id, &threaded).await?;
         }
@@ -572,7 +638,8 @@ async fn threads(gh: &Installation, r: &ReviewRecord) -> Vec<ReviewThread> {
 
 /// Posts the review: a summary, and a thread for each finding that holds the PR. A finding a
 /// thread is already about gets a reply there, and its thread opens again; a thread whose
-/// finding no longer holds is resolved. Returns the ids of the findings that have a thread.
+/// finding no longer holds is resolved. A review that leaves nobody anything to do posts no
+/// summary. Returns the ids of the findings that have a thread.
 async fn post(
     ctx: &Ctx,
     gh: &Installation,
@@ -617,9 +684,11 @@ async fn post(
             body: thread_body(f),
         });
     }
-    let body = github_body(ctx, key, r.number, done);
-    gh.review_lines(&r.repo, r.number, &r.head_sha, &body, &new)
-        .await?;
+    if done.error.is_some() || !held.is_empty() {
+        let body = github_body(ctx, key, r.number, done);
+        gh.review_lines(&r.repo, r.number, &r.head_sha, &body, &new)
+            .await?;
+    }
     // Which new threads GitHub took: one turned down went in the body, and has none.
     let after = threads(gh, r).await;
     for f in &held {
@@ -703,12 +772,6 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
         .iter()
         .filter(|f| !f.asked && !f.sent_back)
         .collect();
-    if sent == 0 && asks == 0 {
-        body.push_str(&format!(
-            "\n\nIt cleared all {} things it looked at. Next: the merge queue.",
-            cleared.len()
-        ));
-    }
     if sent > 0 {
         body.push_str(&format!(
             "\n\nIt sent {sent} back to the author, each in a thread on its line. For each, fix it and push, or reply with why it doesn't apply, then resolve the thread. Once every thread is resolved, the PR goes on to the merge queue with no human approval."

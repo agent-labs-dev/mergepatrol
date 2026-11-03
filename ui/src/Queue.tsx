@@ -931,7 +931,7 @@ const pathSteps: Record<string, [string, boolean, boolean]> = {
   "review-resolved": ["Review comments resolved", false, false],
   "review-sent-back": ["Review sent findings back", true, true],
   "review-asks": ["Review asks a human", true, true],
-  "review-fixing": ["Fixing the review's findings", false, true],
+  "review-fixing": ["Fixing the review's findings", false, false],
   "review-fixed": ["Findings fixed", false, false],
   "review-unfixed": ["Left the findings to the author", true, false],
   "prep-left": ["Left to the merge lane", true, true],
@@ -959,7 +959,13 @@ function Path({
   const left = newest.findIndex((ev) => exitKinds.includes(ev.kind));
   const steps = (left < 0 ? newest : newest.slice(0, left))
     .filter((ev) => ev.kind in pathSteps)
-    .reverse();
+    .reverse()
+    // Findings only went back to the author if the agent's fix did not take them on.
+    .filter((ev, i, all) => {
+      if (ev.kind !== "review-sent-back") return true;
+      const next = all[i + 1];
+      return next ? next.kind !== "review-fixing" : e.hold?.reason === "review_changes";
+    });
   if (steps.length === 0) return null;
   return (
     <>
