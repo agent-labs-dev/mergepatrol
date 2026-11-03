@@ -1550,7 +1550,7 @@ fn behind_and_green(s: &mut State) {
 
 #[tokio::test(start_paused = true)]
 async fn a_green_pr_that_merges_cleanly_skips_the_rebase() {
-    let run = Run::new(Fake::new(behind_and_green));
+    let run = Run::on_the_lane(Fake::new(behind_and_green));
     run.tick().await;
     assert_eq!(run.merged(), [1]);
     assert_eq!(run.rebase.count(), 0);
@@ -1559,7 +1559,7 @@ async fn a_green_pr_that_merges_cleanly_skips_the_rebase() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_on_a_strict_trunk_is_rebased_though_it_merges_cleanly() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         behind_and_green(s);
         s.strict = true;
     }));
@@ -1570,7 +1570,7 @@ async fn a_pr_on_a_strict_trunk_is_rebased_though_it_merges_cleanly() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_whose_checks_are_still_running_is_rebased() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         behind_and_green(s);
         let pending = BTreeMap::from([("ci".to_owned(), CheckState::Pending)]);
         s.checks_on.insert("pr-1-v0".into(), pending);
@@ -1582,7 +1582,7 @@ async fn a_pr_whose_checks_are_still_running_is_rebased() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_with_no_checks_yet_is_rebased() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         behind_and_green(s);
         s.checks.clear();
     }));
@@ -1592,7 +1592,7 @@ async fn a_pr_with_no_checks_yet_is_rebased() {
 
 #[tokio::test(start_paused = true)]
 async fn a_merge_github_refuses_without_a_rebase_rebases_after_all() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         behind_and_green(s);
         s.rejects_once.push(1);
     }));
@@ -1614,7 +1614,7 @@ async fn a_merge_github_refuses_without_a_rebase_rebases_after_all() {
 
 #[tokio::test(start_paused = true)]
 async fn a_suspect_of_a_failed_batch_is_rebased() {
-    let run = Run::batching(Fake::new(|s| {
+    let run = Run::batching_on_the_lane(Fake::new(|s| {
         prs(&[1, 2])(s);
         s.behind.push("pr-1-v0".into());
         s.breaks = Some(2);
