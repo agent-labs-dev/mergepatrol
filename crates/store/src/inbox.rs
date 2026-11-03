@@ -340,6 +340,14 @@ impl InboxStore for PgStore {
         .bind(&numbers)
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "UPDATE inbox_repos SET open_indexed_at = indexed_at
+             WHERE installation_id = $1 AND repo = $2",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -370,7 +378,8 @@ impl InboxStore for PgStore {
         repo: &RepoName,
     ) -> Result<Option<Vec<Value>>> {
         let indexed: Option<bool> = sqlx::query_scalar(
-            "SELECT indexed_at IS NOT NULL FROM inbox_repos WHERE installation_id = $1 AND repo = $2",
+            "SELECT open_indexed_at IS NOT NULL FROM inbox_repos
+             WHERE installation_id = $1 AND repo = $2",
         )
         .bind(installation_id as i64)
         .bind(repo.to_string())
@@ -401,15 +410,25 @@ impl InboxStore for PgStore {
         .bind(secs(age))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                Some((
-                    r.get::<i64, _>("installation_id") as u64,
-                    RepoName::parse(r.get::<&str, _>("repo"))?,
-                ))
-            })
-            .collect())
+        // Then those not yet read with their default branch, as by a binary from before it.
+        let unbranched = sqlx::query(
+            "SELECT installation_id, repo FROM inbox_repos
+             WHERE open_indexed_at IS NULL AND indexed_at IS NOT NULL
+             ORDER BY indexed_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut due: Vec<(u64, RepoName)> = Vec::new();
+        for r in rows.iter().chain(&unbranched) {
+            let Some(repo) = RepoName::parse(r.get::<&str, _>("repo")) else {
+                continue;
+            };
+            let repo = (r.get::<i64, _>("installation_id") as u64, repo);
+            if !due.contains(&repo) {
+                due.push(repo);
+            }
+        }
+        Ok(due)
     }
 
     async fn set_inbox_teams(
@@ -932,6 +951,40 @@ mod tests {
             .collect();
         assert_eq!(updated, ["2026-10-03T00:00:00Z", "2026-10-01T00:00:00Z"]);
         assert_eq!(store.inbox_open(2, &repo()).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_index_by_a_binary_from_before_the_default_branch_keeps_the_live_read(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        // What the binary still indexing during a rollout writes: a full read without the
+        // default branch.
+        sqlx::query(
+            "INSERT INTO inbox_repos (installation_id, repo, indexed_at) VALUES (1, 'o/r', now())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(store.inbox_open(1, &repo()).await.unwrap(), None);
+        assert_eq!(
+            store
+                .inbox_repos_due(Duration::from_secs(86400))
+                .await
+                .unwrap(),
+            [(1, repo())]
+        );
+        let write = write(1, 0, into("main", "2026-10-01T00:00:00Z"));
+        store.save_inbox_index(1, &repo(), &[write]).await.unwrap();
+        assert_eq!(
+            store.inbox_open(1, &repo()).await.unwrap().unwrap().len(),
+            1
+        );
+        assert!(
+            store
+                .inbox_repos_due(Duration::from_secs(86400))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[sqlx::test(migrations = false)]
