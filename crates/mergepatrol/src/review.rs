@@ -783,26 +783,36 @@ fn still(f: &Judged) -> String {
     }
 }
 
-/// How long a finding's test may be for its thread to show it: GitHub takes a comment of up to
-/// 65536 characters.
-const PATCH_BYTES: usize = 40_000;
+/// How long a finding's comment may be, all of it: GitHub takes up to 65536 characters, and a
+/// review that falls back to holding its comments in its body adds a line for each.
+const BODY_CHARS: usize = 60_000;
+
+/// A finding's comment, with its test when the whole comment fits, else without it: a part of a
+/// patch does not apply.
+fn fitted(render: impl Fn(bool) -> String) -> String {
+    let whole = render(true);
+    match whole.chars().count() <= BODY_CHARS {
+        true => whole,
+        false => render(false),
+    }
+}
 
 /// What MergeLoop ran on `head` to show a finding, and what it printed: the author runs the same.
-fn shows_it(e: &Evidence, head: &str) -> String {
+/// With `patch`, the test it wrote, whole.
+fn shows_it(e: &Evidence, head: &str, patch: bool) -> String {
     let mut text = format!(
         "**Shows it:** MergeLoop ran `{}` on `{head}` and it failed:\n\n```\n{}\n```\n\n",
         e.command,
         e.output.trim_end()
     );
     let files = e.files.join(", ");
-    match e.patch.len() {
-        0 => {}
-        // Whole, so the author can apply it: a part of a patch does not apply.
-        n if n <= PATCH_BYTES => text.push_str(&format!(
+    match (e.patch.is_empty(), patch) {
+        (true, _) => {}
+        (false, true) => text.push_str(&format!(
             "<details><summary>With the test it wrote, in {files}</summary>\n\n```diff\n{}\n```\n\n</details>\n\n",
             e.patch.trim_end(),
         )),
-        _ => text.push_str(&format!(
+        (false, false) => text.push_str(&format!(
             "With the test it wrote, in {files}, too long to show here.\n\n"
         )),
     }
@@ -810,9 +820,9 @@ fn shows_it(e: &Evidence, head: &str) -> String {
 }
 
 /// What a finding's evidence showed on `head`, if MergeLoop saw it fail.
-fn shown(f: &Judged, head: &str) -> String {
+fn shown(f: &Judged, head: &str, patch: bool) -> String {
     match &f.finding.evidence {
-        Some(e) if e.failed => shows_it(e, head),
+        Some(e) if e.failed => shows_it(e, head, patch),
         _ => String::new(),
     }
 }
@@ -820,12 +830,14 @@ fn shown(f: &Judged, head: &str) -> String {
 /// The reply in a finding's thread when a later head's review finds it again, with the evidence
 /// that head's run showed.
 fn still_holds(f: &Judged, head: &str) -> String {
-    format!(
-        "Still holds on `{head}`: {}\n\n{}{}\n\n{REPLY_MARK}",
-        f.finding.finding,
-        shown(f, head),
-        still(f)
-    )
+    fitted(|patch| {
+        format!(
+            "Still holds on `{head}`: {}\n\n{}{}\n\n{REPLY_MARK}",
+            f.finding.finding,
+            shown(f, head, patch),
+            still(f)
+        )
+    })
 }
 
 /// The comment that starts a finding's thread on `head`.
@@ -838,17 +850,19 @@ fn thread_body(f: &Judged, head: &str) -> String {
         None => " (about the whole PR)",
         Some(_) => "",
     };
-    let shows = shown(f, head);
-    format!(
-        "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{shows}{}\n\n{MARK}{} -->",
-        f.finding.id,
-        f.finding.kind.as_str(),
-        f.finding.confidence,
-        f.finding.title,
-        f.finding.finding,
-        still(f),
-        norm(&f.finding.title),
-    )
+    fitted(|patch| {
+        format!(
+            "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}{}\n\n{MARK}{} -->",
+            f.finding.id,
+            f.finding.kind.as_str(),
+            f.finding.confidence,
+            f.finding.title,
+            f.finding.finding,
+            shown(f, head, patch),
+            still(f),
+            norm(&f.finding.title),
+        )
+    })
 }
 
 /// The review's summary on GitHub: what it sent back to the author and asks a human, each in
@@ -1091,6 +1105,14 @@ mod tests {
             "{reply}"
         );
         assert!(reply.contains("FAILED again"), "{reply}");
+        // A comment with a test too long for it goes without the test, never with part of it.
+        let e = f.finding.evidence.as_mut().unwrap();
+        e.patch = format!("+{}", "x".repeat(BODY_CHARS));
+        for body in [thread_body(&f, "def5678"), still_holds(&f, "def5678")] {
+            assert!(body.chars().count() <= BODY_CHARS);
+            assert!(body.contains("too long to show here") && !body.contains("+xxx"));
+            assert!(body.contains("FAILED again"));
+        }
     }
 
     #[test]
