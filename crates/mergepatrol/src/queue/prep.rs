@@ -175,6 +175,12 @@ impl Prep {
         }
     }
 
+    /// As the claim of a job does as it ends.
+    #[cfg(test)]
+    pub(super) fn end_job(&self, id: &PrId) {
+        self.running.lock().unwrap().remove(id);
+    }
+
     #[cfg(test)]
     pub(super) fn start_over(&self, repo: &RepoName) {
         self.reset(repo);
