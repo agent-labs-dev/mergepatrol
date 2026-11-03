@@ -152,6 +152,9 @@ select {
   & img {
     max-width: 100%;
   }
+  & a[data-image] {
+    cursor: zoom-in;
+  }
   & table {
     display: block;
     overflow-x: auto;

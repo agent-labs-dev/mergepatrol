@@ -1503,11 +1503,16 @@ function Kbd({ children }: { children: ReactNode }) {
   );
 }
 
-/** Single keys, off while typing or with a modifier. */
+/** Single keys, off while typing, in a dialog or with a modifier. */
 function useKeys(map: Record<string, () => unknown>) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("input, textarea, select, [contenteditable]")) return;
+      if (
+        (e.target as HTMLElement).closest(
+          "input, textarea, select, [contenteditable], [role=dialog]",
+        )
+      )
+        return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const f = map[e.key];
       if (f) {
