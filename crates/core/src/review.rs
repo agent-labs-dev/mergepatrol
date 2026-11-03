@@ -156,14 +156,16 @@ impl ReviewSettings {
     }
 
     /// Where a finding goes. A human only for a kind that always asks, or a change the author
-    /// cannot make from the PR; a change the agent is sure enough of goes back to the author;
-    /// the rest it clears, a change under the bar as a note.
+    /// cannot make from the PR; a change the agent is sure enough of, that shows what it is
+    /// about, goes back to the author; the rest it clears, a change under the bar or one that
+    /// shows nothing as a note.
     pub fn route(&self, finding: &Finding) -> Route {
         let bar = self.bar(finding.kind);
         match finding.lean {
             _ if bar == Bar::Always => Route::Human,
             Lean::Fine => Route::Cleared,
             Lean::Change if finding.needs_human => Route::Human,
+            Lean::Change if !finding.shows_the_change() => Route::Cleared,
             Lean::Change if bar.sends(finding.confidence) => Route::Author,
             Lean::Change => Route::Cleared,
         }
@@ -239,6 +241,10 @@ pub struct Finding {
     /// The change it would ask the author for.
     #[serde(default)]
     pub suggestion: String,
+    /// What shows the change is needed: a failing test, a command with its output, or a repro.
+    /// A `change` of a kind other than security carries one, or it is only a note.
+    #[serde(default)]
+    pub evidence: String,
     /// The change needs a call the author cannot make from the PR: scope, product or design,
     /// access or credentials, or a change outside the repo.
     #[serde(default)]
@@ -249,6 +255,14 @@ pub struct Finding {
     /// Other code it read to get here.
     #[serde(default)]
     pub related: Vec<Related>,
+}
+
+impl Finding {
+    /// Whether it shows the change is needed: a failing test, a repro or a run result. A
+    /// `security` finding always does: the code showing the hole is enough to close it.
+    pub fn shows_the_change(&self) -> bool {
+        self.kind == Kind::Security || !self.evidence.trim().is_empty()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +482,7 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: String::new(),
+            evidence: "a test shows it".into(),
             needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
@@ -491,6 +506,14 @@ mod tests {
             s.route(&finding(Kind::Other, 79, Lean::Change)),
             Route::Cleared
         );
+        // A change that shows no test, repro or run result is a note, however sure.
+        let mut bare = finding(Kind::Other, 100, Lean::Change);
+        bare.evidence.clear();
+        assert_eq!(s.route(&bare), Route::Cleared);
+        // A security one still goes back: the code showing the hole is enough.
+        let mut hole = finding(Kind::Security, 100, Lean::Change);
+        hole.evidence.clear();
+        assert_eq!(s.route(&hole), Route::Author);
         // What hurts more goes back on less certainty.
         assert_eq!(
             s.route(&finding(Kind::Security, 60, Lean::Change)),
@@ -504,6 +527,26 @@ mod tests {
             s.route(&finding(Kind::Migrations, 100, Lean::Fine)),
             Route::Human
         );
+    }
+
+    #[test]
+    fn a_change_needs_a_failing_test_repro_or_run_result_unless_it_is_a_security_one() {
+        let s = ReviewSettings::default();
+        for kind in [Kind::Other, Kind::Dependencies, Kind::PublicApi] {
+            let mut f = finding(kind, 100, Lean::Change);
+            f.evidence.clear();
+            assert_eq!(s.route(&f), Route::Cleared, "{kind:?}");
+            // Blanks are not evidence either.
+            f.evidence = " \n\t".into();
+            assert_eq!(s.route(&f), Route::Cleared, "{kind:?}");
+            f.evidence = "`cargo test -p core retry` fails: the loop never stops.".into();
+            assert_eq!(s.route(&f), Route::Author, "{kind:?}");
+        }
+        // A human is still asked about a change the author cannot make, evidence or not.
+        let mut call = finding(Kind::PublicApi, 100, Lean::Change);
+        call.evidence.clear();
+        call.needs_human = true;
+        assert_eq!(s.route(&call), Route::Human);
     }
 
     #[test]

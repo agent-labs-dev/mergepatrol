@@ -797,8 +797,12 @@ fn thread_body(f: &Judged) -> String {
         None => " (about the whole PR)",
         Some(_) => "",
     };
+    let shows = match f.finding.evidence.trim() {
+        "" => String::new(),
+        e => format!("**Shows it:** {e}\n\n"),
+    };
     format!(
-        "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}\n\n{MARK}{} -->",
+        "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{shows}{}\n\n{MARK}{} -->",
         f.finding.id,
         f.finding.kind.as_str(),
         f.finding.confidence,
@@ -851,9 +855,12 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
     if !cleared.is_empty() {
         body.push_str("\n\n<details><summary>What it cleared</summary>\n");
         for f in cleared {
-            let note = match f.finding.lean {
-                mergepatrol_core::Lean::Change => ", a note under the bar",
-                mergepatrol_core::Lean::Fine => "",
+            let note = match (f.finding.lean, f.finding.shows_the_change()) {
+                (mergepatrol_core::Lean::Change, false) => {
+                    ", a note: nothing showed the change was needed"
+                }
+                (mergepatrol_core::Lean::Change, true) => ", a note under the bar",
+                (mergepatrol_core::Lean::Fine, _) => "",
             };
             body.push_str(&format!(
                 "\n- {} ({}%{note})",
@@ -960,6 +967,7 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: "fix it".into(),
+            evidence: "a test shows it".into(),
             needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
@@ -1012,6 +1020,8 @@ mod tests {
         );
         assert!(thread.body.contains("Sent back to the author"));
         assert!(thread.body.contains("Then resolve this thread."));
+        // What shows the change is needed, so the author knows what to run and what to see change.
+        assert!(thread.body.contains("**Shows it:** a test shows it"));
     }
 
     #[test]

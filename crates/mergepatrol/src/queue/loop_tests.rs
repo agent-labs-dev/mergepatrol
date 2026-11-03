@@ -860,6 +860,7 @@ impl Mem {
                     checked: Vec::new(),
                     would_clear: String::new(),
                     suggestion: String::new(),
+                    evidence: "a test shows it".into(),
                     needs_human: false,
                     code: Vec::new(),
                     related: Vec::new(),

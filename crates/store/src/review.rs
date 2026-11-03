@@ -811,6 +811,7 @@ mod tests {
                 checked: vec!["c".into()],
                 would_clear: "w".into(),
                 suggestion: "s".into(),
+                evidence: "a test shows it".into(),
                 needs_human: false,
                 code: Vec::new(),
                 related: Vec::new(),

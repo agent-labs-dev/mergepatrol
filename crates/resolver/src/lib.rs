@@ -332,6 +332,7 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "checked": ["What you verified, so a human need not"],
       "would_clear": "What would have let you decide alone",
       "suggestion": "The change you would ask the author for. Empty when there is none.",
+      "evidence": "What shows the change is needed: a failing test, a command and what it printed, or a repro. Empty when there is none.",
       "needs_human": false,
       "related": [{ "file": "path", "line": 41, "why": "What this code told you" }]
     }
@@ -438,6 +439,13 @@ the code does not show you: a policy, how production is set up, what the author 
 in `unsure`. Do not inflate it: a change you are sure enough of goes back to the author, often \
 the agent that wrote the PR, who must fix it before the PR can merge.
 
+Every finding you lean `change` on, except a `security` one, must carry `evidence`: the failing \
+test, the command you ran and what it printed, or the repro, that shows the change is needed. \
+Without one it does not go back to the author: MergeLoop shows it as a note that holds nothing. \
+If nothing you can point to shows it, lean `fine` and say in `unsure` what you could not check. \
+A `security` finding needs none: the code showing the hole is enough to close it. A finding you \
+report again for a fix that is still missing carries the same `evidence` again.
+
 Set `needs_human` to true only for a change the author cannot make from the PR and its \
 description: a call on scope, product or design that the PR does not settle, access or \
 credentials it does not have, or a change outside this repo. A human is asked about those. \
@@ -538,6 +546,9 @@ mod prompt_tests {
         assert!(review.contains("what its description sets out to do"));
         assert!(review.contains("must change it before it merges"));
         assert!(review.contains("`fine`, however sure you are"));
+        // A change of a kind other than security needs something showing it, or it is a note.
+        assert!(review.contains("must carry `evidence`"));
+        assert!(review.contains("`security` finding needs none"));
     }
 }
 
