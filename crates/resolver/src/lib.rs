@@ -149,19 +149,26 @@ fn verify_section(commands: &[String], after: &str) -> String {
     format!("After you {after}, run these commands. They must pass:\n{cmds}")
 }
 
-/// How a review learns to run the repo's checks, to build its evidence on.
+/// How a review learns to run the repo, to build its evidence on. The checkout has common
+/// toolchains, not the repo's dependencies: those come from its verify commands, if it has any,
+/// or from the evidence itself.
 fn checks_section(commands: &[String]) -> String {
+    let setup = "The checkout has git and common toolchains (Node with pnpm, Rust, Go, Python, Bun) \
+but none of the repo's dependencies. MergeLoop runs each `evidence` command again in a fresh \
+checkout, so make it install what it needs first, e.g. `pnpm install --frozen-lockfile && pnpm \
+vitest run src/retry.test.ts`.";
     if commands.is_empty() {
-        return "This repo has no verify commands: find how it runs its tests in its docs and \
-config."
-            .to_owned();
+        return format!(
+            "This repo declares no verify commands: find how it runs its tests in its docs, CI \
+workflows and config. {setup}"
+        );
     }
     let cmds = commands
         .iter()
         .map(|c| format!("- `{c}`"))
         .collect::<Vec<_>>()
         .join("\n");
-    format!("The repo checks itself with these commands, which already pass on this PR:\n{cmds}")
+    format!("The repo declares these verify commands, which a fix must pass:\n{cmds}\n\n{setup}")
 }
 
 pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
@@ -597,6 +604,22 @@ mod prompt_tests {
         assert!(review.contains("must carry `evidence`"));
         assert!(review.contains("see it fail"));
         assert!(review.contains("- `cargo test`"));
+        // A repo with no verify commands still gets evidence: the command sets itself up.
+        assert!(review.contains("make it install what it needs first"));
+        let bare = review_prompt(&ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            queue_commits: &[],
+            verify_commands: &[],
+            transcript: Path::new("t"),
+        });
+        assert!(bare.contains("declares no verify commands"));
+        assert!(bare.contains("make it install what it needs first"));
         assert!(review.contains("`security` finding needs none"));
     }
 }

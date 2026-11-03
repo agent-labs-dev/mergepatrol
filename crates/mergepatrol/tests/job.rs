@@ -697,6 +697,9 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
             change("Writes a workflow", serde_json::json!({
                 "command": "sh .github/check.sh", "files": [".github/check.sh"]
             })),
+            change("Needs a tool the checkout lacks", serde_json::json!({
+                "command": "no-such-tool test", "files": []
+            })),
         ]
     })
     .to_string();
@@ -722,6 +725,8 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
     assert_eq!(evidence(1).output, "");
     assert!(!evidence(2).failed);
     assert!(evidence(2).output.contains(".github/check.sh"));
+    // A command the shell cannot find shows the checkout, not the PR.
+    assert!(!evidence(3).failed, "{:?}", evidence(3));
 
     // The fix: the review's test is in place, and passes once the fix is in.
     let mut fix = |dir: &Path, shell: &str| {

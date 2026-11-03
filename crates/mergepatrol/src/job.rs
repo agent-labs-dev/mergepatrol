@@ -738,8 +738,9 @@ async fn check_evidence(
         }
         event(events, "evidence", format!("{}: {}", f.id, e.command));
         let ran = run_command(dir, &e.command).await?;
-        // A command that never ends may be stuck on the machine, not on the PR.
-        e.failed = !ran.passed && !ran.timed_out;
+        // A command that never ends may be stuck on the machine, not on the PR. One the shell
+        // could not find or start never ran: the checkout lacks a tool, the PR is not to blame.
+        e.failed = !ran.passed && !ran.timed_out && !ran.not_run;
         (e.output, e.patch) = (ran.tail, patch);
     }
     git.reset_to(dir, head).await
@@ -812,6 +813,8 @@ fn shown(findings: &[Finding]) -> impl Iterator<Item = &Evidence> {
 struct Ran {
     passed: bool,
     timed_out: bool,
+    /// The shell could not find the command, or start it: exit 127 or 126.
+    not_run: bool,
     tail: String,
 }
 
@@ -826,6 +829,7 @@ async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
         return Ok(Ran {
             passed: false,
             timed_out: true,
+            not_run: false,
             tail: format!("`{cmd}` timed out after {}s", VERIFY_TIMEOUT.as_secs()),
         });
     };
@@ -836,6 +840,7 @@ async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
     Ok(Ran {
         passed: output.status.success(),
         timed_out: false,
+        not_run: matches!(output.status.code(), Some(126 | 127)),
         tail: lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n"),
     })
 }
