@@ -123,7 +123,7 @@ export function Queue({ workspace }: { workspace: number }) {
   // The queue lists the active PRs first, so the batch is the head of the lane.
   const batched = lane.batch === null ? [] : queued.filter((e) => e.state === "active");
   const rest = queued.slice(batched.length);
-  const inLine = rest.filter((e) => e.state !== "held");
+  const inLine = rest.filter((e) => e.state !== "held" && !e.joining);
   const reviewing = rest.filter(heldByReview).sort((a, b) => Number(asks(b)) - Number(asks(a)));
   const held = rest.filter((e) => e.state === "held" && !heldByReview(e));
   const picked =
@@ -148,7 +148,7 @@ export function Queue({ workspace }: { workspace: number }) {
       <Row
         entry={e}
         place={
-          e.state === "held" || e.state === "open"
+          e.state === "held" || e.state === "open" || e.joining
             ? null
             : queued.findIndex((q) => q.number === e.number) + 1
         }
@@ -208,16 +208,7 @@ export function Queue({ workspace }: { workspace: number }) {
             </button>
           </p>
         )}
-        {queued.length === 0 && ejected.length === 0 && (
-          <p className="p-4 text-faint">Nothing queued</p>
-        )}
-        {(batched.length > 0 || inLine.length > 0) && (
-          <ListHead
-            title="Merge lane"
-            note="one at a time"
-            count={batched.length + inLine.length}
-          />
-        )}
+        <ListHead title="Merge lane" note="one at a time" count={batched.length + inLine.length} />
         <ol>
           {lane.batch !== null && (
             <li className="border-b border-line-soft">
@@ -244,13 +235,30 @@ export function Queue({ workspace }: { workspace: number }) {
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
-        <Rows title="Getting ready" note="each on its own, then the line" items={reviewing}>
+        {lane.batch === null && inLine.length === 0 && <Empty>No PRs in the lane</Empty>}
+        <Rows
+          title="Getting ready"
+          note="each on its own, then the line"
+          items={reviewing}
+          empty="No PRs getting ready"
+        >
           {(e) => row(e, true)}
         </Rows>
-        <Rows title="Held" note="until GitHub would merge it" items={held}>
+        <Rows title="Held" note="until GitHub would merge it" items={held} empty="No PRs held">
           {(e) => row(e)}
         </Rows>
-        <Rows title="Ejected" note="queue it again to retry" items={ejected}>
+        <Rows
+          title="Ejected"
+          note="queue it again to retry"
+          items={ejected}
+          empty={
+            exits.isError || open.isError
+              ? "Could not load the ejected PRs."
+              : exits.data && open.data
+                ? `No PRs ejected in the last ${EJECTED_DAYS} days`
+                : "Loading…"
+          }
+        >
           {(e) => row(e)}
         </Rows>
         {open.isError && (
@@ -258,40 +266,42 @@ export function Queue({ workspace }: { workspace: number }) {
             Could not load the open PRs: {open.error.message}
           </p>
         )}
-        {(notQueued.length > 0 || unqueued.length > 0) && (
-          <>
-            <p className="mt-6 flex items-center justify-between border-y border-line bg-sunken px-4 py-2 text-xs text-muted">
-              <span>
-                <span className="font-medium text-fg-2">Open</span> · not queued
-              </span>
-              <span className="tabular-nums">
-                {narrows(filter)
-                  ? `${unqueued.length} of ${leaving.length + notQueued.length}`
-                  : unqueued.length}
-              </span>
-            </p>
-            <OpenFilters pulls={notQueued} me={me} filter={filter} onChange={setFilter} />
-            {unqueued.length === 0 && (
-              <p className="px-4 py-6 text-center text-faint">
-                {narrows(filter) ? "No open PRs match." : "Only drafts are open."}{" "}
-                <button
-                  type="button"
-                  onClick={() =>
-                    setFilter(narrows(filter) ? { drafts: filter.drafts } : { drafts: true })
-                  }
-                  className="text-muted underline underline-offset-2 hover:text-fg"
-                >
-                  {narrows(filter) ? "Clear the filters" : "Show them"}
-                </button>
-              </p>
-            )}
-            <ol>
-              {unqueued.map((e) => (
-                <li key={e.number}>{row(e)}</li>
-              ))}
-            </ol>
-          </>
+        <p className="mt-6 flex items-center justify-between border-y border-line bg-sunken px-4 py-2 text-xs text-muted">
+          <span>
+            <span className="font-medium text-fg-2">Open</span> · not queued
+          </span>
+          <span className="tabular-nums">
+            {narrows(filter)
+              ? `${unqueued.length} of ${leaving.length + notQueued.length}`
+              : unqueued.length}
+          </span>
+        </p>
+        {open.isPending && <Empty>Loading…</Empty>}
+        {open.data && notQueued.length === 0 && unqueued.length === 0 && (
+          <Empty>No other open PRs</Empty>
         )}
+        {(notQueued.length > 0 || unqueued.length > 0) && (
+          <OpenFilters pulls={notQueued} me={me} filter={filter} onChange={setFilter} />
+        )}
+        {notQueued.length > 0 && unqueued.length === 0 && (
+          <p className="px-4 py-6 text-center text-faint">
+            {narrows(filter) ? "No open PRs match." : "Only drafts are open."}{" "}
+            <button
+              type="button"
+              onClick={() =>
+                setFilter(narrows(filter) ? { drafts: filter.drafts } : { drafts: true })
+              }
+              className="text-muted underline underline-offset-2 hover:text-fg"
+            >
+              {narrows(filter) ? "Clear the filters" : "Show them"}
+            </button>
+          </p>
+        )}
+        <ol>
+          {unqueued.map((e) => (
+            <li key={e.number}>{row(e)}</li>
+          ))}
+        </ol>
       </div>
       <div className={`min-h-0 flex-1 overflow-y-auto ${picked ? "" : "max-lg:hidden"}`}>
         {entry && (
@@ -395,14 +405,17 @@ type Item = Omit<EntryView, "state"> & {
   state: EntryView["state"] | "open";
   /** Open, because the queue ejected it: `detail` says why. */
   ejected?: boolean;
+  /** Clicked, and not in the lane yet: only the queue knows where it joins. */
+  joining?: boolean;
 };
 
 /** How far back an open PR still lists as ejected, rather than as just not queued. */
 const EJECTED_DAYS = 7;
 
-/** A held PR that is getting ready or waits on the agent's review or its threads, not on GitHub. */
+/** A held PR that is getting ready or waits on the agent's review or its threads, not on GitHub,
+ * or one just queued, which starts there. */
 const heldByReview = (e: Item) =>
-  e.state !== "open" && reviewBadge({ ...e, state: e.state }) !== null;
+  e.joining || (e.state !== "open" && reviewBadge({ ...e, state: e.state }) !== null);
 /** A PR the agent's review asks a human about: the one thing here that a person can move. */
 const asks = (e: Item) => e.hold?.reason === "review_asks";
 
@@ -452,7 +465,7 @@ const inOpen = (open: OpenPullView[] | undefined, item: Item) =>
 
 /** Where the queue takes a PR from, as the server orders the lane. */
 const rank = (e: Item) =>
-  e.state === "active" ? 0 : e.state === "waiting" ? (e.priority ? 1 : 2) : 3;
+  e.state === "active" ? 0 : e.state === "waiting" && !e.joining ? (e.priority ? 1 : 2) : 3;
 
 /** The lane as it is once the queue has the clicks: queued PRs in, removed ones out, each in
  * merge order. A queued PR goes last of its rank, as the queue puts it. */
@@ -464,7 +477,7 @@ function withClicks(lane: LaneView, pending: ReadonlyMap<number, Pending>): Item
   });
   for (const p of pending.values())
     if (p.kind === "queueing" && !entryOf(lane, p.item.number))
-      entries.push({ ...p.item, state: "waiting", detail: null, ejected: false });
+      entries.push({ ...p.item, state: "waiting", detail: null, ejected: false, joining: true });
   // Stable: each keeps its place within its rank.
   return entries.sort((a, b) => rank(a) - rank(b));
 }
@@ -739,22 +752,29 @@ function ListHead({ title, note, count }: { title: string; note: string; count: 
   );
 }
 
-/** A list of PRs below the lane, with its band. Nothing when it is empty. */
+/** What a list says with no PRs in it. */
+function Empty({ children }: { children: ReactNode }) {
+  return <p className="px-4 py-3 text-xs text-faint">{children}</p>;
+}
+
+/** A list of PRs below the lane, with its band. */
 function Rows({
   title,
   note,
   items,
+  empty,
   children,
 }: {
   title: string;
   note: string;
   items: Item[];
+  empty: string;
   children: (item: Item) => ReactNode;
 }) {
-  if (items.length === 0) return null;
   return (
     <div className="mt-6 border-t border-line">
       <ListHead title={title} note={note} count={items.length} />
+      {items.length === 0 && <Empty>{empty}</Empty>}
       <ol>
         {items.map((e) => (
           <li key={e.number}>{children(e)}</li>
