@@ -976,6 +976,12 @@ impl ReviewStore for Mem {
         }
         Ok(true)
     }
+    async fn rerun_review(&self, id: i64, _: i64, _: Duration) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        reviews.iter_mut().find(|r| r.id == id).unwrap().status = ReviewStatus::Pending;
+        self.fixing.lock().unwrap().remove(&id);
+        Ok(())
+    }
     async fn settle_review(&self, id: i64, _: i64) -> Result<()> {
         self.fixing.lock().unwrap().remove(&id);
         Ok(())

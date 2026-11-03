@@ -204,12 +204,30 @@ pub(crate) async fn conclude(
             Fix::Unfixed
         });
     match fix {
-        Fix::Pushed => return ctx.store.settle_review(r.id, r.claim).await,
-        Fix::Superseded => return ctx.store.stale_review(r.id, r.claim).await,
-        Fix::Unfixed => {}
+        Fix::Pushed => ctx.store.settle_review(r.id, r.claim).await,
+        Fix::Superseded => ctx.store.stale_review(r.id, r.claim).await,
+        Fix::Unfixed => match left_to_author(ctx, gh, key, r, settings, &done).await {
+            Ok(()) => Ok(()),
+            // The author has not heard of it: the review runs again rather than hold the PR.
+            Err(e) => {
+                tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not post what the fix left");
+                ctx.store.rerun_review(r.id, r.claim, RETRY_AFTER).await
+            }
+        },
     }
-    // The PR moved while the fix ran: a pushed or retargeted head gets its own review, and one
-    // no longer queued gets none. What this one found would be out of date.
+}
+
+/// Posts what the fix left the author, on the PR as it is now. A PR that moved while the fix ran
+/// gets nothing: a pushed or retargeted head gets its own review, and one no longer queued gets
+/// none.
+async fn left_to_author(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    r: &ReviewRecord,
+    settings: &RepoSettings,
+    done: &ReviewDone,
+) -> Result<()> {
     let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
     if (!now.is_cross_repository && now.head_ref_oid != r.head_sha)
         || now.merges_into() != key.trunk
@@ -217,7 +235,7 @@ pub(crate) async fn conclude(
     {
         return ctx.store.stale_review(r.id, r.claim).await;
     }
-    publish(ctx, gh, key, &now, r, &done).await?;
+    publish(ctx, gh, key, &now, r, done).await?;
     ctx.store.settle_review(r.id, r.claim).await
 }
 

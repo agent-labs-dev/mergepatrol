@@ -123,6 +123,9 @@ pub trait ReviewStore: Send + Sync {
     /// The agent's fix of what the review sent back is over, and the author has heard of what
     /// it left them.
     async fn settle_review(&self, id: i64, claim: i64) -> Result<()>;
+    /// What the agent's fix left the author could not be posted: the review runs again `after`,
+    /// as the worker's next run of it.
+    async fn rerun_review(&self, id: i64, claim: i64, after: Duration) -> Result<()>;
     /// Puts a running review back to wait `after`, once more, for an error outside the PR.
     async fn retry_review(&self, id: i64, claim: i64, error: &str, after: Duration) -> Result<()>;
     /// The PR moved on before the review finished.
@@ -393,6 +396,20 @@ impl ReviewStore for PgStore {
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)
+    }
+
+    async fn rerun_review(&self, id: i64, claim: i64, after: Duration) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_reviews SET status = 'pending', fixing = false, claimed_at = NULL,
+                 retry_at = now() + make_interval(secs => $3), updated_at = now()
+             WHERE id = $1 AND claim = $2",
+        )
+        .bind(id)
+        .bind(claim)
+        .bind(after.as_secs_f64())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn settle_review(&self, id: i64, claim: i64) -> Result<()> {
@@ -1076,6 +1093,14 @@ mod tests {
         assert_eq!(store.claim_review(stale).await.unwrap(), None);
         let kept = store.review(settled.id).await.unwrap().unwrap();
         assert_eq!(kept.status, ReviewStatus::Changes);
+
+        // A review whose post failed after the fix runs again, once its wait is over.
+        store
+            .rerun_review(settled.id, claim, Duration::ZERO)
+            .await
+            .unwrap();
+        let rerun = store.claim_review(stale).await.unwrap().unwrap();
+        assert_eq!(rerun.id, settled.id);
     }
 
     #[sqlx::test(migrations = false)]

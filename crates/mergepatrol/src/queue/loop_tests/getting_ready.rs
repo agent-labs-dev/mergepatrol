@@ -300,6 +300,19 @@ fn answer(gh: &Fake, origin: &Path, method: &str, path: &str, body: &str) -> (u1
         return (201, json!({ "token": "read" }).to_string());
     }
     if path == "/graphql" {
+        let pr_read = body["query"]
+            .as_str()
+            .unwrap()
+            .contains("pullRequest(number");
+        let down = pr_read
+            && gh.with_mut(|s| {
+                let down = s.outage > 0;
+                s.outage = s.outage.saturating_sub(1);
+                down
+            });
+        if down {
+            return (404, "{}".into());
+        }
         return (200, graphql(gh, origin, &body).to_string());
     }
     let Some(rest) = path.strip_prefix("/repos/o/r/") else {
@@ -1283,6 +1296,23 @@ async fn a_finding_is_posted_when_the_fix_errors() {
     let review = world.conclude(100).await;
     assert!(world.tasks().is_empty(), "no fix");
     assert_eq!(world.posted(), [1]);
+    assert!(!world.fixing(review));
+}
+
+#[tokio::test]
+async fn a_review_whose_post_fails_after_the_fix_runs_again() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    *world.agent.fails.lock().unwrap() = Some("the agent gave up".into());
+    // GitHub fails the read of the PR after the fix.
+    let gh = world.gh.clone();
+    world.during(async move { gh.with_mut(|s| s.outage = 1) });
+    let review = world.conclude(100).await;
+    assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
+    assert_eq!(world.posted(), Vec::<usize>::new());
+    let r = world.store.review(review).await.unwrap().unwrap();
+    assert_eq!(r.status, ReviewStatus::Pending, "the worker runs it again");
     assert!(!world.fixing(review));
 }
 
