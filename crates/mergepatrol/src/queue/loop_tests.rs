@@ -624,6 +624,7 @@ struct Scripted {
     fix_works: bool,
     fix_fails: Option<String>,
     fix_gives_up: Option<String>,
+    fix_retitles: bool,
     recheck_passes: bool,
     /// CI skips the recheck's commit, which changes nothing.
     recheck_skipped: bool,
@@ -644,6 +645,7 @@ impl Scripted {
             fix_works: true,
             fix_fails: None,
             fix_gives_up: None,
+            fix_retitles: false,
             recheck_passes: false,
             recheck_skipped: false,
             conflicts_on: Vec::new(),
@@ -761,6 +763,9 @@ impl Sandbox for Scripted {
         }
         if let Some(reason) = &self.fix_gives_up {
             return Ok(Event::FixGaveUp(reason.clone()));
+        }
+        if self.fix_retitles {
+            return Ok(Event::Retitled);
         }
         let number = unit.layers[layer].number;
         let (fixed, top) = {
@@ -2003,6 +2008,24 @@ async fn a_recheck_cut_short_stays_in_the_lane() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pr_retitled_off_the_lane_gets_one_guarded_recheck_in_the_lane() {
+    for passes in [true, false] {
+        // What getting ready does when the agent sets a title: it leaves the head to the lane.
+        let mut run = prep_run(failing_ci);
+        let head = run.gh.with(|s| s.head(1));
+        run.ctx.prep.leave_to_lane((1, repo(), 1), &head);
+        run.rebase.fix_retitles = true;
+        run.rebase.recheck_passes = passes;
+        run.tick().await;
+        assert_eq!(run.rebase.fixed().len(), 1);
+        match passes {
+            true => assert_eq!(run.kinds(1).last().unwrap(), "merged"),
+            false => assert_eq!(run.labels(1), [FAILED]),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_required_check_no_workflow_runs_is_the_lanes_to_eject() {
     let run = prep_run(|s| {
         s.add_pr(1);
@@ -2994,6 +3017,29 @@ async fn a_check_the_agent_gives_up_on_runs_again_and_a_flaky_one_merges() {
     run.tick().await;
     assert_eq!(run.rebase.fixed().len(), 1);
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_title_the_agent_changes_runs_the_checks_again_and_merges() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    // What the lane's own job does: getting ready leaves the PR to it.
+    run.ctx.config.prep = false;
+    run.rebase.fix_retitles = true;
+    run.rebase.recheck_passes = true;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_title_that_still_fails_ejects_with_no_second_fix() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    // What the lane's own job does: getting ready leaves the PR to it.
+    run.ctx.config.prep = false;
+    run.rebase.fix_retitles = true;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 #[tokio::test(start_paused = true)]

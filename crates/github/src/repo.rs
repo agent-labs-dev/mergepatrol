@@ -1147,6 +1147,17 @@ impl Installation {
         r["number"].as_u64().context("PR number")
     }
 
+    pub async fn set_title(&self, repo: &RepoName, number: PrNumber, title: &str) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::PATCH,
+                &format!("/repos/{repo}/pulls/{number}"),
+                Some(json!({ "title": title })),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn commit_tree(&self, repo: &RepoName, sha: &str) -> Result<String> {
         let r: Value = self
             .rest(
@@ -1784,6 +1795,17 @@ mod tests {
                 "GET /repos/o/r/issues/7/comments?per_page=100&page=2 HTTP/1.1",
                 "PATCH /repos/o/r/issues/comments/4242 HTTP/1.1",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_title_is_set_on_the_pull() {
+        let (gh, requests) = fake::serve(vec![(200, "", "{}")]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        gh.set_title(&repo, 7, "fix: it").await.unwrap();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            ["PATCH /repos/o/r/pulls/7 HTTP/1.1"]
         );
     }
 

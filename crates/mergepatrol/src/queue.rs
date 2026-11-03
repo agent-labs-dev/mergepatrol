@@ -38,7 +38,7 @@ use crate::cached::{Cached, Reader};
 use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
-use crate::job::{GAVE_UP, LEFT_CONFLICT};
+use crate::job::{GAVE_UP, LEFT_CONFLICT, RETITLED};
 use crate::publish::{Publish, create_commits, publish};
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
@@ -3171,6 +3171,8 @@ async fn fix_and_publish(
         branch: &unit.layers[layer - 1].head_ref_name,
         upstream: base,
     });
+    // Only a fix of failed checks may propose a title: the job's word for it is not enough.
+    let may_retitle = matches!(task, Task::FixChecks { .. });
     let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
@@ -3191,12 +3193,68 @@ async fn fix_and_publish(
         Ok(Err(event)) => event,
         Err(e) => {
             let reason = format!("{e:#}");
-            match reason.starts_with(GAVE_UP) {
-                true => Event::FixGaveUp(reason),
-                false => Event::FixFailed(reason),
+            match proposed_title(&reason, may_retitle) {
+                Some(title) => retitle(
+                    ctx,
+                    gh,
+                    key,
+                    settings,
+                    unit,
+                    layer,
+                    &heads,
+                    title,
+                    beside_lane,
+                )
+                .await
+                .unwrap_or_else(|e| Event::FixFailed(format!("{e:#}"))),
+                None if reason.starts_with(GAVE_UP) => Event::FixGaveUp(reason),
+                None => Event::FixFailed(reason),
             }
         }
     })
+}
+
+/// The title a job's failure `reason` proposes, if the job's task may propose one.
+fn proposed_title(reason: &str, may_retitle: bool) -> Option<&str> {
+    reason.strip_prefix(RETITLED).filter(|_| may_retitle)
+}
+
+/// The longest title GitHub takes.
+const MAX_TITLE: usize = 256;
+
+/// Whether a title from a job, which is not to be trusted, can go on a PR.
+fn valid_title(title: &str) -> bool {
+    !title.trim().is_empty()
+        && title.chars().count() <= MAX_TITLE
+        && !title.contains(char::is_control)
+}
+
+/// Sets the title a fix's job proposed. A check reads it only on a new run, which is for the
+/// caller to start.
+#[allow(clippy::too_many_arguments)]
+async fn retitle(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    settings: &RepoSettings,
+    unit: &Unit,
+    layer: usize,
+    heads: &[String],
+    title: &str,
+    beside_lane: bool,
+) -> Result<Event> {
+    let pr = &unit.layers[layer];
+    if !valid_title(title) {
+        return Ok(Event::FixFailed(format!(
+            "the agent proposed a title GitHub would not take: {title}"
+        )));
+    }
+    if beside_lane && !still_queued(gh, key, settings, unit, heads).await? {
+        return Ok(Event::HeadMoved);
+    }
+    gh.set_title(&key.repo, pr.number, title).await?;
+    record(ctx, key, pr.number, "retitled", title).await?;
+    Ok(Event::Retitled)
 }
 
 /// Whether `unit` is as a job beside the lane found it, its branches at `heads`, and still queued:
@@ -3674,6 +3732,22 @@ mod tests {
         assert!(!fixable(unit(vec![bottom, fork], true)));
         let other = serde_json::json!({ "number": 3, "baseRefName": "main" });
         assert!(!fixable(unit(vec![pr(7, other)], true)), "another stack's");
+    }
+
+    #[test]
+    fn a_title_from_a_job_is_one_line_github_takes() {
+        assert!(valid_title("fix(queue): keep the lane moving"));
+        assert!(valid_title(&"t".repeat(MAX_TITLE)));
+        assert!(!valid_title(&"t".repeat(MAX_TITLE + 1)));
+        assert!(!valid_title(" "));
+        assert!(!valid_title("fix: it\n\nmore"));
+    }
+
+    #[test]
+    fn only_a_fix_of_failed_checks_may_propose_a_title() {
+        let reason = format!("{RETITLED}fix: a title");
+        assert_eq!(proposed_title(&reason, true), Some("fix: a title"));
+        assert_eq!(proposed_title(&reason, false), None);
     }
 
     #[sqlx::test(migrations = false)]

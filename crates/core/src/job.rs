@@ -143,6 +143,8 @@ pub enum Event {
     FixFailed(String),
     /// The agent found nothing in the code to fix, and said why.
     FixGaveUp(String),
+    /// What failed was the PR's title, which the agent's new title now replaces.
+    Retitled,
     /// The PR head is no longer the SHA we published: the author pushed.
     HeadMoved,
     /// The trunk is no longer the SHA we rebased onto.
@@ -240,7 +242,7 @@ impl Job {
                     reason,
                 })
             }
-            (P::Fixing { head, base, failed }, E::FixGaveUp(_)) => {
+            (P::Fixing { head, base, failed }, E::FixGaveUp(_) | E::Retitled) => {
                 let phase = P::Rechecking {
                     head: head.clone(),
                     base: base.clone(),
@@ -422,6 +424,21 @@ mod tests {
                 fixes: 1
             })
         );
+    }
+
+    #[test]
+    fn a_new_title_runs_the_checks_again_once_and_a_new_failure_ejects() {
+        let Transition::Continue(fixing) = failed(rebased(Job::start(7, 2))) else {
+            panic!()
+        };
+        let Transition::Continue(rechecking) = fixing.step(Event::Retitled) else {
+            panic!()
+        };
+        assert!(matches!(rechecking.phase, Phase::Rechecking { .. }));
+        let Transition::Continue(again) = rechecking.step(Event::Fixed { head: "c".into() }) else {
+            panic!()
+        };
+        assert!(matches!(failed(again), Transition::Ejected(_)));
     }
 
     #[test]

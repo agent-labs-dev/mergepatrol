@@ -354,6 +354,43 @@ async fn a_fix_that_fails_still_tells_what_it_spent() {
 }
 
 #[tokio::test]
+async fn a_fix_that_proposes_a_title_says_it_for_the_orchestrator_to_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let seen = tmp.path().join("prompt");
+    let shell = format!("printf '%s' \"$*\" > {}", seen.display());
+    let answer = "MERGEPATROL_RETITLE: fix: stop the leak";
+    let executor = with_fake_claude_running(tmp.path(), &shell, answer);
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::FixChecks {
+        failures: vec![CheckFailure {
+            name: "pr-title".into(),
+            details: "no type in the title".into(),
+        }],
+    };
+    let out = tmp.path().join("out");
+    let result = executor.run("t8", &spec, &out).await.unwrap();
+    let JobOutcome::Failed { reason } = &result.outcome else {
+        panic!("{result:?}")
+    };
+    assert_eq!(reason, "the agent proposes the title: fix: stop the leak");
+    assert_eq!(result.events.last().unwrap().kind, "fix", "{result:?}");
+    assert!(!out.join(BUNDLE_FILE).exists());
+    let prompt = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        prompt.contains("MERGEPATROL_RETITLE: <the new title>"),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
 async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
     let run = |shell: &'static str| async move {
         let tmp = tempfile::tempdir().unwrap();
