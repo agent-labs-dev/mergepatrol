@@ -1895,6 +1895,11 @@ pub(crate) async fn you(
     let user = caller.user()?;
     let ids = user.installations();
     let inbox = app.store.inbox(user.login(), ids, MERGED_FOR).await?;
+    // Authored or asked to review is not enough: the user may since have lost the repo.
+    let mut readable = HashMap::new();
+    for &id in ids {
+        readable.insert(id, user.readable(&app, id).await?);
+    }
     let on: HashSet<(u64, RepoName)> = app
         .store
         .repos()
@@ -1914,6 +1919,9 @@ pub(crate) async fn you(
                 let p = InboxPull::from_node(&row.node)
                     .inspect_err(|e| tracing::warn!(error = %format!("{e:#}"), "an inbox PR"))
                     .ok()?;
+                if !readable.get(&row.installation_id)?.contains(&p.repo) {
+                    return None;
+                }
                 Some(InboxPullView {
                     number: p.pr.number as u32,
                     base: p.pr.merges_into().to_owned(),

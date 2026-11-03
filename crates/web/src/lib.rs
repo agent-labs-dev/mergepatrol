@@ -1878,6 +1878,33 @@ mod tests {
             settled: true,
         };
         store.save_inbox_reads(1, &repo, &[write]).await.unwrap();
+        // Asked of Ada's team too, in a repo she cannot read.
+        let secret = mergepatrol_core::RepoName::parse("o/secret").unwrap();
+        let on_secret = on_pr.replace("o/r", "o/secret").replace(":5,", ":9,");
+        deliver_event(&router, "issue_comment", &on_secret).await;
+        let stale = store
+            .inbox_stale(std::time::Duration::ZERO, 10)
+            .await
+            .unwrap();
+        let changes = stale.iter().find(|s| s.number == 9).unwrap().changes;
+        let mut node = inbox_node(9, "bo");
+        node["repository"]["nameWithOwner"] = "o/secret".into();
+        let read = InboxRead {
+            state: "open".into(),
+            author: Some("bo".into()),
+            requested_users: Vec::new(),
+            requested_teams: vec!["core".into()],
+            reviewers: Vec::new(),
+            closed_at: None,
+            node,
+        };
+        let write = InboxWrite {
+            number: 9,
+            changes,
+            read: Some(read),
+            settled: true,
+        };
+        store.save_inbox_reads(1, &secret, &[write]).await.unwrap();
 
         let you = |cookie: String| {
             let router = router.clone();
@@ -1895,6 +1922,7 @@ mod tests {
             }
         };
         let view = you(cookie.clone()).await;
+        assert_eq!(view["review_requested"].as_array().unwrap().len(), 1);
         let asked = &view["review_requested"][0];
         assert_eq!(
             (asked["repo"].as_str(), asked["number"].as_u64()),
