@@ -38,6 +38,7 @@ flowchart TD
     gates --> batch
     ready -- "cannot settle it" --> batch
     batch -- "conflict" --> rebase
+    batch -- "failed, fixes left" --> fixci
     batch -- "failed" --> ejected{{"Ejected: back to a human"}}
     batch -- "passed" --> merged(["Merged"])
 
@@ -53,6 +54,6 @@ Dashed is planned, and not built.
 - **A fix or an agent's conflict resolution** needs a review of that change alone. A clean rebase keeps its approval.
 - **A review's fix** covers only what it sent back. A human keeps what the review asks about, and a PR with no fixes left waits for its author.
 - **Getting ready never ejects.** What it cannot settle goes on to the lane, whose job ejects as it always did: a failed job, no fixes left, or a check that never finishes.
-- **The lane's job** rebases a PR that runs alone when it must, waits for its checks and fixes them. A skipped rebase means the PR merges on checks that ran before the trunk's newest commits, so nothing tested the two together. If GitHub refuses that merge, the job rebases after all. Only a conflict goes back to getting ready.
+- **The lane's job** rebases a PR that runs alone when it must, and waits for its checks. A skipped rebase means the PR merges on checks that ran before the trunk's newest commits, so nothing tested the two together. If GitHub refuses that merge, the job rebases after all. A conflict or a failed check goes back to getting ready, and the PR keeps its place while the next one goes on. Only forks and heads getting ready could not settle stay in the lane.
 
 The code is `crates/mergepatrol/src/queue/prep.rs` for getting ready, `run_job` in `crates/mergepatrol/src/queue.rs` for the lane, and `fix_sent_back` in `crates/mergepatrol/src/review.rs` for a review's fix.

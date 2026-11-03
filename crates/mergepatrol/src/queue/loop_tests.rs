@@ -1890,6 +1890,65 @@ async fn a_conflict_prep_could_not_settle_is_the_lanes_to_eject() {
     assert_eq!(run.labels(1), [FAILED]);
 }
 
+/// `numbers`, whose head fails its checks once #1 is rebased in the lane.
+fn fails_once_rebased(numbers: &[PrNumber]) -> impl FnOnce(&mut State) {
+    let queued = prs(numbers);
+    move |s| {
+        queued(s);
+        s.checks.insert("ci".into(), CheckState::Passed);
+        let failed = BTreeMap::from([("ci".to_owned(), CheckState::Failed)]);
+        s.checks_on.insert("pr-1-r1".into(), failed);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_the_lane_finds_goes_back_off_it_and_the_next_pr_goes_on() {
+    let run = prep_run(fails_once_rebased(&[1, 2]));
+    run.tick().await;
+    assert_eq!(run.lane()[0], (1, "Held(PrepFixing)".into()));
+    assert!(run.rebase.fixed().is_empty(), "no agent in the lane");
+    assert!(!run.kinds(1).contains(&"ejected".to_owned()));
+
+    run.tick().await;
+    let fix = prep::Work::Fix {
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(1, fix)]);
+    assert_eq!(run.merged(), [2]);
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+
+    // Its fix is published: it takes the lane again, in its place.
+    run.ctx.prep.take(&repo());
+    run.ctx.prep.end_job(&(1, repo(), 1));
+    run.gh.with_mut(|s| s.push(1, "pr-1-r1-f1"));
+    run.tick().await;
+    assert_eq!(run.merged(), [2, 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failure_in_the_lane_with_no_fixes_left_ejects() {
+    let run = prep_run(|s| {
+        fails_once_rebased(&[1])(s);
+        s.fixes_used.insert(1, 3);
+    });
+    run.tick().await;
+    assert_eq!(run.labels(1), [FAILED]);
+    assert!(run.ctx.prep.asked().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stacks_failure_is_fixed_in_the_lane() {
+    let run = prep_run(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        s.checks_on
+            .insert("pr-1-r1".into(), [("ci".into(), CheckState::Failed)].into());
+    });
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]]);
+}
+
 #[tokio::test(start_paused = true)]
 async fn what_getting_ready_cannot_settle_goes_to_the_lane() {
     let run = prep_run(failing_ci);
@@ -1898,6 +1957,41 @@ async fn what_getting_ready_cannot_settle_goes_to_the_lane() {
     run.tick().await;
     assert!(run.ctx.prep.asked().is_empty());
     assert_eq!(run.rebase.count(), 1, "the lane took it");
+    assert_eq!(run.rebase.fixed(), [["ci"]], "and fixed it");
+}
+
+/// Getting ready reads a skipped check as a pass, so it would send the PR straight back.
+#[tokio::test(start_paused = true)]
+async fn a_recheck_cut_short_stays_in_the_lane() {
+    let mut run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        s.skipped = vec!["ci".into()];
+    });
+    let head = format!("{}-c", run.gh.with(|s| s.head(1)));
+    let mut lane = Lane::default();
+    lane.sync(&[Candidate {
+        number: 1,
+        priority: false,
+        hold: None,
+        summary: Default::default(),
+        layers: Vec::new(),
+        pin: None,
+    }]);
+    lane.activate(1);
+    lane.set_recheck(1, head.clone(), vec!["ci".into()]);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    run.store.save_lane(&key, &lane).await.unwrap();
+    run.rebase.rebases_once = true;
+    run.gh.with_mut(|s| s.push(1, &head));
+    run.rebase.rebased_already();
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]], "the skip is no pass");
 }
 
 #[tokio::test(start_paused = true)]

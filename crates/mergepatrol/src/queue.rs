@@ -2458,8 +2458,8 @@ async fn run_job(
         true => 0,
         false => settings.fix_ci.allowed(),
     };
-    // A conflict in the lane would hold up every PR behind it, while the agent resolves it.
-    let agent = !ctx.prep.takes_conflicts(ctx, key, unit);
+    // An agent in the lane would hold up every PR behind it.
+    let agent = !ctx.prep.takes_agent_work(ctx, key, unit);
     let mut job = Job::start(unit.number, fix_attempts);
     if fix_attempts > 0 {
         job.fixes += unit.fixes_used(gh, repo).await?;
@@ -2589,8 +2589,15 @@ async fn run_job(
                         }
                     }
                     let missing = unreported.missing(silent, published_at);
+                    // Getting ready reads a skipped check as a pass, which a recheck's is not.
+                    let rechecking = lane
+                        .recheck(unit.number)
+                        .is_some_and(|(head, _)| heads.contains(&head));
                     match verdict {
                         (CheckState::Passed, _) => Event::ChecksPassed,
+                        (CheckState::Failed, _) if !agent && !rechecking && job.can_fix() => {
+                            Event::OnHold(Hold::PrepFixing)
+                        }
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
                         (CheckState::Pending, _) if !missing.is_empty() => {
                             Event::ChecksMissing(missing)
