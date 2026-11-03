@@ -255,6 +255,8 @@ When the file does not parse, the queue pauses, and **Settings** shows why, unti
 
 MergeLoop serves an MCP server at `/mcp`, so a coding agent can do anything the dashboard does: queue a PR, take it out, read where it is, review it, read the queue's history, change a repo's settings. Every call acts as a GitHub user or bot: MergeLoop puts the labels on, comments, and reviews with their token, so GitHub checks they may.
 
+The hosted endpoint is `https://mergeloop.ai/mcp`. It uses sessionless streamable HTTP: each POST carries one JSON-RPC message, with JSON responses to requests. GET returns `405 Method Not Allowed`. Use the endpoint directly: following a redirect from the old host can break POST requests.
+
 An MCP client that supports OAuth signs in with GitHub in the browser, as the dashboard does:
 
 ```sh
@@ -264,6 +266,8 @@ claude mcp add --transport http mergeloop https://mergeloop.ai/mcp
 The client gets a MergeLoop session, and the GitHub token stays on the server. MergeLoop sends the sign-in back only to a loopback address, where native clients such as Claude Code, Codex and Cursor listen.
 
 An agent without a browser, such as one in CI, passes a GitHub token instead: one from `gh auth token`, a personal access token, or a workflow's `GITHUB_TOKEN`. A fine-grained token also needs write access to issues or pull requests. MergeLoop never stores the token. It remembers its hash, in memory for 5 minutes, so calls in a row do not each ask GitHub again.
+
+Send the header `Authorization: Bearer <token>`; no OAuth flow or MergeLoop sign-in is needed. Accepted token prefixes are `ghp_`, `gho_`, `ghu_`, `ghs_` and `github_pat_`.
 
 ```sh
 claude mcp add --transport http mergeloop https://mergeloop.ai/mcp \
