@@ -4,8 +4,8 @@
 //! to the lane, which ejects as it does for any PR. Stacks and forks go straight there.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -21,15 +21,15 @@ use crate::github::GitHub;
 
 /// A job's hold on a PR, which ends with the job, also if it panics or is aborted, and which
 /// leaves a later job's hold alone.
-pub struct Claim<'a> {
-    prep: &'a Prep,
+pub struct Claim {
+    running: Running,
     id: PrId,
     token: u64,
 }
 
-impl Drop for Claim<'_> {
+impl Drop for Claim {
     fn drop(&mut self) {
-        let mut running = self.prep.running.lock().unwrap();
+        let mut running = self.running.lock().unwrap();
         if running.get(&self.id).is_some_and(|(t, _)| *t == self.token) {
             running.remove(&self.id);
         }
@@ -40,6 +40,8 @@ impl Drop for Claim<'_> {
 const DRAIN_EVERY: Duration = Duration::from_secs(2);
 
 type PrId = (u64, RepoName, PrNumber);
+/// Shared, so a claim can outlive the borrow of `Prep`, as a job's task does.
+type Running = Arc<Mutex<HashMap<PrId, (u64, Hold)>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Work {
@@ -63,7 +65,7 @@ pub(super) struct Wanted {
 pub struct Prep {
     wanted: Mutex<Vec<Wanted>>,
     /// The PRs with a job asked for or running: its claim, and what that holds them for.
-    running: Mutex<HashMap<PrId, (u64, Hold)>>,
+    running: Running,
     next_claim: AtomicU64,
     /// The head of each PR left to the lane: its job could not settle it.
     left: Mutex<HashMap<PrId, String>>,
@@ -116,9 +118,18 @@ impl Prep {
         hold
     }
 
+    /// The claim a job the tick asked for holds.
+    fn claim_of(&self, w: &Wanted) -> Claim {
+        Claim {
+            running: self.running.clone(),
+            id: (w.key.installation_id, w.key.repo.clone(), w.unit.number),
+            token: w.token,
+        }
+    }
+
     /// Holds PR `number` for a fix beside this module's jobs, until the claim drops: `None` if a
     /// job has it.
-    pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> Option<Claim<'_>> {
+    pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> Option<Claim> {
         let id = (key.installation_id, key.repo.clone(), number);
         let mut running = self.running.lock().unwrap();
         if running.contains_key(&id) {
@@ -127,7 +138,7 @@ impl Prep {
         let token = self.next_claim.fetch_add(1, Ordering::Relaxed);
         running.insert(id.clone(), (token, Hold::PrepFixing));
         Some(Claim {
-            prep: self,
+            running: self.running.clone(),
             id,
             token,
         })
@@ -179,6 +190,18 @@ impl Prep {
     #[cfg(test)]
     pub(super) fn end_job(&self, id: &PrId) {
         self.running.lock().unwrap().remove(id);
+    }
+
+    /// Takes the jobs asked for on `repo`, as `drain` does, and aborts each before it runs.
+    #[cfg(test)]
+    pub(super) async fn abort_wanted(&self, repo: &RepoName) {
+        let mut jobs = JoinSet::new();
+        for wanted in self.take(repo) {
+            let claim = self.claim_of(&wanted);
+            jobs.spawn(async move { drop((wanted, claim)) });
+        }
+        jobs.abort_all();
+        while jobs.join_next().await.is_some() {}
     }
 
     #[cfg(test)]
@@ -270,7 +293,9 @@ pub(super) async fn drain(ctx: std::sync::Arc<Ctx>, gh: Installation, repo: Repo
     loop {
         for wanted in ctx.prep.take(&repo) {
             let (ctx, gh) = (ctx.clone(), gh.clone());
-            jobs.spawn(async move { run(&ctx, &gh, wanted).await });
+            // Taken here: a task aborted before it first runs drops only what it captured.
+            let claim = ctx.prep.claim_of(&wanted);
+            jobs.spawn(async move { run(&ctx, &gh, wanted, claim).await });
         }
         while let Some(ended) = jobs.try_join_next() {
             if let Err(e) = ended {
@@ -281,16 +306,11 @@ pub(super) async fn drain(ctx: std::sync::Arc<Ctx>, gh: Installation, repo: Repo
     }
 }
 
-async fn run(ctx: &Ctx, gh: &Installation, w: Wanted) {
+async fn run(ctx: &Ctx, gh: &Installation, w: Wanted, claim: Claim) {
     let key = &w.key;
     let number = w.unit.number;
     let id = (key.installation_id, key.repo.clone(), number);
     let head = w.unit.top().head_ref_oid.clone();
-    let claim = Claim {
-        prep: &ctx.prep,
-        id: id.clone(),
-        token: w.token,
-    };
     let event = job(ctx, gh, &w).await;
     let why = match event {
         Ok(Event::Rebased { head, .. } | Event::Fixed { head }) => {

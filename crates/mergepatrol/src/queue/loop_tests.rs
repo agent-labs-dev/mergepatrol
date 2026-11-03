@@ -1675,6 +1675,20 @@ async fn a_review_fix_and_a_check_fix_take_turns() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_job_aborted_before_it_first_runs_lets_go_of_its_pr() {
+    let run = prep_run(failing_ci);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    run.ctx.prep.abort_wanted(&repo()).await;
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    assert!(run.ctx.prep.claim(&key, 1).is_some(), "no job holds it");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_queue_that_starts_over_forgets_the_jobs_it_stopped() {
     let run = prep_run(failing_ci);
     run.tick().await;
