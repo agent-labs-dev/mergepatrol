@@ -67,6 +67,11 @@ struct State {
     checks: BTreeMap<String, CheckState>,
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
     comments: Vec<(PrNumber, String)>,
+    /// The reviews posted on each PR: their body, and how many threads they start.
+    reviews: Vec<(PrNumber, String, usize)>,
+    /// The review threads those started, in order: their first comment, the replies in them, and
+    /// whether they are resolved.
+    threads: Vec<(String, Vec<String>, bool)>,
     merges: u32,
     /// Merged PRs stay, closed, as on GitHub.
     merged: Vec<PrNumber>,
@@ -805,6 +810,10 @@ struct Mem {
     label_heads: Mutex<HashMap<PrNumber, String>>,
     /// The agent's reviews, oldest first.
     reviews: Mutex<Vec<ReviewRecord>>,
+    /// The reviews whose findings the agent fixes first, with nothing posted yet.
+    fixing: Mutex<std::collections::HashSet<i64>>,
+    /// Reading a review fails, as when the database is down.
+    review_reads_fail: Mutex<bool>,
     review_settings: Mutex<Option<ReviewSettings>>,
     repo_defaults: Mutex<Option<WorkspaceDefaults>>,
 }
@@ -870,6 +879,9 @@ impl Mem {
 #[async_trait]
 impl ReviewStore for Mem {
     async fn review(&self, id: i64) -> Result<Option<ReviewRecord>> {
+        if *self.review_reads_fail.lock().unwrap() {
+            anyhow::bail!("the database is down");
+        }
         let reviews = self.reviews.lock().unwrap();
         Ok(reviews.iter().find(|r| r.id == id).cloned())
     }
@@ -894,10 +906,16 @@ impl ReviewStore for Mem {
         &self,
         _: u64,
         _: &RepoName,
-        _: PrNumber,
+        pr: PrNumber,
         _: u32,
     ) -> Result<Vec<ReviewRecord>> {
-        unreachable!()
+        let reviews = self.reviews.lock().unwrap();
+        Ok(reviews
+            .iter()
+            .rev()
+            .filter(|r| r.number == pr)
+            .cloned()
+            .collect())
     }
     async fn start_review(
         &self,
@@ -944,14 +962,43 @@ impl ReviewStore for Mem {
     async fn claim_review(&self, _: Duration) -> Result<Option<ReviewRecord>> {
         unreachable!()
     }
-    async fn finish_review(&self, _: i64, _: i64, _: &ReviewDone) -> Result<bool> {
-        unreachable!()
+    async fn finish_review(
+        &self,
+        id: i64,
+        _: i64,
+        done: &ReviewDone,
+        fixing: bool,
+    ) -> Result<bool> {
+        let mut reviews = self.reviews.lock().unwrap();
+        let r = reviews.iter_mut().find(|r| r.id == id).unwrap();
+        r.status = done.status;
+        r.error = done.error.clone();
+        r.summary = done.summary.clone();
+        r.findings = done.findings.clone();
+        r.asked = done.asked.clone();
+        if fixing {
+            self.fixing.lock().unwrap().insert(id);
+        }
+        Ok(true)
+    }
+    async fn rerun_review(&self, id: i64, _: i64, _: Duration) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        reviews.iter_mut().find(|r| r.id == id).unwrap().status = ReviewStatus::Pending;
+        self.fixing.lock().unwrap().remove(&id);
+        Ok(())
+    }
+    async fn settle_review(&self, id: i64, _: i64) -> Result<()> {
+        self.fixing.lock().unwrap().remove(&id);
+        Ok(())
     }
     async fn retry_review(&self, _: i64, _: i64, _: &str, _: Duration) -> Result<()> {
         unreachable!()
     }
-    async fn stale_review(&self, _: i64, _: i64) -> Result<()> {
-        unreachable!()
+    async fn stale_review(&self, id: i64, _: i64) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        reviews.iter_mut().find(|r| r.id == id).unwrap().status = ReviewStatus::Stale;
+        self.fixing.lock().unwrap().remove(&id);
+        Ok(())
     }
     async fn release_reviews(&self) -> Result<u64> {
         unreachable!()
@@ -1050,7 +1097,7 @@ impl ReviewStore for Mem {
         unreachable!()
     }
     async fn mark_threaded(&self, _: i64, _: &[String]) -> Result<()> {
-        unreachable!()
+        Ok(())
     }
     async fn approve_resolved(&self, id: i64) -> Result<bool> {
         let mut reviews = self.reviews.lock().unwrap();

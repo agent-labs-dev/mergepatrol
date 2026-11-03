@@ -316,8 +316,11 @@ export function Gate({
   const pr = reviewedPr(entry);
   const review = useAgentReview(workspace, repo, pr);
   const r = review.data;
-  if (!r || r.status === "stale") return null;
   const reason = entry.state === "held" ? entry.hold?.reason : undefined;
+  // The agent is still at work on it: nothing here for anyone to read or do.
+  if (!r || r.status === "stale" || reason?.startsWith("prep_")) return null;
+  // What it found matters only while a human holds the next move.
+  const waits = reason === "review_asks" || reason === "review_changes";
   const asks = r.findings.filter((f) => f.asked);
   const back = r.findings.filter((f) => f.sent_back || f.withdrawn);
   const cleared = r.findings.filter((f) => !f.asked && !f.sent_back && !f.withdrawn);
@@ -332,7 +335,7 @@ export function Gate({
       {reason === "review_asks" && (
         <Asks workspace={workspace} repo={repo} pr={pr} review={r} onAnswer={onAnswer} />
       )}
-      {r.status === "changes" && (
+      {reason === "review_changes" && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-900 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
           <p className="font-medium">Sent back</p>
           <p className="mt-0.5">
@@ -345,7 +348,7 @@ export function Gate({
           </p>
         </div>
       )}
-      {back.length > 0 && <SentBackList findings={back} />}
+      {waits && back.length > 0 && <SentBackList findings={back} />}
       {r.status === "approved" && r.answered_by && (
         <p className="text-sm text-muted">
           Approved by @{r.answered_by} on the agent's {asks.length}{" "}
@@ -357,8 +360,8 @@ export function Gate({
           The agent approved it without asking anyone: it was sure enough about everything it found.
         </p>
       )}
-      {r.answers.length > 0 && <Answered review={r} />}
-      <ClearedList findings={cleared} />
+      {waits && r.answers.length > 0 && <Answered review={r} />}
+      {waits && <ClearedList findings={cleared} />}
     </section>
   );
 }
