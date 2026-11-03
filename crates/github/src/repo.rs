@@ -1641,7 +1641,7 @@ fn with_comments(body: &str, comments: &[ThreadComment]) -> String {
         };
         let whole = format!("\n\n**`{place}`**\n{}", c.body);
         let short = format!(
-            "\n\n**`{place}`**\nToo long to show here with the rest: MergeLoop's dashboard has it."
+            "\n\n**`{place}`**\nToo long to show here with the rest: the PR's review in MergeLoop shows it whole, with its test to download."
         );
         let room = COMMENT_CHARS.saturating_sub(all.chars().count());
         if whole.chars().count() <= room {

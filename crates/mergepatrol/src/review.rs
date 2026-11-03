@@ -673,9 +673,26 @@ const MARK: &str = "<!-- mergepatrol-finding: ";
 /// Ends each of MergeLoop's replies in a thread, so a reply is not taken for the author's.
 const REPLY_MARK: &str = "<!-- mergepatrol-reply -->";
 
-/// A title as threads match it.
+/// A title as threads match it: as bounded as the comment that carries it.
 fn norm(title: &str) -> String {
-    title.trim().to_lowercase().replace("--", "-")
+    clip(&title.trim().to_lowercase().replace("--", "-"), TITLE_CHARS).into_owned()
+}
+
+/// The most characters a comment shows of a finding's title, of its other text (what it found,
+/// the change it asks for, the command's output, the review's summary), and of a command or its
+/// files. Bounded so, a comment always fits without its test, which goes in only whole.
+const TITLE_CHARS: usize = 300;
+const TEXT_CHARS: usize = 4_000;
+const COMMAND_CHARS: usize = 1_000;
+
+/// `text`, at most `max` characters of it: one cut short ends in `…`.
+fn clip(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if text.chars().count() <= max {
+        return text.into();
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('…');
+    cut.into()
 }
 
 /// The title of the finding a thread of MergeLoop's is about.
@@ -773,7 +790,7 @@ fn still(f: &Judged) -> String {
             "A human decides this one: MergeLoop asked them. Resolve this thread once they have."
                 .to_owned()
         }
-        false => match f.finding.suggestion.as_str() {
+        false => match clip(&f.finding.suggestion, TEXT_CHARS).as_ref() {
             "" => "Fix it and push, or reply with why it doesn't apply. Then resolve this thread."
                 .to_owned(),
             change => format!(
@@ -802,10 +819,10 @@ fn fitted(render: impl Fn(bool) -> String) -> String {
 fn shows_it(e: &Evidence, head: &str, patch: bool) -> String {
     let mut text = format!(
         "**Shows it:** MergeLoop ran `{}` on `{head}` and it failed:\n\n```\n{}\n```\n\n",
-        e.command,
-        e.output.trim_end()
+        clip(&e.command, COMMAND_CHARS),
+        clip(e.output.trim_end(), TEXT_CHARS)
     );
-    let files = e.files.join(", ");
+    let files = clip(&e.files.join(", "), COMMAND_CHARS).into_owned();
     match (e.patch.is_empty(), patch) {
         (true, _) => {}
         (false, true) => text.push_str(&format!(
@@ -813,7 +830,7 @@ fn shows_it(e: &Evidence, head: &str, patch: bool) -> String {
             e.patch.trim_end(),
         )),
         (false, false) => text.push_str(&format!(
-            "With the test it wrote, in {files}, too long to show here.\n\n"
+            "With the test it wrote, in {files}, too long to show here: the PR's review in MergeLoop has it to download.\n\n"
         )),
     }
     text
@@ -833,7 +850,7 @@ fn still_holds(f: &Judged, head: &str) -> String {
     fitted(|patch| {
         format!(
             "Still holds on `{head}`: {}\n\n{}{}\n\n{REPLY_MARK}",
-            f.finding.finding,
+            clip(&f.finding.finding, TEXT_CHARS),
             shown(f, head, patch),
             still(f)
         )
@@ -856,8 +873,8 @@ fn thread_body(f: &Judged, head: &str) -> String {
             f.finding.id,
             f.finding.kind.as_str(),
             f.finding.confidence,
-            f.finding.title,
-            f.finding.finding,
+            clip(&f.finding.title, TITLE_CHARS),
+            clip(&f.finding.finding, TEXT_CHARS),
             shown(f, head, patch),
             still(f),
             norm(&f.finding.title),
@@ -869,15 +886,21 @@ fn thread_body(f: &Judged, head: &str) -> String {
 /// a thread on its line, and what it cleared.
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
     let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
+    review_body(&url, done)
+}
+
+/// The review's summary, with `url` where a human answers it: bounded, whatever the agent wrote.
+fn review_body(url: &str, done: &ReviewDone) -> String {
     let mut body = String::from("**MergeLoop's review**");
     if let Some(why) = &done.error {
         body.push_str(&format!(
-            "\n\nThe agent could not review this PR: {why}\n\nA human reviews it instead: [approve it, or ask for changes]({url}), or approve it here on GitHub."
+            "\n\nThe agent could not review this PR: {}\n\nA human reviews it instead: [approve it, or ask for changes]({url}), or approve it here on GitHub.",
+            clip(why, TEXT_CHARS)
         ));
         return body;
     }
     if !done.summary.is_empty() {
-        body.push_str(&format!("\n\n{}", done.summary));
+        body.push_str(&format!("\n\n{}", clip(&done.summary, TEXT_CHARS)));
     }
     let sent = done.findings.iter().filter(|f| f.sent_back).count();
     let asks = done.findings.iter().filter(|f| f.asked).count();
@@ -916,7 +939,8 @@ fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) ->
             };
             body.push_str(&format!(
                 "\n- {} ({}%{note})",
-                f.finding.title, f.finding.confidence
+                clip(&f.finding.title, TITLE_CHARS),
+                f.finding.confidence
             ));
         }
         body.push_str("\n\n</details>");
@@ -1113,6 +1137,61 @@ mod tests {
             assert!(body.contains("too long to show here") && !body.contains("+xxx"));
             assert!(body.contains("FAILED again"));
         }
+    }
+
+    /// However long what the agent wrote, a comment fits GitHub without its test, and with it
+    /// only whole: the thread, a reply in it, and the review's summary.
+    #[test]
+    fn every_comment_fits_github_however_long_what_the_agent_wrote() {
+        let huge = "y".repeat(200_000);
+        let mut f = review(1, true, None).findings.remove(0);
+        f.finding.title = huge.clone();
+        f.finding.finding = huge.clone();
+        f.finding.suggestion = huge.clone();
+        f.finding.evidence = Some(Evidence {
+            command: huge.clone(),
+            files: vec![huge.clone()],
+            patch: "+short test".into(),
+            output: huge.clone(),
+            failed: true,
+        });
+        for body in [thread_body(&f, "abc1234"), still_holds(&f, "abc1234")] {
+            assert!(
+                body.chars().count() <= BODY_CHARS,
+                "{}",
+                body.chars().count()
+            );
+            assert!(
+                body.contains("+short test"),
+                "the test fits, so it goes in whole"
+            );
+        }
+        // The thread's marker survives, so the next review still finds it.
+        let thread = ReviewThread {
+            id: "t".into(),
+            resolved: false,
+            comment_id: 1,
+            body: thread_body(&f, "abc1234"),
+            reply: None,
+        };
+        assert_eq!(title_of(&thread), Some(norm(&huge)));
+        assert!(still_holds(&f, "abc1234").ends_with(REPLY_MARK));
+
+        let mut cleared = f.clone();
+        cleared.sent_back = false;
+        let done = ReviewDone {
+            status: ReviewStatus::Changes,
+            error: None,
+            summary: huge.clone(),
+            findings: std::iter::repeat_n(cleared, 25).chain([f]).collect(),
+            asked: Vec::new(),
+        };
+        assert!(review_body("https://m.test", &done).chars().count() <= BODY_CHARS);
+        let failed = ReviewDone {
+            error: Some(huge),
+            ..done
+        };
+        assert!(review_body("https://m.test", &failed).chars().count() <= BODY_CHARS);
     }
 
     #[test]
