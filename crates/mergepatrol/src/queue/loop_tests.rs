@@ -2166,6 +2166,20 @@ async fn a_recheck_ci_skips_does_not_pass() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_recheck_waits_out_the_grace_with_no_required_checks() {
+    let mut run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Failed);
+    }));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_passes = true;
+    let start = Instant::now();
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+    assert!(start.elapsed() >= NO_CHECKS_GRACE, "{:?}", start.elapsed());
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_check_that_fails_again_after_the_agent_gave_up_ejects_with_no_second_fix() {
     let mut run = Run::new(Fake::new(failing_ci));
     run.rebase.fix_gives_up = Some("the agent gave up: the PR's title".into());
