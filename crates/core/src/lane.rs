@@ -41,6 +41,21 @@ pub struct PrSummary {
     /// The head commit's combined checks: `SUCCESS`, `FAILURE`, `ERROR`, `PENDING` or
     /// `EXPECTED`. `None` without checks.
     pub checks: Option<String>,
+    /// The fixes the PR has used, for its checks and its review.
+    #[serde(default)]
+    pub fixes: u32,
+    /// The fixes it gets.
+    #[serde(default)]
+    pub fix_budget: u32,
+}
+
+/// Where a queued PR is on its way to the trunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Rebase,
+    Checks,
+    Review,
+    Lane,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +105,21 @@ impl From<SavedState> for EntryState {
             // Its hold had no type yet: the next sync holds it again, with one.
             SavedState::Held(SavedHold::Text(_)) => EntryState::Waiting,
             SavedState::Active => EntryState::Active,
+        }
+    }
+}
+
+impl EntryState {
+    /// `None` for a PR on hold for what is no stage, as a draft.
+    pub fn stage(&self) -> Option<Stage> {
+        match self {
+            EntryState::Waiting | EntryState::Active => Some(Stage::Lane),
+            EntryState::Held(hold) => match hold.innermost() {
+                Hold::PrepRebasing => Some(Stage::Rebase),
+                Hold::PrepChecks | Hold::PrepFixing => Some(Stage::Checks),
+                hold if hold.of_review() => Some(Stage::Review),
+                _ => None,
+            },
         }
     }
 }

@@ -2025,6 +2025,7 @@ mod tests {
                         "message": "#6 is not ready: the PR is a draft",
                     },
                     "priority": false,
+                    "stage": null,
                     "position": 3,
                     "stack": { "number": 7, "layers": [6, 7] },
                     "batch_pr": null,

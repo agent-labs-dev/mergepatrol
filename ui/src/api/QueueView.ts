@@ -2,6 +2,7 @@
 import type { HoldView } from "./HoldView";
 import type { QueueStateView } from "./QueueStateView";
 import type { StackView } from "./StackView";
+import type { StageView } from "./StageView";
 
 /**
  * A queued PR's place.
@@ -11,6 +12,10 @@ export type QueueView = {
  * The branch the queue merges it into.
  */
 trunk: string, state: QueueStateView, 
+/**
+ * Where it is on its way to the trunk. Null while on hold for what is no stage, as a draft.
+ */
+stage: StageView | null, 
 /**
  * Why it is held. Null unless `state` is `held`.
  */

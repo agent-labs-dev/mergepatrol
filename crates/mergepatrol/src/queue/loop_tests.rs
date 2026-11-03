@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{
     AgentSettings, Bar, CheckFailure, EntryState, Finding, Judged, Kind, LabelSpec, Labels, Lean,
-    Spend, Step, StepTimes, WorkspaceDefaults,
+    Spend, Stage, Step, StepTimes, WorkspaceDefaults,
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -128,6 +128,7 @@ impl State {
                 body: String::new(),
                 is_draft: false,
                 conflicting: false,
+                fix_commits: 0,
                 is_cross_repository: false,
                 review_decision: None,
                 base_ref_name: "main".into(),
@@ -1697,6 +1698,18 @@ async fn a_queue_that_starts_over_forgets_the_jobs_it_stopped() {
     assert!(run.ctx.prep.asked().is_empty());
     run.tick().await;
     assert_eq!(run.ctx.prep.asked().len(), 1, "it asks again");
+async fn an_entry_says_what_fixes_it_has_used_of_its_budget() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().fix_commits = 2;
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Pending);
+    });
+    run.tick().await;
+    let lanes = run.store.lanes.lock().unwrap();
+    let entry = lanes.values().next().unwrap().entries[0].clone();
+    assert_eq!((entry.summary.fixes, entry.summary.fix_budget), (2, 3));
+    assert_eq!(entry.state.stage(), Some(Stage::Checks));
 }
 
 #[tokio::test(start_paused = true)]

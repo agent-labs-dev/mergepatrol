@@ -115,6 +115,8 @@ pub struct QueueView {
     /// The branch the queue merges it into.
     pub trunk: String,
     pub state: QueueStateView,
+    /// Where it is on its way to the trunk. Null while on hold for what is no stage, as a draft.
+    pub stage: Option<crate::api::StageView>,
     /// Why it is held. Null unless `state` is `held`.
     pub hold: Option<HoldView>,
     pub priority: bool,
@@ -387,6 +389,7 @@ pub(crate) async fn statuses(
             let queue = lanes.iter().find_map(|(trunk, batch_pr, entries)| {
                 let place = entries.iter().position(|e| e.prs().contains(&number))?;
                 let e = &entries[place];
+                let stage = e.state.stage().map(crate::api::StageView::from);
                 let (state, hold) = match &e.state {
                     EntryState::Waiting => (QueueStateView::Waiting, None),
                     EntryState::Active => (QueueStateView::Running, None),
@@ -395,6 +398,7 @@ pub(crate) async fn statuses(
                 Some(QueueView {
                     trunk: trunk.clone(),
                     state,
+                    stage,
                     hold,
                     priority: e.priority,
                     position: place as u32 + 1,

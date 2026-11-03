@@ -58,6 +58,9 @@ pub struct PullRequest {
     /// Whether a code owner must still approve, which `reviewDecision` can leave out.
     #[serde(skip)]
     pub awaits_code_owner: bool,
+    /// The fixes its last commits show it used.
+    #[serde(default, deserialize_with = "fixes_in_commits")]
+    pub fix_commits: u32,
     /// GitHub says it conflicts with its base. False while GitHub has yet to work that out.
     #[serde(default, rename = "mergeable", deserialize_with = "conflicting")]
     pub conflicting: bool,
@@ -243,6 +246,8 @@ impl PullRequest {
                 })
                 .map(Person::from)
                 .collect(),
+            fixes: self.fix_commits,
+            fix_budget: 0,
             checks: d.commits["nodes"][0]["commit"]["statusCheckRollup"]["state"]
                 .as_str()
                 .map(str::to_owned),
@@ -373,13 +378,22 @@ macro_rules! summary_fields {
 
 /// A PR as the queue reads it: its files too, for the code owners, and whether its review
 /// threads are resolved, for the review's gate.
+fn fixes_in_commits<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let commits = Value::deserialize(d)?;
+    let nodes = commits["nodes"].as_array().cloned().unwrap_or_default();
+    let messages = nodes.iter().rev();
+    Ok(mergepatrol_core::fixes_used(
+        messages.filter_map(|n| n["commit"]["message"].as_str()),
+    ))
+}
+
 fn conflicting<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(Option::<String>::deserialize(d)?.as_deref() == Some("CONFLICTING"))
 }
 
 const PR_FIELDS: &str = concat!(
     summary_fields!(),
-    " mergeable files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
+    " mergeable fixCommits: commits(last: 7) { nodes { commit { message } } } files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
 );
 
 /// The labeled PRs a snapshot reads at a time. GraphQL charges a point per 100 requests its lists
@@ -1833,6 +1847,10 @@ mod tests {
                 { "requestedReviewer": {} },
             ] },
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "PENDING" } } }] },
+            "fixCommits": { "nodes": [
+                { "commit": { "message": "the author's" } },
+                { "commit": { "message": "Fix ci\n\nFixed-by: mergepatrol, a" } },
+            ] },
         }))
         .unwrap();
         let s = pr.summary();
@@ -1858,6 +1876,7 @@ mod tests {
             }]
         );
         assert_eq!(s.checks.as_deref(), Some("PENDING"));
+        assert_eq!(s.fixes, 1);
     }
 
     const FIX_COMMIT: &str = r#"{"message":"Fix test\n\nFixed-by: mergepatrol, claude (claude-opus-5-5)\nCo-authored-by: mergepatrol <m@x>"}"#;

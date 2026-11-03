@@ -18,7 +18,7 @@ The hosted MergeLoop at https://mergeloop.ai runs the public GitHub App [Merge L
 2. Install the App on your organization or account, and choose its repos. GitHub sends you back to the dashboard.
 3. In **Settings**, pick a repo and **Set up**. MergeLoop opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
 4. In **Settings**, add an Anthropic or OpenAI API key. Create one for MergeLoop alone, with a spend limit.
-5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue. The dashboard puts the label on as you, so it takes triage access to the repo.
+5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue, and shows each queued PR's stage and the path it took. The dashboard puts the label on as you, so it takes triage access to the repo.
 6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review or your team's, those the queue holds first. Approve, request changes or comment there, as you. A review waits 5 seconds before it goes to GitHub, so you can undo it.
 
 Public repos are free. Private repos cost $15 a seat a month, after a free trial: see [Pricing](#pricing). To run your own, see [Run it](#run-it).

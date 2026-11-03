@@ -1151,7 +1151,14 @@ async fn sync_lane(
             number: unit.number,
             priority: unit.layers.iter().any(|pr| pr.has_label(&labels.priority)),
             hold,
-            summary: unit.layers[0].summary(),
+            summary: PrSummary {
+                fixes: unit.layers.iter().map(|pr| pr.fix_commits).sum(),
+                fix_budget: match unit.fork() {
+                    true => 0,
+                    false => settings.fix_ci.allowed(),
+                },
+                ..unit.layers[0].summary()
+            },
             layers: if unit.stacked { unit.prs() } else { Vec::new() },
             pin,
         });

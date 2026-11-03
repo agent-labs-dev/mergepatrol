@@ -22,7 +22,7 @@ import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
 import { PullDetail } from "./PullDetail";
 import { toasts } from "./Toasts";
-import { Avatar, primary, secondary } from "./ui";
+import { Avatar, primary, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 
@@ -139,7 +139,7 @@ export function Queue({ workspace }: { workspace: number }) {
         onExit={() => setAnswer(undefined)}
       />
     );
-  const row = (e: Item) => (
+  const row = (e: Item, track = false) => (
     <div
       className={`group flex items-stretch border-b border-line-soft hover:bg-page ${
         e === entry ? "lg:bg-page" : ""
@@ -153,6 +153,7 @@ export function Queue({ workspace }: { workspace: number }) {
             : queued.findIndex((q) => q.number === e.number) + 1
         }
         selected={e === entry}
+        track={track}
         pending={actions.kinds.get(e.number)}
         onClick={() => setPr(e.number)}
       />
@@ -244,13 +245,13 @@ export function Queue({ workspace }: { workspace: number }) {
           ))}
         </ol>
         <Rows title="Getting ready" note="each on its own, then the line" items={reviewing}>
-          {row}
+          {(e) => row(e, true)}
         </Rows>
         <Rows title="Held" note="until GitHub would merge it" items={held}>
-          {row}
+          {(e) => row(e)}
         </Rows>
         <Rows title="Ejected" note="queue it again to retry" items={ejected}>
-          {row}
+          {(e) => row(e)}
         </Rows>
         {open.isError && (
           <p className="mt-6 border-y border-line bg-sunken px-4 py-2 text-xs text-bad">
@@ -410,6 +411,9 @@ const asItem = (p: OpenPullView): Item => ({
   ...p,
   priority: false,
   state: "open",
+  stage: null,
+  fixes: 0,
+  fix_budget: 0,
   layers: [],
   hold: null,
   review: null,
@@ -771,6 +775,7 @@ function Row({
   entry: e,
   place,
   selected,
+  track,
   pending,
   onClick,
 }: {
@@ -778,6 +783,8 @@ function Row({
   /** `null` for a held or open PR: it has no place until it is released or queued. */
   place: number | null;
   selected: boolean;
+  /** Shows where it is on its way to the trunk. */
+  track: boolean;
   pending?: PendingKind;
   onClick: () => void;
 }) {
@@ -811,6 +818,11 @@ function Row({
             <Diff entry={e} />
           </span>
         </span>
+        {track && (
+          <span className="mt-2 block">
+            <Track entry={e} />
+          </span>
+        )}
         {pending ? (
           <span className="mt-1 block text-muted">
             {pending === "closing"
@@ -828,6 +840,123 @@ function Row({
         )}
       </span>
     </button>
+  );
+}
+
+const stages: [NonNullable<EntryView["stage"]>, string][] = [
+  ["rebase", "Rebase"],
+  ["checks", "Checks"],
+  ["review", "Review"],
+  ["lane", "Merge lane"],
+];
+
+/** How a stage's bar shows: done, where the PR is, or yet to come. */
+function stageColor(e: Item, i: number) {
+  const at = stages.findIndex(([s]) => s === e.stage);
+  if (i < at) return "bg-ok";
+  if (i > at) return "bg-line-strong/50";
+  if (e.state === "waiting") return "bg-ok";
+  if (e.hold?.reason === "review_asks" || e.hold?.reason === "review_changes")
+    return "bg-amber-500";
+  return "bg-blue-500 motion-safe:animate-pulse";
+}
+
+/** Where a queued PR is on its way to the trunk. */
+function Track({ entry: e, labels }: { entry: Item; labels?: boolean }) {
+  return (
+    <span className="flex w-full gap-1">
+      {stages.map(([stage, name], i) => (
+        <span key={stage} className="min-w-0 flex-1">
+          <span className={`block h-1 rounded-full ${stageColor(e, i)}`} />
+          {labels && (
+            <span
+              className={`mt-1.5 block truncate text-xs ${
+                stage === e.stage ? "font-medium text-fg" : "text-faint"
+              }`}
+            >
+              {name}
+            </span>
+          )}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** The events of a PR's path to the trunk, as (what happened, whether it went wrong, whether its
+ * message says more). */
+const pathSteps: Record<string, [string, boolean, boolean]> = {
+  rebasing: ["Rebasing", false, false],
+  conflict: ["Conflict", true, true],
+  resolved: ["Conflict resolved", false, false],
+  unresolved: ["Could not resolve the conflict", true, false],
+  fixing: ["Fixing the checks", true, true],
+  fix: ["Fix committed", false, false],
+  unfixed: ["Could not fix it", true, false],
+  rechecking: ["Running the checks again", false, true],
+  published: ["Pushed", false, false],
+  "review-approved": ["Review passed", false, false],
+  "review-resolved": ["Review comments resolved", false, false],
+  "review-sent-back": ["Review sent findings back", true, true],
+  "review-asks": ["Review asks a human", true, true],
+  "review-fixing": ["Fixing the review's findings", false, true],
+  "review-fixed": ["Findings fixed", false, false],
+  "review-unfixed": ["Left the findings to the author", true, false],
+  "prep-left": ["Left to the merge lane", true, true],
+};
+
+/** The path a queued PR took this time in the queue, loops and all. */
+function Path({
+  workspace,
+  lane,
+  entry: e,
+}: {
+  workspace: number;
+  lane: LaneView;
+  entry: EntryView;
+}) {
+  const events = useQuery({
+    queryKey: ["events", workspace, lane.repo, prOf(e)],
+    queryFn: () => fetchEvents(workspace, lane.repo, prOf(e)),
+    refetchInterval: 3000,
+  });
+  const newest = events.data ?? [];
+  const joined = newest.findIndex((ev) => ev.kind === "enqueued");
+  const steps = (joined < 0 ? newest : newest.slice(0, joined))
+    .filter((ev) => ev.kind in pathSteps)
+    .reverse();
+  if (steps.length === 0) return null;
+  return (
+    <>
+      <p className="mt-5 mb-2 text-xs font-medium text-muted">
+        Path so far
+        {e.fix_budget > 0 && ` · ${e.fixes} of ${e.fix_budget} fixes used`}
+      </p>
+      <ol>
+        {steps.map((ev, i) => {
+          const [what, wrong, noted] = pathSteps[ev.kind];
+          return (
+            <li key={`${ev.at} ${ev.kind}`} className="relative flex gap-3 pb-3 last:pb-0">
+              {i < steps.length - 1 && (
+                <span className="absolute top-3 bottom-0 left-[3.5px] w-px bg-line-strong" />
+              )}
+              <span
+                className={`mt-1.5 size-2 shrink-0 rounded-full ${wrong ? "bg-amber-500" : "bg-ok"}`}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="flex justify-between gap-3">
+                  <span>{what}</span>
+                  <span className="shrink-0 text-xs text-faint">{timeAgo(ev.at)}</span>
+                </span>
+                {noted && ev.message && (
+                  <span className="block text-xs text-muted">{ev.message}</span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </>
   );
 }
 
@@ -881,6 +1010,11 @@ export function QueueGate({
         {e.fork && <span className="text-xs text-muted">From a fork</span>}
         {e.layers.length > 0 && <span className="text-xs text-muted">{refsOf(e)}</span>}
       </p>
+      {e.stage && (
+        <div className="mt-4">
+          <Track entry={e} labels />
+        </div>
+      )}
       {e.state === "held" && !reviewBadge(e) && (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">
           <p className="font-medium">Held</p>
@@ -888,6 +1022,7 @@ export function QueueGate({
         </div>
       )}
       {e.review && <Gate workspace={workspace} repo={lane.repo} entry={e} onAnswer={onReview} />}
+      <Path workspace={workspace} lane={lane} entry={e} />
     </div>
   );
 }

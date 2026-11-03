@@ -13,7 +13,7 @@ pub use hold::Hold;
 pub use job::{CHECKS_MISSING_FOR, CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
     BatchStep, Bisect, BuiltBatch, Candidate, Entry, EntryState, Lane, LaneChange, LayerHead,
-    PendingMerge, Person, PrSummary, Review,
+    PendingMerge, Person, PrSummary, Review, Stage,
 };
 pub use repo_config::{
     AgentSettings, EFFORTS, FixCiSettings, LabelSpec, Labels, ModelOverrides, REPO_CONFIG_PATH,
