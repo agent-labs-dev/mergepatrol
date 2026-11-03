@@ -3368,7 +3368,7 @@ async fn green_prs_are_tested_together_and_merged_without_a_rebase() {
 
 #[tokio::test(start_paused = true)]
 async fn a_failed_batch_is_bisected_to_the_pr_that_broke_it() {
-    let run = Run::batching(Fake::new(|s| {
+    let run = Run::batching_on_the_lane(Fake::new(|s| {
         prs(&[1, 2, 3, 4])(s);
         s.breaks = Some(3);
     }));

@@ -624,6 +624,38 @@ async fn a_failed_check_is_fixed_off_the_lane_then_merges() {
 }
 
 #[tokio::test]
+async fn a_failure_the_lane_finds_is_fixed_off_it_then_merges() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.checks.insert("ci".into(), CheckState::Failed);
+        let passed = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+        s.checks_on.insert(s.head(1), passed);
+    });
+    let _drain = world.drain().await;
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(PrepFixing)".into())]);
+    assert!(!world.did(1, "fixing"), "the lane leaves it as it is");
+
+    // Only the head the lane rebased fails: the fix's passes.
+    let rebased = world.branch("pr-1");
+    world.gh.with_mut(|s| {
+        s.checks.insert("ci".into(), CheckState::Passed);
+        let failed = BTreeMap::from([("ci".to_owned(), CheckState::Failed)]);
+        s.checks_on.insert(rebased, failed);
+    });
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    assert!(
+        matches!(world.tasks()[..], [.., Task::FixChecks { .. }]),
+        "{:?}",
+        world.tasks()
+    );
+    assert!(world.did(1, "fixing"));
+    assert!(!world.did(1, "ejected"));
+    let log = git(&world.origin, &["log", "--format=%B", "main..pr-1"]);
+    assert!(log.starts_with("Fix it") && log.contains(FIXED_BY), "{log}");
+}
+
+#[tokio::test]
 async fn a_review_s_findings_are_fixed_and_reviewed_again() {
     let world = World::one_pr("feature.txt", "other.txt").await;
     world.review_on();
