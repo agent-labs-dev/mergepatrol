@@ -787,6 +787,21 @@ pub mod fake {
 
     /// An installation, with a token already, that talks to the fake. The request lines it got.
     pub async fn serve(responses: Vec<Scripted>) -> (Installation, Arc<Mutex<Vec<String>>>) {
+        start(responses, |request| {
+            request.lines().next().unwrap_or_default().to_owned()
+        })
+        .await
+    }
+
+    /// As [`serve`], with the requests in full.
+    pub async fn serve_whole(responses: Vec<Scripted>) -> (Installation, Arc<Mutex<Vec<String>>>) {
+        start(responses, str::to_owned).await
+    }
+
+    async fn start(
+        responses: Vec<Scripted>,
+        keep: fn(&str) -> String,
+    ) -> (Installation, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -795,9 +810,7 @@ pub mod fake {
             for (status, headers, body) in responses {
                 let (mut conn, _) = listener.accept().await.unwrap();
                 let request = read_request(&mut conn).await;
-                seen.lock()
-                    .unwrap()
-                    .push(request.lines().next().unwrap_or_default().to_owned());
+                seen.lock().unwrap().push(keep(&request));
                 let response = format!(
                     "HTTP/1.1 {status} Scripted\r\ncontent-length: {}\r\nconnection: close\r\n{headers}\r\n{body}",
                     body.len()
@@ -957,6 +970,27 @@ mod tests {
         );
         assert_eq!(gh.current_name(&old).await.unwrap(), None);
         assert!(gh.current_name(&old).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_old_name_follows_github_s_redirect_with_the_token() {
+        let (gh, requests) = fake::serve_whole(vec![
+            (301, "location: /repositories/1\r\n", "{}"),
+            (200, "", r#"{"full_name":"o/new"}"#),
+        ])
+        .await;
+        let old = RepoName::parse("o/old").unwrap();
+        assert_eq!(
+            gh.current_name(&old).await.unwrap(),
+            RepoName::parse("o/new")
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests[1].starts_with("GET /repositories/1 "));
+        assert!(
+            requests[1]
+                .to_lowercase()
+                .contains("authorization: bearer t\r\n")
+        );
     }
 
     #[test]

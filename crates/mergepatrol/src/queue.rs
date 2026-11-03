@@ -409,7 +409,7 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
                 .into_iter()
                 .map(|r| r.repo)
                 .collect();
-            follow_renames(ctx, &gh, &repos).await?;
+            follow_renames(ctx.store.as_ref(), &gh, &repos).await?;
             let has = gh.have_file(&repos, REPO_CONFIG_PATH).await?;
             anyhow::Ok(
                 repos
@@ -433,21 +433,17 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
 }
 
 /// Moves what MergeLoop keeps under a name the installation no longer lists to the name GitHub
-/// gives that repo now. GitHub keeps serving old names, so nothing else would notice. A queue
-/// still running under the old name can write its lane once more, which the next look moves.
-async fn follow_renames(ctx: &Ctx, gh: &Installation, repos: &[RepoName]) -> Result<()> {
-    let states = ctx.store.repos().await?.into_iter();
-    let known = states
-        .filter(|s| s.installation_id == gh.id)
-        .map(|s| s.repo);
-    let lanes = ctx.store.lanes(gh.id).await?.into_iter();
-    let names: BTreeSet<RepoName> = known.chain(lanes.map(|(key, _)| key.repo)).collect();
+/// gives that repo now. GitHub keeps serving old names, so nothing else would notice. A queue or
+/// a review still running under the old name can write to it once more, which the next look
+/// moves.
+async fn follow_renames(store: &dyn Store, gh: &Installation, repos: &[RepoName]) -> Result<()> {
+    let names = store.repo_names(gh.id).await?;
     for old in names.iter().filter(|name| !repos.contains(name)) {
         if let Some(new) = gh.current_name(old).await?
             && repos.contains(&new)
         {
             tracing::info!(installation = gh.id, %old, %new, "repo renamed");
-            ctx.store.rename_repo(gh.id, old, &new).await?;
+            store.rename_repo(gh.id, old, &new).await?;
         }
     }
     Ok(())
@@ -3167,6 +3163,58 @@ mod loop_tests;
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[sqlx::test(migrations = false)]
+    async fn only_a_repo_github_says_is_now_a_listed_one_moves(pool: sqlx::PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let name = |s: &str| RepoName::parse(s).unwrap();
+        let installed = [name("o/new")];
+        // The installation of `fake::serve`, and another with a repo of a renamed one's name.
+        for repo in ["o/a-renamed", "o/gone", "o/moved-away", "o/new"] {
+            store
+                .set_repo_enabled(1, &name(repo), Some(true))
+                .await
+                .unwrap();
+        }
+        store
+            .set_repo_enabled(2, &name("o/a-renamed"), Some(true))
+            .await
+            .unwrap();
+        // In name order, for the names the installation does not list.
+        let (gh, requests) = mergepatrol_github::fake::serve(vec![
+            (200, "", r#"{"full_name":"o/new"}"#),
+            (404, "", "{}"),
+            (200, "", r#"{"full_name":"elsewhere/repo"}"#),
+        ])
+        .await;
+
+        follow_renames(&store, &gh, &installed).await.unwrap();
+
+        let repos: Vec<(u64, String)> = store
+            .repos()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.installation_id, s.repo.to_string()))
+            .collect();
+        assert_eq!(
+            repos,
+            [
+                (1, "o/gone".into()),
+                (1, "o/moved-away".into()),
+                (1, "o/new".into()),
+                (2, "o/a-renamed".into()),
+            ]
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /repos/o/a-renamed HTTP/1.1",
+                "GET /repos/o/gone HTTP/1.1",
+                "GET /repos/o/moved-away HTTP/1.1",
+            ]
+        );
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")

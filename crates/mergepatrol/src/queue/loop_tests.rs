@@ -1,7 +1,7 @@
 //! The queue loop against a fake GitHub, a scripted rebase, and an in-memory store. Time is
 //! paused, so the waits for checks take no real time.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -1167,6 +1167,9 @@ impl Store for Mem {
     }
     async fn set_repo_defaults(&self, _: u64, _: &WorkspaceDefaults) -> Result<()> {
         unimplemented!()
+    }
+    async fn repo_names(&self, _: u64) -> Result<BTreeSet<RepoName>> {
+        unreachable!()
     }
     async fn rename_repo(&self, _: u64, _: &RepoName, _: &RepoName) -> Result<()> {
         unreachable!()

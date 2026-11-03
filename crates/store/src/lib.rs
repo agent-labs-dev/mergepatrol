@@ -15,6 +15,8 @@ pub use vault::{
     api_key_secret,
 };
 
+use std::collections::BTreeSet;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{
@@ -254,6 +256,9 @@ pub trait Store: ReadCache + InboxStore + ReviewStore {
             None => instance.clone(),
         })
     }
+    /// Every name the queue has written the installation's repos under. A review finishing after
+    /// a rename writes under the old one.
+    async fn repo_names(&self, installation_id: u64) -> Result<BTreeSet<RepoName>>;
     /// Moves what MergeLoop keeps of `from`, which GitHub now calls `to`, onto `to`. What the
     /// queue already wrote under `to` stays: it is the newer. The queue's reads of GitHub go.
     async fn rename_repo(&self, installation_id: u64, from: &RepoName, to: &RepoName)
@@ -1174,6 +1179,20 @@ impl Store for PgStore {
         Ok(())
     }
 
+    async fn repo_names(&self, installation_id: u64) -> Result<BTreeSet<RepoName>> {
+        let names: Vec<String> = sqlx::query_scalar(
+            "SELECT repo FROM repos WHERE installation_id = $1
+             UNION SELECT repo FROM lanes WHERE installation_id = $1
+             UNION SELECT repo FROM events WHERE installation_id = $1
+             UNION SELECT repo FROM exits WHERE installation_id = $1
+             UNION SELECT repo FROM agent_reviews WHERE installation_id = $1",
+        )
+        .bind(installation_id as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(names.iter().filter_map(|n| RepoName::parse(n)).collect())
+    }
+
     async fn rename_repo(
         &self,
         installation_id: u64,
@@ -1867,6 +1886,23 @@ mod tests {
         // Nothing is left under the old name: doing it again does nothing.
         store.rename_repo(1, &old, &new).await.unwrap();
         assert_eq!(store.lanes(1).await.unwrap().len(), 2);
+        assert_eq!(
+            store.repo_names(1).await.unwrap(),
+            BTreeSet::from([new.clone()])
+        );
+
+        // A review that was running finishes under the name it started with: the next look
+        // finds that name, and moves what it wrote.
+        store
+            .record(&lane(&old, "main"), 7, "review-done", "m")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.repo_names(1).await.unwrap(),
+            BTreeSet::from([new.clone(), old.clone()])
+        );
+        store.rename_repo(1, &old, &new).await.unwrap();
+        assert_eq!(store.events(1, &new, Some(7), 10).await.unwrap().len(), 2);
     }
 
     #[sqlx::test(migrations = false)]
