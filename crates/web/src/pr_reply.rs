@@ -236,6 +236,7 @@ mod tests {
             since_head: None,
             agent_fixed: false,
             status,
+            claim: 0,
             error: None,
             attempts: 0,
             summary: String::new(),

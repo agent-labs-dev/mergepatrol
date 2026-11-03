@@ -152,7 +152,7 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
     // Only a PR told to merge gets the agent's review: no label, or no place in the lane, and the
     // review is dropped rather than run. Nothing is run and nothing is posted.
     if !merge_requested(ctx.store.as_ref(), &gh, &r.repo, &pr, &settings.label).await? {
-        return ctx.store.stale_review(r.id).await;
+        return ctx.store.stale_review(r.id, r.claim).await;
     }
     let workspace = ctx
         .store
@@ -430,7 +430,7 @@ async fn finish(
     // before the run, so the gate reads the PR anew.
     let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
     if !merge_requested(ctx.store.as_ref(), gh, &r.repo, &now, &settings.label).await? {
-        return ctx.store.stale_review(r.id).await;
+        return ctx.store.stale_review(r.id, r.claim).await;
     }
     let (summary, mut findings, error) = match output {
         Ok(o) => (o.summary, bars.judge(o.findings), None),
