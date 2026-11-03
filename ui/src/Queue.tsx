@@ -56,8 +56,21 @@ export function Queue({ workspace }: { workspace: number }) {
   });
   const exits = useQuery({
     queryKey: ["ejected", workspace, current?.repo],
-    queryFn: () =>
-      fetchExits(workspace, { repo: current?.repo, days: EJECTED_DAYS, outcome: "ejected" }),
+    queryFn: async () => {
+      const exits = [];
+      let before: number | undefined;
+      do {
+        const page = await fetchExits(workspace, {
+          repo: current?.repo,
+          days: EJECTED_DAYS,
+          outcome: "ejected",
+          before,
+        });
+        exits.push(...page.exits);
+        before = page.next ?? undefined;
+      } while (before !== undefined);
+      return exits;
+    },
     enabled: current !== undefined,
     refetchInterval: 30_000,
   });
@@ -93,7 +106,7 @@ export function Queue({ workspace }: { workspace: number }) {
       ![...queued, ...leaving].some((e) => e.number === p.number || e.layers.includes(p.number)),
   );
   // Newest first, so a PR ejected twice shows why it was last.
-  const whyEjected = (n: number) => exits.data?.exits.find((x) => x.number === n)?.detail;
+  const whyEjected = (n: number) => exits.data?.find((x) => x.number === n)?.detail;
   const ejected: Item[] = outside.flatMap((p) => {
     const why = whyEjected(p.number);
     return why ? [{ ...asItem(p), detail: why.replace(/^Ejected: /, ""), ejected: true }] : [];

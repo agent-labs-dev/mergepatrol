@@ -1951,7 +1951,7 @@ async fn test_and_merge(
         if let Some(why) = stale(&trunk_sha, &now_units, batch) {
             break Tested::Stale(why);
         }
-        let checks = checks_verdict(gh, key, head, opened).await?;
+        let checks = checks_verdict(gh, key, head, opened, &[]).await?;
         let silent = checks
             .unreported
             .into_iter()
@@ -2096,9 +2096,21 @@ async fn checks_verdict(
     key: &LaneKey,
     head: &str,
     published: Instant,
+    rechecking: &[String],
 ) -> Result<HeadChecks> {
-    let required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
+    let mut required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
     let checks = gh.checks(&key.repo, head).await?;
+    // A recheck counts only if what failed ran again: CI may skip a commit that changes nothing.
+    if !rechecking.is_empty() {
+        if required.is_empty() {
+            required.extend(checks.by_name.keys().cloned());
+        }
+        for name in rechecking {
+            if !required.contains(name) {
+                required.push(name.clone());
+            }
+        }
+    }
     let verdict = match checks.verdict(&required) {
         (CheckState::Passed, _) if required.is_empty() && published.elapsed() < NO_CHECKS_GRACE => {
             (CheckState::Pending, vec![])
@@ -2298,6 +2310,8 @@ async fn run_job(
     let mut failing = 0;
     let mut unreported = Unreported::default();
     let mut sync = SyncWhileRunning::new();
+    // The checks a recheck ran again, which must pass on its head.
+    let mut rechecking: Vec<String> = Vec::new();
 
     loop {
         let mut now = unit.refreshed(gh, repo).await?;
@@ -2373,7 +2387,8 @@ async fn run_job(
                     let mut verdict = (CheckState::Passed, Vec::new());
                     let mut silent = Vec::new();
                     for (i, head) in heads.iter().enumerate() {
-                        let checks = checks_verdict(gh, key, head, published_at).await?;
+                        let checks =
+                            checks_verdict(gh, key, head, published_at, &rechecking).await?;
                         silent.extend(checks.unreported.into_iter().map(|n| (head.clone(), n)));
                         match checks.verdict {
                             (CheckState::Failed, names) => {
@@ -2444,6 +2459,7 @@ async fn run_job(
                 event
             }
             Phase::Rechecking { failed, .. } => {
+                rechecking = failed.clone();
                 let what = failed.join(", ");
                 record_all(ctx, key, &prs, "rechecking", &what).await?;
                 let comment = format!(

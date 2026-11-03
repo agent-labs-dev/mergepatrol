@@ -604,6 +604,8 @@ struct Scripted {
     fix_fails: Option<String>,
     fix_gives_up: Option<String>,
     recheck_passes: bool,
+    /// CI skips the recheck's commit, which changes nothing.
+    recheck_skipped: bool,
 }
 
 impl Scripted {
@@ -618,6 +620,7 @@ impl Scripted {
             fix_fails: None,
             fix_gives_up: None,
             recheck_passes: false,
+            recheck_skipped: false,
         }
     }
 
@@ -687,6 +690,8 @@ impl Sandbox for Scripted {
         if self.recheck_passes {
             let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
             s.checks_on.insert(top.clone(), passing);
+        } else if self.recheck_skipped {
+            s.checks_on.insert(top.clone(), BTreeMap::new());
         }
         Ok(Event::Fixed { head: top })
     }
@@ -2145,6 +2150,19 @@ async fn a_check_the_agent_gives_up_on_runs_again_and_a_flaky_one_merges() {
     run.tick().await;
     assert_eq!(run.rebase.fixed().len(), 1);
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_ci_skips_does_not_pass() {
+    let mut run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Failed);
+    }));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_skipped = true;
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 #[tokio::test(start_paused = true)]
