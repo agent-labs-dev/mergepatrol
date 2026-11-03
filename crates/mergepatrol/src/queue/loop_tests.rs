@@ -55,6 +55,8 @@ struct State {
     strict: bool,
     /// The merge methods a ruleset allows, if one narrows them. The repo's default is `merge`.
     merge_methods: Option<Vec<String>>,
+    /// The fixes each PR's commits already used.
+    fixes_used: HashMap<PrNumber, u32>,
     /// The merge methods the repo's settings allow, if they narrow them.
     repo_merge_methods: Option<Vec<String>>,
     /// The checks on every commit, unless `checks_on` has the commit.
@@ -448,6 +450,10 @@ impl GitHub for Fake {
         Ok(s.queued_workflows.iter().any(|h| h == sha))
     }
 
+    async fn fixes_used(&self, _: &RepoName, number: PrNumber) -> Result<u32> {
+        let s = self.state.lock().unwrap();
+        Ok(s.fixes_used.get(&number).copied().unwrap_or(0))
+    }
     async fn check_failures(
         &self,
         _: &RepoName,
@@ -881,6 +887,7 @@ impl ReviewStore for Mem {
             number: pr,
             head_sha: head.to_owned(),
             since_head: None,
+            agent_fixed: false,
             status: ReviewStatus::Pending,
             error: None,
             attempts: 0,
@@ -907,6 +914,9 @@ impl ReviewStore for Mem {
         unreachable!()
     }
     async fn stale_review(&self, _: i64) -> Result<()> {
+        unreachable!()
+    }
+    async fn mark_agent_fixed(&self, _: i64) -> Result<()> {
         unreachable!()
     }
     async fn review_queue_change(
@@ -1386,6 +1396,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         unpinned: Default::default(),
         billing: None,
         reviews: Default::default(),
+        caches: Default::default(),
     }
 }
 
@@ -2246,13 +2257,27 @@ async fn fixes_that_do_not_mend_the_checks_eject_after_the_attempts() {
     let mut run = Run::new(Fake::new(failing_ci));
     run.rebase.fix_works = false;
     run.tick().await;
-    assert_eq!(run.rebase.fixed().len(), 2);
+    assert_eq!(run.rebase.fixed().len(), 3);
     assert_eq!(run.labels(1), [FAILED]);
     let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
     assert!(
-        comment.contains("required checks failed: ci, after 2 fixes"),
+        comment.contains("required checks failed: ci, after 3 fixes"),
         "{comment}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn fixes_a_pr_used_before_this_job_count_against_its_budget() {
+    let mut run = Run::new(Fake::new(|s| {
+        failing_ci(s);
+        s.fixes_used.insert(1, 2);
+    }));
+    run.rebase.fix_works = false;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1, "one left of the three");
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(comment.contains("after 3 fixes"), "{comment}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -2641,6 +2666,8 @@ async fn a_failed_batch_is_bisected_to_the_pr_that_broke_it() {
             "batch",
             "batch-failed",
             "rebasing",
+            "published",
+            "fixing",
             "published",
             "fixing",
             "published",

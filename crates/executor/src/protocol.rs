@@ -57,6 +57,8 @@ pub enum Task {
     /// Review what the PR changes since it left `trunk_sha`, and write `REVIEW_FILE`. Changes
     /// nothing. `answered` are what humans said about an earlier head; `sent_back` what the
     /// agent sent back to the author on the last one, to check the fix of.
+    /// Fix what the agent's review sent back, and commit it on top of the PR's head.
+    FixReview { findings: Vec<Finding> },
     Review {
         #[serde(default)]
         answered: Vec<Answered>,
@@ -80,14 +82,17 @@ pub enum Task {
 impl Task {
     /// Whether the job returns code: a review or a question returns only what it wrote.
     pub fn returns_code(&self) -> bool {
-        matches!(self, Task::Rebase | Task::FixChecks { .. })
+        matches!(
+            self,
+            Task::Rebase | Task::FixChecks { .. } | Task::FixReview { .. }
+        )
     }
 
     /// The task the agent runs for: it picks the model, and counts the spend.
     pub fn spend_task(&self) -> SpendTask {
         match self {
             Task::Rebase => SpendTask::Rebase,
-            Task::FixChecks { .. } => SpendTask::Fix,
+            Task::FixChecks { .. } | Task::FixReview { .. } => SpendTask::Fix,
             Task::Review { .. } | Task::Question { .. } => SpendTask::Review,
         }
     }

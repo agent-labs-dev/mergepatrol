@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
-    Answered, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings, ReviewStatus,
-    SentBack, review_status, review_url,
+    Answered, Event, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings,
+    ReviewStatus, SentBack, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
@@ -21,7 +21,7 @@ use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
 use tokio::task::JoinSet;
 
 use crate::github::GitHub;
-use crate::queue::{Ctx, app_credentials, job_spec, record, unix_now};
+use crate::queue::{Ctx, app_credentials, fix_findings, job_spec, record, unix_now};
 
 /// Reviews running at once, across workspaces. Each also takes one of the sandbox's job slots.
 const REVIEWS_AT_ONCE: usize = 4;
@@ -161,7 +161,58 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
             return finish(ctx, &gh, &key, &pr, &r, &bars, Err(why)).await;
         }
     };
-    finish(ctx, &gh, &key, &pr, &r, &bars, Ok(output)).await
+    finish(ctx, &gh, &key, &pr, &r, &bars, Ok(output)).await?;
+    fix_sent_back(ctx, &gh, &key, &pr, &settings, r.id).await
+}
+
+/// What the agent's fix can take on from a review: what it sent back to the author, not what a
+/// human asked for, and not on a PR from a fork, or a stack's layer, whose layers above would have
+/// to move too. Empty otherwise.
+fn fixable(r: &ReviewRecord, fork: bool, stacked: bool) -> Vec<Finding> {
+    if r.status != ReviewStatus::Changes || r.answered_by.is_some() || fork || stacked {
+        return Vec::new();
+    }
+    r.findings
+        .iter()
+        .filter(|f| f.sent_back)
+        .map(|f| f.finding.clone())
+        .collect()
+}
+
+/// While the PR has fixes left, the agent's fix goes first. Without one, or if the agent cannot
+/// fix it, the findings wait for the author, as they would anyway.
+async fn fix_sent_back(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+    review: i64,
+) -> Result<()> {
+    let Some(r) = ctx.store.review(review).await? else {
+        return Ok(());
+    };
+    let findings = fixable(&r, pr.is_cross_repository, pr.stack.is_some());
+    if findings.is_empty()
+        || GitHub::fixes_used(gh, &r.repo, r.number).await? >= settings.fix_ci.allowed()
+    {
+        return Ok(());
+    }
+    let what = format!("{} sent back", findings.len());
+    record(ctx, key, r.number, "review-fixing", &what).await?;
+    let event = fix_findings(ctx, gh, key, pr, settings, &r.head_sha, findings).await;
+    let (kind, message) = match event {
+        Ok(Event::Fixed { head }) => {
+            ctx.store.mark_agent_fixed(r.id).await?;
+            ("review-fixed", head)
+        }
+        Ok(Event::FixFailed(why) | Event::FixGaveUp(why)) => ("review-unfixed", why),
+        Ok(event) => ("review-unfixed", format!("{event:?}")),
+        Err(e) => ("review-unfixed", format!("{e:#}")),
+    };
+    record(ctx, key, r.number, kind, &message).await?;
+    ctx.reviews.notify_one();
+    Ok(())
 }
 
 const NO_KEY: &str = "No model API key";
@@ -311,11 +362,16 @@ fn sent_back_before(earlier: &[ReviewRecord]) -> Vec<Finding> {
         .unwrap_or_default()
 }
 
-/// Whether the author has had their rounds: the last `ROUNDS` reviews each sent findings back,
-/// and no human stepped in.
+/// Whether the author has had their rounds: the last `ROUNDS` reviews each sent findings back to
+/// them, and no human stepped in. A round the queue's agent fixed was not theirs.
 fn rounds_spent(earlier: &[ReviewRecord]) -> bool {
-    earlier.len() >= ROUNDS
-        && earlier[..ROUNDS]
+    let rounds: Vec<_> = earlier
+        .iter()
+        .filter(|e| !e.agent_fixed)
+        .take(ROUNDS)
+        .collect();
+    rounds.len() == ROUNDS
+        && rounds
             .iter()
             .all(|e| e.answered_by.is_none() && e.findings.iter().any(|j| j.sent_back))
 }
@@ -748,6 +804,7 @@ mod tests {
         };
         ReviewRecord {
             since_head: None,
+            agent_fixed: false,
             id,
             installation_id: 1,
             repo: RepoName::parse("o/r").unwrap(),
@@ -795,6 +852,20 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_fixes_only_what_it_sent_back_on_the_authors_own_pr() {
+        let r = review(1, true, None);
+        assert_eq!(fixable(&r, false, false).len(), 1);
+        assert!(fixable(&r, true, false).is_empty(), "a fork");
+        assert!(fixable(&r, false, true).is_empty(), "a stack's layer");
+        assert!(fixable(&review(1, false, None), false, false).is_empty());
+        let asked = review(1, true, Some("ann"));
+        assert!(fixable(&asked, false, false).is_empty(), "a human's call");
+        let mut approved = review(1, true, None);
+        approved.status = ReviewStatus::Approved;
+        assert!(fixable(&approved, false, false).is_empty());
+    }
+
+    #[test]
     fn the_author_gets_three_rounds_before_a_human_steps_in() {
         let back = |id| review(id, true, None);
         assert!(!rounds_spent(&[back(2), back(1)]));
@@ -804,6 +875,19 @@ mod tests {
         assert!(!rounds_spent(&[
             back(3),
             review(2, true, Some("mona")),
+            back(1)
+        ]));
+        // The agent's own rounds are not the author's.
+        let fixed = |id| ReviewRecord {
+            agent_fixed: true,
+            ..back(id)
+        };
+        assert!(!rounds_spent(&[fixed(3), fixed(2), fixed(1)]));
+        assert!(rounds_spent(&[
+            back(5),
+            fixed(4),
+            back(3),
+            fixed(2),
             back(1)
         ]));
         assert_eq!(sent_back_before(&[back(3)]).len(), 1);

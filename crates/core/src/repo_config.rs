@@ -103,13 +103,13 @@ pub struct FixCiSettings {
     pub attempts: u32,
 }
 
-/// On, with two fixes: most failures a fix can mend take one, and a second covers a first that
-/// went halfway.
+/// On, with three fixes for a PR, whether for its checks or its review: most need one, and the
+/// rest cover a first that went halfway.
 impl Default for FixCiSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            attempts: 2,
+            attempts: 3,
         }
     }
 }
@@ -696,10 +696,10 @@ agent:
             RepoSettings::from_file(Some("version: 1\nfix_ci:\n  enabled: false\n"), &defaults())
                 .unwrap();
         assert_eq!(s.fix_ci.allowed(), 0);
-        assert_eq!(s.fix_ci.attempts, 2);
-        let s = RepoSettings::from_file(Some("version: 1\nfix_ci: { attempts: 3 }\n"), &defaults())
+        assert_eq!(s.fix_ci.attempts, 3);
+        let s = RepoSettings::from_file(Some("version: 1\nfix_ci: { attempts: 2 }\n"), &defaults())
             .unwrap();
-        assert_eq!(s.fix_ci.allowed(), 3);
+        assert_eq!(s.fix_ci.allowed(), 2);
     }
 
     #[test]

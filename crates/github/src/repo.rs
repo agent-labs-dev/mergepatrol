@@ -812,6 +812,31 @@ impl Installation {
 
     /// The head of PR `number`, from its `refs/pull/<n>/head`: where a fork PR's head shows in
     /// the base repo.
+    /// The messages of the PR's last commits, newest first: as many as a fix budget can use.
+    pub async fn last_commit_messages(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+    ) -> Result<Vec<String>> {
+        let query = "query($owner: String!, $name: String!, $number: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $number) {
+                commits(last: 20) { nodes { commit { message } } }
+              }
+            }
+        }";
+        let vars = json!({ "owner": repo.owner, "name": repo.name, "number": number });
+        let data: Value = self.graphql("last_commit_messages", query, vars).await?;
+        let nodes = data["repository"]["pullRequest"]["commits"]["nodes"]
+            .as_array()
+            .context("the PR's commits")?;
+        Ok(nodes
+            .iter()
+            .rev()
+            .filter_map(|n| n["commit"]["message"].as_str().map(str::to_owned))
+            .collect())
+    }
+
     pub async fn pull_head(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
         let r: Value = self
             .rest(

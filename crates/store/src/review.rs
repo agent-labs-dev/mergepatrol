@@ -24,6 +24,8 @@ pub struct ReviewRecord {
     /// The approved head it goes on from: only what the queue's agent changed since needs
     /// reading. `None` reads the whole PR.
     pub since_head: Option<String>,
+    /// The queue's agent fixed what it sent back: it spent none of the author's rounds.
+    pub agent_fixed: bool,
     pub status: ReviewStatus,
     /// Why the agent could not review: a human reviews the whole PR.
     pub error: Option<String>,
@@ -132,6 +134,8 @@ pub trait ReviewStore: Send + Sync {
         before: &str,
         after: &str,
     ) -> Result<()>;
+    /// The queue's agent pushed a fix of what the review sent back.
+    async fn mark_agent_fixed(&self, id: i64) -> Result<()>;
     /// Who the review asks, changed.
     async fn set_asked(&self, id: i64, asked: &[String]) -> Result<()>;
     /// A human answered the review's asks. False if it no longer asks.
@@ -181,7 +185,7 @@ pub trait ReviewStore: Send + Sync {
 /// A review's columns, for `concat!`: sqlx takes only literal SQL.
 macro_rules! columns {
     () => {
-        r#"id, installation_id, repo, number, head_sha, since_head, status, error, attempts,
+        r#"id, installation_id, repo, number, head_sha, since_head, agent_fixed, status, error, attempts,
     summary, findings, asked, answers, answered_by, note, questions,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
     to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at"#
@@ -198,6 +202,7 @@ fn record(row: &PgRow) -> Result<ReviewRecord> {
         number: row.get::<i64, _>("number") as u64,
         head_sha: row.get("head_sha"),
         since_head: row.get("since_head"),
+        agent_fixed: row.get("agent_fixed"),
         status: ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?,
         error: row.get("error"),
         attempts: row.get::<i32, _>("attempts") as u32,
@@ -436,6 +441,16 @@ impl ReviewStore for PgStore {
         .bind(pr as i64)
         .bind(before)
         .bind(after)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_agent_fixed(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_reviews SET agent_fixed = true, updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -948,6 +963,11 @@ mod tests {
             .unwrap();
         let next = store.latest_review(1, &repo(), 7).await.unwrap().unwrap();
         assert_eq!(next.since_head.as_deref(), Some("fixed again"));
+
+        assert!(!next.agent_fixed);
+        store.mark_agent_fixed(next.id).await.unwrap();
+        let marked = store.review(next.id).await.unwrap().unwrap();
+        assert!(marked.agent_fixed);
     }
 
     #[sqlx::test(migrations = false)]

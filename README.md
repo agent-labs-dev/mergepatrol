@@ -39,11 +39,11 @@ Then it runs, rebased alone or tested in a [batch](#batches), and merges once it
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
-When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, the PR is ejected. When the agent gives up because the failure is not the PR's to fix, as with a flaky test, an outage or a title since changed, an empty commit runs the checks once more, and a failure then ejects the PR.
+When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After three fixes that do not make the checks pass, the PR is ejected. A PR gets three fixes in all, for its checks and its review together, and a push from its author earns new ones. When the agent gives up because the failure is not the PR's to fix, as with a flaky test, an outage or a title since changed, an empty commit runs the checks once more, and a failure then ejects the PR.
 
 ### Automatic review
 
-Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. The author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
+Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. While the PR has fixes left, the agent's fix goes first and pushes a commit, which the next review checks. That is on with **Fix attempts**, and leaves out stacks and forks. If it cannot fix it, or the PR has no fixes left, the author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
 
 A push gets a new review, which checks each finding sent back, with the author's replies in front of it. A finding still there gets a reply in its own thread, which opens again, never a new comment. A thread whose finding is fixed, or whose reply holds up in the code, is resolved. After three rounds that still send findings back, the next review asks a human instead. An author can also reply to a finding with `ask_agent_about_review`: the agent reads the code again, and withdraws the finding if the reply holds up.
 
@@ -220,7 +220,7 @@ verify:
   - cargo check
 fix_ci:
   enabled: true    # an agent fixes failed required checks
-  attempts: 2      # 1 to 5 fixes, before the PR is ejected
+  attempts: 3      # 1 to 5 fixes, for its checks and its review, before the PR is ejected
 branches:          # queues besides the default branch's: exact names
   - release
 review:            # over the workspace's automatic review settings

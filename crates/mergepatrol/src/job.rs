@@ -157,7 +157,32 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             (&spec.trunk_sha, "rebased")
         }
         Task::FixChecks { failures } => {
-            fix(spec, &git, resolver, failures, dir, out, events).await?;
+            let names: Vec<&str> = failures.iter().map(|f| f.name.as_str()).collect();
+            let what = names.join(", ");
+            fix(
+                spec,
+                &git,
+                resolver,
+                (failures, &[], &what),
+                dir,
+                out,
+                events,
+            )
+            .await?;
+            (&spec.head_sha, "fixed")
+        }
+        Task::FixReview { findings } => {
+            let what = "the review's findings";
+            fix(
+                spec,
+                &git,
+                resolver,
+                (&[], findings, what),
+                dir,
+                out,
+                events,
+            )
+            .await?;
             (&spec.head_sha, "fixed")
         }
         // These return what the agent said, not code.
@@ -309,12 +334,11 @@ async fn fix(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    failures: &[CheckFailure],
+    (failures, findings, what): (&[CheckFailure], &[Finding], &str),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
-    let names: Vec<&str> = failures.iter().map(|f| f.name.as_str()).collect();
     let transcript = out
         .join("transcripts")
         .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
@@ -322,6 +346,7 @@ async fn fix(
         .fix(FixRequest {
             workdir: dir,
             failures,
+            findings,
             pr_title: &spec.pr_title,
             pr_body: &spec.pr_body,
             trunk: &spec.trunk,
@@ -331,7 +356,7 @@ async fn fix(
         .await
         .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
     // A fix is done once it is committed: until then, any failure leaves it unfixed.
-    let fixed = commit_fix(spec, git, resolver, &run.outcome, &names, dir, events).await;
+    let fixed = commit_fix(spec, git, resolver, &run.outcome, what, dir, events).await;
     spent(
         events,
         &spec.resolver,
@@ -349,7 +374,7 @@ async fn commit_fix(
     git: &Git,
     resolver: &dyn Resolver,
     outcome: &Outcome,
-    names: &[&str],
+    what: &str,
     dir: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
@@ -367,11 +392,7 @@ async fn commit_fix(
     verify(spec, dir, events, "the fix").await?;
     git.commit_all(
         dir,
-        &format!(
-            "Fix {}\n\n{FIXED_BY}, {}",
-            names.join(", "),
-            resolver.name()
-        ),
+        &format!("Fix {what}\n\n{FIXED_BY}, {}", resolver.name()),
     )
     .await
 }

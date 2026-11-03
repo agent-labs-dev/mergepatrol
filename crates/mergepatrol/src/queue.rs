@@ -15,8 +15,8 @@ use mergepatrol_billing::Billing;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
     EjectReason, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber,
-    PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings, ReviewStatus, SpendTask,
-    Transition,
+    PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
+    ReviewStatus, SpendTask, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -67,8 +67,6 @@ const JOB_ERRORS_FOR: Duration = Duration::from_secs(30 * 60);
 /// A fix may change any file but these: CI's own config, and the queue's.
 const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
 /// How long to wait for a fork PR's pull ref to follow a push to the fork.
-/// The empty commit that runs a PR's checks again.
-const RECHECK_MESSAGE: &str = "Run the checks again\n\nThe agent found nothing to fix in the code.";
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -102,6 +100,8 @@ pub struct Ctx {
     pub billing: Option<Arc<Billing>>,
     /// Wakes the review worker: a tick started a review.
     pub reviews: Notify,
+    /// Each repo's git cache, which the lane and the review worker's fixes share.
+    pub caches: Caches,
 }
 
 /// Fork PRs waiting for their pin: the `labeled` webhook, or for their pull ref to show it.
@@ -760,6 +760,20 @@ fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> Hold {
     Hold::NoQueue {
         base: base.to_owned(),
         queues: queues.map(str::to_owned).collect(),
+    }
+}
+
+/// One lock per repo's git cache.
+#[derive(Default)]
+pub struct Caches(std::sync::Mutex<HashMap<RepoName, Arc<tokio::sync::Mutex<()>>>>);
+
+impl Caches {
+    async fn lock(&self, repo: &RepoName) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.0.lock().unwrap();
+            locks.entry(repo.clone()).or_default().clone()
+        };
+        lock.lock_owned().await
     }
 }
 
@@ -2321,6 +2335,11 @@ async fn run_job(
         false => settings.fix_ci.allowed(),
     };
     let mut job = Job::start(unit.number, fix_attempts);
+    if fix_attempts > 0 {
+        for pr in &unit.layers {
+            job.fixes += gh.fixes_used(repo, pr.number).await?;
+        }
+    }
     let mut published_at = Instant::now();
     // Each layer's head as published, bottom to top, and the layer whose checks failed.
     let mut heads: Vec<String> = Vec::new();
@@ -2640,7 +2659,18 @@ impl JobSandbox<'_> {
         failures: &[CheckFailure],
     ) -> Result<Event> {
         let fixed = fix_and_publish(
-            self.ctx, self.gh, key, snap, unit, layer, settings, head, base, failures,
+            self.ctx,
+            self.gh,
+            key,
+            snap,
+            unit,
+            layer,
+            settings,
+            head,
+            base,
+            Task::FixChecks {
+                failures: failures.to_vec(),
+            },
         )
         .await?;
         self.restack(key, snap, unit, layer, settings, fixed).await
@@ -2927,15 +2957,19 @@ async fn fix_and_publish(
     settings: &RepoSettings,
     head: &str,
     base: &str,
-    failures: &[CheckFailure],
+    task: Task,
 ) -> Result<Event> {
     let repo = &key.repo;
     let git = Git;
     let pr = &unit.layers[layer];
-    let (cache, fetched, _) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
-    if fetched[layer] != head {
-        return Ok(Event::HeadMoved);
-    }
+    let cache = {
+        let _cache = ctx.caches.lock(repo).await;
+        let (cache, fetched, _) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+        if fetched[layer] != head {
+            return Ok(Event::HeadMoved);
+        }
+        cache
+    };
     let job_id = format!(
         "{}-{}-{}-fix-{}",
         repo.owner,
@@ -2944,9 +2978,6 @@ async fn fix_and_publish(
         &head[..8]
     );
     let out = ctx.config.data_dir.join("jobs").join(&job_id);
-    let task = Task::FixChecks {
-        failures: failures.to_vec(),
-    };
     let below = (layer > 0).then(|| Below {
         branch: &unit.layers[layer - 1].head_ref_name,
         upstream: base,
@@ -2954,6 +2985,7 @@ async fn fix_and_publish(
     let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        let _cache = ctx.caches.lock(repo).await;
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
         let published =
             publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await?;
@@ -2973,6 +3005,30 @@ async fn fix_and_publish(
             }
         }
     })
+}
+
+/// Has the agent fix what the review of PR `pr`, at `head`, sent back to its author, and pushes
+/// the fix, for a new review to check.
+pub(crate) async fn fix_findings(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+    head: &str,
+    findings: Vec<mergepatrol_core::Finding>,
+) -> Result<Event> {
+    let snap = GitHub::snapshot(gh, &key.repo, &settings.labels()).await?;
+    let base = gh.branch_sha(&key.repo, &key.trunk).await?;
+    let unit = Unit {
+        number: pr.number,
+        base: key.trunk.clone(),
+        layers: vec![pr.clone()],
+        stacked: false,
+    };
+    let task = Task::FixReview { findings };
+    let event = fix_and_publish(ctx, gh, key, &snap, &unit, 0, settings, head, &base, task).await;
+    JobSandbox { ctx, gh }.published(key, event).await
 }
 
 /// Pushes an empty commit on `head`, on which CI runs anew and reads the PR as it is now. A
@@ -3020,6 +3076,7 @@ async fn rebase_and_publish(
     settings: &RepoSettings,
 ) -> Result<Event> {
     let git = Git;
+    let _cache = ctx.caches.lock(&key.repo).await;
     let (cache, heads, trunk) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
     // A fork's author may have pushed since the queue checked the head against its pin.
     if unit.fork() && heads[0] != unit.top().head_ref_oid {

@@ -373,6 +373,62 @@ async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
 }
 
 #[tokio::test]
+async fn a_fix_of_a_review_commits_what_the_agent_changed_with_the_fix_trailer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let seen = tmp.path().join("prompt");
+    let shell = format!(
+        "printf '%s' \"$*\" > {} && echo fixed > feature.txt",
+        seen.display()
+    );
+    let executor = with_fake_claude_running(tmp.path(), &shell, "done");
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::FixReview {
+        findings: vec![
+            serde_json::from_value(serde_json::json!({
+                "kind": "other", "title": "The socket leaks", "file": "feature.txt", "line": 1,
+                "confidence": 90, "lean": "change", "finding": "It stays open.",
+                "suggestion": "Close it."
+            }))
+            .unwrap(),
+        ],
+    };
+    let out = tmp.path().join("out");
+    let result = executor.run("t7", &spec, &out).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+    let prompt = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        prompt.contains("The socket leaks (feature.txt:1)"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Close it."), "{prompt}");
+
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "pr"]);
+    git(
+        &check,
+        &[
+            "fetch",
+            "-q",
+            out.join(BUNDLE_FILE).to_str().unwrap(),
+            "refs/heads/result:refs/heads/result",
+        ],
+    );
+    let log = git(&check, &["log", "-1", "--format=%B", "result"]);
+    assert!(log.contains("Fix the review's findings"), "{log}");
+    assert!(log.contains("Fixed-by: mergepatrol"), "{log}");
+}
+
+#[tokio::test]
 async fn a_review_since_an_approval_names_only_the_queues_commits() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");

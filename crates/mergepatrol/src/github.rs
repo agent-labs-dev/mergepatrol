@@ -31,6 +31,8 @@ pub trait GitHub: Send + Sync {
     /// Whether a workflow run on `sha` has yet to finish: queued, waiting for an approval, or
     /// running.
     async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool>;
+    /// How many of its fix budget the PR has used.
+    async fn fixes_used(&self, repo: &RepoName, number: PrNumber) -> Result<u32>;
     /// What GitHub shows of why the checks `names` failed on `sha`.
     async fn check_failures(
         &self,
@@ -116,6 +118,12 @@ impl GitHub for Installation {
     }
     async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool> {
         Installation::workflows_running(self, repo, sha).await
+    }
+    async fn fixes_used(&self, repo: &RepoName, number: PrNumber) -> Result<u32> {
+        let messages = Installation::last_commit_messages(self, repo, number).await?;
+        Ok(mergepatrol_core::fixes_used(
+            messages.iter().map(String::as_str),
+        ))
     }
     async fn check_failures(
         &self,
