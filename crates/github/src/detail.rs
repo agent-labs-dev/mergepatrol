@@ -2,7 +2,8 @@
 //! runs, timeline and diff. Read as the user, on their own rate limit.
 
 use anyhow::{Context, Result, bail};
-use reqwest::StatusCode;
+use futures_util::future::join_all;
+use reqwest::{StatusCode, Url};
 use serde_json::{Value, json};
 
 use mergepatrol_core::{Person, PrNumber, RepoName};
@@ -11,7 +12,8 @@ use crate::app::AsUser;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PullDetail {
-    /// The description as GitHub renders it, sanitized by GitHub.
+    /// The description as GitHub renders it, sanitized by GitHub, its images signed as
+    /// [`AsUser::sign_images`] does.
     pub body_html: String,
     pub labels: Vec<Label>,
     /// The head commit's check runs and commit statuses.
@@ -107,6 +109,7 @@ pub enum TimelineEvent {
 /// The PR, its head commit's checks, and its last 100 timeline events.
 const DETAIL: &str = "query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
+    isPrivate
     pullRequest(number: $number) {
       bodyHTML
       labels(first: 20) { nodes { name color } }
@@ -144,7 +147,63 @@ impl AsUser {
                 json!({ "owner": repo.owner, "name": repo.name, "number": number }),
             )
             .await?;
-        pull_detail(&data["repository"]["pullRequest"])
+        let mut detail = pull_detail(&data["repository"]["pullRequest"])?;
+        if data["repository"]["isPrivate"].as_bool() == Some(true) {
+            self.sign_images(repo, &mut detail).await;
+        }
+        Ok(detail)
+    }
+
+    /// Points the images of a private repo's own files at GitHub's signed URLs for them. Their
+    /// `github.com` URLs need the session cookie, which an `<img>` on another site does not send,
+    /// so GitHub answers 404 there, though the same link opens. An image that cannot be signed
+    /// stays as it was.
+    async fn sign_images(&self, repo: &RepoName, detail: &mut PullDetail) {
+        let comments = detail
+            .timeline
+            .iter_mut()
+            .filter_map(|t| match &mut t.event {
+                TimelineEvent::Review { body_html, .. } | TimelineEvent::Comment { body_html } => {
+                    Some(body_html)
+                }
+                _ => None,
+            });
+        let mut bodies: Vec<&mut String> = std::iter::once(&mut detail.body_html)
+            .chain(comments)
+            .collect();
+        let mut images: Vec<String> = bodies.iter().flat_map(|b| repo_images(b, repo)).collect();
+        images.sort();
+        images.dedup();
+        let signed = join_all(images.iter().map(|src| self.signed_url(repo, src))).await;
+        for (src, url) in images.iter().zip(signed) {
+            let Some(url) = url else { continue };
+            for body in &mut bodies {
+                **body = body.replace(&format!(" src=\"{src}\""), &format!(" src=\"{url}\""));
+            }
+        }
+    }
+
+    /// The signed URL of the file `src` shows, which the contents API gives for a private repo.
+    async fn signed_url(&self, repo: &RepoName, src: &str) -> Option<String> {
+        for (git_ref, path) in ref_and_path(repo, src) {
+            let api = format!("/repos/{repo}/contents/{path}?ref={git_ref}");
+            let (status, body) = match self.get_text(&api, "application/vnd.github+json").await {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!("GET {api}: {e:#}");
+                    return None;
+                }
+            };
+            match status {
+                s if s.is_success() => return download_url(repo, &body),
+                StatusCode::NOT_FOUND => {}
+                s => {
+                    tracing::warn!("GET {api}: {s}");
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// The PR's diff, or one commit's with `commit`. `None` when GitHub will not make one this
@@ -166,6 +225,42 @@ impl AsUser {
             s => bail!("GET {path} as a diff: {s} {diff}"),
         }
     }
+}
+
+/// The `src` of each image in `html` at `repo` on `github.com`.
+fn repo_images(html: &str, repo: &RepoName) -> Vec<String> {
+    let start = format!(" src=\"https://github.com/{repo}/");
+    html.match_indices(&start)
+        .filter_map(|(i, _)| {
+            let src = &html[i + " src=\"".len()..];
+            Some(src[..src.find('"')?].to_owned())
+        })
+        .collect()
+}
+
+/// The ways to read the `blob` or `raw` URL `src` as a ref and a path, shortest ref first: a URL
+/// does not say where a ref with slashes ends, and refs rarely run past three parts.
+fn ref_and_path(repo: &RepoName, src: &str) -> Vec<(String, String)> {
+    let Ok(url) = Url::parse(src) else {
+        return Vec::new();
+    };
+    let file = url.path().strip_prefix(&format!("/{repo}/"));
+    let file = file.and_then(|f| f.strip_prefix("blob/").or_else(|| f.strip_prefix("raw/")));
+    let Some(file) = file else {
+        return Vec::new();
+    };
+    file.match_indices('/')
+        .take(3)
+        .map(|(i, _)| (file[..i].to_owned(), file[i + 1..].to_owned()))
+        .collect()
+}
+
+/// The `download_url` of a contents API response for a file in `repo`.
+fn download_url(repo: &RepoName, body: &str) -> Option<String> {
+    let file: Value = serde_json::from_str(body).ok()?;
+    let url = file["download_url"].as_str()?;
+    let in_repo = url.starts_with(&format!("https://raw.githubusercontent.com/{repo}/"));
+    (in_repo && !url.contains('"')).then(|| url.to_owned())
 }
 
 /// A `pullRequest` node of the [`DETAIL`] query.
@@ -370,6 +465,67 @@ fn timeline_item(v: &Value) -> Result<Option<TimelineItem>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo() -> RepoName {
+        RepoName::parse("acme/app").unwrap()
+    }
+
+    #[test]
+    fn finds_the_repos_own_images() {
+        let html = r#"<a href="https://github.com/acme/app/blob/m/a.png?raw=true"><img src="https://github.com/acme/app/blob/m/a.png?raw=true" width="220"></a>
+            <img src="https://github.com/acme/other/blob/m/b.png?raw=true">
+            <img src="https://private-user-images.githubusercontent.com/1/c.png?jwt=x">
+            <img alt="d" src="https://github.com/acme/app/raw/m/d.png">"#;
+        assert_eq!(
+            repo_images(html, &repo()),
+            [
+                "https://github.com/acme/app/blob/m/a.png?raw=true",
+                "https://github.com/acme/app/raw/m/d.png",
+            ]
+        );
+    }
+
+    #[test]
+    fn tries_each_split_of_a_ref_with_slashes() {
+        let src = "https://github.com/acme/app/blob/pr-assets/one/dir/a.png?raw=true";
+        let splits = ref_and_path(&repo(), src);
+        let splits: Vec<_> = splits.iter().map(|(r, p)| (&**r, &**p)).collect();
+        assert_eq!(
+            splits,
+            [
+                ("pr-assets", "one/dir/a.png"),
+                ("pr-assets/one", "dir/a.png"),
+                ("pr-assets/one/dir", "a.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_no_file_outside_the_repo() {
+        for src in [
+            "https://github.com/acme/app/blob/../../../user",
+            "https://github.com/acme/app/blob/%2e%2e/%2e%2e/%2e%2e/user",
+            "https://github.com/acme/app/pull/1",
+            "not a url",
+        ] {
+            assert_eq!(ref_and_path(&repo(), src), [], "{src}");
+        }
+    }
+
+    #[test]
+    fn takes_only_a_download_url_in_the_repo() {
+        let signed = "https://raw.githubusercontent.com/acme/app/m/a.png?token=t";
+        let body = |url: &str| json!({ "download_url": url }).to_string();
+        assert_eq!(
+            download_url(&repo(), &body(signed)).as_deref(),
+            Some(signed)
+        );
+        assert_eq!(
+            download_url(&repo(), &body("https://evil.test/a.png")),
+            None
+        );
+        assert_eq!(download_url(&repo(), r#"[{"name":"a directory"}]"#), None);
+    }
 
     fn user(login: &str) -> Value {
         json!({ "__typename": "User", "login": login, "avatarUrl": login })
