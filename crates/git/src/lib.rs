@@ -462,6 +462,59 @@ impl Git {
         self.output(wt, &["cat-file", "blob", sha]).await
     }
 
+    /// What the worktree changed in `files` since `rev`, new files included, as a patch that
+    /// `apply` takes. It has no context lines, so that `holds` asks only after the lines it
+    /// changed, not the code around them. A file that is not there is left out.
+    pub async fn patch_of(&self, wt: &Path, rev: &str, files: &[String]) -> Result<String> {
+        let files: Vec<&str> = files
+            .iter()
+            .map(String::as_str)
+            .filter(|f| wt.join(f).exists())
+            .collect();
+        if files.is_empty() {
+            return Ok(String::new());
+        }
+        let mut add = vec!["add", "-A", "--"];
+        add.extend(&files);
+        self.run(wt, &add).await?;
+        let mut diff = vec![
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-renames",
+            "-U0",
+            rev,
+            "--",
+        ];
+        diff.extend(&files);
+        self.run(wt, &diff).await
+    }
+
+    /// Puts the worktree back at `rev` as a fresh checkout has it: ignored files go too, as build
+    /// output and installed packages left behind could change what a command shows.
+    pub async fn reset_to(&self, wt: &Path, rev: &str) -> Result<()> {
+        self.run(wt, &["reset", "-q", "--hard", rev]).await?;
+        self.run(wt, &["clean", "-q", "-fdx"]).await?;
+        Ok(())
+    }
+
+    /// Applies a patch from `patch_of` to the worktree.
+    pub async fn apply(&self, wt: &Path, patch: &str) -> Result<()> {
+        let mut cmd = self.git(wt, &["apply", "--unidiff-zero", "--whitespace=nowarn", "-"]);
+        input(cmd.stdin(Stdio::piped()), patch.as_bytes(), "git apply").await?;
+        Ok(())
+    }
+
+    /// Whether the worktree still holds `patch` as it was applied: its lines are all there.
+    pub async fn holds(&self, wt: &Path, patch: &str) -> Result<bool> {
+        let mut cmd = self.git(wt, &["apply", "--unidiff-zero", "--check", "-R", "-"]);
+        Ok(
+            input(cmd.stdin(Stdio::piped()), patch.as_bytes(), "git apply")
+                .await
+                .is_ok(),
+        )
+    }
+
     fn git(&self, cwd: &Path, args: &[&str]) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("git");
         cmd.current_dir(cwd)
@@ -683,5 +736,47 @@ mod tests {
             .map(|c| c.path.as_str())
             .collect();
         assert_eq!(new, ["both.txt"]);
+    }
+
+    /// A finding's test, taken from the review's tree, goes on the head alone, and a fix that
+    /// changes it no longer holds it.
+    #[tokio::test]
+    async fn a_patch_of_some_files_goes_back_on_the_head_and_tells_if_it_was_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        sh(dir, &["init", "-q", "-b", "main"]);
+        let head = commit(dir, "lib.txt", "a\n");
+        std::fs::write(dir.join("lib.txt"), "a\nb\n").unwrap();
+        std::fs::write(dir.join("test.txt"), "t\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "o\n").unwrap();
+        let patch = Git
+            .patch_of(
+                dir,
+                &head,
+                &["lib.txt".into(), "test.txt".into(), "gone.txt".into()],
+            )
+            .await
+            .unwrap();
+        assert!(patch.contains("+b") && patch.contains("+t") && !patch.contains("other"));
+
+        std::fs::write(dir.join(".git/info/exclude"), "build\n").unwrap();
+        std::fs::create_dir(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/out"), "stale\n").unwrap();
+        Git.reset_to(dir, &head).await.unwrap();
+        assert!(!dir.join("test.txt").exists() && !dir.join("other.txt").exists());
+        assert!(!dir.join("build").exists(), "ignored leftovers go too");
+        assert!(!Git.holds(dir, &patch).await.unwrap());
+        Git.apply(dir, &patch).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("test.txt")).unwrap(),
+            "t\n"
+        );
+        assert!(Git.holds(dir, &patch).await.unwrap());
+        // A fix next to the lines the patch added leaves them as they were.
+        std::fs::write(dir.join("lib.txt"), "fixed\nA\nb\n").unwrap();
+        assert!(Git.holds(dir, &patch).await.unwrap());
+        std::fs::write(dir.join("test.txt"), "weakened\n").unwrap();
+        assert!(!Git.holds(dir, &patch).await.unwrap());
+        assert!(Git.patch_of(dir, &head, &[]).await.unwrap().is_empty());
     }
 }

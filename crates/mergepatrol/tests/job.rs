@@ -660,6 +660,151 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     );
 }
 
+/// The review's word that a command fails counts for nothing: the job runs each change's command
+/// on the head with only the files it names. The fix then starts from that test, must leave it as
+/// it is, and must make it pass.
+#[tokio::test]
+async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "app.txt", "other.txt");
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::Review {
+        answered: Vec::new(),
+        sent_back: Vec::new(),
+        since: None,
+    };
+    let change = |title: &str, evidence: serde_json::Value| {
+        serde_json::json!({
+            "kind": "other", "title": title, "file": "app.txt", "line": 1, "confidence": 90,
+            "lean": "change", "finding": "f", "suggestion": "s", "evidence": evidence
+        })
+    };
+    let answer = serde_json::json!({
+        "summary": "s",
+        "findings": [
+            change("App is not fixed", serde_json::json!({
+                "command": "sh check.sh", "files": ["check.sh"]
+            })),
+            change("Says it failed", serde_json::json!({
+                "command": "true", "files": [], "output": "FAILED", "failed": true
+            })),
+            change("Writes a workflow", serde_json::json!({
+                "command": "sh .github/check.sh", "files": [".github/check.sh"]
+            })),
+            change("Needs a tool the checkout lacks", serde_json::json!({
+                "command": "no-such-tool test", "files": []
+            })),
+            change("Leaves something behind", serde_json::json!({
+                "command": "touch from-a-command; exit 1", "files": []
+            })),
+            change("Sees what others left", serde_json::json!({
+                "command": "test ! -e leftover && test ! -e from-a-command", "files": []
+            })),
+        ]
+    })
+    .to_string();
+    // The agent writes its test, something it does not name, and an ignored file, as a build or
+    // an install would.
+    let shell = "printf 'grep -q fixed app.txt\\n' > check.sh && echo noise > noise.txt \
+        && printf 'leftover\\nfrom-a-command\\n' >> \"$(git rev-parse --git-path info/exclude)\" \
+        && touch leftover";
+    let out = tmp.path().join("out");
+    let result = with_fake_claude_running(tmp.path(), shell, &answer)
+        .run("t8", &spec, &out)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    let review: ReviewOutput =
+        serde_json::from_slice(&std::fs::read(out.join(REVIEW_FILE)).unwrap()).unwrap();
+    let evidence = |i: usize| review.findings[i].evidence.clone().unwrap();
+    let shown = evidence(0);
+    assert!(shown.failed, "{shown:?}");
+    assert!(shown.patch.contains("+grep -q fixed app.txt"), "{shown:?}");
+    assert!(!shown.patch.contains("noise"), "{shown:?}");
+    assert!(
+        !evidence(1).failed,
+        "the agent's word is not MergeLoop's run"
+    );
+    assert_eq!(evidence(1).output, "");
+    assert!(!evidence(2).failed);
+    assert!(evidence(2).output.contains(".github/check.sh"));
+    // A command the shell cannot find shows the checkout, not the PR.
+    assert!(!evidence(3).failed, "{:?}", evidence(3));
+    // Each command runs on a fresh tree: no ignored file the agent or an earlier command left.
+    assert!(evidence(4).failed);
+    assert!(!evidence(5).failed, "{:?}", evidence(5));
+
+    // The fix: the review's test is in place, and passes once the fix is in.
+    let mut fix = |dir: &Path, shell: &str| {
+        spec.task = Task::FixReview {
+            findings: vec![review.findings[0].clone()],
+        };
+        let spec = spec.clone();
+        let dir = dir.to_owned();
+        let shell = shell.to_owned();
+        async move {
+            let out = dir.join("out");
+            let result = with_fake_claude_running(&dir, &shell, "done")
+                .run("t9", &spec, &out)
+                .await
+                .unwrap();
+            (result, out)
+        }
+    };
+    let fixed = tempfile::tempdir().unwrap();
+    let shell = "test -f check.sh && echo fixed > app.txt";
+    let (result, out) = fix(fixed.path(), shell).await;
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "pr"]);
+    let bundle = out.join(BUNDLE_FILE);
+    let refspec = "refs/heads/result:refs/heads/result";
+    git(&check, &["fetch", "-q", bundle.to_str().unwrap(), refspec]);
+    assert_eq!(
+        git(&check, &["show", "result:check.sh"]),
+        "grep -q fixed app.txt",
+        "the review's test is committed with the fix"
+    );
+
+    let weakened = tempfile::tempdir().unwrap();
+    let (result, _) = fix(weakened.path(), "echo true > check.sh").await;
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("changed the review's test"), "{reason}");
+
+    let missed = tempfile::tempdir().unwrap();
+    let (result, _) = fix(missed.path(), "echo other > app.txt").await;
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("`sh check.sh` still fails"), "{reason}");
+
+    // A command may write files too: the review's test is checked once every command ran.
+    let mut rewrites = review.findings[0].clone();
+    rewrites.evidence.as_mut().unwrap().command = "sh check.sh && echo true > check.sh".into();
+    spec.task = Task::FixReview {
+        findings: vec![rewrites],
+    };
+    let rewritten = tempfile::tempdir().unwrap();
+    let result = with_fake_claude_running(rewritten.path(), "echo fixed > app.txt", "done")
+        .run("t10", &spec, &rewritten.path().join("out"))
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("changed the review's test"), "{reason}");
+}
+
 #[tokio::test]
 async fn a_review_the_agent_cannot_give_fails_and_says_why() {
     let tmp = tempfile::tempdir().unwrap();

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, RESOLVED_BY, SentBack, Spend,
-    SpendTask,
+    Answered, CheckFailure, CodeLine, Evidence, FIXED_BY, Finding, Lean, LineKind, RESOLVED_BY,
+    SentBack, Spend, SpendTask,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -352,6 +352,7 @@ async fn fix(
     let transcript = out
         .join("transcripts")
         .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
+    apply_evidence(git, dir, findings).await?;
     let run = resolver
         .fix(FixRequest {
             workdir: dir,
@@ -372,7 +373,10 @@ async fn fix(
     // A fix is done once it is committed: until then, any failure leaves it unfixed.
     let fixed = match &title {
         Some(title) => Err(anyhow!("{RETITLED}{title}")),
-        None => commit_fix(spec, git, resolver, &run.outcome, what, dir, events).await,
+        None => {
+            let ran = (&run.outcome, findings, what);
+            commit_fix(spec, git, resolver, ran, dir, events).await
+        }
     };
     spent(
         events,
@@ -385,13 +389,12 @@ async fn fix(
     fixed
 }
 
-/// Checks the agent's fix, and commits it.
+/// Checks the agent's fix, and commits it: with the review's tests for `findings`, which now pass.
 async fn commit_fix(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    outcome: &Outcome,
-    what: &str,
+    (outcome, findings, what): (&Outcome, &[Finding], &str),
     dir: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
@@ -407,6 +410,7 @@ async fn commit_fix(
         bail!("the agent changed nothing");
     }
     verify(spec, dir, events, "the fix").await?;
+    evidence_passes(git, dir, findings, events).await?;
     git.commit_all(
         dir,
         &format!("Fix {what}\n\n{FIXED_BY}, {}", resolver.name()),
@@ -460,6 +464,7 @@ async fn review(
             answered,
             sent_back,
             queue_commits: &queue_commits,
+            verify_commands: &spec.verify,
             transcript: &transcript,
         })
         .await
@@ -488,6 +493,7 @@ async fn review(
             r.code = file_lines(git, dir, &spec.head_sha, &r.file, r.line).await?;
         }
     }
+    check_evidence(&spec.head_sha, git, dir, &mut output.findings, events).await?;
     tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
     Ok(())
 }
@@ -690,21 +696,206 @@ fn spent(
     event(events, spend.kind(), spend.message());
 }
 
+/// Runs each finding's evidence on the head alone, with only the files it names, and keeps what
+/// that showed: the agent's word that a command fails counts for nothing. Only a change's evidence
+/// runs, as only a change can go back to the author. The tree is left at the head.
+async fn check_evidence(
+    head: &str,
+    git: &Git,
+    dir: &Path,
+    findings: &mut [Finding],
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    // What the agent wrote for each, taken before the tree goes back to the head.
+    let mut patches = Vec::new();
+    for f in findings.iter_mut() {
+        let Some(e) = f.evidence.as_mut() else {
+            patches.push(None);
+            continue;
+        };
+        (e.patch, e.output, e.failed) = (String::new(), String::new(), false);
+        let runs = f.lean == Lean::Change && !e.command.trim().is_empty();
+        let patch = match (runs, unsafe_file(&e.files)) {
+            (false, _) => None,
+            (true, Some(file)) => {
+                e.output = format!("MergeLoop does not run evidence that writes {file}.");
+                None
+            }
+            (true, None) => Some(git.patch_of(dir, head, &e.files).await?),
+        };
+        patches.push(patch);
+    }
+    for (f, patch) in findings.iter_mut().zip(patches) {
+        let (Some(e), Some(patch)) = (f.evidence.as_mut(), patch) else {
+            continue;
+        };
+        git.reset_to(dir, head).await?;
+        if !patch.is_empty()
+            && let Err(err) = git.apply(dir, &patch).await
+        {
+            e.output = format!("{err:#}");
+            continue;
+        }
+        event(events, "evidence", format!("{}: {}", f.id, e.command));
+        let ran = run_command(dir, &e.command).await?;
+        // A command that never ends may be stuck on the machine, not on the PR. One the shell
+        // could not find or start never ran: the checkout lacks a tool, the PR is not to blame.
+        e.failed = !ran.passed && !ran.timed_out && !ran.not_run;
+        (e.output, e.patch) = (ran.tail, patch);
+    }
+    git.reset_to(dir, head).await
+}
+
+/// A file evidence may not write: one outside the repo, or one a fix may not change, which the
+/// fix would have to commit.
+fn unsafe_file(files: &[String]) -> Option<&str> {
+    files
+        .iter()
+        .find(|f| {
+            let p = Path::new(f.as_str());
+            p.is_absolute()
+                || p.components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                || p.starts_with(".github")
+                || p.starts_with(".mergepatrol")
+        })
+        .map(String::as_str)
+}
+
+/// The fix starts from the review's tests for what it fixes, in place, as the review ran them.
+async fn apply_evidence(git: &Git, dir: &Path, findings: &[Finding]) -> Result<()> {
+    for e in shown(findings) {
+        if !e.patch.is_empty() {
+            git.apply(dir, &e.patch)
+                .await
+                .with_context(|| format!("the review's test for `{}` does not apply", e.command))?;
+        }
+    }
+    Ok(())
+}
+
+/// After the fix, each command that showed a finding passes, and the review's tests are as they
+/// were: checked once every command ran, as a command may write files too.
+async fn evidence_passes(
+    git: &Git,
+    dir: &Path,
+    findings: &[Finding],
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    for e in shown(findings) {
+        event(events, "evidence", e.command.as_str());
+        let ran = run_command(dir, &e.command).await?;
+        if !ran.passed {
+            bail!(
+                "`{}` still fails after the fix:\n```\n{}\n```",
+                e.command,
+                ran.tail
+            );
+        }
+    }
+    for e in shown(findings) {
+        if !e.patch.is_empty() && !git.holds(dir, &e.patch).await? {
+            bail!(
+                "the fix changed the review's test in {}",
+                e.files.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The evidence MergeLoop saw fail, of the findings that have it.
+fn shown(findings: &[Finding]) -> impl Iterator<Item = &Evidence> {
+    findings
+        .iter()
+        .filter_map(|f| f.evidence.as_ref())
+        .filter(|e| e.failed)
+}
+
+/// How a command ran: whether it passed, and the end of what it printed.
+struct Ran {
+    passed: bool,
+    timed_out: bool,
+    /// The shell could not find the command, or start it: exit 127 or 126.
+    not_run: bool,
+    tail: String,
+}
+
+/// How much of the end of what a command printed a failure keeps: its last lines, and at most
+/// this many bytes of them, as a line may be long.
+const TAIL_LINES: usize = 20;
+const TAIL_BYTES: usize = 4_000;
+
+/// Runs a command from the repo's root. One that runs past the timeout did not pass.
+async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
+    use std::process::Stdio;
+    let mut c = tokio::process::Command::new("sh");
+    c.current_dir(dir)
+        .args(["-c", cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // A group of its own, so that what it started stops with it.
+        .process_group(0)
+        .kill_on_drop(true);
+    let child = c.spawn()?;
+    let group = child.id();
+    let done = tokio::time::timeout(VERIFY_TIMEOUT, child.wait_with_output()).await;
+    if let Some(group) = group {
+        stop_group(group).await;
+    }
+    let Ok(output) = done else {
+        return Ok(Ran {
+            passed: false,
+            timed_out: true,
+            not_run: false,
+            tail: format!("`{cmd}` timed out after {}s", VERIFY_TIMEOUT.as_secs()),
+        });
+    };
+    let output = output?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
+    let mut cut = tail.len().saturating_sub(TAIL_BYTES);
+    while !tail.is_char_boundary(cut) {
+        cut += 1;
+    }
+    Ok(Ran {
+        passed: output.status.success(),
+        timed_out: false,
+        not_run: matches!(output.status.code(), Some(126 | 127)),
+        tail: tail[cut..].to_owned(),
+    })
+}
+
+/// Stops every process left in a command's group, and waits until none is: one left running, a
+/// test runner or an install, could write into the tree of the next command.
+async fn stop_group(group: u32) {
+    let Ok(group) = i32::try_from(group) else {
+        return;
+    };
+    // SAFETY: `kill` takes any pid and signal; a negative pid names the group.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
+    for _ in 0..50 {
+        // SAFETY: signal 0 only asks whether the group has a process left.
+        if unsafe { libc::kill(-group, 0) } != 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Runs the repo's verify commands, which must pass after `what` the agent did.
 async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &str) -> Result<()> {
     for cmd in &spec.verify {
         event(events, "verify", cmd.as_str());
-        let mut c = tokio::process::Command::new("sh");
-        c.current_dir(dir).args(["-c", cmd]).kill_on_drop(true);
-        let output = tokio::time::timeout(VERIFY_TIMEOUT, c.output())
-            .await
-            .with_context(|| format!("`{cmd}` timed out"))??;
-        if !output.status.success() {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            let lines: Vec<&str> = text.lines().collect();
-            let tail = lines[lines.len().saturating_sub(20)..].join("\n");
-            bail!("`{cmd}` failed after {what}:\n```\n{tail}\n```");
+        let ran = run_command(dir, cmd).await?;
+        if ran.timed_out {
+            bail!("`{cmd}` timed out");
+        }
+        if !ran.passed {
+            bail!("`{cmd}` failed after {what}:\n```\n{}\n```", ran.tail);
         }
     }
     Ok(())
@@ -713,6 +904,34 @@ async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn what_a_command_starts_stops_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = run_command(dir.path(), "(sleep 1; touch late) >/dev/null 2>&1 & exit 1")
+            .await
+            .unwrap();
+        assert!(!ran.passed);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !dir.path().join("late").exists(),
+            "the background job was stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_commands_output_is_kept_short_however_long_its_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = run_command(dir.path(), "yes é | head -n 50000 | tr -d '\\n'; exit 1")
+            .await
+            .unwrap();
+        assert!(!ran.passed);
+        assert!(
+            ran.tail.len() <= TAIL_BYTES && ran.tail.ends_with('é'),
+            "{}",
+            ran.tail.len()
+        );
+    }
 
     #[test]
     fn a_review_reads_from_the_agents_json_in_or_out_of_a_code_block() {

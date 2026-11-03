@@ -314,6 +314,9 @@ pub struct FindingView {
     pub checked: Vec<String>,
     pub would_clear: String,
     pub suggestion: String,
+    /// What showed the change is needed, as MergeLoop ran it: the whole test, also when a
+    /// comment on GitHub had no room for it.
+    pub evidence: Option<EvidenceView>,
     pub code: Vec<CodeLineView>,
     pub related: Vec<RelatedView>,
     /// The agent asks a human about it.
@@ -336,6 +339,21 @@ pub struct FindingView {
 pub enum LeanView {
     Fine,
     Change,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct EvidenceView {
+    /// What MergeLoop ran from the repo's root.
+    pub command: String,
+    /// The files the agent wrote for it.
+    pub files: Vec<String>,
+    /// Those files' changes on the PR's head, as a patch `git apply --unidiff-zero` takes.
+    pub patch: String,
+    /// The end of what the command printed.
+    pub output: String,
+    /// MergeLoop saw it fail on the PR's head: only then does it show the change is needed.
+    pub failed: bool,
 }
 
 #[derive(Serialize, TS)]
@@ -415,6 +433,13 @@ impl From<Judged> for FindingView {
             checked: f.checked,
             would_clear: f.would_clear,
             suggestion: f.suggestion,
+            evidence: f.evidence.map(|e| EvidenceView {
+                command: e.command,
+                files: e.files,
+                patch: e.patch,
+                output: e.output,
+                failed: e.failed,
+            }),
             needs_human: f.needs_human,
             code: code_view(f.code),
             related: f
@@ -878,6 +903,11 @@ mod tests {
                 checked: Vec::new(),
                 would_clear: String::new(),
                 suggestion: String::new(),
+                evidence: Some(mergepatrol_core::Evidence {
+                    command: "cargo test".into(),
+                    failed: true,
+                    ..Default::default()
+                }),
                 needs_human: false,
                 code: Vec::new(),
                 related: Vec::new(),

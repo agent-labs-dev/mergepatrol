@@ -860,6 +860,11 @@ impl Mem {
                     checked: Vec::new(),
                     would_clear: String::new(),
                     suggestion: String::new(),
+                    evidence: Some(mergepatrol_core::Evidence {
+                        command: "cargo test".into(),
+                        failed: true,
+                        ..Default::default()
+                    }),
                     needs_human: false,
                     code: Vec::new(),
                     related: Vec::new(),

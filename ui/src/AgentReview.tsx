@@ -211,6 +211,58 @@ function Code({ lines, file }: { lines: CodeLineView[]; file: string }) {
   );
 }
 
+/** Hands the browser a text file to save. */
+function save(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/x-diff" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * What MergeLoop ran on the PR's head to show a finding, and what it printed, with the whole test
+ * the agent wrote for it: GitHub's comment may have had no room for the test.
+ */
+function Evidence({ f }: { f: FindingView }) {
+  const e = f.evidence;
+  if (!e?.failed) return null;
+  return (
+    <div className="mt-2 overflow-hidden rounded-md border border-line bg-surface text-xs">
+      <p className="border-b border-line bg-sunken px-3 py-1.5 text-muted">
+        MergeLoop ran <code className="font-mono text-fg-2">{e.command}</code> on this head, and it
+        failed
+      </p>
+      {e.output && (
+        <pre className="max-h-48 overflow-auto px-3 py-2 font-mono leading-5 whitespace-pre-wrap">
+          {e.output}
+        </pre>
+      )}
+      {e.patch && (
+        <details className="border-t border-line">
+          <summary className="flex cursor-pointer items-center gap-3 px-3 py-1.5 text-muted">
+            The test it wrote, in <span className="font-mono">{e.files.join(", ")}</span>
+            <button
+              type="button"
+              onClick={(ev) => {
+                ev.preventDefault();
+                save(`${f.id}.patch`, e.patch);
+              }}
+              className="ml-auto text-fg-2 hover:text-fg"
+            >
+              Download
+            </button>
+          </summary>
+          <pre className="max-h-96 overflow-auto px-3 py-2 font-mono leading-5 whitespace-pre">
+            {e.patch}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function Kbd({ children }: { children: ReactNode }) {
   return (
     <kbd className="rounded border border-line-strong bg-surface px-1 font-mono text-[10px] text-muted shadow-xs">
@@ -388,6 +440,11 @@ function SentBackList({ findings }: { findings: FindingView[] }) {
             <p className="mt-1 pl-5 text-muted">
               <Md>{f.suggestion}</Md>
             </p>
+          )}
+          {!f.withdrawn && (
+            <div className="pl-5">
+              <Evidence f={f} />
+            </div>
           )}
         </li>
       ))}
@@ -880,6 +937,9 @@ function Answering({
                 <Code lines={f.code} file={f.line ? `${f.file}:${f.line}` : f.file} />
               </div>
             )}
+            <div className="mt-2 max-w-3xl">
+              <Evidence f={f} />
+            </div>
             {f.related.length > 0 && (
               <>
                 <button

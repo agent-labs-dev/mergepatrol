@@ -1394,16 +1394,9 @@ impl Installation {
         if res.status != StatusCode::UNPROCESSABLE_ENTITY || comments.is_empty() {
             anyhow::bail!("POST {path}: {} {}", res.status, res.body);
         }
-        let mut all = body.to_owned();
-        for c in comments {
-            let place = match c.line {
-                Some(line) => format!("{}:{line}", c.path),
-                None => c.path.clone(),
-            };
-            all.push_str(&format!("\n\n**`{place}`**\n{}", c.body));
-        }
+        let all = with_comments(body, comments);
         let _: Value = self
-            .rest(Method::POST, &path, Some(review(&[], all.trim())))
+            .rest(Method::POST, &path, Some(review(&[], &all)))
             .await?;
         Ok(())
     }
@@ -1500,7 +1493,7 @@ impl Installation {
             .rest(
                 Method::POST,
                 &format!("/repos/{repo}/pulls/{number}/comments/{comment_id}/replies"),
-                Some(json!({ "body": body })),
+                Some(json!({ "body": fit_comment(body) })),
             )
             .await?;
         Ok(())
@@ -1630,6 +1623,78 @@ impl Installation {
             }
         }
         Ok(())
+    }
+}
+
+/// The most characters GitHub takes in a comment or a review's body.
+const COMMENT_CHARS: usize = 65_536;
+
+/// A review's body with its comments, for when GitHub turned the comments down on their lines.
+/// Each goes in whole while there is room, as a part of a patch does not apply; the rest only say
+/// where they are.
+fn with_comments(body: &str, comments: &[ThreadComment]) -> String {
+    let mut all = body.trim().to_owned();
+    for c in comments {
+        let place = match c.line {
+            Some(line) => format!("{}:{line}", c.path),
+            None => c.path.clone(),
+        };
+        let whole = format!("\n\n**`{place}`**\n{}", c.body);
+        let short = format!(
+            "\n\n**`{place}`**\nToo long to show here with the rest: the PR's review in MergeLoop shows it whole, with its test to download."
+        );
+        let room = COMMENT_CHARS.saturating_sub(all.chars().count());
+        if whole.chars().count() <= room {
+            all.push_str(&whole);
+        } else if short.chars().count() <= room {
+            all.push_str(&short);
+        }
+    }
+    fit_comment(&all).into_owned()
+}
+
+/// A comment GitHub takes: one too long loses its end, which says so.
+fn fit_comment(text: &str) -> std::borrow::Cow<'_, str> {
+    const CUT: &str = "\n\n… (cut: too long for GitHub)";
+    if text.chars().count() <= COMMENT_CHARS {
+        return text.into();
+    }
+    let keep: String = text
+        .chars()
+        .take(COMMENT_CHARS - CUT.chars().count())
+        .collect();
+    format!("{keep}{CUT}").into()
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    #[test]
+    fn a_comment_too_long_for_github_loses_its_end() {
+        assert_eq!(fit_comment("short"), "short");
+        let long = "é".repeat(COMMENT_CHARS + 10);
+        let fit = fit_comment(&long);
+        assert_eq!(fit.chars().count(), COMMENT_CHARS);
+        assert!(fit.ends_with("too long for GitHub)"));
+    }
+
+    #[test]
+    fn a_review_body_holds_whole_comments_while_they_fit_and_points_at_the_rest() {
+        let comment = |path: &str, body: String| ThreadComment {
+            path: path.into(),
+            line: Some(1),
+            body,
+        };
+        let patch = |c: char| format!("```diff\n{}\n```", c.to_string().repeat(35_000));
+        let all = with_comments(
+            "**MergeLoop's review**",
+            &[comment("a.rs", patch('a')), comment("b.rs", patch('b'))],
+        );
+        assert!(all.chars().count() <= COMMENT_CHARS);
+        assert!(all.contains(&patch('a')), "the first goes in whole");
+        assert!(!all.contains(&"b".repeat(100)), "no part of the second");
+        assert!(all.contains("**`b.rs:1`**\nToo long to show here"));
     }
 }
 

@@ -156,14 +156,16 @@ impl ReviewSettings {
     }
 
     /// Where a finding goes. A human only for a kind that always asks, or a change the author
-    /// cannot make from the PR; a change the agent is sure enough of goes back to the author;
-    /// the rest it clears, a change under the bar as a note.
+    /// cannot make from the PR; a change the agent is sure enough of, that shows what it is
+    /// about, goes back to the author; the rest it clears, a change under the bar or one that
+    /// shows nothing as a note.
     pub fn route(&self, finding: &Finding) -> Route {
         let bar = self.bar(finding.kind);
         match finding.lean {
             _ if bar == Bar::Always => Route::Human,
             Lean::Fine => Route::Cleared,
             Lean::Change if finding.needs_human => Route::Human,
+            Lean::Change if !finding.shows_the_change() => Route::Cleared,
             Lean::Change if bar.sends(finding.confidence) => Route::Author,
             Lean::Change => Route::Cleared,
         }
@@ -239,6 +241,11 @@ pub struct Finding {
     /// The change it would ask the author for.
     #[serde(default)]
     pub suggestion: String,
+    /// What shows the change is needed: a command that fails on the PR's head. A `change` of a
+    /// kind other than security carries one that MergeLoop ran and saw fail, or it is only a
+    /// note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<Evidence>,
     /// The change needs a call the author cannot make from the PR: scope, product or design,
     /// access or credentials, or a change outside the repo.
     #[serde(default)]
@@ -249,6 +256,35 @@ pub struct Finding {
     /// Other code it read to get here.
     #[serde(default)]
     pub related: Vec<Related>,
+}
+
+impl Finding {
+    /// Whether it shows the change is needed: MergeLoop ran its evidence on the PR's head and it
+    /// failed. A `security` finding always does: the code showing the hole is enough to close it.
+    pub fn shows_the_change(&self) -> bool {
+        self.kind == Kind::Security || self.evidence.as_ref().is_some_and(|e| e.failed)
+    }
+}
+
+/// A command that shows a change is needed by failing, with any test the agent wrote for it. The
+/// agent names it; only MergeLoop's own run of it on the PR's head counts.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Evidence {
+    /// What to run from the repo's root, e.g. `cargo test -p core retry_stops`.
+    pub command: String,
+    /// The files the agent wrote or changed to show it: a test, most often.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Those files' changes on the PR's head, as MergeLoop took them after the review. The fix
+    /// starts from them, and must leave them as they are.
+    #[serde(default)]
+    pub patch: String,
+    /// The end of what the command printed when MergeLoop ran it.
+    #[serde(default)]
+    pub output: String,
+    /// MergeLoop ran it on the PR's head, with `patch`, and it failed.
+    #[serde(default)]
+    pub failed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -468,6 +504,11 @@ mod tests {
             checked: Vec::new(),
             would_clear: String::new(),
             suggestion: String::new(),
+            evidence: Some(Evidence {
+                command: "cargo test".into(),
+                failed: true,
+                ..Evidence::default()
+            }),
             needs_human: false,
             code: Vec::new(),
             related: Vec::new(),
@@ -491,6 +532,14 @@ mod tests {
             s.route(&finding(Kind::Other, 79, Lean::Change)),
             Route::Cleared
         );
+        // A change that shows no test, repro or run result is a note, however sure.
+        let mut bare = finding(Kind::Other, 100, Lean::Change);
+        bare.evidence = None;
+        assert_eq!(s.route(&bare), Route::Cleared);
+        // A security one still goes back: the code showing the hole is enough.
+        let mut hole = finding(Kind::Security, 100, Lean::Change);
+        hole.evidence = None;
+        assert_eq!(s.route(&hole), Route::Author);
         // What hurts more goes back on less certainty.
         assert_eq!(
             s.route(&finding(Kind::Security, 60, Lean::Change)),
@@ -504,6 +553,30 @@ mod tests {
             s.route(&finding(Kind::Migrations, 100, Lean::Fine)),
             Route::Human
         );
+    }
+
+    #[test]
+    fn a_change_needs_a_command_mergeloop_saw_fail_unless_it_is_a_security_one() {
+        let s = ReviewSettings::default();
+        for kind in [Kind::Other, Kind::Dependencies, Kind::PublicApi] {
+            let mut f = finding(kind, 100, Lean::Change);
+            f.evidence = None;
+            assert_eq!(s.route(&f), Route::Cleared, "{kind:?}");
+            // What the agent says it ran is not evidence: only MergeLoop's run is.
+            f.evidence = Some(Evidence {
+                command: "cargo test -p core retry".into(),
+                output: "test retry ... FAILED".into(),
+                ..Evidence::default()
+            });
+            assert_eq!(s.route(&f), Route::Cleared, "{kind:?}");
+            f.evidence.as_mut().unwrap().failed = true;
+            assert_eq!(s.route(&f), Route::Author, "{kind:?}");
+        }
+        // A human is still asked about a change the author cannot make, evidence or not.
+        let mut call = finding(Kind::PublicApi, 100, Lean::Change);
+        call.evidence = None;
+        call.needs_human = true;
+        assert_eq!(s.route(&call), Route::Human);
     }
 
     #[test]

@@ -160,7 +160,9 @@ impl Resolver for ClaudeResolver {
 
     async fn review(&self, req: ReviewRequest<'_>) -> Result<Resolution> {
         let prompt = review_prompt(&req);
-        self.run(req.workdir, prompt, Access::Read, req.transcript)
+        // It runs the repo and writes tests, to show what it finds: the job keeps none of it but
+        // what a finding's evidence names, and returns no code.
+        self.run(req.workdir, prompt, Access::Edit, req.transcript)
             .await
     }
 
@@ -235,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn a_review_may_read_but_not_edit_or_run_anything() {
+    fn a_question_may_read_but_not_edit_or_run_anything() {
         let tools =
             |access| -> Vec<&str> { ClaudeResolver::allowed_tools(access).split(',').collect() };
         let read = tools(Access::Read);
