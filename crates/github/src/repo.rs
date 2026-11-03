@@ -58,6 +58,9 @@ pub struct PullRequest {
     /// Whether a code owner must still approve, which `reviewDecision` can leave out.
     #[serde(skip)]
     pub awaits_code_owner: bool,
+    /// GitHub says it conflicts with its base. False while GitHub has yet to work that out.
+    #[serde(default, rename = "mergeable", deserialize_with = "conflicting")]
+    pub conflicting: bool,
     /// The stack the PR is a layer of. `None` outside a stack.
     #[serde(default)]
     pub stack: Option<StackRef>,
@@ -370,9 +373,13 @@ macro_rules! summary_fields {
 
 /// A PR as the queue reads it: its files too, for the code owners, and whether its review
 /// threads are resolved, for the review's gate.
+fn conflicting<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.as_deref() == Some("CONFLICTING"))
+}
+
 const PR_FIELDS: &str = concat!(
     summary_fields!(),
-    " files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
+    " mergeable files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
 );
 
 /// The labeled PRs a snapshot reads at a time. GraphQL charges a point per 100 requests its lists

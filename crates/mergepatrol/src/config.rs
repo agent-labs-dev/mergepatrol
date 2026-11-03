@@ -23,6 +23,9 @@ pub struct Config {
     pub poll: Duration,
     pub bind: SocketAddr,
     pub max_jobs: usize,
+    /// Gets a PR ready off the lane, before its review. Off, as with
+    /// `MERGEPATROL_PREP=false`, a PR's rebase, checks and fixes all run in the lane.
+    pub prep: bool,
     pub executor: ExecutorConfig,
     /// Where jobs reach the orchestrator: its model API proxy, and a remote job's link.
     /// `public_url` by default.
@@ -117,6 +120,7 @@ impl Config {
             poll: Duration::from_secs(opt("MERGEPATROL_POLL_SECS", "60").parse()?),
             bind: opt("MERGEPATROL_BIND", "127.0.0.1:8080").parse()?,
             max_jobs: opt("MERGEPATROL_MAX_JOBS", "4").parse()?,
+            prep: opt("MERGEPATROL_PREP", "true").parse()?,
             executor: match opt("MERGEPATROL_EXECUTOR", "local").as_str() {
                 "local" => ExecutorConfig::Local,
                 "docker" => ExecutorConfig::Docker {

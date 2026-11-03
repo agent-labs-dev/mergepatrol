@@ -243,7 +243,7 @@ export function Queue({ workspace }: { workspace: number }) {
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
-        <Rows title="Getting ready" note="the agent's review, then the line" items={reviewing}>
+        <Rows title="Getting ready" note="each on its own, then the line" items={reviewing}>
           {row}
         </Rows>
         <Rows title="Held" note="until GitHub would merge it" items={held}>
@@ -399,7 +399,7 @@ type Item = Omit<EntryView, "state"> & {
 /** How far back an open PR still lists as ejected, rather than as just not queued. */
 const EJECTED_DAYS = 7;
 
-/** A held PR that waits on the agent's review or its threads, not on GitHub. */
+/** A held PR that is getting ready or waits on the agent's review or its threads, not on GitHub. */
 const heldByReview = (e: Item) =>
   e.state !== "open" && reviewBadge({ ...e, state: e.state }) !== null;
 /** A PR the agent's review asks a human about: the one thing here that a person can move. */

@@ -27,6 +27,8 @@ Public repos are free. Private repos cost $15 a seat a month, after a free trial
 
 ### What a queued PR needs
 
+A labeled PR gets ready on its own first, and no PR waits for another's: the agent resolves a conflict with its base, its checks run, and the agent fixes what fails. Then the agent reviews it. A PR that this cannot settle goes on to the queue as it is, which ejects it. Stacks and PRs from forks skip this. To run all of it in the queue instead, one PR at a time, a self-hosted MergeLoop sets `MERGEPATROL_PREP=false`.
+
 A labeled PR keeps its place in line, on hold, until GitHub would merge it and the queue can take it:
 
 - It is not a draft.

@@ -101,8 +101,9 @@ pub struct Ctx {
     pub billing: Option<Arc<Billing>>,
     /// Wakes the review worker: a tick started a review.
     pub reviews: Notify,
-    /// Each repo's git cache, which the lane and the review worker's fixes share.
+    /// Each repo's git cache, which the lane and the agent's jobs off it share.
     pub caches: Caches,
+    pub prep: prep::Prep,
 }
 
 /// Fork PRs waiting for their pin: the `labeled` webhook, or for their pull ref to show it.
@@ -508,6 +509,12 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running, alive: &Alive) -> Resu
 const TICK_GAP: Duration = Duration::from_secs(10);
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
+    // Stops with the queue: dropped when it is, which aborts this task.
+    let _prep = Spawned(tokio::spawn(prep::drain(
+        ctx.clone(),
+        gh.clone(),
+        repo.clone(),
+    )));
     let sandbox = JobSandbox { ctx: &ctx, gh: &gh };
     let cached = Cached {
         gh: &gh,
@@ -1109,6 +1116,12 @@ async fn sync_lane(
             Some(no_queue(&unit.base, &read.snap.default_branch, settings))
         } else if let Some(draft) = unit.hold_reason().filter(|h| *h.innermost() == Hold::Draft) {
             Some(draft)
+        } else if let Some(reason) = match lane.is_active(unit.number) {
+            // The lane's own job has it: a restart cut it short, or it runs in a batch.
+            true => None,
+            false => prep::hold(ctx, gh, key, snap, settings, unit).await?,
+        } {
+            Some(reason)
         } else if let Some(reason) = {
             let heads: Vec<(PrNumber, &str, u32)> = unit
                 .layers
@@ -1187,6 +1200,8 @@ async fn sync_lane(
                     {
                         None
                     }
+                    // Getting ready shows on the dashboard, and in the commits it pushes.
+                    _ if reason.of_prep() => None,
                     _ => Some(on_hold(&reason)),
                 };
                 (number, "held", reason.to_string(), comment)
@@ -3085,8 +3100,10 @@ async fn rebase_and_publish(
     settings: &RepoSettings,
 ) -> Result<Event> {
     let git = Git;
-    let _cache = ctx.caches.lock(&key.repo).await;
-    let (cache, heads, trunk) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+    let (cache, heads, trunk) = {
+        let _cache = ctx.caches.lock(&key.repo).await;
+        fetch_layers(ctx, gh, &git, key, &unit.layers).await?
+    };
     // A fork's author may have pushed since the queue checked the head against its pin.
     if unit.fork() && heads[0] != unit.top().head_ref_oid {
         return Ok(Event::HeadMoved);
@@ -3133,6 +3150,7 @@ async fn rebase_and_publish(
                 base: trunk,
             });
         }
+        let _cache = ctx.caches.lock(&key.repo).await;
         let event =
             publish_to_fork(gh, &git, &cache, key, pr, &heads[0], &rebased[0], trunk).await?;
         if matches!(event, Event::Rebased { .. }) {
@@ -3277,6 +3295,7 @@ async fn rebase_layers(
         if agent_resolved(&events) {
             resolved.push(i);
         }
+        let _cache = ctx.caches.lock(repo).await;
         let local_head = check_job_output(
             git,
             cache,
@@ -3397,6 +3416,8 @@ async fn import_job_output(
     let _ = tokio::fs::remove_file(&bundle).await;
     Ok(local_head)
 }
+
+mod prep;
 
 #[cfg(test)]
 mod loop_tests;

@@ -167,6 +167,12 @@ pub enum HoldReasonView {
     /// The account's public repos are over MergeLoop's fair-use limit for the hour.
     FairUseLimit,
     /// The agent is reviewing it, the queue's first gate.
+    /// Getting ready off the lane: the agent resolves its conflict.
+    PrepRebasing,
+    /// Getting ready off the lane: its checks run.
+    PrepChecks,
+    /// Getting ready off the lane: the agent fixes its failed checks.
+    PrepFixing,
     Reviewing,
     /// The agent's review asks a human about what it was not sure of.
     ReviewAsks,
@@ -219,6 +225,9 @@ impl From<&Hold> for HoldView {
             Hold::NoQueue { .. } => HoldReasonView::NoQueue,
             Hold::NoSubscription => HoldReasonView::NoSubscription,
             Hold::FairUseLimit => HoldReasonView::FairUseLimit,
+            Hold::PrepRebasing => HoldReasonView::PrepRebasing,
+            Hold::PrepChecks => HoldReasonView::PrepChecks,
+            Hold::PrepFixing => HoldReasonView::PrepFixing,
             Hold::Reviewing => HoldReasonView::Reviewing,
             Hold::ReviewAsks => HoldReasonView::ReviewAsks,
             Hold::ReviewChanges => HoldReasonView::ReviewChanges,

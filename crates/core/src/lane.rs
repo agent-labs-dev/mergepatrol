@@ -293,6 +293,12 @@ impl Lane {
         changes
     }
 
+    pub fn is_active(&self, number: PrNumber) -> bool {
+        self.entries
+            .iter()
+            .any(|e| e.number == number && e.state == EntryState::Active)
+    }
+
     pub fn active(&self) -> Vec<PrNumber> {
         self.entries
             .iter()

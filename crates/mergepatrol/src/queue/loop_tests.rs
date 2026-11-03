@@ -125,6 +125,7 @@ impl State {
                 title: format!("PR {number}"),
                 body: String::new(),
                 is_draft: false,
+                conflicting: false,
                 is_cross_repository: false,
                 review_decision: None,
                 base_ref_name: "main".into(),
@@ -1372,6 +1373,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             poll: Duration::from_secs(60),
             bind: "127.0.0.1:0".parse().unwrap(),
             max_jobs: 1,
+            prep: false,
             executor: ExecutorConfig::Local,
             job_proxy_url: "http://localhost:8080".into(),
             job_proxy_bind: None,
@@ -1397,6 +1399,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         billing: None,
         reviews: Default::default(),
         caches: Default::default(),
+        prep: Default::default(),
     }
 }
 
@@ -1535,6 +1538,137 @@ async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
     }));
     run.tick().await;
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+/// A run that gets PRs ready off the lane.
+fn prep_run(setup: impl FnOnce(&mut State)) -> Run {
+    let mut run = Run::new(Fake::new(setup));
+    run.ctx.config.prep = true;
+    run
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_whose_checks_run_waits_off_the_lane_and_holds_up_no_other() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        let head = s.head(1);
+        s.checks_on.insert(
+            head,
+            BTreeMap::from([("ci".to_owned(), CheckState::Pending)]),
+        );
+    });
+    run.tick().await;
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepChecks)".into())]);
+    assert_eq!(run.merged(), [2], "#2 passes #1, which holds no job");
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_review_waits_for_green_checks() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Pending);
+    });
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(1, "Held(PrepChecks)".into())]);
+    assert!(run.store.reviews.lock().unwrap().is_empty());
+
+    run.gh
+        .state
+        .lock()
+        .unwrap()
+        .checks
+        .insert("ci".into(), CheckState::Passed);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_check_is_fixed_off_the_lane_while_fixes_are_left() {
+    let run = prep_run(failing_ci);
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    let fix = prep::Work::Fix {
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(1, fix)]);
+    // A tick does not ask twice.
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1);
+
+    let run = prep_run(|s| {
+        failing_ci(s);
+        s.fixes_used.insert(1, 3);
+    });
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.labels(1), [FAILED], "no fixes left: the lane ejects it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_the_lane_is_running_gets_no_job_off_it() {
+    let run = prep_run(failing_ci);
+    let mut lane = Lane::default();
+    lane.sync(&[Candidate {
+        number: 1,
+        priority: false,
+        hold: None,
+        summary: Default::default(),
+        layers: Vec::new(),
+        pin: None,
+    }]);
+    lane.activate(1);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    run.store.save_lane(&key, &lane).await.unwrap();
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.rebase.count(), 1, "the lane ran it again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_is_rebased_off_the_lane() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(1, "Held(PrepRebasing)".into())]);
+    assert_eq!(run.ctx.prep.asked(), [(1, prep::Work::Rebase)]);
+    assert_eq!(run.rebase.count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_getting_ready_cannot_settle_goes_to_the_lane() {
+    let run = prep_run(failing_ci);
+    let head = run.gh.with(|s| s.head(1));
+    run.ctx.prep.leave_to_lane((1, repo(), 1), &head);
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.rebase.count(), 1, "the lane took it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_required_check_no_workflow_runs_is_the_lanes_to_eject() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["never".into()];
+        s.checks.insert("other".into(), CheckState::Passed);
+    });
+    run.tick().await;
+    assert_eq!(run.rebase.count(), 1, "the lane took it");
 }
 
 #[tokio::test(start_paused = true)]
