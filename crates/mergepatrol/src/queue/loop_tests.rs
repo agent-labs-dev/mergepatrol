@@ -1168,6 +1168,9 @@ impl Store for Mem {
     async fn set_repo_defaults(&self, _: u64, _: &WorkspaceDefaults) -> Result<()> {
         unimplemented!()
     }
+    async fn rename_repo(&self, _: u64, _: &RepoName, _: &RepoName) -> Result<()> {
+        unreachable!()
+    }
     async fn set_has_config(&self, _: u64, _: &RepoName, _: bool) -> Result<()> {
         unreachable!()
     }

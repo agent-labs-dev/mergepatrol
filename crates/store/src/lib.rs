@@ -254,6 +254,10 @@ pub trait Store: ReadCache + InboxStore + ReviewStore {
             None => instance.clone(),
         })
     }
+    /// Moves what MergeLoop keeps of `from`, which GitHub now calls `to`, onto `to`. What the
+    /// queue already wrote under `to` stays: it is the newer. The queue's reads of GitHub go.
+    async fn rename_repo(&self, installation_id: u64, from: &RepoName, to: &RepoName)
+    -> Result<()>;
     async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()>;
     /// All the repos of an installation that have the config file. The rest have not.
     async fn replace_has_config(
@@ -341,6 +345,36 @@ impl Scope {
         }
     }
 }
+
+/// What moves a repo from its old name, $2, to its new one, $3. A table that can hold a row under
+/// each name keeps the new name's: it is the newer. The inbox's PRs follow the installation's
+/// repos, and read again.
+const RENAME_REPO: [&str; 15] = [
+    // A repo turned on or off under its old name stays so.
+    "UPDATE repos new SET enabled = COALESCE(new.enabled, old.enabled) FROM repos old
+     WHERE new.installation_id = $1 AND new.repo = $3
+       AND old.installation_id = $1 AND old.repo = $2",
+    "DELETE FROM repos old WHERE old.installation_id = $1 AND old.repo = $2 AND EXISTS
+     (SELECT 1 FROM repos new WHERE new.installation_id = $1 AND new.repo = $3)",
+    "UPDATE repos SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "DELETE FROM lanes old WHERE old.installation_id = $1 AND old.repo = $2 AND EXISTS
+     (SELECT 1 FROM lanes new WHERE new.installation_id = $1 AND new.repo = $3 AND new.trunk = old.trunk)",
+    "UPDATE lanes SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "DELETE FROM label_heads old WHERE old.installation_id = $1 AND old.repo = $2 AND EXISTS
+     (SELECT 1 FROM label_heads new WHERE new.installation_id = $1 AND new.repo = $3 AND new.pr = old.pr AND new.label = old.label)",
+    "UPDATE label_heads SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "DELETE FROM agent_reviews old WHERE old.installation_id = $1 AND old.repo = $2 AND EXISTS
+     (SELECT 1 FROM agent_reviews new WHERE new.installation_id = $1 AND new.repo = $3 AND new.number = old.number AND new.head_sha = old.head_sha)",
+    "UPDATE agent_reviews SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "DELETE FROM inbox_seen old WHERE old.installation_id = $1 AND old.repo = $2 AND EXISTS
+     (SELECT 1 FROM inbox_seen new WHERE new.installation_id = $1 AND new.repo = $3 AND new.login = old.login AND new.number = old.number)",
+    "UPDATE inbox_seen SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "DELETE FROM inbox_snoozed old WHERE old.installation_id = $1 AND old.repo = $2 AND EXISTS
+     (SELECT 1 FROM inbox_snoozed new WHERE new.installation_id = $1 AND new.repo = $3 AND new.login = old.login AND new.number = old.number)",
+    "UPDATE inbox_snoozed SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "UPDATE events SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+    "UPDATE exits SET repo = $3 WHERE installation_id = $1 AND repo = $2",
+];
 
 /// One installation of the GitHub App, on an organization or a user account.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1140,6 +1174,32 @@ impl Store for PgStore {
         Ok(())
     }
 
+    async fn rename_repo(
+        &self,
+        installation_id: u64,
+        from: &RepoName,
+        to: &RepoName,
+    ) -> Result<()> {
+        let id = installation_id as i64;
+        let (from, to) = (from.to_string(), to.to_string());
+        let mut tx = self.pool.begin().await?;
+        for statement in RENAME_REPO {
+            sqlx::query(statement)
+                .bind(id)
+                .bind(&from)
+                .bind(&to)
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("DELETE FROM github_repos WHERE installation_id = $1 AND repo = $2")
+            .bind(id)
+            .bind(&from)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn set_has_config(&self, installation_id: u64, repo: &RepoName, has: bool) -> Result<()> {
         sqlx::query(
             "INSERT INTO repos (installation_id, repo, has_config) VALUES ($1, $2, $3)
@@ -1723,6 +1783,90 @@ mod tests {
         assert_eq!(one, states[1]);
         let unknown = RepoName::parse("o/c").unwrap();
         assert_eq!(store.repo_state(9, &unknown).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_renamed_repo_keeps_its_queue_and_history(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        let old = RepoName::parse("o/old").unwrap();
+        let new = RepoName::parse("o/new").unwrap();
+        let lane = |repo: &RepoName, trunk: &str| LaneKey {
+            installation_id: 1,
+            repo: repo.clone(),
+            trunk: trunk.into(),
+        };
+        let held = Lane {
+            batch_pr: Some(7),
+            ..Lane::default()
+        };
+
+        // The old name alone, and both names, as once a look at the repos found the new one.
+        store.set_repo_enabled(1, &old, Some(false)).await.unwrap();
+        store
+            .replace_has_config(1, std::slice::from_ref(&new))
+            .await
+            .unwrap();
+        store.save_lane(&lane(&old, "main"), &held).await.unwrap();
+        store
+            .save_lane(&lane(&new, "main"), &Lane::default())
+            .await
+            .unwrap();
+        store.save_lane(&lane(&old, "next"), &held).await.unwrap();
+        store
+            .record(&lane(&old, "main"), 7, "enqueued", "added")
+            .await
+            .unwrap();
+        store
+            .record_exit(&lane(&old, "main"), 7, "merged", "s", &PrSummary::default())
+            .await
+            .unwrap();
+        store
+            .save_repository_read(
+                1,
+                &old,
+                0,
+                &serde_json::Value::Null,
+                &serde_json::Value::Null,
+            )
+            .await
+            .unwrap();
+        // Another workspace's repo of that name is not this one.
+        store.set_repo_enabled(2, &old, Some(true)).await.unwrap();
+
+        store.rename_repo(1, &old, &new).await.unwrap();
+
+        let repos: Vec<_> = store.repos().await.unwrap();
+        let names: Vec<_> = repos
+            .iter()
+            .map(|s| (s.installation_id, s.repo.to_string(), s.enabled))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (1, "o/new".to_string(), Some(false)),
+                (2, "o/old".to_string(), Some(true)),
+            ]
+        );
+        let lanes = store.lanes(1).await.unwrap();
+        assert_eq!(
+            lanes,
+            [
+                (lane(&new, "main"), Lane::default()),
+                (lane(&new, "next"), held.clone()),
+            ]
+        );
+        let events = store.events(1, &new, Some(7), 10).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(store.has_left(&lane(&new, "main"), 7).await.unwrap());
+        let reads: i64 = sqlx::query_scalar("SELECT count(*) FROM github_repos")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(reads, 0);
+
+        // Nothing is left under the old name: doing it again does nothing.
+        store.rename_repo(1, &old, &new).await.unwrap();
+        assert_eq!(store.lanes(1).await.unwrap().len(), 2);
     }
 
     #[sqlx::test(migrations = false)]

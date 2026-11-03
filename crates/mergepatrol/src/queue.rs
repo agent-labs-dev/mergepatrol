@@ -409,6 +409,7 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
                 .into_iter()
                 .map(|r| r.repo)
                 .collect();
+            follow_renames(ctx, &gh, &repos).await?;
             let has = gh.have_file(&repos, REPO_CONFIG_PATH).await?;
             anyhow::Ok(
                 repos
@@ -426,6 +427,27 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
                 error = %format!("{e:#}"),
                 "could not look for config files"
             ),
+        }
+    }
+    Ok(())
+}
+
+/// Moves what MergeLoop keeps under a name the installation no longer lists to the name GitHub
+/// gives that repo now. GitHub keeps serving old names, so nothing else would notice. A queue
+/// still running under the old name can write its lane once more, which the next look moves.
+async fn follow_renames(ctx: &Ctx, gh: &Installation, repos: &[RepoName]) -> Result<()> {
+    let states = ctx.store.repos().await?.into_iter();
+    let known = states
+        .filter(|s| s.installation_id == gh.id)
+        .map(|s| s.repo);
+    let lanes = ctx.store.lanes(gh.id).await?.into_iter();
+    let names: BTreeSet<RepoName> = known.chain(lanes.map(|(key, _)| key.repo)).collect();
+    for old in names.iter().filter(|name| !repos.contains(name)) {
+        if let Some(new) = gh.current_name(old).await?
+            && repos.contains(&new)
+        {
+            tracing::info!(installation = gh.id, %old, %new, "repo renamed");
+            ctx.store.rename_repo(gh.id, old, &new).await?;
         }
     }
     Ok(())

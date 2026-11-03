@@ -337,6 +337,20 @@ impl Installation {
         Ok(repos)
     }
 
+    /// What GitHub calls `repo` now: an old name keeps answering, for the renamed repo. `None`
+    /// when this installation cannot reach it.
+    pub async fn current_name(&self, repo: &RepoName) -> Result<Option<RepoName>> {
+        let path = format!("/repos/{repo}");
+        let res = self.request(Method::GET, &path, None).await?;
+        if res.status == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !res.status.is_success() {
+            bail!("GET {path}: {} {}", res.status, res.body);
+        }
+        Ok(res.body["full_name"].as_str().and_then(RepoName::parse))
+    }
+
     /// A GET for a body that is not JSON, in the media type `accept` names: its status and text.
     pub(crate) async fn get_text(&self, path: &str, accept: &str) -> Result<(StatusCode, String)> {
         let build = || async move {
@@ -926,6 +940,23 @@ mod tests {
             .unwrap_err();
         assert!(e.downcast_ref::<RateLimited>().unwrap().remaining() > MAX_RATE_LIMIT_WAIT);
         assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_old_name_answers_with_the_name_github_uses_now() {
+        let (gh, _) = fake::serve(vec![
+            (200, "", r#"{"full_name":"o/new"}"#),
+            (404, "", r#"{"message":"Not Found"}"#),
+            (500, "", "{}"),
+        ])
+        .await;
+        let old = RepoName::parse("o/old").unwrap();
+        assert_eq!(
+            gh.current_name(&old).await.unwrap(),
+            RepoName::parse("o/new")
+        );
+        assert_eq!(gh.current_name(&old).await.unwrap(), None);
+        assert!(gh.current_name(&old).await.is_err());
     }
 
     #[test]
