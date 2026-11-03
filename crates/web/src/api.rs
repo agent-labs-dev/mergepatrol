@@ -10,7 +10,7 @@ use mergepatrol_core::{
 };
 use mergepatrol_github::{
     App, AsUser, BranchFile, CheckRunState, DiffOf, GitObject, InboxPull, Installation, Proposal,
-    PullDetail, PullRef, SYMLINK_MODE, TimelineEvent, setup,
+    PullDetail, PullRef, PullRequest, SYMLINK_MODE, TimelineEvent, setup,
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
@@ -1338,8 +1338,9 @@ pub(crate) async fn set_repo(
 const OPEN_PULLS: u32 = 50;
 
 /// The repo's open PRs into its default branch that are not in its queue, updated last first.
-/// Read as the user: each viewer's polling spends their own rate limit, not the queue's. A
-/// revoked token means signing in again.
+/// From the inbox, so a viewer's polling reads nothing of GitHub. Until the inbox has read all of
+/// the repo, read as the user: each viewer's polling spends their own rate limit, not the
+/// queue's. A revoked token means signing in again.
 pub(crate) async fn open_pulls(
     State(app): State<AppState>,
     caller: Caller,
@@ -1347,9 +1348,28 @@ pub(crate) async fn open_pulls(
 ) -> Result<Json<Vec<OpenPullView>>, ApiError> {
     let repo = repo_name(owner, name)?;
     let id = caller.repo(&app, id, &repo).await?;
-    let gh = AsUser::new(caller.github_token(&app)?)?;
-    let file = as_user(gh.default_branch_file(&repo, REPO_CONFIG_PATH).await, &repo)?;
-    let (labels, trunk) = labels_of(&app, id, file).await?;
+    let (pulls, labels) = match app.store.inbox_open(id, &repo).await? {
+        Some(nodes) => {
+            // The config file as the queue last read it. A repo it does not run has none.
+            let config = app.store.config_read(id, &repo).await?.flatten();
+            let pulls = nodes
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<Vec<PullRequest>, _>>()
+                .map_err(anyhow::Error::from)?;
+            (pulls, labels_in(&app, id, config.as_deref()).await?)
+        }
+        None => {
+            let gh = AsUser::new(caller.github_token(&app)?)?;
+            let file = as_user(gh.default_branch_file(&repo, REPO_CONFIG_PATH).await, &repo)?;
+            let (labels, trunk) = labels_of(&app, id, file).await?;
+            let pulls = as_user(
+                gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await,
+                &repo,
+            )?;
+            (pulls, labels)
+        }
+    };
     // A stack's layers are in the queue with it, though one layer alone may have the label.
     let queued: HashSet<u64> = app
         .store
@@ -1360,14 +1380,11 @@ pub(crate) async fn open_pulls(
         .flat_map(|(_, lane)| lane.entries)
         .flat_map(|e| std::iter::once(e.number).chain(e.layers))
         .collect();
-    let pulls = as_user(
-        gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await,
-        &repo,
-    )?;
     Ok(Json(
         pulls
             .into_iter()
             .filter(|pr| !pr.has_label(&labels.trigger) && !queued.contains(&pr.number))
+            .take(OPEN_PULLS as usize)
             .map(|pr| OpenPullView {
                 number: pr.number as u32,
                 draft: pr.is_draft,
@@ -2208,10 +2225,15 @@ async fn labels_of(
     id: u64,
     file: BranchFile,
 ) -> Result<(Labels, String), ApiError> {
+    Ok((labels_in(app, id, file.text.as_deref()).await?, file.branch))
+}
+
+/// The labels a config file sets: the workspace's where it says nothing, or there is none.
+async fn labels_in(app: &AppState, id: u64, config: Option<&str>) -> Result<Labels, ApiError> {
     let defaults = inherited(app, id).await?;
-    let settings = RepoSettings::from_file(file.text.as_deref(), &defaults)
+    let settings = RepoSettings::from_file(config, &defaults)
         .map_err(|e| ApiError::Status(StatusCode::CONFLICT, e))?;
-    Ok((settings.labels(), file.branch))
+    Ok(settings.labels())
 }
 
 /// The PRs whose labels queue `number`: its stack's layers, or the PR alone.

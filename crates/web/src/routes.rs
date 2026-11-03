@@ -193,7 +193,7 @@ pub(crate) static ROUTES: &[Route] = &[
         "Turns a repo's queue on or off, over what its config file says, or back to following the file. Needs a MergeLoop sign-in, or a GitHub token with admin access to the repo.",
         opt("enabled", Ty::Bool, "`true` on, `false` off. Without it, the repo follows its config file."))),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/open", api::open_pulls, tool!("list_open_pulls", Reads,
-        "The repo's open PRs into its default branch that are not queued, last updated first, up to 50.")),
+        "The repo's open PRs into its default branch that are not queued, last updated first, up to 50: as MergeLoop last read them from GitHub, which webhooks keep within seconds.")),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}", api::pull_detail, tool!("get_pull", Reads,
         "An open PR's head and base commits, description, labels, checks, and timeline. In a private repo, images of its own files in the description and comments carry short-lived signed URLs.")),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/diff", api::pull_diff, tool!("get_pull_diff", Reads,

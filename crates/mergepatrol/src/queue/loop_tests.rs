@@ -1133,6 +1133,9 @@ impl ReadCache for Mem {
     async fn github_reads(&self, _: u64, _: &RepoName) -> Result<RepoReads> {
         unreachable!()
     }
+    async fn config_read(&self, _: u64, _: &RepoName) -> Result<Option<Option<String>>> {
+        unreachable!()
+    }
     async fn save_config_read(&self, _: u64, _: &RepoName, _: i64, _: Option<&str>) -> Result<()> {
         unreachable!()
     }
@@ -1195,6 +1198,9 @@ impl InboxStore for Mem {
         unreachable!()
     }
     async fn set_inbox_repos(&self, _: u64, _: &[RepoName]) -> Result<()> {
+        unreachable!()
+    }
+    async fn inbox_open(&self, _: u64, _: &RepoName) -> Result<Option<Vec<serde_json::Value>>> {
         unreachable!()
     }
     async fn inbox_repos_due(&self, _: Duration) -> Result<Vec<(u64, RepoName)>> {

@@ -116,6 +116,10 @@ pub trait InboxStore: Send + Sync {
     ) -> Result<()>;
     /// Makes the installation's repos these: adds the new ones, drops the rest with their PRs.
     async fn set_inbox_repos(&self, installation_id: u64, repos: &[RepoName]) -> Result<()>;
+    /// The repo's open PRs into its default branch, last updated first. `None` until every open
+    /// PR of the repo was read.
+    async fn inbox_open(&self, installation_id: u64, repo: &RepoName)
+    -> Result<Option<Vec<Value>>>;
     /// Repos whose open PRs were never read, or not for `age`.
     async fn inbox_repos_due(&self, age: Duration) -> Result<Vec<(u64, RepoName)>>;
     /// The installation's teams, by slug, with their members' logins.
@@ -358,6 +362,34 @@ impl InboxStore for PgStore {
         .await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn inbox_open(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+    ) -> Result<Option<Vec<Value>>> {
+        let indexed: Option<bool> = sqlx::query_scalar(
+            "SELECT indexed_at IS NOT NULL FROM inbox_repos WHERE installation_id = $1 AND repo = $2",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        if indexed != Some(true) {
+            return Ok(None);
+        }
+        let nodes = sqlx::query_scalar(
+            "SELECT node FROM inbox_pulls
+             WHERE installation_id = $1 AND repo = $2 AND state = 'open'
+               AND node->>'baseRefName' = node#>>'{repository,defaultBranchRef,name}'
+             ORDER BY node->>'updatedAt' DESC",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(Some(nodes))
     }
 
     async fn inbox_repos_due(&self, age: Duration) -> Result<Vec<(u64, RepoName)>> {
@@ -853,6 +885,53 @@ mod tests {
             .await
             .unwrap();
         inbox.requested.len()
+    }
+
+    /// An open PR into `base` of a repo whose default branch is `main`.
+    fn into(base: &str, updated: &str) -> InboxRead {
+        let mut read = read("open", "me", &[], &[]);
+        read.node = json!({
+            "baseRefName": base, "updatedAt": updated,
+            "repository": { "nameWithOwner": "o/r", "defaultBranchRef": { "name": "main" } },
+        });
+        read
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_open_prs_into_the_default_branch_wait_for_the_first_index(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        assert_eq!(store.inbox_open(1, &repo()).await.unwrap(), None);
+        // A webhook's read alone leaves the repo's other PRs unread.
+        store.inbox_changed(1, &repo(), 1).await.unwrap();
+        let read = write(1, 1, into("main", "2026-10-01T00:00:00Z"));
+        store.save_inbox_reads(1, &repo(), &[read]).await.unwrap();
+        assert_eq!(store.inbox_open(1, &repo()).await.unwrap(), None);
+
+        let mut merged = into("main", "2026-10-04T00:00:00Z");
+        merged.state = "merged".into();
+        let mut before = into("main", "2026-10-05T00:00:00Z");
+        before.node["repository"] = json!({ "nameWithOwner": "o/r" });
+        store
+            .save_inbox_index(
+                1,
+                &repo(),
+                &[
+                    write(1, 1, into("main", "2026-10-01T00:00:00Z")),
+                    write(2, 0, into("main", "2026-10-03T00:00:00Z")),
+                    write(3, 0, into("feature", "2026-10-02T00:00:00Z")),
+                    write(4, 0, merged),
+                    write(5, 0, before),
+                ],
+            )
+            .await
+            .unwrap();
+        let open = store.inbox_open(1, &repo()).await.unwrap().unwrap();
+        let updated: Vec<&str> = open
+            .iter()
+            .filter_map(|n| n["updatedAt"].as_str())
+            .collect();
+        assert_eq!(updated, ["2026-10-03T00:00:00Z", "2026-10-01T00:00:00Z"]);
+        assert_eq!(store.inbox_open(2, &repo()).await.unwrap(), None);
     }
 
     #[sqlx::test(migrations = false)]
