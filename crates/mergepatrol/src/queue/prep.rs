@@ -18,6 +18,24 @@ use tokio::time::Instant;
 use super::{Ctx, JobSandbox, Unit, fix_and_publish, rebase_and_publish, record};
 use crate::github::GitHub;
 
+/// Stops holding a PR when its job ends, also if it panics or is aborted.
+pub(super) struct Running<'a> {
+    prep: &'a Prep,
+    id: PrId,
+}
+
+impl<'a> Running<'a> {
+    pub(super) fn new(prep: &'a Prep, id: PrId) -> Self {
+        Self { prep, id }
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        self.prep.running.lock().unwrap().remove(&self.id);
+    }
+}
+
 /// How soon a job the tick asks for starts, also while the lane's job runs.
 const DRAIN_EVERY: Duration = Duration::from_secs(2);
 
@@ -65,6 +83,23 @@ impl Prep {
         hold
     }
 
+    /// Holds PR `number` for a fix beside this module's jobs: false if a job has it.
+    pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> bool {
+        let id = (key.installation_id, key.repo.clone(), number);
+        let mut running = self.running.lock().unwrap();
+        if running.contains_key(&id) {
+            return false;
+        }
+        running.insert(id, Hold::PrepFixing);
+        true
+    }
+
+    /// Ends a `claim`.
+    pub(crate) fn release(&self, key: &LaneKey, number: PrNumber) {
+        let id = (key.installation_id, key.repo.clone(), number);
+        self.running.lock().unwrap().remove(&id);
+    }
+
     /// A queue starts on `repo`: nothing of its jobs from before runs, as stopping stopped them.
     fn reset(&self, repo: &RepoName) {
         self.wanted.lock().unwrap().retain(|w| w.key.repo != *repo);
@@ -75,7 +110,7 @@ impl Prep {
     }
 
     /// The jobs asked for on `repo`.
-    fn take(&self, repo: &RepoName) -> Vec<Wanted> {
+    pub(super) fn take(&self, repo: &RepoName) -> Vec<Wanted> {
         let mut wanted = self.wanted.lock().unwrap();
         let (mine, rest) = std::mem::take(&mut *wanted)
             .into_iter()
@@ -95,9 +130,8 @@ impl Prep {
         entry.1.elapsed()
     }
 
-    /// The PR's job ended. `left`: the head it could not settle.
+    /// The PR's job ended, for `Running` to stop holding it. `left`: the head it could not settle.
     fn finish(&self, id: &PrId, left: Option<String>) {
-        self.running.lock().unwrap().remove(id);
         if let Some(head) = left {
             self.left.lock().unwrap().insert(id.clone(), head);
         }
@@ -193,7 +227,11 @@ pub(super) async fn drain(ctx: std::sync::Arc<Ctx>, gh: Installation, repo: Repo
             let (ctx, gh) = (ctx.clone(), gh.clone());
             jobs.spawn(async move { run(&ctx, &gh, wanted).await });
         }
-        while jobs.try_join_next().is_some() {}
+        while let Some(ended) = jobs.try_join_next() {
+            if let Err(e) = ended {
+                tracing::error!(%repo, error = %e, "a job off the lane broke");
+            }
+        }
         tokio::time::sleep(DRAIN_EVERY).await;
     }
 }
@@ -203,6 +241,7 @@ async fn run(ctx: &Ctx, gh: &Installation, w: Wanted) {
     let number = w.unit.number;
     let id = (key.installation_id, key.repo.clone(), number);
     let head = w.unit.top().head_ref_oid.clone();
+    let running = Running::new(&ctx.prep, id.clone());
     let event = job(ctx, gh, &w).await;
     let why = match event {
         Ok(Event::Rebased { head, .. } | Event::Fixed { head }) => {
@@ -219,6 +258,7 @@ async fn run(ctx: &Ctx, gh: &Installation, w: Wanted) {
         ok(record(ctx, key, number, "prep-left", why).await);
     }
     ctx.prep.finish(&id, why.map(|_| head));
+    drop(running);
     ctx.wakers.wake_repo(key.installation_id, &key.repo);
 }
 

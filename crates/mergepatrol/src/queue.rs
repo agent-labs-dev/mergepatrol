@@ -882,9 +882,7 @@ async fn review_change(
 ) -> Result<()> {
     ctx.store
         .review_queue_change(key.installation_id, &key.repo, number, before, after)
-        .await?;
-    ctx.reviews.notify_one();
-    Ok(())
+        .await
 }
 
 /// Syncs the lane of `trunk` with GitHub, and runs its next job, if it has one.

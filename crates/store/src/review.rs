@@ -125,7 +125,8 @@ pub trait ReviewStore: Send + Sync {
         after: &str,
     ) -> Result<()>;
     /// The queue's agent changed an approved PR from `before` to `after`, which waits for a
-    /// review of that change alone. A review not yet approved passes on the approval it goes from.
+    /// review of that change alone. It stays stale until `start_review`, as a tick does once the
+    /// PR's checks let it on. A review not yet approved passes on the approval it goes from.
     async fn review_queue_change(
         &self,
         installation_id: u64,
@@ -428,8 +429,9 @@ impl ReviewStore for PgStore {
         after: &str,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO agent_reviews (installation_id, repo, number, head_sha, since_head)
-             SELECT installation_id, repo, number, $5,
+            "INSERT INTO agent_reviews
+                 (installation_id, repo, number, head_sha, status, since_head)
+             SELECT installation_id, repo, number, $5, 'stale',
                  CASE status WHEN 'approved' THEN head_sha ELSE since_head END
              FROM agent_reviews
              WHERE installation_id = $1 AND repo = $2 AND number = $3 AND head_sha = $4
@@ -939,8 +941,9 @@ mod tests {
             .await
             .unwrap();
         let next = store.latest_review(1, &repo(), 7).await.unwrap().unwrap();
-        assert_eq!(next.status, ReviewStatus::Pending);
+        assert_eq!(next.status, ReviewStatus::Stale, "not before its checks");
         assert_eq!(next.since_head.as_deref(), Some("aaa"));
+        assert_eq!(store.claim_review(Duration::ZERO).await.unwrap(), None);
         assert!(next.findings.is_empty());
 
         // A second fix before that review ends goes on from the same approval.
@@ -953,9 +956,13 @@ mod tests {
         assert_eq!(last.since_head.as_deref(), Some("aaa"));
 
         // Once that review approves, the next fix goes on from it.
-        for _ in 0..2 {
-            store.claim_review(Duration::from_secs(600)).await.unwrap();
-        }
+        let started = store
+            .start_review(1, &repo(), 7, "fixed again")
+            .await
+            .unwrap();
+        assert_eq!(started.since_head.as_deref(), Some("aaa"), "it keeps that");
+        assert_eq!(started.status, ReviewStatus::Pending);
+        store.claim_review(Duration::from_secs(600)).await.unwrap();
         store.finish_review(last.id, &done).await.unwrap();
         store
             .review_queue_change(1, &repo(), 7, "fixed again", "fixed once more")

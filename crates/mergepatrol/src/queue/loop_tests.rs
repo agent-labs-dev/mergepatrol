@@ -942,7 +942,7 @@ impl ReviewStore for Mem {
                     ReviewStatus::Approved => Some(r.head_sha),
                     _ => r.since_head,
                 },
-                status: ReviewStatus::Pending,
+                status: ReviewStatus::Stale,
                 ..r
             });
         }
@@ -1636,6 +1636,36 @@ async fn a_pr_the_lane_is_running_gets_no_job_off_it() {
     run.tick().await;
     assert!(run.ctx.prep.asked().is_empty());
     assert_eq!(run.rebase.count(), 1, "the lane ran it again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_that_ends_any_way_at_all_stops_holding_its_pr() {
+    let run = prep_run(failing_ci);
+    run.tick().await;
+    let id = (1, repo(), 1);
+    {
+        let _running = prep::Running::new(&run.ctx.prep, id.clone());
+    }
+    run.ctx.prep.take(&repo());
+    run.gh.with_mut(|s| s.fixes_used.insert(1, 3));
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.labels(1), [FAILED], "no hold is left: the lane took it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_fix_and_a_check_fix_take_turns() {
+    let run = prep_run(failing_ci);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    assert!(run.ctx.prep.claim(&key, 1));
+    assert!(!run.ctx.prep.claim(&key, 1), "one job at a time on a PR");
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    assert!(run.ctx.prep.asked().is_empty(), "the check fix waits");
 }
 
 #[tokio::test(start_paused = true)]

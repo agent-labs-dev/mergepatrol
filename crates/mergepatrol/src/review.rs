@@ -212,9 +212,17 @@ async fn fix_sent_back(
     {
         return Ok(());
     }
+    // A fix of its checks may be on this head: the next review gets its turn.
+    if !ctx.prep.claim(key, r.number) {
+        return Ok(());
+    }
     let what = format!("{} sent back", findings.len());
-    record(ctx, key, r.number, "review-fixing", &what).await?;
-    let event = fix_findings(ctx, gh, key, pr, settings, &r.head_sha, findings).await;
+    let fixed = async {
+        record(ctx, key, r.number, "review-fixing", &what).await?;
+        fix_findings(ctx, gh, key, pr, settings, &r.head_sha, findings).await
+    };
+    let event = fixed.await;
+    ctx.prep.release(key, r.number);
     let (kind, message) = match event {
         Ok(Event::Fixed { head }) => {
             ctx.store.mark_agent_fixed(r.id).await?;
