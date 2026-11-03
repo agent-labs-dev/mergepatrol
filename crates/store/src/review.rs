@@ -27,6 +27,8 @@ pub struct ReviewRecord {
     /// The queue's agent fixed what it sent back: it spent none of the author's rounds.
     pub agent_fixed: bool,
     pub status: ReviewStatus,
+    /// Which taking of it this is: a worker's writes count only while it is the latest.
+    pub claim: i64,
     /// Why the agent could not review: a human reviews the whole PR.
     pub error: Option<String>,
     pub attempts: u32,
@@ -108,12 +110,16 @@ pub trait ReviewStore: Send + Sync {
     /// Takes the next review to run: a pending one, or one whose run has gone `stale` since a
     /// worker took it, as a restart leaves it. It is running once taken.
     async fn claim_review(&self, stale: Duration) -> Result<Option<ReviewRecord>>;
-    /// Ends a running review with what the agent found. False if it is no longer running.
-    async fn finish_review(&self, id: i64, done: &ReviewDone) -> Result<bool>;
+    /// Ends a running review with what the agent found. False if it is no longer running, or
+    /// the worker no longer holds `claim`.
+    async fn finish_review(&self, id: i64, claim: i64, done: &ReviewDone) -> Result<bool>;
     /// Puts a running review back to wait `after`, once more, for an error outside the PR.
-    async fn retry_review(&self, id: i64, error: &str, after: Duration) -> Result<()>;
+    async fn retry_review(&self, id: i64, claim: i64, error: &str, after: Duration) -> Result<()>;
     /// The PR moved on before the review finished.
-    async fn stale_review(&self, id: i64) -> Result<()>;
+    async fn stale_review(&self, id: i64, claim: i64) -> Result<()>;
+    /// Lets go of every review and question a worker took, for the next to take them now, and
+    /// ends those claims: only the worker that starts with the queue lock may run them.
+    async fn release_reviews(&self) -> Result<u64>;
     /// The queue moved the PR from `before` to `after`, a head it made: a rebase, or a fix of
     /// its checks. An approval of `before` holds for `after`, which is not reviewed again.
     async fn carry_review(
@@ -157,12 +163,14 @@ pub trait ReviewStore: Send + Sync {
     /// Takes the next review with a question waiting, as for `claim_review`.
     async fn claim_question(&self, stale: Duration) -> Result<Option<(ReviewRecord, Question)>>;
     /// The agent's answer to a question, or why it has none.
+    /// False if the worker no longer holds `claim`.
     async fn answer_question(
         &self,
         id: i64,
+        claim: i64,
         question: &str,
         answer: std::result::Result<String, String>,
-    ) -> Result<()>;
+    ) -> Result<bool>;
     /// The agent withdrew a finding it sent back to the author, on their reply. A review that
     /// held the PR for the author alone, and now holds it for nothing, approves it. Returns the
     /// review's status after, or `None` if the finding was not sent back.
@@ -186,7 +194,7 @@ pub trait ReviewStore: Send + Sync {
 /// A review's columns, for `concat!`: sqlx takes only literal SQL.
 macro_rules! columns {
     () => {
-        r#"id, installation_id, repo, number, head_sha, since_head, agent_fixed, status, error, attempts,
+        r#"id, installation_id, repo, number, head_sha, since_head, agent_fixed, status, claim, error, attempts,
     summary, findings, asked, answers, answered_by, note, questions,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
     to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at"#
@@ -205,6 +213,7 @@ fn record(row: &PgRow) -> Result<ReviewRecord> {
         since_head: row.get("since_head"),
         agent_fixed: row.get("agent_fixed"),
         status: ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?,
+        claim: row.get("claim"),
         error: row.get("error"),
         attempts: row.get::<i32, _>("attempts") as u32,
         summary: row.get("summary"),
@@ -333,7 +342,8 @@ impl ReviewStore for PgStore {
 
     async fn claim_review(&self, stale: Duration) -> Result<Option<ReviewRecord>> {
         let row = sqlx::query(concat!(
-            "UPDATE agent_reviews SET status = 'running', claimed_at = now(), updated_at = now()
+            "UPDATE agent_reviews SET status = 'running', claim = claim + 1, claimed_at = now(),
+                 updated_at = now()
              WHERE id = (
                  SELECT id FROM agent_reviews
                  WHERE (status = 'pending' AND (retry_at IS NULL OR retry_at <= now()))
@@ -349,11 +359,11 @@ impl ReviewStore for PgStore {
         row.as_ref().map(record).transpose()
     }
 
-    async fn finish_review(&self, id: i64, done: &ReviewDone) -> Result<bool> {
+    async fn finish_review(&self, id: i64, claim: i64, done: &ReviewDone) -> Result<bool> {
         let updated = sqlx::query(
             "UPDATE agent_reviews SET status = $2, error = $3, summary = $4, findings = $5,
                  asked = $6, claimed_at = NULL, retry_at = NULL, updated_at = now()
-             WHERE id = $1 AND status = 'running'",
+             WHERE id = $1 AND status = 'running' AND claim = $7",
         )
         .bind(id)
         .bind(done.status.as_str())
@@ -361,32 +371,47 @@ impl ReviewStore for PgStore {
         .bind(&done.summary)
         .bind(serde_json::to_value(&done.findings)?)
         .bind(&done.asked)
+        .bind(claim)
         .execute(&self.pool)
         .await?;
         Ok(updated.rows_affected() == 1)
     }
 
-    async fn retry_review(&self, id: i64, error: &str, after: Duration) -> Result<()> {
+    async fn retry_review(&self, id: i64, claim: i64, error: &str, after: Duration) -> Result<()> {
         sqlx::query(
             "UPDATE agent_reviews SET status = 'pending', error = $2, attempts = attempts + 1,
                  claimed_at = NULL, retry_at = now() + make_interval(secs => $3),
                  updated_at = now()
-             WHERE id = $1 AND status = 'running'",
+             WHERE id = $1 AND status = 'running' AND claim = $4",
         )
         .bind(id)
         .bind(error)
         .bind(after.as_secs_f64())
+        .bind(claim)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    async fn stale_review(&self, id: i64) -> Result<()> {
+    async fn release_reviews(&self) -> Result<u64> {
+        let released = sqlx::query(
+            "UPDATE agent_reviews
+             SET status = CASE status WHEN 'running' THEN 'pending' ELSE status END,
+                 claim = claim + 1, claimed_at = NULL, updated_at = now()
+             WHERE claimed_at IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(released.rows_affected())
+    }
+
+    async fn stale_review(&self, id: i64, claim: i64) -> Result<()> {
         sqlx::query(
             "UPDATE agent_reviews SET status = 'stale', claimed_at = NULL, updated_at = now()
-             WHERE id = $1",
+             WHERE id = $1 AND claim = $2",
         )
         .bind(id)
+        .bind(claim)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -535,7 +560,7 @@ impl ReviewStore for PgStore {
     }
 
     async fn claim_question(&self, stale: Duration) -> Result<Option<(ReviewRecord, Question)>> {
-        let row = sqlx::query(concat!("UPDATE agent_reviews SET claimed_at = now()
+        let row = sqlx::query(concat!("UPDATE agent_reviews SET claim = claim + 1, claimed_at = now()
              WHERE id = (
                  SELECT id FROM agent_reviews
                  WHERE status IN ('asks', 'changes') AND jsonb_path_exists(questions, '$[*] ? (!exists(@.answer) && !exists(@.error))')
@@ -558,14 +583,21 @@ impl ReviewStore for PgStore {
     async fn answer_question(
         &self,
         id: i64,
+        claim: i64,
         question: &str,
         answer: std::result::Result<String, String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("SELECT questions FROM agent_reviews WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let row = sqlx::query(
+            "SELECT questions FROM agent_reviews WHERE id = $1 AND claim = $2 FOR UPDATE",
+        )
+        .bind(id)
+        .bind(claim)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
         let mut questions: Vec<Question> = serde_json::from_value(row.get("questions"))?;
         if let Some(q) = questions.iter_mut().find(|q| q.id == question) {
             match answer {
@@ -582,7 +614,7 @@ impl ReviewStore for PgStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn withdraw_finding(&self, id: i64, finding: &str) -> Result<Option<ReviewStatus>> {
@@ -706,6 +738,16 @@ mod tests {
         RepoName::parse("o/r").unwrap()
     }
 
+    fn asks() -> ReviewDone {
+        ReviewDone {
+            status: ReviewStatus::Asks,
+            error: None,
+            summary: "s".into(),
+            findings: vec![judged("f1", true)],
+            asked: vec!["mona".into()],
+        }
+    }
+
     fn judged(id: &str, asked: bool) -> Judged {
         Judged {
             finding: Finding {
@@ -737,7 +779,12 @@ mod tests {
     async fn a_withdrawn_finding_lets_the_pr_on_once_nothing_is_sent_back(pool: PgPool) {
         let store = PgStore::migrate(pool).await.unwrap();
         let r = store.start_review(1, &repo(), 8, "bbb").await.unwrap();
-        store.claim_review(Duration::from_secs(600)).await.unwrap();
+        let claim = store
+            .claim_review(Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
         let back = |id: &str| Judged {
             sent_back: true,
             ..judged(id, false)
@@ -749,7 +796,7 @@ mod tests {
             findings: vec![back("f1"), back("f2"), judged("f3", false)],
             asked: Vec::new(),
         };
-        assert!(store.finish_review(r.id, &done).await.unwrap());
+        assert!(store.finish_review(r.id, claim, &done).await.unwrap());
         // The author's reply to a finding sent back is taken like a human's question.
         store
             .add_question(r.id, "f1", "the caller holds the lock", "bot")
@@ -800,9 +847,17 @@ mod tests {
             findings: vec![judged("f1", true), judged("f2", false)],
             asked: vec!["mona".into()],
         };
-        assert!(store.finish_review(r.id, &done).await.unwrap());
         assert!(
-            !store.finish_review(r.id, &done).await.unwrap(),
+            store
+                .finish_review(r.id, claimed.claim, &done)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .finish_review(r.id, claimed.claim, &done)
+                .await
+                .unwrap(),
             "not running"
         );
         let r = store.latest_review(1, &repo(), 7).await.unwrap().unwrap();
@@ -824,13 +879,13 @@ mod tests {
             .unwrap();
         assert_eq!(store.claim_question(stale).await.unwrap(), None);
         store
-            .answer_question(r.id, "q1", Ok("because".into()))
+            .answer_question(r.id, taken.claim, "q1", Ok("because".into()))
             .await
             .unwrap();
-        let (_, next) = store.claim_question(stale).await.unwrap().unwrap();
+        let (again, next) = store.claim_question(stale).await.unwrap().unwrap();
         assert_eq!(next.id, "q2");
         store
-            .answer_question(r.id, "q2", Err("no key".into()))
+            .answer_question(r.id, again.claim, "q2", Err("no key".into()))
             .await
             .unwrap();
         assert_eq!(store.claim_question(stale).await.unwrap(), None);
@@ -865,7 +920,7 @@ mod tests {
 
         // A review gone stale, as its worker read an older head, is started again.
         let stale = store.start_review(1, &repo(), 9, "x").await.unwrap();
-        store.stale_review(stale.id).await.unwrap();
+        store.stale_review(stale.id, stale.claim).await.unwrap();
         let again = store.start_review(1, &repo(), 9, "x").await.unwrap();
         assert_eq!((again.id, again.status), (stale.id, ReviewStatus::Pending));
 
@@ -902,9 +957,9 @@ mod tests {
         let store = PgStore::migrate(pool).await.unwrap();
         let r = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
         let stale = Duration::from_secs(600);
-        store.claim_review(stale).await.unwrap().unwrap();
+        let claim = store.claim_review(stale).await.unwrap().unwrap().claim;
         store
-            .retry_review(r.id, "the sandbox broke", Duration::from_secs(60))
+            .retry_review(r.id, claim, "the sandbox broke", Duration::from_secs(60))
             .await
             .unwrap();
         assert_eq!(store.claim_review(stale).await.unwrap(), None, "not yet");
@@ -924,10 +979,80 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn the_next_worker_takes_what_a_restart_cut_short_at_once(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let stale = Duration::from_secs(600);
+        let cut = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
+        store.claim_review(stale).await.unwrap().unwrap();
+        let asked = store.start_review(1, &repo(), 8, "bbb").await.unwrap();
+        let claim = store.claim_review(stale).await.unwrap().unwrap().claim;
+        let done = asks();
+        store.finish_review(asked.id, claim, &done).await.unwrap();
+        store
+            .add_question(asked.id, "f1", "why?", "mona")
+            .await
+            .unwrap();
+        store.claim_question(stale).await.unwrap().unwrap();
+        assert_eq!(store.claim_review(stale).await.unwrap(), None, "taken");
+        assert_eq!(store.claim_question(stale).await.unwrap(), None, "taken");
+
+        assert_eq!(store.release_reviews().await.unwrap(), 2);
+
+        let again = store.claim_review(stale).await.unwrap().unwrap();
+        assert_eq!(again.id, cut.id);
+        let (r, _) = store.claim_question(stale).await.unwrap().unwrap();
+        assert_eq!((r.id, r.status), (asked.id, ReviewStatus::Asks));
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_worker_that_lost_the_queue_lock_changes_nothing(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let stale = Duration::from_secs(600);
+        let r = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
+        let old = store.claim_review(stale).await.unwrap().unwrap().claim;
+        let asked = store.start_review(1, &repo(), 8, "bbb").await.unwrap();
+        let claim = store.claim_review(stale).await.unwrap().unwrap().claim;
+        let done = asks();
+        store.finish_review(asked.id, claim, &done).await.unwrap();
+        let q = store
+            .add_question(asked.id, "f1", "why?", "mona")
+            .await
+            .unwrap();
+        let (taken, _) = store.claim_question(stale).await.unwrap().unwrap();
+
+        // The next instance takes the lock and both runs, while the old worker runs on.
+        store.release_reviews().await.unwrap();
+        let new = store.claim_review(stale).await.unwrap().unwrap().claim;
+        let (retaken, _) = store.claim_question(stale).await.unwrap().unwrap();
+
+        assert!(!store.finish_review(r.id, old, &done).await.unwrap());
+        let later = Duration::from_secs(60);
+        store.retry_review(r.id, old, "late", later).await.unwrap();
+        store.stale_review(r.id, old).await.unwrap();
+        let held = store.review(r.id).await.unwrap().unwrap();
+        assert_eq!((held.status, held.attempts), (ReviewStatus::Running, 0));
+        let late = Ok("late".to_owned());
+        let answered = store.answer_question(asked.id, taken.claim, &q.id, late);
+        assert!(!answered.await.unwrap());
+        let open = store.review(asked.id).await.unwrap().unwrap();
+        assert!(open.questions[0].pending());
+
+        assert!(store.finish_review(r.id, new, &done).await.unwrap());
+        let answer = Ok("because".to_owned());
+        let answered = store.answer_question(asked.id, retaken.claim, &q.id, answer);
+        assert!(answered.await.unwrap());
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn the_queues_agent_changing_an_approved_pr_starts_a_review_of_that_change(pool: PgPool) {
         let store = PgStore::migrate(pool).await.unwrap();
         let r = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
-        store.claim_review(Duration::from_secs(600)).await.unwrap();
+        let claim = store
+            .claim_review(Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
         let done = ReviewDone {
             status: ReviewStatus::Approved,
             error: None,
@@ -935,7 +1060,7 @@ mod tests {
             findings: vec![judged("f1", false)],
             asked: Vec::new(),
         };
-        store.finish_review(r.id, &done).await.unwrap();
+        store.finish_review(r.id, claim, &done).await.unwrap();
         store
             .review_queue_change(1, &repo(), 7, "aaa", "fixed")
             .await
@@ -962,8 +1087,13 @@ mod tests {
             .unwrap();
         assert_eq!(started.since_head.as_deref(), Some("aaa"), "it keeps that");
         assert_eq!(started.status, ReviewStatus::Pending);
-        store.claim_review(Duration::from_secs(600)).await.unwrap();
-        store.finish_review(last.id, &done).await.unwrap();
+        let claim = store
+            .claim_review(Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
+        store.finish_review(last.id, claim, &done).await.unwrap();
         store
             .review_queue_change(1, &repo(), 7, "fixed again", "fixed once more")
             .await
@@ -981,7 +1111,12 @@ mod tests {
     async fn an_approval_holds_for_the_heads_the_queue_makes(pool: PgPool) {
         let store = PgStore::migrate(pool).await.unwrap();
         let r = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
-        store.claim_review(Duration::from_secs(600)).await.unwrap();
+        let claim = store
+            .claim_review(Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
         let done = ReviewDone {
             status: ReviewStatus::Approved,
             error: None,
@@ -989,7 +1124,7 @@ mod tests {
             findings: vec![judged("f1", false)],
             asked: Vec::new(),
         };
-        store.finish_review(r.id, &done).await.unwrap();
+        store.finish_review(r.id, claim, &done).await.unwrap();
         store
             .carry_review(1, &repo(), 7, "aaa", "rebased")
             .await

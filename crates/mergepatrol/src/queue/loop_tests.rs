@@ -908,6 +908,7 @@ impl ReviewStore for Mem {
             head_sha: head.to_owned(),
             since_head: None,
             agent_fixed: false,
+            claim: 0,
             status: ReviewStatus::Pending,
             error: None,
             attempts: 0,
@@ -927,13 +928,16 @@ impl ReviewStore for Mem {
     async fn claim_review(&self, _: Duration) -> Result<Option<ReviewRecord>> {
         unreachable!()
     }
-    async fn finish_review(&self, _: i64, _: &ReviewDone) -> Result<bool> {
+    async fn finish_review(&self, _: i64, _: i64, _: &ReviewDone) -> Result<bool> {
         unreachable!()
     }
-    async fn retry_review(&self, _: i64, _: &str, _: Duration) -> Result<()> {
+    async fn retry_review(&self, _: i64, _: i64, _: &str, _: Duration) -> Result<()> {
         unreachable!()
     }
-    async fn stale_review(&self, _: i64) -> Result<()> {
+    async fn stale_review(&self, _: i64, _: i64) -> Result<()> {
+        unreachable!()
+    }
+    async fn release_reviews(&self) -> Result<u64> {
         unreachable!()
     }
     async fn mark_agent_fixed(&self, _: i64) -> Result<()> {
@@ -1018,9 +1022,10 @@ impl ReviewStore for Mem {
     async fn answer_question(
         &self,
         _: i64,
+        _: i64,
         _: &str,
         _: std::result::Result<String, String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         unreachable!()
     }
     async fn withdraw_finding(&self, _: i64, _: &str) -> Result<Option<ReviewStatus>> {
