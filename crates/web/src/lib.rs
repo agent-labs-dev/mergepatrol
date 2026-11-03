@@ -1919,11 +1919,15 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        // No config file read yet: the workspace's label.
+        // The config file not read yet: from GitHub, which this token cannot reach.
+        let (status, _) = json(&router, "GET", "/api/w/1/repos/o/r/open", &cookie, None).await;
+        assert_ne!(status, StatusCode::OK);
+        // Read, and there is none: the workspace's label.
+        store.github_reads(1, &repo).await.unwrap();
+        store.save_config_read(1, &repo, 0, None).await.unwrap();
         let listed = open(router.clone(), cookie.clone()).await;
         assert_eq!(listed, [(1, true), (2, false), (7, false)]);
-        // The queue's read of the config file sets it.
-        store.github_reads(1, &repo).await.unwrap();
+        // One that names another label.
         store
             .save_config_read(1, &repo, 0, Some("version: 1\nlabel: ship\n"))
             .await

@@ -1348,10 +1348,14 @@ pub(crate) async fn open_pulls(
 ) -> Result<Json<Vec<OpenPullView>>, ApiError> {
     let repo = repo_name(owner, name)?;
     let id = caller.repo(&app, id, &repo).await?;
-    let (pulls, labels) = match app.store.inbox_open(id, &repo).await? {
-        Some(nodes) => {
-            // The config file as the queue last read it. A repo it does not run has none.
-            let config = app.store.config_read(id, &repo).await?.flatten();
+    // The config file as the queue last read it, `Some(None)` for none: its trigger label says
+    // which PRs are queued. Until both are read, as the user.
+    let kept = match app.store.inbox_open(id, &repo).await? {
+        Some(nodes) => app.store.config_read(id, &repo).await?.map(|c| (nodes, c)),
+        None => None,
+    };
+    let (pulls, labels) = match kept {
+        Some((nodes, config)) => {
             let pulls = nodes
                 .into_iter()
                 .map(serde_json::from_value)
