@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use mergepatrol_analytics::Analytics;
 use mergepatrol_billing::Billing;
 use mergepatrol_core::RepoSettings;
-use mergepatrol_github::{AppCredentials, SignedImages};
+use mergepatrol_github::{AppCredentials, PullDiffs, SignedImages};
 use mergepatrol_resolver::ChatGptAuth;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
 use secrecy::ExposeSecret;
@@ -78,6 +78,8 @@ struct AppState {
     budgets: Arc<v1::Budgets>,
     /// The signed URLs of private repos' images, by viewer.
     signed_images: Arc<SignedImages>,
+    /// The PR diffs each user read lately.
+    pull_diffs: Arc<PullDiffs>,
 }
 
 impl AppState {
@@ -115,6 +117,7 @@ fn state(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> AppStat
         seen: Arc::default(),
         budgets: Arc::default(),
         signed_images: Arc::default(),
+        pull_diffs: Arc::default(),
     }
 }
 

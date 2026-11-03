@@ -157,7 +157,13 @@ export function PullDetail({
       </div>
       {tab === "code" ? (
         <Suspense fallback={<p className="px-4 py-6 text-faint sm:px-6">Loading the changes…</p>}>
-          <PullCode workspace={workspace} repo={repo} number={p.number} commits={commits} />
+          <PullCode
+            workspace={workspace}
+            repo={repo}
+            number={p.number}
+            commits={commits}
+            tips={d && { head: d.head, base: d.base }}
+          />
         </Suspense>
       ) : tab === "activity" ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">{activity}</div>

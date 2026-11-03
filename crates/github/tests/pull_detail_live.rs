@@ -1,5 +1,6 @@
 //! Reads a real PR as a user, the way the dashboard's detail pane does: its timeline, checks and
-//! diff. Needs a user token and any PR the user can read, with checks and a few commits:
+//! diffs, each diff from GitHub once. Needs a user token and any PR the user can read, with
+//! checks and a few commits:
 //! `LIVE_TOKEN=$(gh auth token) LIVE_REPO=cli/cli LIVE_PR=14858 \
 //! cargo test -p mergepatrol-github --test pull_detail_live -- --ignored a_user_reads`
 //!
@@ -8,7 +9,7 @@
 //! cargo test -p mergepatrol-github --test pull_detail_live -- --ignored a_private_repos`
 
 use mergepatrol_core::RepoName;
-use mergepatrol_github::{AsUser, TimelineEvent};
+use mergepatrol_github::{AsUser, DiffOf, PullDiffs, TimelineEvent};
 
 fn env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is not set"))
@@ -36,14 +37,27 @@ async fn a_user_reads_a_pr_and_its_diffs() {
         .collect();
     assert!(!commits.is_empty(), "no commits in {:?}", detail.timeline);
 
-    let whole = gh.pull_diff(&repo, pr, None).await.unwrap().unwrap();
-    assert!(whole.starts_with("diff --git "), "{whole:.200}");
-    let one = gh
-        .pull_diff(&repo, pr, Some(commits[0]))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(one.starts_with("diff --git "), "{one:.200}");
+    assert_eq!(
+        (detail.head.len(), detail.base.len()),
+        (40, 40),
+        "{detail:?}"
+    );
+
+    let kept = PullDiffs::default();
+    for of in [
+        DiffOf::Pull(Some((&detail.head, &detail.base))),
+        DiffOf::Commit(commits[0]),
+    ] {
+        let diff = gh.pull_diff(&repo, pr, of, &kept).await.unwrap();
+        let patch = diff.as_deref().unwrap();
+        assert!(patch.starts_with("diff --git "), "{patch:.200}");
+        // Kept: the same patch, not read again.
+        let again = gh.pull_diff(&repo, pr, of, &kept).await.unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&diff, &again),
+            "{of:?} was read again"
+        );
+    }
 }
 
 #[tokio::test]

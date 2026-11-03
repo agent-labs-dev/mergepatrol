@@ -189,8 +189,16 @@ export const fetchPullDetail = (id: number, repo: string, pr: number) =>
   get<PullDetailView>(w(id, `/repos/${repo}/pulls/${pr}`));
 
 /** An open PR's diff, or one of its commits' with `commit`. */
-export const fetchPullDiff = (id: number, repo: string, pr: number, commit?: string) =>
-  get<PullDiffView>(w(id, `/repos/${repo}/pulls/${pr}/diff${commit ? `?commit=${commit}` : ""}`));
+/** A PR's diff: one commit's, or the whole PR's. With its head and base, the server keeps it. */
+export const fetchPullDiff = (
+  id: number,
+  repo: string,
+  pr: number,
+  of?: { commit: string } | { head: string; base: string },
+) =>
+  get<PullDiffView>(
+    w(id, `/repos/${repo}/pulls/${pr}/diff${of ? `?${new URLSearchParams(of)}` : ""}`),
+  );
 
 /** Queues the PR, or changes the priority of a queued one, as the user. */
 export const queuePull = (id: number, repo: string, pr: number, priority: boolean) =>

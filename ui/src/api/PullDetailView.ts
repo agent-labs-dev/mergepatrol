@@ -9,6 +9,14 @@ import type { TimelineItemView } from "./TimelineItemView";
  */
 export type PullDetailView = { 
 /**
+ * The head commit's SHA.
+ */
+head: string, 
+/**
+ * The base branch's commit, by SHA. With `head`, what the PR's diff is of.
+ */
+base: string, 
+/**
  * The description as GitHub renders it, sanitized by GitHub. In a private repo, images of
  * its own files carry short-lived signed URLs, so any page can load them.
  */
