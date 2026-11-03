@@ -1,5 +1,6 @@
+import { Dialog } from "@base-ui/react/dialog";
 import { useQuery } from "@tanstack/react-query";
-import { lazy, type ReactNode, Suspense, useState } from "react";
+import { lazy, type MouseEvent, type ReactNode, Suspense, useState } from "react";
 import { fetchPullDetail } from "./api";
 import type { CheckRunStateView } from "./api/CheckRunStateView";
 import type { CheckRunView } from "./api/CheckRunView";
@@ -355,24 +356,68 @@ function Section({
   );
 }
 
-/** GitHub's own rendering of some Markdown, sanitized by GitHub. Its links open in a new tab. */
+/** GitHub's own rendering of some Markdown, sanitized by GitHub. Its links open in a new tab,
+ * and its images in a lightbox. */
 function Markdown({ html }: { html: string }) {
+  const [image, setImage] = useState<{ src: string; alt: string } | null>(null);
+  const openImage = (e: MouseEvent) => {
+    // A modified click still means a new tab or window.
+    if (e.metaKey || e.ctrlKey || e.shiftKey) return;
+    const a = (e.target as Element).closest<HTMLAnchorElement>("a[data-image]");
+    if (!a) return;
+    e.preventDefault();
+    setImage({ src: a.href, alt: a.querySelector("img")?.alt ?? "" });
+  };
   return (
-    <div
-      // Remounted with new HTML, so each version's links get the ref.
-      key={html}
-      ref={newTabLinks}
-      className="markdown"
-      // biome-ignore lint/security/noDangerouslySetInnerHtml: GitHub sanitizes `bodyHTML`, as it does for github.com.
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: delegated to the links in the HTML, which take the keyboard. */}
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: Enter on those links is a click. */}
+      <div
+        // Remounted with new HTML, so each version's links get the ref.
+        key={html}
+        ref={prepareLinks}
+        className="markdown"
+        onClick={openImage}
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: GitHub sanitizes `bodyHTML`, as it does for github.com.
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+      <Dialog.Root open={image !== null} onOpenChange={(open) => open || setImage(null)}>
+        <Dialog.Portal>
+          <Dialog.Backdrop className="fixed inset-0 z-40 bg-black/80" />
+          {/* Any click closes it but the link's, which would unmount before the browser follows it. */}
+          <Dialog.Popup
+            aria-label={image?.alt || "Image"}
+            onClick={() => setImage(null)}
+            className="fixed inset-0 z-40 flex cursor-zoom-out flex-col items-center justify-center gap-3 p-6 outline-none"
+          >
+            <img
+              src={image?.src}
+              alt={image?.alt}
+              className="min-h-0 max-w-full rounded object-contain"
+            />
+            <a
+              href={image?.src}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="text-xs text-white/70 underline underline-offset-2 hover:text-white"
+            >
+              Open original
+            </a>
+          </Dialog.Popup>
+        </Dialog.Portal>
+      </Dialog.Root>
+    </>
   );
 }
 
-const newTabLinks = (el: HTMLElement | null) => {
+/** GitHub links an image to itself, and those open in the lightbox. An image linked elsewhere,
+ * like a badge or an agent's button, stays a link. */
+const prepareLinks = (el: HTMLElement | null) => {
   for (const a of el?.querySelectorAll("a") ?? []) {
     a.target = "_blank";
     a.rel = "noreferrer";
+    if (a.querySelector("img")?.src === a.href) a.dataset.image = "";
   }
 };
 
