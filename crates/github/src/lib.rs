@@ -16,7 +16,8 @@ pub use app::{
 pub use checks::{BranchRules, CheckState, Checks};
 pub use codeowners::CodeOwners;
 pub use detail::{
-    CheckRun, CheckRunState, Label, PullDetail, ThreadSummary, TimelineEvent, TimelineItem,
+    CheckRun, CheckRunState, Label, PullDetail, SignedImages, ThreadSummary, TimelineEvent,
+    TimelineItem,
 };
 pub use files::{BranchFile, GitObject, ObjectsAt, Proposal, PullRef, SYMLINK_MODE};
 pub use repo::{

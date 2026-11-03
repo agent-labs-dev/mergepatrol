@@ -21,7 +21,10 @@ async fn a_user_reads_a_pr_and_its_diffs() {
     let repo = RepoName::parse(&env("LIVE_REPO")).unwrap();
     let pr: u64 = env("LIVE_PR").parse().unwrap();
 
-    let detail = gh.pull_detail(&repo, pr).await.unwrap();
+    let detail = gh
+        .pull_detail(&repo, pr, &Default::default())
+        .await
+        .unwrap();
     assert!(!detail.checks.is_empty(), "no checks");
     let commits: Vec<&str> = detail
         .timeline
@@ -50,7 +53,10 @@ async fn a_private_repos_images_load_without_a_session() {
     let repo = RepoName::parse(&env("LIVE_REPO")).unwrap();
     let pr: u64 = env("LIVE_PR").parse().unwrap();
 
-    let detail = gh.pull_detail(&repo, pr).await.unwrap();
+    let detail = gh
+        .pull_detail(&repo, pr, &Default::default())
+        .await
+        .unwrap();
     let html = detail.body_html;
     let unsigned = format!(" src=\"https://github.com/{repo}/");
     assert!(!html.contains(&unsigned), "an image was not signed");

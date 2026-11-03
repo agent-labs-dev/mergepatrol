@@ -1,10 +1,15 @@
 //! What the dashboard shows of one open PR beyond its summary: its description, labels, check
 //! runs, timeline and diff. Read as the user, on their own rate limit.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result, bail};
 use futures_util::future::join_all;
 use reqwest::{StatusCode, Url};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use mergepatrol_core::{Person, PrNumber, RepoName};
 
@@ -13,7 +18,7 @@ use crate::app::AsUser;
 #[derive(Debug, Clone, PartialEq)]
 pub struct PullDetail {
     /// The description as GitHub renders it, sanitized by GitHub, its images signed as
-    /// [`AsUser::sign_images`] does.
+    /// [`SignedImages`] says.
     pub body_html: String,
     pub labels: Vec<Label>,
     /// The head commit's check runs and commit statuses.
@@ -138,8 +143,58 @@ const DETAIL: &str = "query($owner: String!, $name: String!, $number: Int!) {
   }
 }";
 
+/// How long a signed URL, or that an image could not be signed, is kept.
+const SIGNED_FOR: Duration = Duration::from_secs(5 * 60);
+
+/// The hash of a viewer's token, and an image's `src`.
+type Image = (String, String);
+
+/// The signed URLs of a private repo's images, by viewer, so each image costs a viewer one
+/// signing per [`SIGNED_FOR`], not one per read of the PR. Their `github.com` URLs need the
+/// session cookie, which an `<img>` on another site does not send, so GitHub answers 404 there,
+/// though the same link opens.
+pub struct SignedImages {
+    /// The longest a read of the PR waits on signing. Past it, its images stay as they were.
+    within: Duration,
+    /// `None`: it could not be signed.
+    urls: Mutex<HashMap<Image, (Instant, Option<String>)>>,
+}
+
+impl Default for SignedImages {
+    fn default() -> Self {
+        Self::within(Duration::from_secs(5))
+    }
+}
+
+impl SignedImages {
+    pub fn within(within: Duration) -> Self {
+        Self {
+            within,
+            urls: Mutex::default(),
+        }
+    }
+
+    /// `Some(None)` for an image that could not be signed lately.
+    fn get(&self, key: &Image) -> Option<Option<String>> {
+        let urls = self.urls.lock().unwrap();
+        let (at, url) = urls.get(key)?;
+        (at.elapsed() < SIGNED_FOR).then(|| url.clone())
+    }
+
+    fn put(&self, keys: impl IntoIterator<Item = (Image, Option<String>)>) {
+        let mut urls = self.urls.lock().unwrap();
+        urls.retain(|_, (at, _)| at.elapsed() < SIGNED_FOR);
+        urls.extend(keys.into_iter().map(|(k, url)| (k, (Instant::now(), url))));
+    }
+}
+
 impl AsUser {
-    pub async fn pull_detail(&self, repo: &RepoName, number: PrNumber) -> Result<PullDetail> {
+    pub async fn pull_detail(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        signed: &SignedImages,
+    ) -> Result<PullDetail> {
         let data: Value = self
             .graphql(
                 "pull detail",
@@ -149,16 +204,14 @@ impl AsUser {
             .await?;
         let mut detail = pull_detail(&data["repository"]["pullRequest"])?;
         if data["repository"]["isPrivate"].as_bool() == Some(true) {
-            self.sign_images(repo, &mut detail).await;
+            self.sign_images(repo, &mut detail, signed).await;
         }
         Ok(detail)
     }
 
-    /// Points the images of a private repo's own files at GitHub's signed URLs for them. Their
-    /// `github.com` URLs need the session cookie, which an `<img>` on another site does not send,
-    /// so GitHub answers 404 there, though the same link opens. An image that cannot be signed
-    /// stays as it was.
-    async fn sign_images(&self, repo: &RepoName, detail: &mut PullDetail) {
+    /// Points the images of a private repo's own files at GitHub's signed URLs for them. An image
+    /// that cannot be signed in time stays as it was.
+    async fn sign_images(&self, repo: &RepoName, detail: &mut PullDetail, signed: &SignedImages) {
         let comments = detail
             .timeline
             .iter_mut()
@@ -174,9 +227,41 @@ impl AsUser {
         let mut images: Vec<String> = bodies.iter().flat_map(|b| repo_images(b, repo)).collect();
         images.sort();
         images.dedup();
-        let signed = join_all(images.iter().map(|src| self.signed_url(repo, src))).await;
-        for (src, url) in images.iter().zip(signed) {
-            let Some(url) = url else { continue };
+        let viewer: String = Sha256::digest(self.token.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let keys: Vec<_> = images
+            .into_iter()
+            .map(|src| (viewer.clone(), src))
+            .collect();
+        let kept: Vec<_> = keys.iter().map(|k| signed.get(k)).collect();
+        let unsigned: Vec<_> = keys
+            .iter()
+            .zip(&kept)
+            .filter(|(_, u)| u.is_none())
+            .collect();
+        let reads = join_all(
+            unsigned
+                .iter()
+                .map(|((_, src), _)| self.signed_url(repo, src)),
+        );
+        // Out of time, as when the rate limit is used up: unsigned until it is read again.
+        let read = tokio::time::timeout(signed.within, reads)
+            .await
+            .unwrap_or_else(|_| vec![None; unsigned.len()]);
+        let read: Vec<_> = unsigned
+            .iter()
+            .map(|(k, _)| (*k).clone())
+            .zip(read)
+            .collect();
+        signed.put(read.clone());
+        let read: HashMap<_, _> = read.into_iter().collect();
+        for (key, kept) in keys.iter().zip(kept) {
+            let Some(url) = kept.or_else(|| read.get(key).cloned()).flatten() else {
+                continue;
+            };
+            let src = &key.1;
             for body in &mut bodies {
                 **body = body.replace(&format!(" src=\"{src}\""), &format!(" src=\"{url}\""));
             }
@@ -468,6 +553,55 @@ mod tests {
 
     fn repo() -> RepoName {
         RepoName::parse("acme/app").unwrap()
+    }
+
+    /// A private repo's PR, its description one image of the repo's own `a.png`.
+    const PRIVATE_PR: &str = r#"{ "data": { "repository": { "isPrivate": true, "pullRequest": {
+        "bodyHTML": "<img src=\"https://github.com/acme/app/blob/m/a.png?raw=true\">" } } } }"#;
+    const SIGNED: &str =
+        r#"{ "download_url": "https://raw.githubusercontent.com/acme/app/m/a.png?token=t" }"#;
+
+    #[tokio::test]
+    async fn an_image_is_signed_once_per_viewer_while_it_keeps() {
+        let (gh, requests) = crate::fake::as_user(vec![
+            (200, "", PRIVATE_PR),
+            (200, "", SIGNED),
+            (200, "", PRIVATE_PR),
+        ])
+        .await;
+        let signed = SignedImages::default();
+        for _ in 0..2 {
+            let d = gh.pull_detail(&repo(), 1, &signed).await.unwrap();
+            assert_eq!(
+                d.body_html,
+                r#"<img src="https://raw.githubusercontent.com/acme/app/m/a.png?token=t">"#
+            );
+        }
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "POST /graphql HTTP/1.1",
+                "GET /repos/acme/app/contents/a.png?ref=m HTTP/1.1",
+                "POST /graphql HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_used_up_rate_limit_leaves_the_images_and_does_not_hold_the_pr() {
+        let (gh, _) = crate::fake::as_user(vec![
+            (200, "", PRIVATE_PR),
+            (429, "retry-after: 60\r\n", ""),
+        ])
+        .await;
+        let signed = SignedImages::within(Duration::from_millis(100));
+        let repo = repo();
+        let read = tokio::time::timeout(Duration::from_secs(5), gh.pull_detail(&repo, 1, &signed));
+        let d = read.await.expect("held past its time to sign").unwrap();
+        assert!(
+            d.body_html
+                .contains(r#"src="https://github.com/acme/app/blob/m/a.png?raw=true""#)
+        );
     }
 
     #[test]

@@ -1589,7 +1589,10 @@ pub(crate) async fn pull_detail(
     let repo = repo_name(owner, name)?;
     caller.repo(&app, id, &repo).await?;
     let gh = AsUser::new(caller.github_token(&app)?)?;
-    let detail = as_user(gh.pull_detail(&repo, number).await, &repo)?;
+    let detail = as_user(
+        gh.pull_detail(&repo, number, &app.signed_images).await,
+        &repo,
+    )?;
     Ok(Json(detail.into()))
 }
 
