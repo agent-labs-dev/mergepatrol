@@ -1234,6 +1234,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "futures-util",
  "mergepatrol-analytics",
  "mergepatrol-billing",

@@ -1199,10 +1199,12 @@ mod tests {
         assert_eq!((status, body), (StatusCode::OK, serde_json::Value::Null));
 
         let r = store.start_review(1, &repo, 7, "head").await.unwrap();
-        store
+        let claim = store
             .claim_review(std::time::Duration::from_secs(60))
             .await
-            .unwrap();
+            .unwrap()
+            .unwrap()
+            .claim;
         let finding = |id: &str, confidence| Finding {
             id: id.into(),
             kind: Kind::Security,
@@ -1244,7 +1246,7 @@ mod tests {
             ],
             asked: vec!["mona".into()],
         };
-        store.finish_review(r.id, &done).await.unwrap();
+        store.finish_review(r.id, claim, &done).await.unwrap();
         let (status, body) = json(&router, "GET", path, &cookie, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "asks");
