@@ -1698,6 +1698,9 @@ async fn a_queue_that_starts_over_forgets_the_jobs_it_stopped() {
     assert!(run.ctx.prep.asked().is_empty());
     run.tick().await;
     assert_eq!(run.ctx.prep.asked().len(), 1, "it asks again");
+}
+
+#[tokio::test(start_paused = true)]
 async fn an_entry_says_what_fixes_it_has_used_of_its_budget() {
     let run = prep_run(|s| {
         s.add_pr(1);
