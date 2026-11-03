@@ -40,7 +40,6 @@ use crate::credentials::ChatGpt;
 use crate::github::GitHub;
 use crate::job::{GAVE_UP, LEFT_CONFLICT};
 use crate::publish::{Publish, create_commits, publish};
-use crate::review::still_fixable;
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
@@ -1242,9 +1241,9 @@ async fn sync_lane(
 
 /// What the queue merges as one: a PR, or a stack of PRs, which GitHub merges all at once.
 #[derive(Clone, Debug)]
-struct Unit {
+pub(crate) struct Unit {
     /// The PR's number, or the stack's.
-    number: PrNumber,
+    pub(crate) number: PrNumber,
     /// The branch it merges into: the PR's base, or the stack's.
     base: String,
     /// A stack's open PRs, bottom to top, or the PR alone.
@@ -1309,6 +1308,56 @@ impl Unit {
                 reason
             })
         })
+    }
+
+    /// Whether the agent may change it: it has `label`, merges into `trunk` as the same unit, and
+    /// no PR of it is closed or from a fork.
+    fn fixable(&self, label: &str, trunk: &str) -> bool {
+        let stack = self.stacked.then_some(self.number);
+        self.has_label(label)
+            && self.layers.iter().all(|pr| {
+                pr.is_open()
+                    && !pr.is_cross_repository
+                    && pr.stack.as_ref().map(|s| s.number) == stack
+                    && pr.merges_into() == trunk
+            })
+    }
+
+    /// The unit as it is now, and the index of its PR `number`, if that PR is still at `head`, and
+    /// the agent may fix it with fixes left.
+    pub(crate) async fn to_fix(
+        &self,
+        gh: &dyn GitHub,
+        key: &LaneKey,
+        settings: &RepoSettings,
+        number: PrNumber,
+        head: &str,
+    ) -> Result<Option<(Unit, usize)>> {
+        let now = self.refreshed(gh, &key.repo).await?;
+        let layer = now.layers.iter().position(|pr| pr.number == number);
+        let Some(layer) = layer.filter(|&i| now.layers[i].head_ref_oid == head) else {
+            return Ok(None);
+        };
+        let fixes_left = now.fixes_used(gh, &key.repo).await? < settings.fix_ci.allowed();
+        let fixable = now.fixable(&settings.label, &key.trunk);
+        Ok((fixes_left && fixable).then_some((now, layer)))
+    }
+
+    /// How many fixes its PRs used, of the one budget they share.
+    async fn fixes_used(&self, gh: &dyn GitHub, repo: &RepoName) -> Result<u32> {
+        let mut used = 0;
+        for pr in &self.layers {
+            used += gh.fixes_used(repo, pr.number).await?;
+        }
+        Ok(used)
+    }
+
+    /// What layer `layer` sits on: the layer below's head, or the trunk's.
+    async fn below(&self, gh: &dyn GitHub, key: &LaneKey, layer: usize) -> Result<String> {
+        match layer {
+            0 => gh.branch_sha(&key.repo, &key.trunk).await,
+            _ => Ok(self.layers[layer - 1].head_ref_oid.clone()),
+        }
     }
 
     /// The unit as GitHub shows it now.
@@ -1507,7 +1556,11 @@ async fn fork_block(
 
 /// The queue's units: each labeled PR, and each stack with a labeled layer, with all its open
 /// layers. In the order of `labeled`, a stack where its first labeled layer is.
-async fn units(gh: &dyn GitHub, repo: &RepoName, labeled: &[PullRequest]) -> Result<Vec<Unit>> {
+pub(crate) async fn units(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    labeled: &[PullRequest],
+) -> Result<Vec<Unit>> {
     let mut units: Vec<Unit> = Vec::new();
     for pr in labeled {
         let Some(stack) = &pr.stack else {
@@ -2409,9 +2462,7 @@ async fn run_job(
     let agent = !ctx.prep.takes_conflicts(ctx, key, unit);
     let mut job = Job::start(unit.number, fix_attempts);
     if fix_attempts > 0 {
-        for pr in &unit.layers {
-            job.fixes += gh.fixes_used(repo, pr.number).await?;
-        }
+        job.fixes += unit.fixes_used(gh, repo).await?;
     }
     let mut published_at = Instant::now();
     // Each layer's head as published, bottom to top, and the layer whose checks failed.
@@ -2730,6 +2781,7 @@ impl JobSandbox<'_> {
     }
 
     /// The layers above `layer` onto what `event` published on it, if it did.
+    #[allow(clippy::too_many_arguments)]
     async fn restack(
         &self,
         key: &LaneKey,
@@ -2738,6 +2790,7 @@ impl JobSandbox<'_> {
         layer: usize,
         settings: &RepoSettings,
         event: Event,
+        beside_lane: bool,
     ) -> Result<Event> {
         if !matches!(event, Event::Fixed { .. }) || layer + 1 == unit.layers.len() {
             return Ok(event);
@@ -2753,7 +2806,7 @@ impl JobSandbox<'_> {
                 layer + 1,
                 settings,
                 true,
-                false,
+                beside_lane,
             )
             .await?
             {
@@ -2774,7 +2827,8 @@ impl JobSandbox<'_> {
         settings: &RepoSettings,
         head: &str,
         base: &str,
-        failures: &[CheckFailure],
+        task: Task,
+        beside_lane: bool,
     ) -> Result<Event> {
         let fixed = fix_and_publish(
             self.ctx,
@@ -2786,13 +2840,12 @@ impl JobSandbox<'_> {
             settings,
             head,
             base,
-            Task::FixChecks {
-                failures: failures.to_vec(),
-            },
-            false,
+            task,
+            beside_lane,
         )
         .await?;
-        self.restack(key, snap, unit, layer, settings, fixed).await
+        self.restack(key, snap, unit, layer, settings, fixed, beside_lane)
+            .await
     }
 }
 
@@ -2824,8 +2877,11 @@ impl Sandbox for JobSandbox<'_> {
         base: &str,
         failures: &[CheckFailure],
     ) -> Result<Event> {
+        let task = Task::FixChecks {
+            failures: failures.to_vec(),
+        };
         let event = self
-            .fix_and_restack(key, snap, unit, layer, settings, head, base, failures)
+            .fix_and_restack(key, snap, unit, layer, settings, head, base, task, false)
             .await;
         self.published(key, event).await
     }
@@ -2842,7 +2898,8 @@ impl Sandbox for JobSandbox<'_> {
         let event = async {
             let pushed = push_recheck(self.ctx, self.gh, key, snap, &unit.layers[layer], head);
             let pushed = pushed.await?;
-            self.restack(key, snap, unit, layer, settings, pushed).await
+            self.restack(key, snap, unit, layer, settings, pushed, false)
+                .await
         }
         .await;
         self.published(key, event).await
@@ -3087,13 +3144,13 @@ async fn fix_and_publish(
     let repo = &key.repo;
     let git = Git;
     let pr = &unit.layers[layer];
-    let cache = {
+    let (cache, heads) = {
         let _cache = ctx.caches.lock(repo).await;
         let (cache, fetched, _) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
         if fetched[layer] != head {
             return Ok(Event::HeadMoved);
         }
-        cache
+        (cache, fetched)
     };
     let job_id = format!(
         "{}-{}-{}-fix-{}",
@@ -3111,7 +3168,7 @@ async fn fix_and_publish(
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         let _cache = ctx.caches.lock(repo).await;
-        if beside_lane && !still_queued(gh, key, settings, pr, head).await? {
+        if beside_lane && !still_queued(gh, key, settings, unit, &heads).await? {
             return anyhow::Ok(Err(Event::HeadMoved));
         }
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
@@ -3135,44 +3192,42 @@ async fn fix_and_publish(
     })
 }
 
-/// Whether PR `pr` is as a job beside the lane found it, and still queued: the lane, which
-/// would see it leave, is not watching.
+/// Whether `unit` is as a job beside the lane found it, its branches at `heads`, and still queued:
+/// the lane, which would see it leave, is not watching. The refs, not `head_ref_oid`: a PR lags
+/// behind the job's own publish.
 async fn still_queued(
-    gh: &Installation,
+    gh: &dyn GitHub,
     key: &LaneKey,
     settings: &RepoSettings,
-    pr: &PullRequest,
-    head: &str,
+    unit: &Unit,
+    heads: &[String],
 ) -> Result<bool> {
-    let now = GitHub::pull_request(gh, &key.repo, pr.number).await?;
-    Ok(still_fixable(&now, &settings.label, &key.trunk, head))
+    let now = unit.refreshed(gh, &key.repo).await?;
+    Ok(now.fixable(&settings.label, &key.trunk)
+        && now.reshaped(gh, &key.repo).await?.is_none()
+        && now.branch_heads(gh, &key.repo).await? == heads)
 }
 
-/// Has the agent fix what the review of PR `pr`, at `head`, sent back to its author, and pushes
-/// the fix, for a new review to check.
+/// Has the agent fix what a review of `unit`'s layer `layer` sent back to its author, and pushes
+/// the fix, with the layers above it on top, for a new review to check.
 pub(crate) async fn fix_findings(
     ctx: &Ctx,
     gh: &Installation,
     key: &LaneKey,
-    pr: &PullRequest,
+    unit: &Unit,
+    layer: usize,
     settings: &RepoSettings,
-    head: &str,
     findings: Vec<mergepatrol_core::Finding>,
 ) -> Result<Event> {
     let snap = GitHub::snapshot(gh, &key.repo, &settings.labels()).await?;
-    let base = gh.branch_sha(&key.repo, &key.trunk).await?;
-    let unit = Unit {
-        number: pr.number,
-        base: key.trunk.clone(),
-        layers: vec![pr.clone()],
-        stacked: false,
-    };
+    let head = &unit.layers[layer].head_ref_oid;
+    let base = unit.below(gh, key, layer).await?;
     let task = Task::FixReview { findings };
-    let event = fix_and_publish(
-        ctx, gh, key, &snap, &unit, 0, settings, head, &base, task, true,
-    )
-    .await;
-    JobSandbox { ctx, gh }.published(key, event).await
+    let sandbox = JobSandbox { ctx, gh };
+    let event = sandbox
+        .fix_and_restack(key, &snap, unit, layer, settings, head, &base, task, true)
+        .await;
+    sandbox.published(key, event).await
 }
 
 /// Pushes an empty commit on `head`, on which CI runs anew and reads the PR as it is now. A
@@ -3286,7 +3341,7 @@ async fn rebase_and_publish(
         return Ok(event);
     }
 
-    if beside_lane && !still_queued(gh, key, settings, unit.top(), &heads[0]).await? {
+    if beside_lane && !still_queued(gh, key, settings, unit, &heads).await? {
         return Ok(Event::HeadMoved);
     }
     // Every layer, so that the update also fails if an author pushed to one left as it is: a
@@ -3558,6 +3613,61 @@ mod loop_tests;
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn the_agent_changes_only_a_unit_still_queued_as_it_was() {
+        let pr = |number: PrNumber, stack: serde_json::Value| -> PullRequest {
+            serde_json::from_value(serde_json::json!({
+                "number": number, "state": "OPEN", "title": "t", "body": "", "isDraft": false,
+                "isCrossRepository": false, "reviewDecision": null, "baseRefName": "main",
+                "headRefName": "b", "headRefOid": "h", "stack": stack,
+                "labels": { "nodes": [{ "name": "q" }] }, "files": { "nodes": [] },
+                "url": "u", "createdAt": "c", "additions": 0, "deletions": 0, "changedFiles": 0,
+                "author": null, "latestOpinionatedReviews": { "nodes": [] },
+                "reviewRequests": { "nodes": [] }, "commits": { "nodes": [] },
+            }))
+            .unwrap()
+        };
+        let unit = |layers: Vec<PullRequest>, stacked: bool| Unit {
+            number: 9,
+            base: "main".into(),
+            layers,
+            stacked,
+        };
+        let alone = |edit: fn(&mut PullRequest)| {
+            let mut pr = pr(7, serde_json::Value::Null);
+            edit(&mut pr);
+            unit(vec![pr], false)
+        };
+        let fixable = |u: Unit| u.fixable("q", "main");
+        assert!(fixable(alone(|_| {})));
+        assert!(!fixable(alone(|p| p.state = "CLOSED".into())));
+        assert!(!fixable(alone(|p| p.labels.clear())));
+        assert!(!fixable(alone(|p| p.is_cross_repository = true)));
+        assert!(!fixable(alone(|p| p.base_ref_name = "release".into())));
+
+        let in_stack = serde_json::json!({ "number": 9, "baseRefName": "main" });
+        assert!(
+            !fixable(unit(vec![pr(7, in_stack.clone())], false)),
+            "it joined a stack"
+        );
+        let (bottom, top) = (pr(7, in_stack.clone()), pr(8, in_stack.clone()));
+        assert!(fixable(unit(vec![bottom.clone(), top.clone()], true)));
+        let mut unlabeled = bottom.clone();
+        unlabeled.labels.clear();
+        assert!(
+            fixable(unit(vec![unlabeled, top.clone()], true)),
+            "any layer's label queues a stack"
+        );
+        let mut closed = bottom.clone();
+        closed.state = "CLOSED".into();
+        assert!(!fixable(unit(vec![closed, top.clone()], true)));
+        let mut fork = top;
+        fork.is_cross_repository = true;
+        assert!(!fixable(unit(vec![bottom, fork], true)));
+        let other = serde_json::json!({ "number": 3, "baseRefName": "main" });
+        assert!(!fixable(unit(vec![pr(7, other)], true)), "another stack's");
+    }
 
     #[sqlx::test(migrations = false)]
     async fn only_a_repo_github_says_is_now_a_listed_one_moves(pool: sqlx::PgPool) {

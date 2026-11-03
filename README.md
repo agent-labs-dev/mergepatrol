@@ -27,7 +27,7 @@ Public repos are free. Private repos cost $15 a seat a month, after a free trial
 
 ### What a queued PR needs
 
-A labeled PR gets ready on its own first, and no PR waits for another's: the agent resolves a conflict with its base, its checks run, and the agent fixes what fails. Then the agent reviews it. A PR that this cannot settle goes on to the queue as it is, which ejects it. Stacks and PRs from forks skip this. To run all of it in the queue instead, one PR at a time, a self-hosted MergeLoop sets `MERGEPATROL_PREP=false`.
+A labeled PR gets ready on its own first, and no PR waits for another's: the agent resolves a conflict with its base, its checks run, and the agent fixes what fails. Then the agent reviews it. A PR that this cannot settle goes on to the queue as it is, which ejects it. A stack gets ready as one, and a PR from a fork skips this. To run all of it in the queue instead, one PR at a time, a self-hosted MergeLoop sets `MERGEPATROL_PREP=false`.
 
 A labeled PR keeps its place in line, on hold, until GitHub would merge it and the queue can take it:
 
@@ -45,7 +45,7 @@ When a PR's required checks fail, an agent fixes them too. It reads what GitHub 
 
 ### Automatic review
 
-Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. While the PR has fixes left, the agent's fix goes first and pushes a commit, which the next review checks. That is on with **Fix attempts**, and leaves out stacks and forks. If it cannot fix it, or the PR has no fixes left, the author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
+Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. While the PR has fixes left, the agent's fix goes first and pushes a commit, which the next review checks. That is on with **Fix attempts**, and leaves out forks. On a stack, the fix goes on the layer the review read, and the layers above it are rebased onto it. If it cannot fix it, or the PR has no fixes left, the author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
 
 A push gets a new review, which checks each finding sent back, with the author's replies in front of it. A finding still there gets a reply in its own thread, which opens again, never a new comment. A thread whose finding is fixed, or whose reply holds up in the code, is resolved. After three rounds that still send findings back, the next review asks a human instead. An author can also reply to a finding with `ask_agent_about_review`: the agent reads the code again, and withdraws the finding if the reply holds up.
 
@@ -83,6 +83,7 @@ A PR runs alone when its own checks have not passed, when it conflicts with the 
 
 A stack of PRs, made with `gh stack`, is one item of the queue: the label on any of its PRs queues the whole stack, and MergeLoop merges it all at once, with GitHub's asynchronous merge. Either every PR of the stack merges, or none does. GitHub merges a stack only when the required checks of each of its PRs passed.
 
+- The stack gets ready as one item, off the queue, like a single PR: a conflict on any layer rebases the whole stack, and it waits for each layer's checks. A failed check is fixed on the lowest layer it failed on, and the layers above it are rebased onto the fix. The layers share one fix budget.
 - The stack waits while any of its PRs is a draft or waits for a review.
 - In a batch, the stack is one step: its top PR holds every layer below it.
 - Alone, MergeLoop rebases each layer onto the one below it, the bottom onto the base branch, and waits for each layer's checks. A failed check is fixed on the layer it failed on, and the layers above it are rebased onto the fix.
@@ -96,6 +97,7 @@ A maintainer queues a PR from a fork with the label, as any other. Its author is
 
 - It merges the PR only as it was when the label went on. MergeLoop reads that head from the `labeled` webhook, or, without webhooks, from when it first sees the PR. If the author pushes after that, the PR leaves the queue, and a maintainer adds the label again to queue the new commits.
 - It never tests the PR in a batch, whose draft PR runs CI with the repo's secrets. The PR runs alone, with the fork's own CI.
+- It skips getting ready. No agent runs on it, and running alone, it is rebased and its checks run again in the queue anyway.
 - It runs no agent on the PR: a plain `git rebase` only. A conflict, or a failed required check, ejects the PR, for its author to fix.
 - It pushes the rebase to the fork, which GitHub allows while the author allows edits by maintainers. Without that, a PR that needs a rebase waits on hold until they allow it. GitHub does not let the App push to a fork that an organization owns, nor push changes to workflow files to a fork: such a PR that needs a rebase is ejected, for its author to rebase.
 - While GitHub waits for a maintainer to approve the fork's workflow runs, the PR waits on hold.
