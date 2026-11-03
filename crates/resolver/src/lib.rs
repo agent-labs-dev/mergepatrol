@@ -115,12 +115,22 @@ pub trait Resolver: Send + Sync {
 }
 
 pub(crate) const GIVE_UP: &str = "MERGEPATROL_GIVE_UP:";
+const RETITLE: &str = "MERGEPATROL_RETITLE:";
 
 /// The reason the agent gave up, if its last message says it did.
 pub(crate) fn gave_up(text: &str) -> Option<String> {
     text.lines()
         .find_map(|l| l.trim().strip_prefix(GIVE_UP))
         .map(|r| r.trim().to_owned())
+}
+
+/// The title the agent proposes for the PR, if its last message says one. A job cannot write to
+/// GitHub, so the orchestrator sets it.
+pub fn new_title(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(RETITLE))
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
 }
 
 /// The `verify` paragraph of a prompt.
@@ -269,6 +279,10 @@ What GitHub shows of the failures:
 
 Find out why they fail, and change the code so that they pass. Use `git log`, `git show` and \
 `git diff {trunk}...HEAD` to see what the pull request changes.
+
+A commit cannot change the pull request's title. When all that fails is a check of that title, \
+change nothing, and reply with one line: `{RETITLE} <the new title>`. Keep what the title says, \
+in the form that the failure and the repo's docs ask for.
 
 Rules:
 - Make the smallest change that fixes the failure, in the spirit of the pull request.
@@ -524,6 +538,22 @@ mod prompt_tests {
         assert!(review.contains("what its description sets out to do"));
         assert!(review.contains("must change it before it merges"));
         assert!(review.contains("`fine`, however sure you are"));
+    }
+}
+
+#[cfg(test)]
+mod retitle_tests {
+    use super::*;
+
+    #[test]
+    fn a_new_title_is_read_from_its_line() {
+        let text = "It lacks a scope.\n  MERGEPATROL_RETITLE: fix(queue): keep the lane moving \n";
+        assert_eq!(
+            new_title(text).as_deref(),
+            Some("fix(queue): keep the lane moving")
+        );
+        assert_eq!(new_title("MERGEPATROL_RETITLE:   "), None);
+        assert_eq!(new_title("Fixed."), None);
     }
 }
 

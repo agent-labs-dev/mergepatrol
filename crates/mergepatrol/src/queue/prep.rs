@@ -18,7 +18,7 @@ use mergepatrol_store::LaneKey;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use super::{Ctx, JobSandbox, Unit, rebase_and_publish, record_all, still_queued};
+use super::{Ctx, JobSandbox, Sandbox, Unit, rebase_and_publish, record_all, still_queued};
 use crate::github::GitHub;
 
 /// A job's hold on a PR, which ends with the job, also if it panics or is aborted, and which
@@ -75,6 +75,8 @@ pub struct Prep {
     next_claim: AtomicU64,
     /// The head of each PR left to the lane: its job could not settle it.
     left: Mutex<HashMap<PrId, String>>,
+    /// The head of each PR a recheck here pushed, with the checks that must really pass on it.
+    rechecked: Mutex<HashMap<PrId, (String, Vec<String>)>>,
     /// The head of each PR the lane found a conflict on, which GitHub may not say yet.
     conflicts: Mutex<HashMap<PrId, String>>,
     /// Each PR's head that its checks hold, and since when.
@@ -187,6 +189,26 @@ impl Prep {
         if let Some(head) = left {
             self.left.lock().unwrap().insert(id.clone(), head);
         }
+    }
+
+    /// A recheck here pushed `head` for the checks `failed`: the lane takes it as rechecked.
+    pub(super) fn rechecked(&self, id: &PrId, head: &str, failed: Vec<String>) {
+        self.finish(id, Some(head.to_owned()));
+        let recheck = (head.to_owned(), failed);
+        self.rechecked.lock().unwrap().insert(id.clone(), recheck);
+    }
+
+    /// The checks that must really pass on PR `number`'s `head`, if a recheck here pushed it.
+    pub(super) fn recheck_of(
+        &self,
+        key: &LaneKey,
+        number: PrNumber,
+        head: &str,
+    ) -> Option<Vec<String>> {
+        let id = (key.installation_id, key.repo.clone(), number);
+        let rechecked = self.rechecked.lock().unwrap();
+        let (h, failed) = rechecked.get(&id)?;
+        (h == head).then(|| failed.clone())
     }
 
     /// As the claim of a job does as it ends.
@@ -385,9 +407,23 @@ async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
             let failures = GitHub::check_failures(gh, &key.repo, head, failed).await?;
             let base = unit.below(gh, key, *layer).await?;
             let task = Task::FixChecks { failures };
-            sandbox
+            let fixed = sandbox
                 .fix_and_restack(key, snap, unit, *layer, settings, head, &base, task, true)
-                .await
+                .await;
+            match fixed {
+                Ok(Event::Retitled) => {
+                    let pushed = sandbox
+                        .recheck(key, snap, unit, *layer, settings, head)
+                        .await;
+                    // A title that still fails is the lane's to eject: it gets no fix of its own.
+                    if let Ok(Event::Fixed { head }) = &pushed {
+                        let id = (key.installation_id, key.repo.clone(), unit.number);
+                        ctx.prep.rechecked(&id, head, failed.clone());
+                    }
+                    pushed
+                }
+                event => event,
+            }
         }
     };
     sandbox.published(key, event).await

@@ -23,7 +23,7 @@ use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
     ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
-    ResolveRequest, Resolver, ReviewRequest,
+    ResolveRequest, Resolver, ReviewRequest, new_title,
 };
 use tokio::io::AsyncReadExt;
 
@@ -335,6 +335,10 @@ pub(crate) const LEFT_CONFLICT: &str = "it conflicts";
 /// reads it from the job's reason.
 pub(crate) const GAVE_UP: &str = "the agent gave up";
 
+/// How a fix's failure starts when a check failed on the PR's title, and the rest of it is the
+/// title the agent proposes: a job cannot set it.
+pub(crate) const RETITLED: &str = "the agent proposes the title: ";
+
 /// Has the agent fix the failed checks, and commits its fix on top of the PR head.
 async fn fix(
     spec: &JobSpec,
@@ -361,13 +365,20 @@ async fn fix(
         })
         .await
         .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
+    let title = match run.outcome {
+        Outcome::Resolved if !failures.is_empty() => new_title(&run.text),
+        _ => None,
+    };
     // A fix is done once it is committed: until then, any failure leaves it unfixed.
-    let fixed = commit_fix(spec, git, resolver, &run.outcome, what, dir, events).await;
+    let fixed = match &title {
+        Some(title) => Err(anyhow!("{RETITLED}{title}")),
+        None => commit_fix(spec, git, resolver, &run.outcome, what, dir, events).await,
+    };
     spent(
         events,
         &spec.resolver,
         SpendTask::Fix,
-        fixed.is_ok(),
+        fixed.is_ok() || title.is_some(),
         String::new(),
         &run,
     );
