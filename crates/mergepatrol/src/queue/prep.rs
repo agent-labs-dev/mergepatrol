@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -15,24 +16,23 @@ use mergepatrol_store::LaneKey;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use super::{Ctx, JobSandbox, Unit, fix_and_publish, rebase_and_publish, record};
+use super::{Ctx, JobSandbox, Unit, fix_and_publish, rebase_and_publish, record, still_fixable};
 use crate::github::GitHub;
 
-/// Stops holding a PR when its job ends, also if it panics or is aborted.
-pub(super) struct Running<'a> {
+/// A job's hold on a PR, which ends with the job, also if it panics or is aborted, and which
+/// leaves a later job's hold alone.
+pub struct Claim<'a> {
     prep: &'a Prep,
     id: PrId,
+    token: u64,
 }
 
-impl<'a> Running<'a> {
-    pub(super) fn new(prep: &'a Prep, id: PrId) -> Self {
-        Self { prep, id }
-    }
-}
-
-impl Drop for Running<'_> {
+impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        self.prep.running.lock().unwrap().remove(&self.id);
+        let mut running = self.prep.running.lock().unwrap();
+        if running.get(&self.id).is_some_and(|(t, _)| *t == self.token) {
+            running.remove(&self.id);
+        }
     }
 }
 
@@ -54,14 +54,17 @@ pub(super) struct Wanted {
     pub snap: RepoSnapshot,
     pub settings: RepoSettings,
     pub work: Work,
+    /// Its claim on the PR.
+    token: u64,
 }
 
 /// What of it lives only in memory: a restart reads it all from GitHub again.
 #[derive(Default)]
 pub struct Prep {
     wanted: Mutex<Vec<Wanted>>,
-    /// The PRs with a job asked for or running, and what that holds them for.
-    running: Mutex<HashMap<PrId, Hold>>,
+    /// The PRs with a job asked for or running: its claim, and what that holds them for.
+    running: Mutex<HashMap<PrId, (u64, Hold)>>,
+    next_claim: AtomicU64,
     /// The head of each PR left to the lane: its job could not settle it.
     left: Mutex<HashMap<PrId, String>>,
     /// Each PR's head that its checks hold, and since when.
@@ -70,43 +73,55 @@ pub struct Prep {
 
 impl Prep {
     fn holding(&self, id: &PrId) -> Option<Hold> {
-        self.running.lock().unwrap().get(id).cloned()
+        let running = self.running.lock().unwrap();
+        running.get(id).map(|(_, hold)| hold.clone())
     }
 
     fn left_to_lane(&self, id: &PrId, head: &str) -> bool {
         self.left.lock().unwrap().get(id).is_some_and(|h| h == head)
     }
 
-    fn want(&self, id: PrId, hold: Hold, wanted: Wanted) -> Hold {
-        self.running.lock().unwrap().insert(id, hold.clone());
+    /// Asks for `wanted`, or, if a job has the PR since the tick looked, holds it for that one.
+    fn want(&self, id: PrId, hold: Hold, mut wanted: Wanted) -> Hold {
+        let mut running = self.running.lock().unwrap();
+        if let Some((_, theirs)) = running.get(&id) {
+            return theirs.clone();
+        }
+        wanted.token = self.next_claim.fetch_add(1, Ordering::Relaxed);
+        running.insert(id, (wanted.token, hold.clone()));
         self.wanted.lock().unwrap().push(wanted);
         hold
     }
 
-    /// Holds PR `number` for a fix beside this module's jobs: false if a job has it.
-    pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> bool {
+    /// Holds PR `number` for a fix beside this module's jobs, until the claim drops: `None` if a
+    /// job has it.
+    pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> Option<Claim<'_>> {
         let id = (key.installation_id, key.repo.clone(), number);
         let mut running = self.running.lock().unwrap();
         if running.contains_key(&id) {
-            return false;
+            return None;
         }
-        running.insert(id, Hold::PrepFixing);
-        true
+        let token = self.next_claim.fetch_add(1, Ordering::Relaxed);
+        running.insert(id.clone(), (token, Hold::PrepFixing));
+        Some(Claim {
+            prep: self,
+            id,
+            token,
+        })
     }
 
-    /// Ends a `claim`.
-    pub(crate) fn release(&self, key: &LaneKey, number: PrNumber) {
-        let id = (key.installation_id, key.repo.clone(), number);
-        self.running.lock().unwrap().remove(&id);
-    }
-
-    /// A queue starts on `repo`: nothing of its jobs from before runs, as stopping stopped them.
+    /// A queue starts on `repo`: the jobs its last run asked for and never started are gone. One
+    /// that started ended with that queue, and took its claim along.
     fn reset(&self, repo: &RepoName) {
-        self.wanted.lock().unwrap().retain(|w| w.key.repo != *repo);
-        self.running
-            .lock()
-            .unwrap()
-            .retain(|(_, r, _), _| r != repo);
+        let mut running = self.running.lock().unwrap();
+        let mut wanted = self.wanted.lock().unwrap();
+        wanted.retain(|w| {
+            if w.key.repo != *repo {
+                return true;
+            }
+            running.retain(|_, (token, _)| *token != w.token);
+            false
+        });
     }
 
     /// The jobs asked for on `repo`.
@@ -130,7 +145,7 @@ impl Prep {
         entry.1.elapsed()
     }
 
-    /// The PR's job ended, for `Running` to stop holding it. `left`: the head it could not settle.
+    /// The PR's job ended, for its claim to stop holding it. `left`: the head it could not settle.
     fn finish(&self, id: &PrId, left: Option<String>) {
         if let Some(head) = left {
             self.left.lock().unwrap().insert(id.clone(), head);
@@ -186,6 +201,7 @@ pub(super) async fn hold(
         snap: snap.clone(),
         settings: settings.clone(),
         work,
+        token: 0,
     };
     if pr.conflicting {
         let wanted = want(Work::Rebase);
@@ -241,7 +257,11 @@ async fn run(ctx: &Ctx, gh: &Installation, w: Wanted) {
     let number = w.unit.number;
     let id = (key.installation_id, key.repo.clone(), number);
     let head = w.unit.top().head_ref_oid.clone();
-    let running = Running::new(&ctx.prep, id.clone());
+    let claim = Claim {
+        prep: &ctx.prep,
+        id: id.clone(),
+        token: w.token,
+    };
     let event = job(ctx, gh, &w).await;
     let why = match event {
         Ok(Event::Rebased { head, .. } | Event::Fixed { head }) => {
@@ -258,7 +278,7 @@ async fn run(ctx: &Ctx, gh: &Installation, w: Wanted) {
         ok(record(ctx, key, number, "prep-left", why).await);
     }
     ctx.prep.finish(&id, why.map(|_| head));
-    drop(running);
+    drop(claim);
     ctx.wakers.wake_repo(key.installation_id, &key.repo);
 }
 
@@ -273,7 +293,7 @@ async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
     let pr = unit.top();
     // It may have left the queue, or moved, since the tick asked: no agent for that.
     let now = GitHub::pull_request(gh, &key.repo, pr.number).await?;
-    if !now.is_open() || !now.has_label(&settings.label) || now.head_ref_oid != pr.head_ref_oid {
+    if !still_fixable(&now, &settings.label, &key.trunk, &pr.head_ref_oid) {
         return Ok(Event::HeadMoved);
     }
     let event = match &w.work {
