@@ -449,6 +449,60 @@ async fn a_fix_of_a_review_commits_what_the_agent_changed_with_the_fix_trailer()
 }
 
 #[tokio::test]
+async fn a_fix_of_a_review_on_a_stack_layer_goes_on_top_of_that_layer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    commit(&origin, "shared.txt", "base\n");
+    git(&origin, &["checkout", "-q", "-b", "l1"]);
+    let l1 = commit(&origin, "l1.txt", "layer 1\n");
+    git(&origin, &["checkout", "-q", "-b", "l2"]);
+    let l2 = commit(&origin, "l2.txt", "layer 2\n");
+
+    let executor = with_fake_claude_running(tmp.path(), "echo fixed > l2.txt", "done");
+    let mut spec = JobSpec {
+        head_ref: "refs/heads/l2".into(),
+        base_ref: Some("l1".into()),
+        upstream: Some(l1.clone()),
+        ..spec(&origin, &l2, &l1)
+    };
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::FixReview {
+        findings: vec![
+            serde_json::from_value(serde_json::json!({
+                "kind": "other", "title": "Wrong", "file": "l2.txt", "line": 1,
+                "confidence": 90, "lean": "change", "finding": "It is wrong.",
+                "suggestion": "Fix it."
+            }))
+            .unwrap(),
+        ],
+    };
+    let out = tmp.path().join("out");
+    let result = executor.run("t-layer", &spec, &out).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "l2"]);
+    git(
+        &check,
+        &[
+            "fetch",
+            "-q",
+            out.join(BUNDLE_FILE).to_str().unwrap(),
+            "refs/heads/result:refs/heads/result",
+        ],
+    );
+    assert_eq!(git(&check, &["rev-parse", "result~1"]), l2);
+    assert_eq!(git(&check, &["show", "result:l2.txt"]), "fixed");
+}
+
+#[tokio::test]
 async fn a_review_since_an_approval_names_only_the_queues_commits() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");

@@ -1743,6 +1743,7 @@ async fn a_failed_check_is_fixed_off_the_lane_while_fixes_are_left() {
     assert!(matches!(run.tick().await, Ran::Idle));
     assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
     let fix = prep::Work::Fix {
+        layer: 0,
         failed: vec!["ci".into()],
     };
     assert_eq!(run.ctx.prep.asked(), [(1, fix)]);
@@ -1907,6 +1908,211 @@ async fn a_required_check_no_workflow_runs_is_the_lanes_to_eject() {
         s.checks.insert("other".into(), CheckState::Passed);
     });
     run.tick().await;
+    assert_eq!(run.rebase.count(), 1, "the lane took it");
+}
+
+/// A stack of #1 and #2, labeled on #2, whose top layer fails `ci`.
+fn failing_stack(s: &mut State) {
+    s.add_stack(10, &[1, 2], &[2]);
+    s.required = vec!["ci".into()];
+    s.checks.insert("ci".into(), CheckState::Passed);
+    let head = s.head(2);
+    s.checks_on
+        .insert(head, [("ci".into(), CheckState::Failed)].into());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_waits_off_the_lane_for_every_layers_checks() {
+    let run = prep_run(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.add_pr(3);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        let head = s.head(1);
+        s.checks_on
+            .insert(head, [("ci".into(), CheckState::Pending)].into());
+    });
+    run.tick().await;
+    run.tick().await;
+    assert_eq!(run.lane(), [(10, "Held(PrepChecks)".into())]);
+    assert_eq!(run.merged(), [3], "#3 passes the stack, which holds no job");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stack_is_fixed_off_the_lane_on_the_layer_that_failed() {
+    let run = prep_run(failing_stack);
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(10, "Held(PrepFixing)".into())]);
+    let fix = prep::Work::Fix {
+        layer: 1,
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(10, fix)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_lowest_failed_layer_of_a_stack_is_fixed_first() {
+    let run = prep_run(|s| {
+        failing_stack(s);
+        s.checks.insert("ci".into(), CheckState::Failed);
+    });
+    run.tick().await;
+    let fix = prep::Work::Fix {
+        layer: 0,
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(10, fix)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stacks_layers_share_one_fix_budget() {
+    let run = prep_run(|s| {
+        failing_stack(s);
+        s.checks.insert("ci".into(), CheckState::Failed);
+        s.fixes_used.insert(1, 2);
+        s.fixes_used.insert(2, 1);
+    });
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.labels(2), [FAILED], "no fixes left: the lane ejects it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_on_any_layer_rebases_the_stack_off_the_lane() {
+    let run = prep_run(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(10, "Held(PrepRebasing)".into())]);
+    assert_eq!(run.ctx.prep.asked(), [(10, prep::Work::Rebase)]);
+    assert_eq!(run.rebase.count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_lane_finds_in_a_stack_goes_back_off_it() {
+    let mut run = prep_run(|s| s.add_stack(10, &[1, 2], &[2]));
+    run.rebase.conflicts_on = vec![10];
+    run.tick().await;
+    assert_eq!(run.lane(), [(10, "Held(PrepRebasing)".into())]);
+    assert!(!run.kinds(2).contains(&"ejected".to_owned()));
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked(), [(10, prep::Work::Rebase)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_fix_on_a_layer_holds_the_whole_stack() {
+    let run = prep_run(failing_stack);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let _claim = run.ctx.prep.claim(&key, 10).unwrap();
+    run.tick().await;
+    assert_eq!(run.lane(), [(10, "Held(PrepFixing)".into())]);
+    assert!(run.ctx.prep.asked().is_empty(), "the check fix waits");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_green_stack_goes_on_from_getting_ready_and_merges_at_once() {
+    let run = prep_run(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+    });
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.merged(), [1, 2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_beside_the_lane_goes_by_the_refs_not_the_lagging_pr() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.add_pr(3);
+        s.lag_reads = 5;
+    }));
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let labeled = run.gh.with(|s| vec![s.prs[&2].clone()]);
+    let stack = units(&*run.gh, &repo(), &labeled).await.unwrap().remove(0);
+    let settings = &run.ctx.config.repo_defaults;
+    let queued = |heads: Vec<String>| {
+        let (run, key, stack) = (&run, &key, &stack);
+        async move {
+            still_queued(&*run.gh, key, settings, stack, &heads)
+                .await
+                .unwrap()
+        }
+    };
+    let heads = |run: &Run| run.gh.with(|s| vec![s.head(1), s.head(2)]);
+    assert!(queued(heads(&run)).await);
+
+    // The job's own publish, which the PR API does not show yet.
+    let change = |edit: fn(&mut State)| edit(&mut run.gh.state.lock().unwrap());
+    change(|s| s.push(1, "pr-1-fixed"));
+    assert!(queued(heads(&run)).await);
+    assert!(!queued(vec!["pr-1-v0".into(), "pr-2-v0".into()]).await);
+
+    // A layer joined the stack, or the stack left the queue.
+    let now = heads(&run);
+    change(|s| s.stacks.get_mut(&10).unwrap().push(3));
+    assert!(!queued(now.clone()).await);
+    change(|s| {
+        s.stacks.get_mut(&10).unwrap().pop();
+        s.prs.get_mut(&2).unwrap().labels.clear();
+    });
+    assert!(!queued(now).await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_fix_finds_the_layer_of_its_pr_and_the_stacks_budget() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_stack(10, &[1, 2], &[2]);
+        s.fixes_used.insert(2, 2);
+    }));
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let labeled = run.gh.with(|s| vec![s.prs[&1].clone()]);
+    let stack = units(&*run.gh, &repo(), &labeled).await.unwrap().remove(0);
+    assert_eq!((stack.number, stack.prs()), (10, vec![1, 2]));
+    let settings = &run.ctx.config.repo_defaults;
+    let to_fix = |number, head: String| {
+        let (run, key, stack) = (&run, &key, &stack);
+        async move {
+            let found = stack.to_fix(&*run.gh, key, settings, number, &head);
+            found.await.unwrap().map(|(_, layer)| layer)
+        }
+    };
+    let head = run.gh.with(|s| s.head(1));
+    assert_eq!(to_fix(1, head.clone()).await, Some(0));
+    assert_eq!(to_fix(2, run.gh.with(|s| s.head(2))).await, Some(1));
+    assert_eq!(to_fix(1, "pushed".into()).await, None);
+
+    let change = |edit: fn(&mut State)| edit(&mut run.gh.state.lock().unwrap());
+    change(|s| {
+        s.fixes_used.insert(1, 1);
+    });
+    assert_eq!(to_fix(1, head).await, None, "layers share one budget");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fork_pr_skips_getting_ready() {
+    let run = prep_run(|s| {
+        fork_pr(s);
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Failed);
+    });
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
     assert_eq!(run.rebase.count(), 1, "the lane took it");
 }
 
@@ -3512,7 +3718,7 @@ async fn a_failed_check_on_a_layer_is_fixed_there_and_the_layers_above_go_onto_t
 
 #[tokio::test(start_paused = true)]
 async fn a_push_to_a_lower_layer_while_checks_run_rebases_the_stack_again() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_stack(10, &[1, 2], &[2]);
         s.required = vec!["ci".into()];
         s.checks_on.insert(
@@ -4326,7 +4532,7 @@ async fn a_required_check_whose_workflow_is_queued_is_waited_for_past_the_missin
 
 #[tokio::test(start_paused = true)]
 async fn a_stack_layer_gets_its_own_missing_check_clock() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_stack(10, &[1, 2], &[2]);
         s.required = vec!["ci".into(), "sift".into()];
         s.checks.insert("sift".into(), CheckState::Passed);

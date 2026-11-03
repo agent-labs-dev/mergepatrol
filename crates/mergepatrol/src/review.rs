@@ -22,7 +22,7 @@ use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
 
 use crate::github::GitHub;
-use crate::queue::{Alive, Ctx, app_credentials, fix_findings, job_spec, record, unix_now};
+use crate::queue::{Alive, Ctx, app_credentials, fix_findings, job_spec, record, units, unix_now};
 
 /// Reviews running at once, across workspaces. Each also takes one of the sandbox's job slots.
 const REVIEWS_AT_ONCE: usize = 4;
@@ -183,10 +183,9 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
 }
 
 /// What the agent's fix can take on from a review: what it sent back to the author, not what a
-/// human asked for, and not on a PR from a fork, or a stack's layer, whose layers above would have
-/// to move too. Empty otherwise.
-fn fixable(r: &ReviewRecord, fork: bool, stacked: bool) -> Vec<Finding> {
-    if r.status != ReviewStatus::Changes || r.answered_by.is_some() || fork || stacked {
+/// human asked for, and not on a PR from a fork. Empty otherwise.
+fn fixable(r: &ReviewRecord, fork: bool) -> Vec<Finding> {
+    if r.status != ReviewStatus::Changes || r.answered_by.is_some() || fork {
         return Vec::new();
     }
     r.findings
@@ -194,15 +193,6 @@ fn fixable(r: &ReviewRecord, fork: bool, stacked: bool) -> Vec<Finding> {
         .filter(|f| f.sent_back)
         .map(|f| f.finding.clone())
         .collect()
-}
-
-/// Whether the PR is as the review left it, and still queued.
-pub(crate) fn still_fixable(pr: &PullRequest, label: &str, trunk: &str, head: &str) -> bool {
-    pr.is_open()
-        && pr.has_label(label)
-        && pr.stack.is_none()
-        && pr.merges_into() == trunk
-        && pr.head_ref_oid == head
 }
 
 /// While the PR has fixes left, the agent's fix goes first. Without one, or if the agent cannot
@@ -218,24 +208,26 @@ pub(crate) async fn fix_sent_back(
     let Some(r) = ctx.store.review(review).await? else {
         return Ok(());
     };
-    let findings = fixable(&r, pr.is_cross_repository, pr.stack.is_some());
+    let findings = fixable(&r, pr.is_cross_repository);
     if findings.is_empty() {
         return Ok(());
     }
+    // The PR, or the stack it is a layer of, whose budget it shares and whose layers above move.
+    let Some(unit) = units(gh, &r.repo, std::slice::from_ref(pr)).await?.pop() else {
+        return Ok(());
+    };
     // A fix of its checks may be on this head: the next review gets its turn.
-    let Some(_claim) = ctx.prep.claim(key, r.number) else {
+    let Some(_claim) = ctx.prep.claim(key, unit.number) else {
         return Ok(());
     };
     // The review took a while: the PR may have moved on.
-    let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
-    if !still_fixable(&now, &settings.label, &key.trunk, &r.head_sha)
-        || GitHub::fixes_used(gh, &r.repo, r.number).await? >= settings.fix_ci.allowed()
-    {
+    let to_fix = unit.to_fix(gh, key, settings, r.number, &r.head_sha);
+    let Some((now, layer)) = to_fix.await? else {
         return Ok(());
-    }
+    };
     let what = format!("{} sent back", findings.len());
     record(ctx, key, r.number, "review-fixing", &what).await?;
-    let event = fix_findings(ctx, gh, key, pr, settings, &r.head_sha, findings).await;
+    let event = fix_findings(ctx, gh, key, &now, layer, settings, findings).await;
     let (kind, message) = match event {
         Ok(Event::Fixed { head }) => {
             ctx.store.mark_agent_fixed(r.id).await?;
@@ -902,48 +894,16 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_starts_only_on_a_pr_as_the_review_left_it() {
-        let pr = |state: &str, label: &str, oid: &str, stack: serde_json::Value| -> PullRequest {
-            serde_json::from_value(serde_json::json!({
-                "number": 7, "state": state, "title": "t", "body": "", "isDraft": false,
-                "isCrossRepository": false, "reviewDecision": null, "baseRefName": "main",
-                "headRefName": "b", "headRefOid": oid, "stack": stack,
-                "labels": { "nodes": [{ "name": label }] }, "files": { "nodes": [] },
-                "url": "u", "createdAt": "c", "additions": 0, "deletions": 0, "changedFiles": 0,
-                "author": null, "latestOpinionatedReviews": { "nodes": [] },
-                "reviewRequests": { "nodes": [] }, "commits": { "nodes": [] },
-            }))
-            .unwrap()
-        };
-        let fixable = |p: &PullRequest| still_fixable(p, "q", "main", "h");
-        assert!(fixable(&pr("OPEN", "q", "h", serde_json::Value::Null)));
-        assert!(!fixable(&pr("CLOSED", "q", "h", serde_json::Value::Null)));
-        assert!(!fixable(&pr("OPEN", "other", "h", serde_json::Value::Null)));
-        assert!(!fixable(&pr(
-            "OPEN",
-            "q",
-            "pushed",
-            serde_json::Value::Null
-        )));
-        let stacked = serde_json::json!({ "number": 9, "baseRefName": "main" });
-        assert!(!fixable(&pr("OPEN", "q", "h", stacked)));
-        let mut retargeted = pr("OPEN", "q", "h", serde_json::Value::Null);
-        retargeted.base_ref_name = "release".into();
-        assert!(!fixable(&retargeted));
-    }
-
-    #[test]
     fn the_agent_fixes_only_what_it_sent_back_on_the_authors_own_pr() {
         let r = review(1, true, None);
-        assert_eq!(fixable(&r, false, false).len(), 1);
-        assert!(fixable(&r, true, false).is_empty(), "a fork");
-        assert!(fixable(&r, false, true).is_empty(), "a stack's layer");
-        assert!(fixable(&review(1, false, None), false, false).is_empty());
+        assert_eq!(fixable(&r, false).len(), 1);
+        assert!(fixable(&r, true).is_empty(), "a fork");
+        assert!(fixable(&review(1, false, None), false).is_empty());
         let asked = review(1, true, Some("ann"));
-        assert!(fixable(&asked, false, false).is_empty(), "a human's call");
+        assert!(fixable(&asked, false).is_empty(), "a human's call");
         let mut approved = review(1, true, None);
         approved.status = ReviewStatus::Approved;
-        assert!(fixable(&approved, false, false).is_empty());
+        assert!(fixable(&approved, false).is_empty());
     }
 
     #[test]

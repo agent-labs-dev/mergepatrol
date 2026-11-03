@@ -1,7 +1,9 @@
 //! Getting a PR ready before it takes the lane: its conflicts resolved, its checks green, its
 //! failures fixed, each on its own, so that no PR holds up another. A tick reads where a PR is
 //! from GitHub and starts what it needs, and nothing here waits. What this cannot settle goes on
-//! to the lane, which ejects as it does for any PR. Stacks and forks go straight there.
+//! to the lane, which ejects as it does for any PR. A stack gets ready as one, and its fix goes on
+//! the layer that failed. A fork goes straight to the lane: no agent runs on it, and as it never
+//! joins a batch, the lane rebases it and runs its checks again whatever they said here.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +18,7 @@ use mergepatrol_store::LaneKey;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use super::{Ctx, JobSandbox, Unit, fix_and_publish, rebase_and_publish, record, still_fixable};
+use super::{Ctx, JobSandbox, Unit, rebase_and_publish, record_all, still_queued};
 use crate::github::GitHub;
 
 /// A job's hold on a PR, which ends with the job, also if it panics or is aborted, and which
@@ -46,7 +48,11 @@ type Running = Arc<Mutex<HashMap<PrId, (u64, Hold)>>>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Work {
     Rebase,
-    Fix { failed: Vec<String> },
+    /// `layer`: the index in the unit of the lowest layer that failed.
+    Fix {
+        layer: usize,
+        failed: Vec<String>,
+    },
 }
 
 /// A job the tick asked for.
@@ -88,10 +94,7 @@ impl Prep {
     /// Whether a conflict of `unit`'s is for here to resolve, and not its job in the lane.
     pub(super) fn takes_conflicts(&self, ctx: &Ctx, key: &LaneKey, unit: &Unit) -> bool {
         let id = (key.installation_id, key.repo.clone(), unit.number);
-        ctx.config.prep
-            && !unit.stacked
-            && !unit.fork()
-            && !self.left_to_lane(&id, &unit.top().head_ref_oid)
+        ctx.config.prep && !unit.fork() && !self.left_to_lane(&id, &unit.top().head_ref_oid)
     }
 
     /// The lane found a conflict on the PR's `head`.
@@ -127,8 +130,8 @@ impl Prep {
         }
     }
 
-    /// Holds PR `number` for a fix beside this module's jobs, until the claim drops: `None` if a
-    /// job has it.
+    /// Holds the unit `number` for a fix beside this module's jobs, until the claim drops: `None`
+    /// if a job has it.
     pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> Option<Claim> {
         let id = (key.installation_id, key.repo.clone(), number);
         let mut running = self.running.lock().unwrap();
@@ -225,8 +228,8 @@ impl Prep {
     }
 }
 
-/// Why `unit`, which is no stack or fork, waits off the lane, starting what it needs. `None`: it
-/// goes on to the review.
+/// Why `unit`, unless it is a fork, waits off the lane, starting what it needs. `None`: it goes on
+/// to the review.
 pub(super) async fn hold(
     ctx: &Ctx,
     gh: &dyn GitHub,
@@ -235,11 +238,10 @@ pub(super) async fn hold(
     settings: &RepoSettings,
     unit: &Unit,
 ) -> Result<Option<Hold>> {
-    if !ctx.config.prep || unit.stacked || unit.fork() {
+    if !ctx.config.prep || unit.fork() {
         return Ok(None);
     }
-    let pr = unit.top();
-    let head = pr.head_ref_oid.as_str();
+    let head = unit.top().head_ref_oid.as_str();
     let id = (key.installation_id, key.repo.clone(), unit.number);
     if let Some(hold) = ctx.prep.holding(&id) {
         return Ok(Some(hold));
@@ -255,35 +257,41 @@ pub(super) async fn hold(
         work,
         token: 0,
     };
-    if ctx.prep.take_conflict(&id, head) || pr.conflicting {
+    if ctx.prep.take_conflict(&id, head) || unit.layers.iter().any(|pr| pr.conflicting) {
         let wanted = want(Work::Rebase);
         return Ok(Some(ctx.prep.want(id, Hold::PrepRebasing, wanted)));
     }
     let required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
-    let checks = gh.checks(&key.repo, head).await?;
-    let (state, names) = checks.verdict(&required);
-    Ok(match state {
-        CheckState::Passed => None,
-        CheckState::Failed => {
-            let used = gh.fixes_used(&key.repo, pr.number).await?;
-            (used < settings.fix_ci.allowed()).then(|| {
-                let wanted = want(Work::Fix { failed: names });
-                ctx.prep.want(id, Hold::PrepFixing, wanted)
-            })
+    // Bottom to top: a fix moves the layers above it.
+    let mut waiting = false;
+    for (layer, pr) in unit.layers.iter().enumerate() {
+        let sha = pr.head_ref_oid.as_str();
+        let checks = gh.checks(&key.repo, sha).await?;
+        let (state, names) = checks.verdict(&required);
+        match state {
+            CheckState::Passed => {}
+            CheckState::Failed => {
+                let used = unit.fixes_used(gh, &key.repo).await?;
+                return Ok((used < settings.fix_ci.allowed()).then(|| {
+                    let failed = names;
+                    let wanted = want(Work::Fix { layer, failed });
+                    ctx.prep.want(id, Hold::PrepFixing, wanted)
+                }));
+            }
+            CheckState::Pending => {
+                // A check that never reports, or never ends, is the lane's to eject.
+                let silent = !names
+                    .iter()
+                    .any(|n| checks.by_name.get(n) == Some(&CheckState::Pending));
+                let running = match checks.workflows_running {
+                    Some(running) => running,
+                    None => silent && gh.workflows_running(&key.repo, sha).await?,
+                };
+                waiting |= (!silent || running) && ctx.prep.waited(&id, head) < CHECKS_TIMEOUT;
+            }
         }
-        CheckState::Pending => {
-            // A check that never reports, or never ends, is the lane's to eject.
-            let silent = !names
-                .iter()
-                .any(|n| checks.by_name.get(n) == Some(&CheckState::Pending));
-            let running = match checks.workflows_running {
-                Some(running) => running,
-                None => silent && gh.workflows_running(&key.repo, head).await?,
-            };
-            let holds = (!silent || running) && ctx.prep.waited(&id, head) < CHECKS_TIMEOUT;
-            holds.then_some(Hold::PrepChecks)
-        }
-    })
+    }
+    Ok(waiting.then_some(Hold::PrepChecks))
 }
 
 /// Starts what the ticks of `repo` ask for, until the queue stops, which stops the jobs too.
@@ -308,13 +316,13 @@ pub(super) async fn drain(ctx: std::sync::Arc<Ctx>, gh: Installation, repo: Repo
 
 async fn run(ctx: &Ctx, gh: &Installation, w: Wanted, claim: Claim) {
     let key = &w.key;
-    let number = w.unit.number;
-    let id = (key.installation_id, key.repo.clone(), number);
+    let prs = w.unit.prs();
+    let id = (key.installation_id, key.repo.clone(), w.unit.number);
     let head = w.unit.top().head_ref_oid.clone();
     let event = job(ctx, gh, &w).await;
     let why = match event {
         Ok(Event::Rebased { head, .. } | Event::Fixed { head }) => {
-            ok(record(ctx, key, number, "published", &head).await);
+            ok(record_all(ctx, key, &prs, "published", &head).await);
             None
         }
         // The author pushed: the next tick reads the new head.
@@ -324,7 +332,7 @@ async fn run(ctx: &Ctx, gh: &Installation, w: Wanted, claim: Claim) {
         Err(e) => Some(format!("{e:#}")),
     };
     if let Some(why) = &why {
-        ok(record(ctx, key, number, "prep-left", why).await);
+        ok(record_all(ctx, key, &prs, "prep-left", why).await);
     }
     ctx.prep.finish(&id, why.map(|_| head));
     drop(claim);
@@ -339,35 +347,48 @@ fn ok(recorded: Result<()>) {
 
 async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
     let (key, unit, snap, settings) = (&w.key, &w.unit, &w.snap, &w.settings);
-    let pr = unit.top();
+    let prs = unit.prs();
+    let heads: Vec<String> = unit
+        .layers
+        .iter()
+        .map(|pr| pr.head_ref_oid.clone())
+        .collect();
     // It may have left the queue, or moved, since the tick asked: no agent for that.
-    let now = GitHub::pull_request(gh, &key.repo, pr.number).await?;
-    if !still_fixable(&now, &settings.label, &key.trunk, &pr.head_ref_oid) {
+    if !still_queued(gh, key, settings, unit, &heads).await? {
         return Ok(Event::HeadMoved);
     }
+    let sandbox = JobSandbox { ctx, gh };
     let event = match &w.work {
         Work::Rebase => {
             let onto = format!("onto {}", key.trunk);
-            record(ctx, key, pr.number, "rebasing", &onto).await?;
+            record_all(ctx, key, &prs, "rebasing", &onto).await?;
             rebase_and_publish(ctx, gh, key, snap, unit, 0, settings, true, true).await
         }
-        Work::Fix { failed } => {
+        Work::Fix { layer, failed } => {
+            let pr = &unit.layers[*layer];
             let head = &pr.head_ref_oid;
-            let used = GitHub::fixes_used(gh, &key.repo, pr.number).await?;
+            let used = unit.fixes_used(gh, &key.repo).await?;
             let allowed = settings.fix_ci.allowed();
             if used >= allowed {
                 return Ok(Event::FixFailed("no fixes left".into()));
             }
-            let what = format!("{}, attempt {} of {allowed}", failed.join(", "), used + 1);
-            record(ctx, key, pr.number, "fixing", &what).await?;
+            let on = match unit.stacked {
+                true => format!(" on #{}", pr.number),
+                false => String::new(),
+            };
+            let what = format!(
+                "{}{on}, attempt {} of {allowed}",
+                failed.join(", "),
+                used + 1
+            );
+            record_all(ctx, key, &prs, "fixing", &what).await?;
             let failures = GitHub::check_failures(gh, &key.repo, head, failed).await?;
-            let trunk = gh.branch_sha(&key.repo, &key.trunk).await?;
+            let base = unit.below(gh, key, *layer).await?;
             let task = Task::FixChecks { failures };
-            fix_and_publish(
-                ctx, gh, key, snap, unit, 0, settings, head, &trunk, task, true,
-            )
-            .await
+            sandbox
+                .fix_and_restack(key, snap, unit, *layer, settings, head, &base, task, true)
+                .await
         }
     };
-    JobSandbox { ctx, gh }.published(key, event).await
+    sandbox.published(key, event).await
 }
