@@ -436,7 +436,7 @@ impl AsUser {
 /// What the inbox reads of a PR: the dashboard's summary, and what it finds the PR by.
 const INBOX_FIELDS: &str = concat!(
     summary_fields!(),
-    " updatedAt closedAt mergedAt repository { nameWithOwner }
+    " updatedAt closedAt mergedAt repository { nameWithOwner defaultBranchRef { name } }
   reviewThreads(first: 100) { nodes { isResolved } }
   teamRequests: reviewRequests(first: 20) { nodes { requestedReviewer { ... on Team { slug } } } }
   activity: timelineItems(last: 50, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW]) {

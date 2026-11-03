@@ -103,6 +103,13 @@ pub trait ReadCache: Send + Sync {
     ) -> Result<()>;
     /// Starts keeping track of the repo's changes, if it did not yet.
     async fn github_reads(&self, installation_id: u64, repo: &RepoName) -> Result<RepoReads>;
+    /// The config file as the queue last read it, without keeping track of the repo: `None`
+    /// never read, `Some(None)` none.
+    async fn config_read(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+    ) -> Result<Option<Option<String>>>;
     async fn save_config_read(
         &self,
         installation_id: u64,
@@ -258,6 +265,22 @@ impl ReadCache for PgStore {
             repository,
             prs,
         })
+    }
+
+    async fn config_read(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+    ) -> Result<Option<Option<String>>> {
+        let row = sqlx::query(
+            "SELECT config FROM github_repos
+             WHERE installation_id = $1 AND repo = $2 AND config_read IS NOT NULL",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get("config")))
     }
 
     async fn save_config_read(

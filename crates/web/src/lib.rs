@@ -1843,6 +1843,100 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn the_open_prs_come_from_the_inbox_without_reading_github(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Lane};
+        use mergepatrol_store::{InboxRead, InboxWrite, LaneKey};
+        // The session's GitHub token is fake: a read of GitHub would fail the request.
+        let (router, cookie) = signed_in(pool.clone()).await;
+        let (store, _) = store_and_vault(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let pr = |number: u64, updated: &str, labels: &[&str]| {
+            let mut node = inbox_node(number, "bo");
+            node["updatedAt"] = updated.into();
+            node["labels"]["nodes"] = labels
+                .iter()
+                .map(|l| serde_json::json!({ "name": l }))
+                .collect();
+            node["repository"]["defaultBranchRef"] = serde_json::json!({ "name": "main" });
+            node
+        };
+        let mut draft = pr(1, "2026-10-09T00:00:00Z", &[]);
+        draft["isDraft"] = true.into();
+        let mut elsewhere = pr(6, "2026-10-08T00:00:00Z", &[]);
+        elsewhere["baseRefName"] = "release".into();
+        let nodes = [
+            draft,
+            pr(2, "2026-10-07T00:00:00Z", &[]),
+            pr(3, "2026-10-06T00:00:00Z", &["mergepatrol"]),
+            // Queued, and a layer of its stack.
+            pr(4, "2026-10-05T00:00:00Z", &[]),
+            pr(5, "2026-10-04T00:00:00Z", &[]),
+            elsewhere,
+            pr(7, "2026-10-03T00:00:00Z", &["ship"]),
+        ];
+        let writes: Vec<InboxWrite> = nodes
+            .into_iter()
+            .map(|node| InboxWrite {
+                number: node["number"].as_u64().unwrap(),
+                changes: 0,
+                read: Some(InboxRead {
+                    state: "open".into(),
+                    author: Some("bo".into()),
+                    requested_users: Vec::new(),
+                    requested_teams: Vec::new(),
+                    reviewers: Vec::new(),
+                    closed_at: None,
+                    node,
+                }),
+                settled: true,
+            })
+            .collect();
+        store.save_inbox_index(1, &repo, &writes).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo: repo.clone(),
+            trunk: "main".into(),
+        };
+        let lane = Lane {
+            entries: vec![Entry {
+                number: 4,
+                priority: false,
+                state: EntryState::Waiting,
+                summary: Default::default(),
+                layers: vec![5],
+                heads: Vec::new(),
+                recheck: None,
+            }],
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        let open = |router: Router, cookie: String| async move {
+            let (status, list) =
+                json(&router, "GET", "/api/w/1/repos/o/r/open", &cookie, None).await;
+            assert_eq!(status, StatusCode::OK);
+            let list = list.as_array().unwrap().iter();
+            list.map(|p| (p["number"].as_u64().unwrap(), p["draft"] == true))
+                .collect::<Vec<_>>()
+        };
+
+        // The config file not read yet: from GitHub, which this token cannot reach.
+        let (status, _) = json(&router, "GET", "/api/w/1/repos/o/r/open", &cookie, None).await;
+        assert_ne!(status, StatusCode::OK);
+        // Read, and there is none: the workspace's label.
+        store.github_reads(1, &repo).await.unwrap();
+        store.save_config_read(1, &repo, 0, None).await.unwrap();
+        let listed = open(router.clone(), cookie.clone()).await;
+        assert_eq!(listed, [(1, true), (2, false), (7, false)]);
+        // One that names another label.
+        store
+            .save_config_read(1, &repo, 0, Some("version: 1\nlabel: ship\n"))
+            .await
+            .unwrap();
+        let listed = open(router, cookie).await;
+        assert_eq!(listed, [(1, true), (2, false), (3, false)]);
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn webhooks_keep_the_inbox_and_the_you_tab_reads_it(pool: PgPool) {
         use mergepatrol_store::{InboxRead, InboxWrite};
         let store: Arc<dyn Store> = Arc::new(PgStore::migrate(pool.clone()).await.unwrap());

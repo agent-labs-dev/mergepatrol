@@ -116,6 +116,10 @@ pub trait InboxStore: Send + Sync {
     ) -> Result<()>;
     /// Makes the installation's repos these: adds the new ones, drops the rest with their PRs.
     async fn set_inbox_repos(&self, installation_id: u64, repos: &[RepoName]) -> Result<()>;
+    /// The repo's open PRs into its default branch, last updated first. `None` until every open
+    /// PR of the repo was read.
+    async fn inbox_open(&self, installation_id: u64, repo: &RepoName)
+    -> Result<Option<Vec<Value>>>;
     /// Repos whose open PRs were never read, or not for `age`.
     async fn inbox_repos_due(&self, age: Duration) -> Result<Vec<(u64, RepoName)>>;
     /// The installation's teams, by slug, with their members' logins.
@@ -336,6 +340,14 @@ impl InboxStore for PgStore {
         .bind(&numbers)
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "UPDATE inbox_repos SET open_indexed_at = indexed_at
+             WHERE installation_id = $1 AND repo = $2",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -360,6 +372,35 @@ impl InboxStore for PgStore {
         Ok(())
     }
 
+    async fn inbox_open(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+    ) -> Result<Option<Vec<Value>>> {
+        let indexed: Option<bool> = sqlx::query_scalar(
+            "SELECT open_indexed_at IS NOT NULL FROM inbox_repos
+             WHERE installation_id = $1 AND repo = $2",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        if indexed != Some(true) {
+            return Ok(None);
+        }
+        let nodes = sqlx::query_scalar(
+            "SELECT node FROM inbox_pulls
+             WHERE installation_id = $1 AND repo = $2 AND state = 'open'
+               AND node->>'baseRefName' = node#>>'{repository,defaultBranchRef,name}'
+             ORDER BY node->>'updatedAt' DESC",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(Some(nodes))
+    }
+
     async fn inbox_repos_due(&self, age: Duration) -> Result<Vec<(u64, RepoName)>> {
         let rows = sqlx::query(
             "SELECT installation_id, repo FROM inbox_repos
@@ -369,15 +410,25 @@ impl InboxStore for PgStore {
         .bind(secs(age))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                Some((
-                    r.get::<i64, _>("installation_id") as u64,
-                    RepoName::parse(r.get::<&str, _>("repo"))?,
-                ))
-            })
-            .collect())
+        // Then those not yet read with their default branch, as by a binary from before it.
+        let unbranched = sqlx::query(
+            "SELECT installation_id, repo FROM inbox_repos
+             WHERE open_indexed_at IS NULL AND indexed_at IS NOT NULL
+             ORDER BY indexed_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut due: Vec<(u64, RepoName)> = Vec::new();
+        for r in rows.iter().chain(&unbranched) {
+            let Some(repo) = RepoName::parse(r.get::<&str, _>("repo")) else {
+                continue;
+            };
+            let repo = (r.get::<i64, _>("installation_id") as u64, repo);
+            if !due.contains(&repo) {
+                due.push(repo);
+            }
+        }
+        Ok(due)
     }
 
     async fn set_inbox_teams(
@@ -853,6 +904,87 @@ mod tests {
             .await
             .unwrap();
         inbox.requested.len()
+    }
+
+    /// An open PR into `base` of a repo whose default branch is `main`.
+    fn into(base: &str, updated: &str) -> InboxRead {
+        let mut read = read("open", "me", &[], &[]);
+        read.node = json!({
+            "baseRefName": base, "updatedAt": updated,
+            "repository": { "nameWithOwner": "o/r", "defaultBranchRef": { "name": "main" } },
+        });
+        read
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_open_prs_into_the_default_branch_wait_for_the_first_index(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        assert_eq!(store.inbox_open(1, &repo()).await.unwrap(), None);
+        // A webhook's read alone leaves the repo's other PRs unread.
+        store.inbox_changed(1, &repo(), 1).await.unwrap();
+        let read = write(1, 1, into("main", "2026-10-01T00:00:00Z"));
+        store.save_inbox_reads(1, &repo(), &[read]).await.unwrap();
+        assert_eq!(store.inbox_open(1, &repo()).await.unwrap(), None);
+
+        let mut merged = into("main", "2026-10-04T00:00:00Z");
+        merged.state = "merged".into();
+        let mut before = into("main", "2026-10-05T00:00:00Z");
+        before.node["repository"] = json!({ "nameWithOwner": "o/r" });
+        store
+            .save_inbox_index(
+                1,
+                &repo(),
+                &[
+                    write(1, 1, into("main", "2026-10-01T00:00:00Z")),
+                    write(2, 0, into("main", "2026-10-03T00:00:00Z")),
+                    write(3, 0, into("feature", "2026-10-02T00:00:00Z")),
+                    write(4, 0, merged),
+                    write(5, 0, before),
+                ],
+            )
+            .await
+            .unwrap();
+        let open = store.inbox_open(1, &repo()).await.unwrap().unwrap();
+        let updated: Vec<&str> = open
+            .iter()
+            .filter_map(|n| n["updatedAt"].as_str())
+            .collect();
+        assert_eq!(updated, ["2026-10-03T00:00:00Z", "2026-10-01T00:00:00Z"]);
+        assert_eq!(store.inbox_open(2, &repo()).await.unwrap(), None);
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn an_index_by_a_binary_from_before_the_default_branch_keeps_the_live_read(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        // What the binary still indexing during a rollout writes: a full read without the
+        // default branch.
+        sqlx::query(
+            "INSERT INTO inbox_repos (installation_id, repo, indexed_at) VALUES (1, 'o/r', now())",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(store.inbox_open(1, &repo()).await.unwrap(), None);
+        assert_eq!(
+            store
+                .inbox_repos_due(Duration::from_secs(86400))
+                .await
+                .unwrap(),
+            [(1, repo())]
+        );
+        let write = write(1, 0, into("main", "2026-10-01T00:00:00Z"));
+        store.save_inbox_index(1, &repo(), &[write]).await.unwrap();
+        assert_eq!(
+            store.inbox_open(1, &repo()).await.unwrap().unwrap().len(),
+            1
+        );
+        assert!(
+            store
+                .inbox_repos_due(Duration::from_secs(86400))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[sqlx::test(migrations = false)]
