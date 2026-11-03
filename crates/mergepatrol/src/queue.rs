@@ -2377,8 +2377,6 @@ async fn run_job(
     let mut failing = 0;
     let mut unreported = Unreported::default();
     let mut sync = SyncWhileRunning::new();
-    // The layer a recheck ran on, and the checks that must pass on its head.
-    let mut rechecking: Option<(usize, Vec<String>)> = None;
 
     loop {
         let mut now = unit.refreshed(gh, repo).await?;
@@ -2407,8 +2405,6 @@ async fn run_job(
 
         let event = match &job.phase {
             Phase::Rebasing => 'rebase: {
-                // A new head has its own checks.
-                rechecking = None;
                 if now.fork() {
                     let trunk = gh.branch_sha(repo, &key.trunk).await?;
                     match fork_block(gh, key, &trunk, now.top()).await? {
@@ -2460,9 +2456,10 @@ async fn run_job(
                     let mut verdict = (CheckState::Passed, Vec::new());
                     let mut silent = Vec::new();
                     for (i, head) in heads.iter().enumerate() {
-                        let again = rechecking
+                        let recheck = lane.recheck(unit.number);
+                        let again = recheck
                             .as_ref()
-                            .filter(|(layer, _)| *layer == i)
+                            .filter(|(rechecked, _)| rechecked == head)
                             .map_or(&[][..], |(_, names)| names.as_slice());
                         let checks = checks_verdict(gh, key, head, published_at, again).await?;
                         silent.extend(checks.unreported.into_iter().map(|n| (head.clone(), n)));
@@ -2535,7 +2532,6 @@ async fn run_job(
                 event
             }
             Phase::Rechecking { failed, .. } => {
-                rechecking = Some((failing, failed.clone()));
                 let what = failed.join(", ");
                 record_all(ctx, key, &prs, "rechecking", &what).await?;
                 let comment = format!(
@@ -2548,6 +2544,8 @@ async fn run_job(
                 published_at = Instant::now();
                 if let Event::Fixed { head } = &event {
                     heads = now.branch_heads(gh, repo).await?;
+                    lane.set_recheck(unit.number, heads[failing].clone(), failed.clone());
+                    ctx.store.save_lane(key, lane).await?;
                     record_all(ctx, key, &prs, "published", head).await?;
                     let comment = format!("Pushed {head}. Waiting for checks.");
                     comment_all(gh, repo, &prs, &comment).await?;

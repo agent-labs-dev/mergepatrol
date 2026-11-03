@@ -1966,6 +1966,7 @@ mod tests {
             summary: PrSummary::default(),
             layers,
             heads: Vec::new(),
+            recheck: None,
         };
         let held = Hold::Layer {
             number: 6,

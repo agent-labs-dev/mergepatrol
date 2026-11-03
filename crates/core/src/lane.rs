@@ -139,6 +139,10 @@ pub struct Entry {
     /// published since. Empty for a PR from the repo itself.
     #[serde(default)]
     pub heads: Vec<String>,
+    /// The head a recheck pushed, with the checks that must really pass on it: it holds across
+    /// a restart, and no other head answers for it.
+    #[serde(default)]
+    pub recheck: Option<(String, Vec<String>)>,
 }
 
 impl Entry {
@@ -308,6 +312,7 @@ impl Lane {
                         summary: c.summary.clone(),
                         layers: c.layers.clone(),
                         heads: c.pin.iter().cloned().collect(),
+                        recheck: None,
                     });
                     changes.push(LaneChange::Enqueued(c.number));
                     if let Some(reason) = &c.hold {
@@ -400,6 +405,18 @@ impl Lane {
             if e.state == EntryState::Active {
                 e.state = EntryState::Waiting;
             }
+        }
+    }
+
+    /// The checks that must really pass on the head a recheck pushed.
+    pub fn recheck(&self, number: PrNumber) -> Option<(String, Vec<String>)> {
+        let entry = self.entries.iter().find(|e| e.number == number);
+        entry.and_then(|e| e.recheck.clone())
+    }
+
+    pub fn set_recheck(&mut self, number: PrNumber, head: String, checks: Vec<String>) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.number == number) {
+            e.recheck = Some((head, checks));
         }
     }
 
@@ -721,6 +738,7 @@ mod tests {
                 summary: PrSummary::default(),
                 layers: if stacked { vec![7, 8] } else { Vec::new() },
                 heads: Vec::new(),
+                recheck: None,
             };
             let status = |n| statuses.iter().find(|(m, _)| *m == n).map(|(_, s)| *s);
             assert_eq!(

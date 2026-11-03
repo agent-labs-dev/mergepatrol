@@ -166,6 +166,7 @@ impl EntryView {
             summary: pr,
             layers,
             heads: _,
+            recheck: _,
         } = e;
         let stage = state.stage().map(StageView::from);
         let (fixes, fix_budget) = (pr.fixes, pr.fix_budget);
@@ -3507,6 +3508,7 @@ mod tests {
             summary: PrSummary::default(),
             layers: Vec::new(),
             heads: Vec::new(),
+            recheck: None,
         }
     }
 

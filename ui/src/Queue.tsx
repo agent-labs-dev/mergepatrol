@@ -905,6 +905,8 @@ const pathSteps: Record<string, [string, boolean, boolean]> = {
   "prep-left": ["Left to the merge lane", true, true],
 };
 
+const exitKinds = ["merged", "ejected", "dequeued", "cancelled", "pushed"];
+
 /** The path a queued PR took this time in the queue, loops and all. */
 function Path({
   workspace,
@@ -921,8 +923,9 @@ function Path({
     refetchInterval: 3000,
   });
   const newest = events.data ?? [];
-  const joined = newest.findIndex((ev) => ev.kind === "enqueued");
-  const steps = (joined < 0 ? newest : newest.slice(0, joined))
+  // From the last time it left: work can start as it joins, ahead of that event.
+  const left = newest.findIndex((ev) => exitKinds.includes(ev.kind));
+  const steps = (left < 0 ? newest : newest.slice(0, left))
     .filter((ev) => ev.kind in pathSteps)
     .reverse();
   if (steps.length === 0) return null;

@@ -641,6 +641,11 @@ impl Scripted {
         }
     }
 
+    /// Counts one rebase, for `rebases_once` to leave the next as it is.
+    fn rebased_already(&self) {
+        *self.rebases.lock().unwrap() += 1;
+    }
+
     /// The failed checks each fix was asked to fix.
     fn fixed(&self) -> Vec<Vec<String>> {
         self.fixes.lock().unwrap().clone()
@@ -2593,6 +2598,42 @@ async fn a_recheck_whose_check_is_skipped_does_not_pass() {
     run.tick().await;
     assert!(run.merged().is_empty());
     assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_holds_across_a_restart() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        s.skipped = vec!["ci".into()];
+    }));
+    run.ctx.prep.start_over(&repo());
+    let head = run.gh.with(|s| s.head(1));
+    let mut lane = Lane::default();
+    lane.sync(&[Candidate {
+        number: 1,
+        priority: false,
+        hold: None,
+        summary: Default::default(),
+        layers: Vec::new(),
+        pin: None,
+    }]);
+    lane.set_recheck(1, format!("{head}-c"), vec!["ci".into()]);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    run.store.save_lane(&key, &lane).await.unwrap();
+
+    // It runs on the head the recheck pushed: a clean rebase leaves that as it is.
+    let mut run = run;
+    run.rebase.rebases_once = true;
+    run.gh.with_mut(|s| s.push(1, &format!("{head}-c")));
+    run.rebase.rebased_already();
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]], "the skip is no pass");
 }
 
 #[tokio::test(start_paused = true)]
