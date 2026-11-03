@@ -18,6 +18,7 @@ use mergepatrol_executor::protocol::{
 use mergepatrol_github::{App, CodeOwners, Installation, PullRequest, ReviewThread, ThreadComment};
 use mergepatrol_resolver::withdraws;
 use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
+use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
 
 use crate::github::GitHub;
@@ -139,6 +140,11 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
     }
     let key = lane_key(&r, &pr);
     let settings = settings(ctx, &gh, &r.repo).await?;
+    // Only a PR told to merge gets the agent's review: no label, or no place in the lane, and the
+    // review is dropped rather than run. Nothing is run and nothing is posted.
+    if !merge_requested(ctx.store.as_ref(), &gh, &r.repo, &pr, &settings.label).await? {
+        return ctx.store.stale_review(r.id).await;
+    }
     let workspace = ctx
         .store
         .review_settings(r.installation_id)
@@ -158,10 +164,10 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
             return Ok(());
         }
         Err(why) => {
-            return finish(ctx, &gh, &key, &pr, &r, &bars, Err(why)).await;
+            return finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Err(why)).await;
         }
     };
-    finish(ctx, &gh, &key, &pr, &r, &bars, Ok(output)).await?;
+    finish(ctx, &gh, &key, &pr, &r, &settings, &bars, Ok(output)).await?;
     fix_sent_back(ctx, &gh, &key, &pr, &settings, r.id).await
 }
 
@@ -404,9 +410,17 @@ async fn finish(
     key: &LaneKey,
     pr: &PullRequest,
     r: &ReviewRecord,
+    settings: &RepoSettings,
     bars: &ReviewSettings,
     output: std::result::Result<ReviewOutput, String>,
 ) -> Result<()> {
+    // The merge request may have gone while the agent ran: then the review posts nothing and the
+    // PR ends no hold. It is dropped, for a review of a later head to take its place. `pr` is from
+    // before the run, so the gate reads the PR anew.
+    let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
+    if !merge_requested(ctx.store.as_ref(), gh, &r.repo, &now, &settings.label).await? {
+        return ctx.store.stale_review(r.id).await;
+    }
     let (summary, mut findings, error) = match output {
         Ok(o) => (o.summary, bars.judge(o.findings), None),
         Err(why) => (String::new(), Vec::new(), Some(why)),
