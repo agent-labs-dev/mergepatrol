@@ -61,6 +61,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
         pr_title: "t".into(),
         pr_body: String::new(),
         verify: Vec::new(),
+        leave_conflicts: false,
         resolver: ResolverSpec {
             provider: Default::default(),
             model: "claude-opus-5-5".into(),
@@ -162,6 +163,46 @@ async fn a_stack_layer_replays_only_its_own_commits_onto_the_layer_below() {
 }
 
 #[tokio::test]
+async fn a_rebase_that_leaves_nothing_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (_, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let out = tmp.path().join("out");
+    let result = executor()
+        .run("t5", &spec(&origin, &trunk, &trunk), &out)
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(
+        reason.contains("its changes are already on main"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
+async fn a_conflict_left_for_off_the_lane_stops_with_no_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "shared.txt", "shared.txt");
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.leave_conflicts = true;
+    let result = executor()
+        .run("t8", &spec, &tmp.path().join("out"))
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(reason.starts_with("it conflicts in shared.txt"), "{reason}");
+}
+
+#[tokio::test]
 async fn conflict_without_a_key_fails_with_the_reason() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");
@@ -203,7 +244,6 @@ async fn fix_without_a_key_fails_with_the_reason() {
         panic!("{result:?}")
     };
     assert!(reason.contains("no Anthropic API key"), "{reason}");
-    assert_eq!(result.events[0].kind, "fixing");
     assert!(!out.join(BUNDLE_FILE).exists());
 }
 
@@ -230,7 +270,6 @@ async fn an_openai_fix_runs_codex_and_needs_its_key() {
     };
     // Codex says whose key is missing; the Claude CLI would ask for Anthropic's.
     assert!(reason.contains("no OpenAI API key"), "{reason}");
-    assert_eq!(result.events[0].kind, "fixing");
     assert!(!out.join(BUNDLE_FILE).exists());
 }
 
@@ -331,21 +370,123 @@ async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
             .run("t9", &spec, &out)
             .await
             .unwrap();
-        (result.outcome, out.join(BUNDLE_FILE).exists())
+        let resolved = result.events.iter().any(|e| e.kind == "resolved");
+        (result.outcome, out.join(BUNDLE_FILE).exists(), resolved)
     };
 
-    let (outcome, bundled) = run("echo generated > shared.txt").await;
+    let (outcome, bundled, resolved) = run("echo generated > shared.txt").await;
     assert!(matches!(outcome, JobOutcome::Done), "{outcome:?}");
     assert!(bundled);
+    assert!(
+        resolved,
+        "the orchestrator reads this to withhold the approval"
+    );
 
     let committed = "echo generated > shared.txt && git add -A && \
         git -c user.name=a -c user.email=a@example.com commit -qm moved";
-    let (outcome, bundled) = run(committed).await;
+    let (outcome, bundled, _) = run(committed).await;
     let JobOutcome::Failed { reason } = outcome else {
         panic!("{outcome:?}")
     };
     assert!(reason.contains("the agent moved HEAD"), "{reason}");
     assert!(!bundled);
+}
+
+#[tokio::test]
+async fn a_fix_of_a_review_commits_what_the_agent_changed_with_the_fix_trailer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let seen = tmp.path().join("prompt");
+    let shell = format!(
+        "printf '%s' \"$*\" > {} && echo fixed > feature.txt",
+        seen.display()
+    );
+    let executor = with_fake_claude_running(tmp.path(), &shell, "done");
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::FixReview {
+        findings: vec![
+            serde_json::from_value(serde_json::json!({
+                "kind": "other", "title": "The socket leaks", "file": "feature.txt", "line": 1,
+                "confidence": 90, "lean": "change", "finding": "It stays open.",
+                "suggestion": "Close it."
+            }))
+            .unwrap(),
+        ],
+    };
+    let out = tmp.path().join("out");
+    let result = executor.run("t7", &spec, &out).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+    let prompt = std::fs::read_to_string(&seen).unwrap();
+    assert!(
+        prompt.contains("The socket leaks (feature.txt:1)"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Close it."), "{prompt}");
+
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "pr"]);
+    git(
+        &check,
+        &[
+            "fetch",
+            "-q",
+            out.join(BUNDLE_FILE).to_str().unwrap(),
+            "refs/heads/result:refs/heads/result",
+        ],
+    );
+    let log = git(&check, &["log", "-1", "--format=%B", "result"]);
+    assert!(log.contains("Fix the review's findings"), "{log}");
+    assert!(log.contains("Fixed-by: mergepatrol"), "{log}");
+}
+
+#[tokio::test]
+async fn a_review_since_an_approval_names_only_the_queues_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    let trunk = commit(&origin, "app.rs", "one\n");
+    git(&origin, &["checkout", "-q", "-b", "pr"]);
+    let approved = commit(&origin, "app.rs", "two\n");
+    std::fs::write(origin.join("app.rs"), "three\n").unwrap();
+    git(&origin, &["add", "-A"]);
+    git(
+        &origin,
+        &["commit", "-qm", "Fix ci\n\nFixed-by: mergepatrol, a"],
+    );
+    let head = git(&origin, &["rev-parse", "HEAD"]);
+
+    let seen = tmp.path().join("prompt");
+    let keep = format!("printf '%s' \"$*\" > {}", seen.display());
+    let answer = r#"{"summary":"s","findings":[]}"#;
+    let executor = with_fake_claude_running(tmp.path(), &keep, answer);
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.resolver.api = Some(mergepatrol_executor::protocol::ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "t".into(),
+    });
+    spec.task = Task::Review {
+        answered: Vec::new(),
+        sent_back: Vec::new(),
+        since: Some(approved),
+    };
+    let result = executor
+        .run("t6", &spec, &tmp.path().join("out"))
+        .await
+        .unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+    let prompt = std::fs::read_to_string(&seen).unwrap();
+    assert!(prompt.contains("Review only these commits"), "{prompt}");
+    assert!(prompt.contains("Fix ci"), "{prompt}");
 }
 
 #[tokio::test]
@@ -378,6 +519,7 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     spec.task = Task::Review {
         answered: Vec::new(),
         sent_back: Vec::new(),
+        since: None,
     };
     let out = tmp.path().join("out");
     // The fake CLI echoes its answer, so one line: `echo` would break a `\n`.
@@ -441,6 +583,7 @@ async fn a_review_the_agent_cannot_give_fails_and_says_why() {
     spec.task = Task::Review {
         answered: Vec::new(),
         sent_back: Vec::new(),
+        since: None,
     };
     let out = tmp.path().join("out");
     let result = with_fake_claude(tmp.path(), "Looks good to me!")

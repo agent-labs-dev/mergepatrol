@@ -41,6 +41,9 @@ pub struct JobSpec {
     pub pr_body: String,
     /// The repo's verify commands, from its config file.
     pub verify: Vec<String>,
+    /// A rebase stops at a conflict, with no agent: it is the job's to get ready off the lane.
+    #[serde(default)]
+    pub leave_conflicts: bool,
     pub resolver: ResolverSpec,
     #[serde(default)]
     pub task: Task,
@@ -57,11 +60,17 @@ pub enum Task {
     /// Review what the PR changes since it left `trunk_sha`, and write `REVIEW_FILE`. Changes
     /// nothing. `answered` are what humans said about an earlier head; `sent_back` what the
     /// agent sent back to the author on the last one, to check the fix of.
+    /// Fix what the agent's review sent back, and commit it on top of the PR's head.
+    FixReview { findings: Vec<Finding> },
     Review {
         #[serde(default)]
         answered: Vec<Answered>,
         #[serde(default)]
         sent_back: Vec<SentBack>,
+        /// The approved head it goes on from: only what the queue's agent changed since needs
+        /// reading.
+        #[serde(default)]
+        since: Option<String>,
     },
     /// Answer a question about a finding of the review, and write `ANSWER_FILE`. `sent_back`:
     /// the finding went back to the author, and this is their reply, which it may withdraw on.
@@ -76,14 +85,17 @@ pub enum Task {
 impl Task {
     /// Whether the job returns code: a review or a question returns only what it wrote.
     pub fn returns_code(&self) -> bool {
-        matches!(self, Task::Rebase | Task::FixChecks { .. })
+        matches!(
+            self,
+            Task::Rebase | Task::FixChecks { .. } | Task::FixReview { .. }
+        )
     }
 
     /// The task the agent runs for: it picks the model, and counts the spend.
     pub fn spend_task(&self) -> SpendTask {
         match self {
             Task::Rebase => SpendTask::Rebase,
-            Task::FixChecks { .. } => SpendTask::Fix,
+            Task::FixChecks { .. } | Task::FixReview { .. } => SpendTask::Fix,
             Task::Review { .. } | Task::Question { .. } => SpendTask::Review,
         }
     }

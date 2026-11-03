@@ -344,6 +344,9 @@ impl GitHub for Cached<'_> {
     async fn workflows_running(&self, repo: &RepoName, sha: &str) -> Result<bool> {
         GitHub::workflows_running(self.gh, repo, sha).await
     }
+    async fn fixes_used(&self, repo: &RepoName, number: PrNumber) -> Result<u32> {
+        self.gh.fixes_used(repo, number).await
+    }
     async fn check_failures(
         &self,
         repo: &RepoName,

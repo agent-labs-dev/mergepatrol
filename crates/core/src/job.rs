@@ -16,6 +16,14 @@ pub enum Phase {
         base: String,
         failed: Vec<String>,
     },
+    /// The agent gave up on the checks `failed` on `head`, as not the PR's to fix: they run
+    /// again, on a new commit of the same files. The failure may be a flaky test, or a check that
+    /// read a PR title since changed.
+    Rechecking {
+        head: String,
+        base: String,
+        failed: Vec<String>,
+    },
     Merging {
         head: String,
     },
@@ -119,6 +127,8 @@ pub enum Event {
         base: String,
     },
     RebaseFailed(String),
+    /// It conflicts with the trunk, and the lane left that for off the lane.
+    RebaseConflict,
     ChecksPassed,
     ChecksFailed(Vec<String>),
     /// These required checks are still pending, `CHECKS_TIMEOUT` after the publish.
@@ -131,6 +141,8 @@ pub enum Event {
         head: String,
     },
     FixFailed(String),
+    /// The agent found nothing in the code to fix, and said why.
+    FixGaveUp(String),
     /// The PR head is no longer the SHA we published: the author pushed.
     HeadMoved,
     /// The trunk is no longer the SHA we rebased onto.
@@ -159,6 +171,8 @@ pub struct Job {
     pub fix_attempts: u32,
     /// The fixes tried since the author last pushed.
     pub fixes: u32,
+    /// The checks ran again since the author last pushed: a failure now is the PR's.
+    pub rechecked: bool,
 }
 
 impl Job {
@@ -169,6 +183,7 @@ impl Job {
             base_moves: 0,
             fix_attempts,
             fixes: 0,
+            rechecked: false,
         }
     }
 
@@ -178,13 +193,14 @@ impl Job {
         match (&self.phase, event) {
             (P::Rebasing, E::Rebased { head, base }) => self.with(P::AwaitingChecks { head, base }),
             (P::Rebasing, E::RebaseFailed(r)) => Transition::Ejected(EjectReason::RebaseFailed(r)),
+            (P::Rebasing, E::RebaseConflict) => Transition::Held(Hold::PrepRebasing),
 
             (P::AwaitingChecks { head, .. }, E::ChecksPassed) => {
                 let head = head.clone();
                 self.with(P::Merging { head })
             }
             (P::AwaitingChecks { head, base }, E::ChecksFailed(failed))
-                if self.fixes < self.fix_attempts =>
+                if self.fixes < self.fix_attempts && !self.rechecked =>
             {
                 let phase = P::Fixing {
                     head: head.clone(),
@@ -214,11 +230,28 @@ impl Job {
                 let base = base.clone();
                 self.with(P::AwaitingChecks { head, base })
             }
-            (P::Fixing { failed, .. }, E::FixFailed(reason)) => {
+            (P::Fixing { failed, .. }, E::FixFailed(reason))
+            | (P::Rechecking { failed, .. }, E::FixFailed(reason)) => {
                 Transition::Ejected(EjectReason::FixFailed {
                     checks: failed.clone(),
                     reason,
                 })
+            }
+            (P::Fixing { head, base, failed }, E::FixGaveUp(_)) => {
+                let phase = P::Rechecking {
+                    head: head.clone(),
+                    base: base.clone(),
+                    failed: failed.clone(),
+                };
+                Transition::Continue(Job {
+                    phase,
+                    rechecked: true,
+                    ..self
+                })
+            }
+            (P::Rechecking { base, .. }, E::Fixed { head }) => {
+                let base = base.clone();
+                self.with(P::AwaitingChecks { head, base })
             }
 
             (P::Merging { .. }, E::Merged) => Transition::Merged,
@@ -230,6 +263,7 @@ impl Job {
             (_, E::HeadMoved) => Transition::Continue(Job {
                 phase: P::Rebasing,
                 fixes: 0,
+                rechecked: false,
                 ..self
             }),
             (_, E::BaseMoved) => {
@@ -276,6 +310,14 @@ mod tests {
         };
         assert_eq!(job.phase, Phase::Merging { head: "h1".into() });
         assert_eq!(job.step(Event::Merged), Transition::Merged);
+    }
+
+    #[test]
+    fn a_conflict_left_for_off_the_lane_holds_the_pr() {
+        assert_eq!(
+            Job::start(7, 2).step(Event::RebaseConflict),
+            Transition::Held(Hold::PrepRebasing)
+        );
     }
 
     #[test]
@@ -347,6 +389,34 @@ mod tests {
             Transition::Ejected(EjectReason::ChecksFailed {
                 names: vec!["ci".into()],
                 fixes: 2
+            })
+        );
+    }
+
+    #[test]
+    fn a_fix_given_up_on_runs_the_checks_again_once_and_a_new_failure_ejects() {
+        let Transition::Continue(fixing) = failed(rebased(Job::start(7, 2))) else {
+            panic!()
+        };
+        let Transition::Continue(rechecking) = fixing.step(Event::FixGaveUp("flaky".into())) else {
+            panic!()
+        };
+        assert!(matches!(rechecking.phase, Phase::Rechecking { .. }));
+        let Transition::Continue(again) = rechecking.step(Event::Fixed { head: "c".into() }) else {
+            panic!()
+        };
+        assert_eq!(
+            again.phase,
+            Phase::AwaitingChecks {
+                head: "c".into(),
+                base: "b1".into()
+            }
+        );
+        assert_eq!(
+            failed(again),
+            Transition::Ejected(EjectReason::ChecksFailed {
+                names: vec!["ci".into()],
+                fixes: 1
             })
         );
     }

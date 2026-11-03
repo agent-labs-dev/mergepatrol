@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 use reqwest::{Method, StatusCode};
@@ -20,6 +20,9 @@ pub enum CheckState {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Checks {
     pub by_name: BTreeMap<String, CheckState>,
+    /// The checks that passed without running: skipped, or neutral.
+    #[serde(default)]
+    pub skipped: BTreeSet<String>,
     /// Whether a workflow run on the commit has yet to finish: queued behind its `concurrency`
     /// group, waiting for an approval, or running. Its jobs may not have check runs yet. `None`
     /// when no GitHub Actions check run is on the commit, so the workflow runs were not read:
@@ -207,6 +210,9 @@ impl Installation {
             };
             if let Some(name) = run["name"].as_str() {
                 checks.by_name.insert(name.to_owned(), state);
+                if matches!(run["conclusion"].as_str(), Some("neutral" | "skipped")) {
+                    checks.skipped.insert(name.to_owned());
+                }
             }
         }
 
@@ -527,6 +533,7 @@ mod tests {
     fn checks(list: &[(&str, CheckState)]) -> Checks {
         Checks {
             by_name: list.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect(),
+            skipped: Default::default(),
             workflows_running: None,
         }
     }

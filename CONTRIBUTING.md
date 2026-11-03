@@ -1,6 +1,6 @@
 # Contributing
 
-MergeLoop is early, and its design still moves. Before a large change, open an issue so we can agree on the shape first.
+MergeLoop is early, and its design still moves. Before a large change, open an issue so we can agree on the shape first. [`docs/queue-flow.md`](docs/queue-flow.md) shows how a PR moves through the queue.
 
 ## Develop
 

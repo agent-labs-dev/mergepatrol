@@ -29,6 +29,33 @@ fn commit(dir: &Path, file: &str, content: &str, msg: &str) -> String {
 }
 
 #[tokio::test]
+async fn commits_with_a_trailer_are_listed_from_a_base() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wt = tmp.path();
+    sh(wt, &["init", "-q", "-b", "main"]);
+    let root = commit(wt, "a.txt", "one\n", "root");
+    commit(wt, "a.txt", "two\n", "first\n\nFixed-by: mergepatrol, a");
+    let approved = commit(wt, "a.txt", "three\n", "the author's");
+    commit(
+        wt,
+        "a.txt",
+        "four\n",
+        "second\n\nResolved-by: mergepatrol, a",
+    );
+
+    let listed = |base| async move {
+        let trailers = ["Fixed-by: mergepatrol", "Resolved-by: mergepatrol"];
+        let commits = Git.commits_with(wt, base, "HEAD", &trailers).await.unwrap();
+        commits
+            .iter()
+            .map(|c| c.split_once(' ').unwrap().1.to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(listed(&approved).await, ["second"]);
+    assert_eq!(listed(&root).await, ["second", "first"]);
+}
+
+#[tokio::test]
 async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     let tmp = tempfile::tempdir().unwrap();
     let wt = tmp.path();

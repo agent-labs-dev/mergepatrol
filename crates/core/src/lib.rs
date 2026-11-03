@@ -13,7 +13,7 @@ pub use hold::Hold;
 pub use job::{CHECKS_MISSING_FOR, CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
     BatchStep, Bisect, BuiltBatch, Candidate, Entry, EntryState, Lane, LaneChange, LayerHead,
-    PendingMerge, Person, PrSummary, Review,
+    PendingMerge, Person, PrSummary, Review, Stage,
 };
 pub use repo_config::{
     AgentSettings, EFFORTS, FixCiSettings, LabelSpec, Labels, ModelOverrides, REPO_CONFIG_PATH,
@@ -32,6 +32,27 @@ pub type PrNumber = u64;
 
 /// The trailer on every commit the fix agent makes, before the agent's name.
 pub const FIXED_BY: &str = "Fixed-by: mergepatrol";
+/// The trailer of a commit whose conflict the agent resolved in a rebase.
+pub const RESOLVED_BY: &str = "Resolved-by: mergepatrol";
+/// The empty commit that runs a PR's checks again.
+pub const RECHECK_MESSAGE: &str =
+    "Run the checks again\n\nThe agent found nothing to fix in the code.";
+
+/// How many of a PR's fix budget its commits have used, from `messages`, newest first: the
+/// agent's fixes on top of the PR. The author's next commit ends the count, so new code earns new
+/// fixes, and the commits themselves survive a restart or a rebase.
+pub fn fixes_used<'a>(messages: impl IntoIterator<Item = &'a str>) -> u32 {
+    let mut used = 0;
+    for message in messages {
+        if message.lines().any(|l| l.starts_with(FIXED_BY)) {
+            used += 1;
+        // A rebase's rewrite adds trailers after it.
+        } else if !message.starts_with(RECHECK_MESSAGE) {
+            break;
+        }
+    }
+    used
+}
 
 /// Who runs the agent's model, with the workspace's own key.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -148,5 +169,20 @@ impl RepoName {
 impl std::fmt::Display for RepoName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.owner, self.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_budget_counts_the_agents_fixes_on_top_of_the_authors_last_commit() {
+        let fix = "Fix ci\n\nFixed-by: mergepatrol, claude";
+        assert_eq!(fixes_used([fix, RECHECK_MESSAGE, fix, "the author's"]), 2);
+        assert_eq!(fixes_used(["the author's", fix, fix]), 0);
+        let rewritten = format!("{RECHECK_MESSAGE}\n\nCo-authored-by: a <a@example.com>");
+        assert_eq!(fixes_used([rewritten.as_str(), fix]), 1);
+        assert_eq!(fixes_used([]), 0);
     }
 }

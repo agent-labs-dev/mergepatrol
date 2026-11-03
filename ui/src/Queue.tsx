@@ -1,12 +1,13 @@
 import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Activity } from "./Activity";
 import { AgentReviewScreen, Gate, reviewBadge, reviewedPr, reviewLine } from "./AgentReview";
 import {
   closePull,
   dequeuePull,
   fetchEvents,
+  fetchExits,
   fetchLanes,
   fetchOpenPulls,
   fetchSession,
@@ -21,7 +22,7 @@ import type { OpenPullView } from "./api/OpenPullView";
 import { matches, narrows, type OpenFilter, OpenFilters } from "./OpenFilters";
 import { PullDetail } from "./PullDetail";
 import { toasts } from "./Toasts";
-import { Avatar, primary, secondary } from "./ui";
+import { Avatar, primary, secondary, timeAgo } from "./ui";
 
 const laneKey = (l: LaneView) => `${l.repo}:${l.trunk}`;
 
@@ -53,6 +54,26 @@ export function Queue({ workspace }: { workspace: number }) {
     // Read as the user, on their own rate limit. A label change shows sooner through the lane.
     refetchInterval: 30_000,
   });
+  const exits = useQuery({
+    queryKey: ["ejected", workspace, current?.repo],
+    queryFn: async () => {
+      const exits = [];
+      let before: number | undefined;
+      do {
+        const page = await fetchExits(workspace, {
+          repo: current?.repo,
+          days: EJECTED_DAYS,
+          outcome: "ejected",
+          before,
+        });
+        exits.push(...page.exits);
+        before = page.next ?? undefined;
+      } while (before !== undefined);
+      return exits;
+    },
+    enabled: current !== undefined,
+    refetchInterval: 30_000,
+  });
   const actions = useActions(workspace, current, open.data, open.dataUpdatedAt);
 
   if (lanes.isError) return <p className="p-6 text-bad">Could not load the queue.</p>;
@@ -80,13 +101,20 @@ export function Queue({ workspace }: { workspace: number }) {
   const leaving = [...pending.values()].flatMap((p) =>
     p.kind === "removing" ? [{ ...p.item, state: "open" as const, priority: false }] : [],
   );
-  // What the filters narrow: the open PRs, without any the lane or `leaving` has already.
-  const notQueued = (open.data ?? []).filter(
+  const outside = (open.data ?? []).filter(
     (p) =>
       ![...queued, ...leaving].some((e) => e.number === p.number || e.layers.includes(p.number)),
   );
+  // Newest first, so a PR ejected twice shows why it was last.
+  const whyEjected = (n: number) => exits.data?.find((x) => x.number === n)?.detail;
+  const ejected: Item[] = outside.flatMap((p) => {
+    const why = whyEjected(p.number);
+    return why ? [{ ...asItem(p), detail: why.replace(/^Ejected: /, ""), ejected: true }] : [];
+  });
+  // What the filters narrow: the open PRs that are in no list above them.
+  const notQueued = outside.filter((p) => !whyEjected(p.number));
   const unqueued = [...leaving, ...notQueued.filter(matches(filter, me)).map(asItem)];
-  const items: Item[] = [...queued, ...unqueued];
+  const items: Item[] = [...queued, ...ejected, ...unqueued];
   // A link to a stack's layer, as the agent's review gives, picks its stack.
   const entry =
     items.find((e) => e.number === pr) ??
@@ -95,6 +123,9 @@ export function Queue({ workspace }: { workspace: number }) {
   // The queue lists the active PRs first, so the batch is the head of the lane.
   const batched = lane.batch === null ? [] : queued.filter((e) => e.state === "active");
   const rest = queued.slice(batched.length);
+  const inLine = rest.filter((e) => e.state !== "held");
+  const reviewing = rest.filter(heldByReview).sort((a, b) => Number(asks(b)) - Number(asks(a)));
+  const held = rest.filter((e) => e.state === "held" && !heldByReview(e));
   const picked =
     entry !== undefined && (entry.number === pr || (!!pr && entry.layers.includes(pr)));
   if (answer && picked && entry.state !== "open")
@@ -108,7 +139,7 @@ export function Queue({ workspace }: { workspace: number }) {
         onExit={() => setAnswer(undefined)}
       />
     );
-  const row = (e: Item) => (
+  const row = (e: Item, track = false) => (
     <div
       className={`group flex items-stretch border-b border-line-soft hover:bg-page ${
         e === entry ? "lg:bg-page" : ""
@@ -122,6 +153,7 @@ export function Queue({ workspace }: { workspace: number }) {
             : queued.findIndex((q) => q.number === e.number) + 1
         }
         selected={e === entry}
+        track={track}
         pending={actions.kinds.get(e.number)}
         onClick={() => setPr(e.number)}
       />
@@ -162,7 +194,7 @@ export function Queue({ workspace }: { workspace: number }) {
       >
         <div className="sticky top-0 border-b border-line bg-surface px-4 py-3">
           <p className="font-medium">{lane.repo}</p>
-          <p className="text-xs text-muted">Merge order into {lane.trunk}</p>
+          <p className="text-xs text-muted">Into {lane.trunk}</p>
         </div>
         {actions.error && (
           <p className="flex items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-red-800 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200">
@@ -176,7 +208,16 @@ export function Queue({ workspace }: { workspace: number }) {
             </button>
           </p>
         )}
-        {queued.length === 0 && <p className="p-4 text-faint">Nothing queued</p>}
+        {queued.length === 0 && ejected.length === 0 && (
+          <p className="p-4 text-faint">Nothing queued</p>
+        )}
+        {(batched.length > 0 || inLine.length > 0) && (
+          <ListHead
+            title="Merge lane"
+            note="one at a time"
+            count={batched.length + inLine.length}
+          />
+        )}
         <ol>
           {lane.batch !== null && (
             <li className="border-b border-line-soft">
@@ -199,10 +240,19 @@ export function Queue({ workspace }: { workspace: number }) {
               </ol>
             </li>
           )}
-          {rest.map((e) => (
+          {inLine.map((e) => (
             <li key={e.number}>{row(e)}</li>
           ))}
         </ol>
+        <Rows title="Getting ready" note="each on its own, then the line" items={reviewing}>
+          {(e) => row(e, true)}
+        </Rows>
+        <Rows title="Held" note="until GitHub would merge it" items={held}>
+          {(e) => row(e)}
+        </Rows>
+        <Rows title="Ejected" note="queue it again to retry" items={ejected}>
+          {(e) => row(e)}
+        </Rows>
         {open.isError && (
           <p className="mt-6 border-y border-line bg-sunken px-4 py-2 text-xs text-bad">
             Could not load the open PRs: {open.error.message}
@@ -341,13 +391,29 @@ export function Queue({ workspace }: { workspace: number }) {
 }
 
 /** A PR in the list: queued, or open and not queued. An open one has no priority or place. */
-type Item = Omit<EntryView, "state"> & { state: EntryView["state"] | "open" };
+type Item = Omit<EntryView, "state"> & {
+  state: EntryView["state"] | "open";
+  /** Open, because the queue ejected it: `detail` says why. */
+  ejected?: boolean;
+};
+
+/** How far back an open PR still lists as ejected, rather than as just not queued. */
+const EJECTED_DAYS = 7;
+
+/** A held PR that is getting ready or waits on the agent's review or its threads, not on GitHub. */
+const heldByReview = (e: Item) =>
+  e.state !== "open" && reviewBadge({ ...e, state: e.state }) !== null;
+/** A PR the agent's review asks a human about: the one thing here that a person can move. */
+const asks = (e: Item) => e.hold?.reason === "review_asks";
 
 /** An open PR as the list shows it: `detail` says what the queue would do with it. */
 const asItem = (p: OpenPullView): Item => ({
   ...p,
   priority: false,
   state: "open",
+  stage: null,
+  fixes: 0,
+  fix_budget: 0,
   layers: [],
   hold: null,
   review: null,
@@ -398,7 +464,7 @@ function withClicks(lane: LaneView, pending: ReadonlyMap<number, Pending>): Item
   });
   for (const p of pending.values())
     if (p.kind === "queueing" && !entryOf(lane, p.item.number))
-      entries.push({ ...p.item, state: "waiting", detail: null });
+      entries.push({ ...p.item, state: "waiting", detail: null, ejected: false });
   // Stable: each keeps its place within its rank.
   return entries.sort((a, b) => rank(a) - rank(b));
 }
@@ -640,18 +706,61 @@ const stateBadge: Record<Item["state"], [string, string]> = {
   ],
 };
 
+const ejectedBadge = [
+  "Ejected",
+  "bg-red-50 text-red-700 ring-red-600/20 dark:bg-red-400/10 dark:text-red-300 dark:ring-red-400/30",
+];
+
 function State({ entry }: { entry: Item }) {
-  const [label, style] =
-    (entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
-    (entry.state === "held" && entry.hold?.reason === "review_required"
-      ? ["Needs a reviewer", stateBadge.held[1]]
-      : stateBadge[entry.state]);
+  const [label, style] = entry.ejected
+    ? ejectedBadge
+    : ((entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
+      (entry.state === "held" && entry.hold?.reason === "review_required"
+        ? ["Needs a reviewer", stateBadge.held[1]]
+        : stateBadge[entry.state]));
   return (
     <span
       className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}
     >
       {label}
     </span>
+  );
+}
+
+/** A band over a list of PRs. */
+function ListHead({ title, note, count }: { title: string; note: string; count: number }) {
+  return (
+    <p className="flex items-center justify-between border-b border-line bg-sunken px-4 py-2 text-xs text-muted">
+      <span>
+        <span className="font-medium text-fg-2">{title}</span> · {note}
+      </span>
+      <span className="tabular-nums">{count}</span>
+    </p>
+  );
+}
+
+/** A list of PRs below the lane, with its band. Nothing when it is empty. */
+function Rows({
+  title,
+  note,
+  items,
+  children,
+}: {
+  title: string;
+  note: string;
+  items: Item[];
+  children: (item: Item) => ReactNode;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div className="mt-6 border-t border-line">
+      <ListHead title={title} note={note} count={items.length} />
+      <ol>
+        {items.map((e) => (
+          <li key={e.number}>{children(e)}</li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
@@ -666,6 +775,7 @@ function Row({
   entry: e,
   place,
   selected,
+  track,
   pending,
   onClick,
 }: {
@@ -673,6 +783,8 @@ function Row({
   /** `null` for a held or open PR: it has no place until it is released or queued. */
   place: number | null;
   selected: boolean;
+  /** Shows where it is on its way to the trunk. */
+  track: boolean;
   pending?: PendingKind;
   onClick: () => void;
 }) {
@@ -706,6 +818,11 @@ function Row({
             <Diff entry={e} />
           </span>
         </span>
+        {track && (
+          <span className="mt-2 block">
+            <Track entry={e} />
+          </span>
+        )}
         {pending ? (
           <span className="mt-1 block text-muted">
             {pending === "closing"
@@ -723,6 +840,126 @@ function Row({
         )}
       </span>
     </button>
+  );
+}
+
+const stages: [NonNullable<EntryView["stage"]>, string][] = [
+  ["rebase", "Rebase"],
+  ["checks", "Checks"],
+  ["review", "Review"],
+  ["lane", "Merge lane"],
+];
+
+/** How a stage's bar shows: done, where the PR is, or yet to come. */
+function stageColor(e: Item, i: number) {
+  const at = stages.findIndex(([s]) => s === e.stage);
+  if (i < at) return "bg-ok";
+  if (i > at) return "bg-line-strong/50";
+  if (e.state === "waiting") return "bg-ok";
+  if (e.hold?.reason === "review_asks" || e.hold?.reason === "review_changes")
+    return "bg-amber-500";
+  return "bg-blue-500 motion-safe:animate-pulse";
+}
+
+/** Where a queued PR is on its way to the trunk. */
+function Track({ entry: e, labels }: { entry: Item; labels?: boolean }) {
+  return (
+    <span className="flex w-full gap-1">
+      {stages.map(([stage, name], i) => (
+        <span key={stage} className="min-w-0 flex-1">
+          <span className={`block h-1 rounded-full ${stageColor(e, i)}`} />
+          {labels && (
+            <span
+              className={`mt-1.5 block truncate text-xs ${
+                stage === e.stage ? "font-medium text-fg" : "text-faint"
+              }`}
+            >
+              {name}
+            </span>
+          )}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** The events of a PR's path to the trunk, as (what happened, whether it went wrong, whether its
+ * message says more). */
+const pathSteps: Record<string, [string, boolean, boolean]> = {
+  rebasing: ["Rebasing", false, false],
+  conflict: ["Conflict", true, true],
+  resolved: ["Conflict resolved", false, false],
+  unresolved: ["Could not resolve the conflict", true, false],
+  fixing: ["Fixing the checks", true, true],
+  fix: ["Fix committed", false, false],
+  unfixed: ["Could not fix it", true, false],
+  rechecking: ["Running the checks again", false, true],
+  published: ["Pushed", false, false],
+  "review-approved": ["Review passed", false, false],
+  "review-resolved": ["Review comments resolved", false, false],
+  "review-sent-back": ["Review sent findings back", true, true],
+  "review-asks": ["Review asks a human", true, true],
+  "review-fixing": ["Fixing the review's findings", false, true],
+  "review-fixed": ["Findings fixed", false, false],
+  "review-unfixed": ["Left the findings to the author", true, false],
+  "prep-left": ["Left to the merge lane", true, true],
+};
+
+const exitKinds = ["merged", "ejected", "dequeued", "cancelled", "pushed"];
+
+/** The path a queued PR took this time in the queue, loops and all. */
+function Path({
+  workspace,
+  lane,
+  entry: e,
+}: {
+  workspace: number;
+  lane: LaneView;
+  entry: EntryView;
+}) {
+  const events = useQuery({
+    queryKey: ["events", workspace, lane.repo, prOf(e)],
+    queryFn: () => fetchEvents(workspace, lane.repo, prOf(e)),
+    refetchInterval: 3000,
+  });
+  const newest = events.data ?? [];
+  // From the last time it left: work can start as it joins, ahead of that event.
+  const left = newest.findIndex((ev) => exitKinds.includes(ev.kind));
+  const steps = (left < 0 ? newest : newest.slice(0, left))
+    .filter((ev) => ev.kind in pathSteps)
+    .reverse();
+  if (steps.length === 0) return null;
+  return (
+    <>
+      <p className="mt-5 mb-2 text-xs font-medium text-muted">
+        Path so far
+        {e.fix_budget > 0 && ` · ${e.fixes} of ${e.fix_budget} fixes used`}
+      </p>
+      <ol>
+        {steps.map((ev, i) => {
+          const [what, wrong, noted] = pathSteps[ev.kind];
+          return (
+            <li key={`${ev.at} ${ev.kind}`} className="relative flex gap-3 pb-3 last:pb-0">
+              {i < steps.length - 1 && (
+                <span className="absolute top-3 bottom-0 left-[3.5px] w-px bg-line-strong" />
+              )}
+              <span
+                className={`mt-1.5 size-2 shrink-0 rounded-full ${wrong ? "bg-amber-500" : "bg-ok"}`}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="flex justify-between gap-3">
+                  <span>{what}</span>
+                  <span className="shrink-0 text-xs text-faint">{timeAgo(ev.at)}</span>
+                </span>
+                {noted && ev.message && (
+                  <span className="block text-xs text-muted">{ev.message}</span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </>
   );
 }
 
@@ -776,6 +1013,11 @@ export function QueueGate({
         {e.fork && <span className="text-xs text-muted">From a fork</span>}
         {e.layers.length > 0 && <span className="text-xs text-muted">{refsOf(e)}</span>}
       </p>
+      {e.stage && (
+        <div className="mt-4">
+          <Track entry={e} labels />
+        </div>
+      )}
       {e.state === "held" && !reviewBadge(e) && (
         <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200">
           <p className="font-medium">Held</p>
@@ -783,6 +1025,7 @@ export function QueueGate({
         </div>
       )}
       {e.review && <Gate workspace={workspace} repo={lane.repo} entry={e} onAnswer={onReview} />}
+      <Path workspace={workspace} lane={lane} entry={e} />
     </div>
   );
 }

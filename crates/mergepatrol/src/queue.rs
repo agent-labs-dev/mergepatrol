@@ -15,12 +15,12 @@ use mergepatrol_billing::Billing;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
     EjectReason, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber,
-    PrSummary, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings, ReviewStatus, SpendTask,
-    Transition,
+    PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
+    ReviewStatus, SpendTask, Transition,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
-    ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
+    ApiAccess, BUNDLE_FILE, JobEvent, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
 };
 use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
 use mergepatrol_git::{Git, cache_path};
@@ -38,7 +38,9 @@ use crate::cached::{Cached, Reader};
 use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
+use crate::job::{GAVE_UP, LEFT_CONFLICT};
 use crate::publish::{Publish, create_commits, publish};
+use crate::review::still_fixable;
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
@@ -57,7 +59,7 @@ const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 /// that adds or removes it is quicker.
 const DISCOVER_EVERY: Duration = Duration::from_secs(5 * 60);
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const RESOLVER_MAX_TURNS: u32 = 50;
+const RESOLVER_MAX_TURNS: u32 = 100;
 const MERGE_RETRIES: u32 = 15;
 const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// How long a PR's job may keep failing on errors outside it, such as a GitHub outage, before
@@ -99,6 +101,9 @@ pub struct Ctx {
     pub billing: Option<Arc<Billing>>,
     /// Wakes the review worker: a tick started a review.
     pub reviews: Notify,
+    /// Each repo's git cache, which the lane and the agent's jobs off it share.
+    pub caches: Caches,
+    pub prep: prep::Prep,
 }
 
 /// Fork PRs waiting for their pin: the `labeled` webhook, or for their pull ref to show it.
@@ -504,6 +509,12 @@ async fn reconcile(ctx: &Arc<Ctx>, running: &mut Running, alive: &Alive) -> Resu
 const TICK_GAP: Duration = Duration::from_secs(10);
 
 async fn run_repo(ctx: Arc<Ctx>, gh: Installation, repo: RepoName) {
+    // Stops with the queue: dropped when it is, which aborts this task.
+    let _prep = Spawned(tokio::spawn(prep::drain(
+        ctx.clone(),
+        gh.clone(),
+        repo.clone(),
+    )));
     let sandbox = JobSandbox { ctx: &ctx, gh: &gh };
     let cached = Cached {
         gh: &gh,
@@ -760,6 +771,20 @@ fn no_queue(base: &str, default_branch: &str, settings: &RepoSettings) -> Hold {
     }
 }
 
+/// One lock per repo's git cache.
+#[derive(Default)]
+pub struct Caches(std::sync::Mutex<HashMap<RepoName, Arc<tokio::sync::Mutex<()>>>>);
+
+impl Caches {
+    async fn lock(&self, repo: &RepoName) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.0.lock().unwrap();
+            locks.entry(repo.clone()).or_default().clone()
+        };
+        lock.lock_owned().await
+    }
+}
+
 /// Why a unit waits for the agent's review, the queue's first gate: each PR's review of its
 /// head, which a tick starts, then its review threads. `heads` are each layer's, bottom to top,
 /// as (PR, head, unresolved review threads).
@@ -844,6 +869,20 @@ async fn carry_reviews(ctx: &Ctx, key: &LaneKey, moved: &[(PrNumber, &str, &str)
             .await?;
     }
     Ok(())
+}
+
+/// The queue's agent changed PR `number` from `before` to `after`: an approval holds only once
+/// the agent reviewed that change.
+async fn review_change(
+    ctx: &Ctx,
+    key: &LaneKey,
+    number: PrNumber,
+    before: &str,
+    after: &str,
+) -> Result<()> {
+    ctx.store
+        .review_queue_change(key.installation_id, &key.repo, number, before, after)
+        .await
 }
 
 /// Syncs the lane of `trunk` with GitHub, and runs its next job, if it has one.
@@ -1075,6 +1114,12 @@ async fn sync_lane(
             Some(no_queue(&unit.base, &read.snap.default_branch, settings))
         } else if let Some(draft) = unit.hold_reason().filter(|h| *h.innermost() == Hold::Draft) {
             Some(draft)
+        } else if let Some(reason) = match lane.is_active(unit.number) {
+            // The lane's own job has it: a restart cut it short, or it runs in a batch.
+            true => None,
+            false => prep::hold(ctx, gh, key, snap, settings, unit).await?,
+        } {
+            Some(reason)
         } else if let Some(reason) = {
             let heads: Vec<(PrNumber, &str, u32)> = unit
                 .layers
@@ -1106,7 +1151,14 @@ async fn sync_lane(
             number: unit.number,
             priority: unit.layers.iter().any(|pr| pr.has_label(&labels.priority)),
             hold,
-            summary: unit.layers[0].summary(),
+            summary: PrSummary {
+                fixes: unit.layers.iter().map(|pr| pr.fix_commits).sum(),
+                fix_budget: match unit.fork() {
+                    true => 0,
+                    false => settings.fix_ci.allowed(),
+                },
+                ..unit.layers[0].summary()
+            },
             layers: if unit.stacked { unit.prs() } else { Vec::new() },
             pin,
         });
@@ -1153,6 +1205,8 @@ async fn sync_lane(
                     {
                         None
                     }
+                    // Getting ready shows on the dashboard, and in the commits it pushes.
+                    _ if reason.of_prep() => None,
                     _ => Some(on_hold(&reason)),
                 };
                 (number, "held", reason.to_string(), comment)
@@ -1948,7 +2002,7 @@ async fn test_and_merge(
         if let Some(why) = stale(&trunk_sha, &now_units, batch) {
             break Tested::Stale(why);
         }
-        let checks = checks_verdict(gh, key, head, opened).await?;
+        let checks = checks_verdict(gh, key, head, opened, &[]).await?;
         let silent = checks
             .unreported
             .into_iter()
@@ -2093,13 +2147,33 @@ async fn checks_verdict(
     key: &LaneKey,
     head: &str,
     published: Instant,
+    rechecking: &[String],
 ) -> Result<HeadChecks> {
-    let required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
+    let mut required = gh.branch_rules(&key.repo, &key.trunk).await?.checks;
+    let none_required = required.is_empty();
     let checks = gh.checks(&key.repo, head).await?;
+    // A recheck counts only if what failed ran again: CI may skip a commit that changes nothing.
+    if !rechecking.is_empty() {
+        if none_required {
+            required.extend(checks.by_name.keys().cloned());
+        }
+        for name in rechecking {
+            if !required.contains(name) {
+                required.push(name.clone());
+            }
+        }
+    }
+    // A check that skipped what failed proves nothing of it.
+    let skipped: Vec<String> = rechecking
+        .iter()
+        .filter(|name| checks.skipped.contains(*name))
+        .cloned()
+        .collect();
     let verdict = match checks.verdict(&required) {
-        (CheckState::Passed, _) if required.is_empty() && published.elapsed() < NO_CHECKS_GRACE => {
+        (CheckState::Passed, _) if none_required && published.elapsed() < NO_CHECKS_GRACE => {
             (CheckState::Pending, vec![])
         }
+        (CheckState::Passed, _) if !skipped.is_empty() => (CheckState::Failed, skipped),
         v => v,
     };
     let mut unreported = checks.unreported(&required);
@@ -2117,10 +2191,13 @@ async fn checks_verdict(
     })
 }
 
-/// The method to merge into the trunk with: the repo's default, unless the trunk's rulesets do
-/// not allow it.
+/// The method to merge into the trunk with: the repo's default, unless the repo's settings or the
+/// trunk's rulesets do not allow it.
 async fn merge_method(gh: &dyn GitHub, key: &LaneKey, snap: &RepoSnapshot) -> Result<String> {
-    let rules = gh.branch_rules(&key.repo, &key.trunk).await?;
+    let mut rules = gh.branch_rules(&key.repo, &key.trunk).await?;
+    rules
+        .merge_methods
+        .retain(|m| snap.merge_methods.contains(m));
     Ok(rules.merge_method(&snap.merge_method))
 }
 
@@ -2241,6 +2318,7 @@ async fn forget_refs(ctx: &Ctx, key: &LaneKey, number: PrNumber) {
     let patterns =
         ["pr", "result", "publish"].map(|kind| format!("refs/mergepatrol/{kind}/{number}"));
     let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+    let _cache = ctx.caches.lock(&key.repo).await;
     if let Err(e) = Git.delete_refs(&cache, &patterns).await {
         tracing::warn!(repo = %key.repo, pr = number, error = %format!("{e:#}"), "could not delete the PR's refs");
     }
@@ -2285,7 +2363,14 @@ async fn run_job(
         true => 0,
         false => settings.fix_ci.allowed(),
     };
+    // A conflict in the lane would hold up every PR behind it, while the agent resolves it.
+    let agent = !ctx.prep.takes_conflicts(ctx, key, unit);
     let mut job = Job::start(unit.number, fix_attempts);
+    if fix_attempts > 0 {
+        for pr in &unit.layers {
+            job.fixes += gh.fixes_used(repo, pr.number).await?;
+        }
+    }
     let mut published_at = Instant::now();
     // Each layer's head as published, bottom to top, and the layer whose checks failed.
     let mut heads: Vec<String> = Vec::new();
@@ -2333,7 +2418,11 @@ async fn run_job(
                 record_all(ctx, key, &prs, "rebasing", &format!("onto {}", key.trunk)).await?;
                 let comment = format!("Rebasing onto `{}`.", key.trunk);
                 comment_all(gh, repo, &prs, &comment).await?;
-                let event = sandbox.rebase(key, snap, &now, settings).await?;
+                let event = sandbox.rebase(key, snap, &now, settings, agent).await?;
+                if event == Event::RebaseConflict {
+                    ctx.prep
+                        .conflicted(key, unit.number, &now.top().head_ref_oid);
+                }
                 published_at = Instant::now();
                 if let Event::Rebased { head, .. } = &event {
                     if now.fork() {
@@ -2367,7 +2456,12 @@ async fn run_job(
                     let mut verdict = (CheckState::Passed, Vec::new());
                     let mut silent = Vec::new();
                     for (i, head) in heads.iter().enumerate() {
-                        let checks = checks_verdict(gh, key, head, published_at).await?;
+                        let recheck = lane.recheck(unit.number);
+                        let again = recheck
+                            .as_ref()
+                            .filter(|(rechecked, _)| rechecked == head)
+                            .map_or(&[][..], |(_, names)| names.as_slice());
+                        let checks = checks_verdict(gh, key, head, published_at, again).await?;
                         silent.extend(checks.unreported.into_iter().map(|n| (head.clone(), n)));
                         match checks.verdict {
                             (CheckState::Failed, names) => {
@@ -2437,6 +2531,27 @@ async fn run_job(
                 }
                 event
             }
+            Phase::Rechecking { failed, .. } => {
+                let what = failed.join(", ");
+                record_all(ctx, key, &prs, "rechecking", &what).await?;
+                let comment = format!(
+                    "The agent found nothing to fix in the code for {what}. Running the checks again."
+                );
+                comment_all(gh, repo, &prs, &comment).await?;
+                let event = sandbox
+                    .recheck(key, snap, &now, failing, settings, &heads[failing])
+                    .await?;
+                published_at = Instant::now();
+                if let Event::Fixed { head } = &event {
+                    heads = now.branch_heads(gh, repo).await?;
+                    lane.set_recheck(unit.number, heads[failing].clone(), failed.clone());
+                    ctx.store.save_lane(key, lane).await?;
+                    record_all(ctx, key, &prs, "published", head).await?;
+                    let comment = format!("Pushed {head}. Waiting for checks.");
+                    comment_all(gh, repo, &prs, &comment).await?;
+                }
+                event
+            }
             Phase::Merging { head } => {
                 // An author's push during the job made heads the review never saw: what
                 // merges is what was reviewed, or what the queue made of it.
@@ -2488,6 +2603,7 @@ trait Sandbox: Send + Sync {
         snap: &RepoSnapshot,
         unit: &Unit,
         settings: &RepoSettings,
+        agent: bool,
     ) -> Result<Event>;
 
     /// Commits a fix for `failures` on top of `head`, the head of `unit.layers[layer]`, which
@@ -2504,6 +2620,18 @@ trait Sandbox: Send + Sync {
         head: &str,
         base: &str,
         failures: &[CheckFailure],
+    ) -> Result<Event>;
+
+    /// Runs the checks of layer `layer` again on a new commit of `head`'s files: `Event::Fixed`
+    /// with the new head of the top layer.
+    async fn recheck(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        head: &str,
     ) -> Result<Event>;
 }
 
@@ -2527,6 +2655,41 @@ impl JobSandbox<'_> {
         event
     }
 
+    /// The layers above `layer` onto what `event` published on it, if it did.
+    async fn restack(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        event: Event,
+    ) -> Result<Event> {
+        if !matches!(event, Event::Fixed { .. }) || layer + 1 == unit.layers.len() {
+            return Ok(event);
+        }
+        // The layers above the fix go onto it.
+        Ok(
+            match rebase_and_publish(
+                self.ctx,
+                self.gh,
+                key,
+                snap,
+                unit,
+                layer + 1,
+                settings,
+                true,
+                false,
+            )
+            .await?
+            {
+                Event::Rebased { head, .. } => Event::Fixed { head },
+                Event::RebaseFailed(r) => Event::FixFailed(format!("restacking after it: {r}")),
+                event => event,
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn fix_and_restack(
         &self,
@@ -2540,22 +2703,22 @@ impl JobSandbox<'_> {
         failures: &[CheckFailure],
     ) -> Result<Event> {
         let fixed = fix_and_publish(
-            self.ctx, self.gh, key, snap, unit, layer, settings, head, base, failures,
+            self.ctx,
+            self.gh,
+            key,
+            snap,
+            unit,
+            layer,
+            settings,
+            head,
+            base,
+            Task::FixChecks {
+                failures: failures.to_vec(),
+            },
+            false,
         )
         .await?;
-        if !matches!(fixed, Event::Fixed { .. }) || layer + 1 == unit.layers.len() {
-            return Ok(fixed);
-        }
-        // The layers above the fix go onto it.
-        Ok(
-            match rebase_and_publish(self.ctx, self.gh, key, snap, unit, layer + 1, settings)
-                .await?
-            {
-                Event::Rebased { head, .. } => Event::Fixed { head },
-                Event::RebaseFailed(r) => Event::FixFailed(format!("restacking after it: {r}")),
-                event => event,
-            },
-        )
+        self.restack(key, snap, unit, layer, settings, fixed).await
     }
 }
 
@@ -2567,8 +2730,12 @@ impl Sandbox for JobSandbox<'_> {
         snap: &RepoSnapshot,
         unit: &Unit,
         settings: &RepoSettings,
+        agent: bool,
     ) -> Result<Event> {
-        let event = rebase_and_publish(self.ctx, self.gh, key, snap, unit, 0, settings).await;
+        let event = rebase_and_publish(
+            self.ctx, self.gh, key, snap, unit, 0, settings, agent, false,
+        )
+        .await;
         self.published(key, event).await
     }
 
@@ -2586,6 +2753,24 @@ impl Sandbox for JobSandbox<'_> {
         let event = self
             .fix_and_restack(key, snap, unit, layer, settings, head, base, failures)
             .await;
+        self.published(key, event).await
+    }
+
+    async fn recheck(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        head: &str,
+    ) -> Result<Event> {
+        let event = async {
+            let pushed = push_recheck(self.ctx, self.gh, key, snap, &unit.layers[layer], head);
+            let pushed = pushed.await?;
+            self.restack(key, snap, unit, layer, settings, pushed).await
+        }
+        .await;
         self.published(key, event).await
     }
 }
@@ -2683,6 +2868,7 @@ pub(crate) async fn job_spec(
         pr_title: pr.title.clone(),
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
+        leave_conflicts: false,
         resolver: ResolverSpec {
             provider,
             model: model.to_owned(),
@@ -2703,7 +2889,47 @@ pub(crate) async fn job_spec(
     Ok((spec, granted))
 }
 
-/// Runs a job in the sandbox, with its output in `out`. `Err` says why it failed.
+/// A rebase moved the layers `moved` from `heads` to `rebased`: an approval stays with a clean
+/// one, and a layer whose conflict the agent `resolved` waits for a review of that.
+async fn settle_reviews(
+    ctx: &Ctx,
+    key: &LaneKey,
+    unit: &Unit,
+    heads: &[String],
+    rebased: &[String],
+    moved: &[usize],
+    resolved: &[usize],
+) -> Result<()> {
+    let carried: Vec<(PrNumber, &str, &str)> = clean_moves(moved, resolved)
+        .into_iter()
+        .map(|i| {
+            (
+                unit.layers[i].number,
+                heads[i].as_str(),
+                rebased[i].as_str(),
+            )
+        })
+        .collect();
+    carry_reviews(ctx, key, &carried).await?;
+    for &i in resolved {
+        review_change(ctx, key, unit.layers[i].number, &heads[i], &rebased[i]).await?;
+    }
+    Ok(())
+}
+
+/// Whether a rebase job's agent resolved a conflict: what it wrote needs a review.
+fn agent_resolved(events: &[JobEvent]) -> bool {
+    let resolved = SpendTask::Rebase.event_kind(true);
+    events.iter().any(|e| e.kind == resolved)
+}
+
+/// The layers `moved` that keep their approval, of a rebase that `resolved` conflicts in others.
+fn clean_moves(moved: &[usize], resolved: &[usize]) -> Vec<usize> {
+    let clean = moved.iter().filter(|i| !resolved.contains(i));
+    clean.copied().collect()
+}
+
+/// Runs a job in the sandbox, with its output in `out`: what it told of. `Err` says why it failed.
 async fn run_sandboxed(
     ctx: &Ctx,
     key: &LaneKey,
@@ -2712,7 +2938,7 @@ async fn run_sandboxed(
     spec: &JobSpec,
     out: &Path,
     private: bool,
-) -> Result<()> {
+) -> Result<Vec<JobEvent>> {
     let _ = tokio::fs::remove_dir_all(out).await;
     record(ctx, key, number, "job", job_id).await?;
     if let Some(b) = &ctx.billing {
@@ -2730,7 +2956,7 @@ async fn run_sandboxed(
     if let JobOutcome::Failed { reason } = result.outcome {
         bail!("{reason}");
     }
-    Ok(())
+    Ok(result.events)
 }
 
 /// Publishes the commits `base..local_head` to the PR branch, if it is still at `head`.
@@ -2781,15 +3007,20 @@ async fn fix_and_publish(
     settings: &RepoSettings,
     head: &str,
     base: &str,
-    failures: &[CheckFailure],
+    task: Task,
+    beside_lane: bool,
 ) -> Result<Event> {
     let repo = &key.repo;
     let git = Git;
     let pr = &unit.layers[layer];
-    let (cache, fetched, _) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
-    if fetched[layer] != head {
-        return Ok(Event::HeadMoved);
-    }
+    let cache = {
+        let _cache = ctx.caches.lock(repo).await;
+        let (cache, fetched, _) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+        if fetched[layer] != head {
+            return Ok(Event::HeadMoved);
+        }
+        cache
+    };
     let job_id = format!(
         "{}-{}-{}-fix-{}",
         repo.owner,
@@ -2798,9 +3029,6 @@ async fn fix_and_publish(
         &head[..8]
     );
     let out = ctx.config.data_dir.join("jobs").join(&job_id);
-    let task = Task::FixChecks {
-        failures: failures.to_vec(),
-    };
     let below = (layer > 0).then(|| Below {
         branch: &unit.layers[layer - 1].head_ref_name,
         upstream: base,
@@ -2808,19 +3036,96 @@ async fn fix_and_publish(
     let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        let _cache = ctx.caches.lock(repo).await;
+        if beside_lane && !still_queued(gh, key, settings, pr, head).await? {
+            return anyhow::Ok(Err(Event::HeadMoved));
+        }
         let local_head = check_fix_output(&git, &cache, &out, pr.number, head).await?;
         let published =
             publish_to_pr(gh, &git, &cache, key, snap, pr, head, head, &local_head).await?;
         if let Ok(sha) = &published {
-            carry_reviews(ctx, key, &[(pr.number, head, sha)]).await?;
+            review_change(ctx, key, pr.number, head, sha).await?;
         }
         anyhow::Ok(published)
     };
     Ok(match fixed.await {
         Ok(Ok(sha)) => Event::Fixed { head: sha },
         Ok(Err(event)) => event,
-        Err(e) => Event::FixFailed(format!("{e:#}")),
+        Err(e) => {
+            let reason = format!("{e:#}");
+            match reason.starts_with(GAVE_UP) {
+                true => Event::FixGaveUp(reason),
+                false => Event::FixFailed(reason),
+            }
+        }
     })
+}
+
+/// Whether PR `pr` is as a job beside the lane found it, and still queued: the lane, which
+/// would see it leave, is not watching.
+async fn still_queued(
+    gh: &Installation,
+    key: &LaneKey,
+    settings: &RepoSettings,
+    pr: &PullRequest,
+    head: &str,
+) -> Result<bool> {
+    let now = GitHub::pull_request(gh, &key.repo, pr.number).await?;
+    Ok(still_fixable(&now, &settings.label, &key.trunk, head))
+}
+
+/// Has the agent fix what the review of PR `pr`, at `head`, sent back to its author, and pushes
+/// the fix, for a new review to check.
+pub(crate) async fn fix_findings(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+    head: &str,
+    findings: Vec<mergepatrol_core::Finding>,
+) -> Result<Event> {
+    let snap = GitHub::snapshot(gh, &key.repo, &settings.labels()).await?;
+    let base = gh.branch_sha(&key.repo, &key.trunk).await?;
+    let unit = Unit {
+        number: pr.number,
+        base: key.trunk.clone(),
+        layers: vec![pr.clone()],
+        stacked: false,
+    };
+    let task = Task::FixReview { findings };
+    let event = fix_and_publish(
+        ctx, gh, key, &snap, &unit, 0, settings, head, &base, task, true,
+    )
+    .await;
+    JobSandbox { ctx, gh }.published(key, event).await
+}
+
+/// Pushes an empty commit on `head`, on which CI runs anew and reads the PR as it is now. A
+/// re-run through the Actions API would read the PR as it was, and need another permission.
+async fn push_recheck(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    pr: &PullRequest,
+    head: &str,
+) -> Result<Event> {
+    let repo = &key.repo;
+    let tree = gh.commit_tree(repo, head).await?;
+    let sha = gh.create_commit(repo, RECHECK_MESSAGE, &tree, head).await?;
+    if let Err(e) = gh
+        .force_update_branch(&snap.id, &pr.head_ref_name, head, &sha)
+        .await
+    {
+        // `updateRefs` refuses when the branch moved: the author pushed.
+        if gh.branch_sha(repo, &pr.head_ref_name).await? != head {
+            return Ok(Event::HeadMoved);
+        }
+        bail!("publishing failed: {e:#}");
+    }
+    carry_reviews(ctx, key, &[(pr.number, head, &sha)]).await?;
+    Ok(Event::Fixed { head: sha })
 }
 
 /// Rebases the unit's layers from `from` up and publishes them: the bottom onto the trunk, each
@@ -2830,7 +3135,8 @@ async fn fix_and_publish(
 /// The layers' branches move together, in one atomic update at the end. Until then a rebased
 /// layer is on a branch of its own, for the next layer's job to fetch. So a restart, or an
 /// author's push, never leaves a layer rebased under one that is not: each layer's own commits
-/// still start at the layer below, as it is on GitHub.
+/// still start at the layer below, as it is on GitHub. Without `agent`, a conflict stops it.
+#[allow(clippy::too_many_arguments)]
 async fn rebase_and_publish(
     ctx: &Ctx,
     gh: &Installation,
@@ -2839,15 +3145,21 @@ async fn rebase_and_publish(
     unit: &Unit,
     from: usize,
     settings: &RepoSettings,
+    agent: bool,
+    beside_lane: bool,
 ) -> Result<Event> {
     let git = Git;
-    let (cache, heads, trunk) = fetch_layers(ctx, gh, &git, key, &unit.layers).await?;
+    let (cache, heads, trunk) = {
+        let _cache = ctx.caches.lock(&key.repo).await;
+        fetch_layers(ctx, gh, &git, key, &unit.layers).await?
+    };
     // A fork's author may have pushed since the queue checked the head against its pin.
     if unit.fork() && heads[0] != unit.top().head_ref_oid {
         return Ok(Event::HeadMoved);
     }
     let mut rebased: Vec<String> = heads[..from].to_vec();
     let mut moved: Vec<usize> = Vec::new();
+    let mut resolved: Vec<usize> = Vec::new();
     let result = rebase_layers(
         ctx,
         gh,
@@ -2857,10 +3169,12 @@ async fn rebase_and_publish(
         snap,
         unit,
         settings,
+        agent,
         &heads,
         &trunk,
         &mut rebased,
         &mut moved,
+        &mut resolved,
     )
     .await;
     for i in &moved {
@@ -2868,6 +3182,9 @@ async fn rebase_and_publish(
             .await?;
     }
     if let Err(e) = result {
+        if !agent && format!("{e:#}").starts_with(LEFT_CONFLICT) {
+            return Ok(Event::RebaseConflict);
+        }
         let failed = rebased.len();
         return Ok(Event::RebaseFailed(match (unit.stacked, unit.fork()) {
             (true, _) => format!("#{}: {e:#}", unit.layers[failed].number),
@@ -2886,6 +3203,7 @@ async fn rebase_and_publish(
                 base: trunk,
             });
         }
+        let _cache = ctx.caches.lock(&key.repo).await;
         let event =
             publish_to_fork(gh, &git, &cache, key, pr, &heads[0], &rebased[0], trunk).await?;
         if matches!(event, Event::Rebased { .. }) {
@@ -2894,6 +3212,9 @@ async fn rebase_and_publish(
         return Ok(event);
     }
 
+    if beside_lane && !still_queued(gh, key, settings, unit.top(), &heads[0]).await? {
+        return Ok(Event::HeadMoved);
+    }
     // Every layer, so that the update also fails if an author pushed to one left as it is: a
     // layer's update to the head it has is its lease.
     let moves: Vec<(&str, &str, &str)> = unit
@@ -2911,17 +3232,7 @@ async fn rebase_and_publish(
         }
         bail!("publishing failed: {e:#}");
     }
-    let carried: Vec<(PrNumber, &str, &str)> = moved
-        .iter()
-        .map(|&i| {
-            (
-                unit.layers[i].number,
-                heads[i].as_str(),
-                rebased[i].as_str(),
-            )
-        })
-        .collect();
-    carry_reviews(ctx, key, &carried).await?;
+    settle_reviews(ctx, key, unit, &heads, &rebased, &moved, &resolved).await?;
     Ok(Event::Rebased {
         head: rebased.pop().expect("a unit has a PR"),
         base: trunk,
@@ -2990,7 +3301,8 @@ fn restack_branch(pr: &PullRequest) -> String {
 }
 
 /// Rebases each layer from `rebased.len()` up, and creates its commits on GitHub: pushes its new
-/// head to `rebased`, and its index to `moved` when it changed.
+/// head to `rebased`, its index to `moved` when it changed, and to `resolved` when the agent
+/// resolved a conflict in it.
 #[allow(clippy::too_many_arguments)]
 async fn rebase_layers(
     ctx: &Ctx,
@@ -3001,10 +3313,12 @@ async fn rebase_layers(
     snap: &RepoSnapshot,
     unit: &Unit,
     settings: &RepoSettings,
+    agent: bool,
     heads: &[String],
     trunk: &str,
     rebased: &mut Vec<String>,
     moved: &mut Vec<usize>,
+    resolved: &mut Vec<usize>,
 ) -> Result<()> {
     let repo = &key.repo;
     for i in rebased.len()..unit.layers.len() {
@@ -3032,9 +3346,14 @@ async fn rebase_layers(
         let upstream = below.as_ref().map(|b| b.upstream.to_owned());
         let job_id = format!("{}-{}-{}-{}", repo.owner, repo.name, pr.number, &head[..8]);
         let out = ctx.config.data_dir.join("jobs").join(&job_id);
-        let (spec, _granted) =
+        let (mut spec, _granted) =
             job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
-        run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        spec.leave_conflicts = !agent;
+        let events = run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        if agent_resolved(&events) {
+            resolved.push(i);
+        }
+        let _cache = ctx.caches.lock(repo).await;
         let local_head = check_job_output(
             git,
             cache,
@@ -3155,6 +3474,8 @@ async fn import_job_output(
     let _ = tokio::fs::remove_file(&bundle).await;
     Ok(local_head)
 }
+
+mod prep;
 
 #[cfg(test)]
 mod loop_tests;
@@ -3315,6 +3636,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("may not: .github/ci.yml"), "{err}");
+    }
+
+    #[test]
+    fn a_conflict_the_agent_resolved_loses_the_approval_and_a_clean_rebase_keeps_it() {
+        let event = |kind: &str| JobEvent {
+            kind: kind.into(),
+            message: String::new(),
+        };
+        assert!(agent_resolved(&[event("conflict"), event("resolved")]));
+        assert!(!agent_resolved(&[event("rebased")]));
+        assert!(!agent_resolved(&[event("conflict"), event("unresolved")]));
+        assert_eq!(clean_moves(&[0, 1, 2], &[1]), [0, 2]);
+        assert_eq!(clean_moves(&[0], &[]), [0]);
     }
 
     #[tokio::test]

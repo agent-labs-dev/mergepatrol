@@ -396,6 +396,22 @@ impl Git {
         Ok(commits)
     }
 
+    /// `base..head`'s commits with a line that starts with one of `trailers`, as "sha subject".
+    pub async fn commits_with(
+        &self,
+        wt: &Path,
+        base: &str,
+        head: &str,
+        trailers: &[&str],
+    ) -> Result<Vec<String>> {
+        let range = format!("{base}..{head}");
+        let greps: Vec<String> = trailers.iter().map(|t| format!("--grep=^{t}")).collect();
+        let mut args = vec!["log", "--format=%h %s"];
+        args.extend(greps.iter().map(String::as_str));
+        args.push(&range);
+        Ok(lines(&self.run(wt, &args).await?))
+    }
+
     pub async fn commit_message(&self, wt: &Path, rev: &str) -> Result<String> {
         Ok(self
             .run(wt, &["log", "-1", "--format=%B", rev])

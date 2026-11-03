@@ -30,6 +30,12 @@ pub enum Hold {
     NoSubscription,
     /// The public repos of the account queued too much in the last hour.
     FairUseLimit,
+    /// Getting ready off the lane: the agent resolves its conflict with the trunk.
+    PrepRebasing,
+    /// Getting ready off the lane: its checks run.
+    PrepChecks,
+    /// Getting ready off the lane: the agent fixes its failed checks.
+    PrepFixing,
     /// The agent is reviewing it, the queue's first gate.
     Reviewing,
     /// The agent's review asks a human about what it was not sure of.
@@ -65,7 +71,10 @@ impl Hold {
             | Hold::ReviewAsks
             | Hold::ReviewChanges
             | Hold::UnresolvedThreads { .. } => true,
-            Hold::Draft
+            Hold::PrepRebasing
+            | Hold::PrepChecks
+            | Hold::PrepFixing
+            | Hold::Draft
             | Hold::ReviewRequired
             | Hold::ChangesRequested
             | Hold::WorkflowApproval
@@ -75,6 +84,14 @@ impl Hold {
             | Hold::FairUseLimit => false,
             Hold::Layer { .. } => unreachable!("innermost is no layer"),
         }
+    }
+
+    /// Whether it is getting ready off the lane, which needs nobody.
+    pub fn of_prep(&self) -> bool {
+        matches!(
+            self.innermost(),
+            Hold::PrepRebasing | Hold::PrepChecks | Hold::PrepFixing
+        )
     }
 
     /// What the agent's review holds a unit for: the first of its layers, bottom to top, whose
@@ -130,6 +147,9 @@ impl fmt::Display for Hold {
             }
             Hold::NoSubscription => f.write_str("private repos need a MergeLoop subscription"),
             Hold::FairUseLimit => f.write_str("over the fair-use limit of public repos"),
+            Hold::PrepRebasing => f.write_str("the agent is resolving its conflict"),
+            Hold::PrepChecks => f.write_str("its checks are running"),
+            Hold::PrepFixing => f.write_str("the agent is fixing its checks"),
             Hold::Reviewing => f.write_str("the agent is reviewing it"),
             Hold::ReviewAsks => {
                 f.write_str("the agent's review asks a human about what it was not sure of")

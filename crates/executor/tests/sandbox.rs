@@ -47,6 +47,7 @@ async fn a_rebase_runs_in_a_gke_sandbox() {
         pr_title: "fork: only.txt".into(),
         pr_body: String::new(),
         verify: Vec::new(),
+        leave_conflicts: false,
         resolver: ResolverSpec {
             provider: Default::default(),
             model: "claude-opus-5-5".into(),

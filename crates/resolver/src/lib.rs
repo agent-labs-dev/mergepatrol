@@ -37,6 +37,8 @@ pub struct ResolveRequest<'a> {
 pub struct FixRequest<'a> {
     pub workdir: &'a Path,
     pub failures: &'a [CheckFailure],
+    /// What the agent's review sent back, to fix instead of `failures`.
+    pub findings: &'a [Finding],
     pub pr_title: &'a str,
     pub pr_body: &'a str,
     pub trunk: &'a str,
@@ -56,6 +58,9 @@ pub struct ReviewRequest<'a> {
     /// What the agent sent back to the author on the last head, to check the fix of, with the
     /// author's replies.
     pub sent_back: &'a [SentBack],
+    /// What the queue's agent committed on a version already approved, as "sha subject". When
+    /// any, only these need reading.
+    pub queue_commits: &'a [String],
     pub transcript: &'a Path,
 }
 
@@ -181,7 +186,64 @@ If you cannot resolve the conflict with confidence, stop and reply with one line
     )
 }
 
+/// Asks for what a review sent back: its findings, not a failure to read.
+fn fix_review_prompt(req: &FixRequest<'_>) -> String {
+    let findings = req
+        .findings
+        .iter()
+        .map(|f| {
+            let place = match (&f.file, f.line) {
+                (Some(file), Some(line)) => format!(" ({file}:{line})"),
+                (Some(file), None) => format!(" ({file})"),
+                _ => String::new(),
+            };
+            format!(
+                "## {}{place}\n\n{}\n\nThe change asked for: {}",
+                f.title,
+                f.finding.trim(),
+                f.suggestion.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let verify = verify_section(req.verify_commands, "fix");
+    format!(
+        "You are fixing what a code review found in a pull request, for a merge queue.
+
+The pull request sits on top of `{trunk}`.
+
+Pull request: {title}
+
+{body}
+
+What the review found:
+
+{findings}
+
+Change the code so that each finding no longer applies. Use `git log`, `git show` and \
+`git diff {trunk}...HEAD` to see what the pull request changes.
+
+Rules:
+- Make the smallest change that settles each finding, in the spirit of the pull request.
+- Do not delete, skip or weaken tests or checks.
+- Do not edit `.github/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
+- Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
+- Do not refactor or improve unrelated code.
+
+{verify}
+
+Give up rather than guess when a finding is wrong, or settling it changes what the pull request \
+means. Then stop and reply with one line: `{GIVE_UP} <the reason>`.",
+        trunk = req.trunk,
+        title = req.pr_title,
+        body = req.pr_body,
+    )
+}
+
 pub(crate) fn fix_prompt(req: &FixRequest<'_>) -> String {
+    if !req.findings.is_empty() {
+        return fix_review_prompt(req);
+    }
     let failures = req
         .failures
         .iter()
@@ -318,13 +380,24 @@ title and say why the reply does not hold. One that was neither fixed nor answer
 with the same title, so the author can tell it is the same one, and say what is still missing.\n{items}\n"
         )
     };
+    let queue_commits = if req.queue_commits.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
+changed it, to fix failed checks or resolve a conflict in a rebase. Review only these commits, \
+with `git show`, and read the rest of the PR only to judge them. Report nothing about the rest of \
+the PR unless one of these breaks it.\n{}\n",
+            req.queue_commits.join("\n")
+        )
+    };
     format!(
         "You are reviewing a pull request before a merge queue merges it into `{trunk}`.
 
 Pull request: {title}
 
 {body}
-{answered}{sent_back}
+{answered}{sent_back}{queue_commits}
 Its changes are `git diff {base}..HEAD`. Read them, and read the code around them that you need \
 to judge them: callers, tests, config, deploy files, earlier migrations, docs. Use `git log`, \
 `git show` and `git diff`, and read files. Change nothing.

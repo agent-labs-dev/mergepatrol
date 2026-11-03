@@ -186,6 +186,8 @@ async fn orchestrator() -> Result<()> {
         unpinned: Default::default(),
         billing: billing.clone(),
         reviews: Default::default(),
+        caches: Default::default(),
+        prep: Default::default(),
         config,
     });
 

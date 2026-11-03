@@ -6,8 +6,21 @@ import type { PersonView } from "./PersonView";
 import type { ReviewBriefView } from "./ReviewBriefView";
 import type { ReviewDecisionView } from "./ReviewDecisionView";
 import type { ReviewView } from "./ReviewView";
+import type { StageView } from "./StageView";
 
 export type EntryView = { number: number, priority: boolean, state: EntryStateView, 
+/**
+ * Where it is on its way to the trunk. Null while on hold for what is no stage, as a draft.
+ */
+stage: StageView | null, 
+/**
+ * The fixes it has used, for its checks and its review.
+ */
+fixes: number, 
+/**
+ * The fixes it gets.
+ */
+fix_budget: number, 
 /**
  * Why the PR is held.
  */

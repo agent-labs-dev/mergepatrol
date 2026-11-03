@@ -310,6 +310,7 @@ mod tests {
             pr_title: String::new(),
             pr_body: String::new(),
             verify: Vec::new(),
+            leave_conflicts: false,
             resolver: ResolverSpec {
                 provider: Default::default(),
                 model: String::new(),

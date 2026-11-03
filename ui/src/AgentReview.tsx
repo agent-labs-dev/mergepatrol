@@ -50,6 +50,12 @@ type Gated = Pick<EntryView, "state" | "hold" | "review">;
 export function reviewBadge(e: Gated): [string, string] | null {
   if (e.state !== "held") return null;
   switch (e.hold?.reason) {
+    case "prep_rebasing":
+      return ["Rebasing", reviewTones.reviewing];
+    case "prep_checks":
+      return ["Checks", reviewTones.reviewing];
+    case "prep_fixing":
+      return ["Fixing", reviewTones.reviewing];
     case "reviewing":
       return ["Reviewing", reviewTones.reviewing];
     case "review_asks":

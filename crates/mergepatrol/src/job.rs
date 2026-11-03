@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, SentBack, Spend, SpendTask,
+    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, LineKind, RESOLVED_BY, SentBack, Spend,
+    SpendTask,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -147,18 +148,51 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     let (exclude, done) = match &spec.task {
         Task::Rebase => {
             rebase(spec, &git, resolver, dir, out, events).await?;
+            if git.rev_parse(dir, "HEAD").await? == spec.trunk_sha {
+                bail!(
+                    "nothing is left to merge: its changes are already on {}",
+                    spec.trunk
+                );
+            }
             (&spec.trunk_sha, "rebased")
         }
         Task::FixChecks { failures } => {
-            fix(spec, &git, resolver, failures, dir, out, events).await?;
+            let names: Vec<&str> = failures.iter().map(|f| f.name.as_str()).collect();
+            let what = names.join(", ");
+            fix(
+                spec,
+                &git,
+                resolver,
+                (failures, &[], &what),
+                dir,
+                out,
+                events,
+            )
+            .await?;
+            (&spec.head_sha, "fixed")
+        }
+        Task::FixReview { findings } => {
+            let what = "the review's findings";
+            fix(
+                spec,
+                &git,
+                resolver,
+                (&[], findings, what),
+                dir,
+                out,
+                events,
+            )
+            .await?;
             (&spec.head_sha, "fixed")
         }
         // These return what the agent said, not code.
         Task::Review {
             answered,
             sent_back,
+            since,
         } => {
-            return review(spec, &git, resolver, answered, sent_back, dir, out, events).await;
+            let earlier = (answered.as_slice(), sent_back.as_slice(), since.as_deref());
+            return review(spec, &git, resolver, earlier, dir, out, events).await;
         }
         Task::Question {
             finding,
@@ -221,6 +255,9 @@ async fn rebase(
         .await?;
     while let RebaseStep::Conflict { commit, files } = step {
         event(events, "conflict", files.join(", "));
+        if spec.leave_conflicts {
+            bail!("{LEFT_CONFLICT} in {}", files.join(", "));
+        }
         if spec.resolver.api.is_none() {
             let files = files.join(", ");
             let credential = spec.resolver.provider.credential();
@@ -281,10 +318,7 @@ async fn rebase(
         }
         resolved_any = true;
         step = git
-            .continue_resolution(
-                dir,
-                &format!("Resolved-by: mergepatrol, {}", resolver.name()),
-            )
+            .continue_resolution(dir, &format!("{RESOLVED_BY}, {}", resolver.name()))
             .await?;
     }
 
@@ -294,18 +328,23 @@ async fn rebase(
     Ok(())
 }
 
+/// How a rebase's failure starts when it stopped at a conflict, as `leave_conflicts` asks.
+pub(crate) const LEFT_CONFLICT: &str = "it conflicts";
+
+/// How a fix's failure starts when the agent found nothing in the code to fix: the orchestrator
+/// reads it from the job's reason.
+pub(crate) const GAVE_UP: &str = "the agent gave up";
+
 /// Has the agent fix the failed checks, and commits its fix on top of the PR head.
 async fn fix(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    failures: &[CheckFailure],
+    (failures, findings, what): (&[CheckFailure], &[Finding], &str),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
-    let names: Vec<&str> = failures.iter().map(|f| f.name.as_str()).collect();
-    event(events, "fixing", names.join(", "));
     let transcript = out
         .join("transcripts")
         .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
@@ -313,6 +352,7 @@ async fn fix(
         .fix(FixRequest {
             workdir: dir,
             failures,
+            findings,
             pr_title: &spec.pr_title,
             pr_body: &spec.pr_body,
             trunk: &spec.trunk,
@@ -322,7 +362,7 @@ async fn fix(
         .await
         .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
     // A fix is done once it is committed: until then, any failure leaves it unfixed.
-    let fixed = commit_fix(spec, git, resolver, &run.outcome, &names, dir, events).await;
+    let fixed = commit_fix(spec, git, resolver, &run.outcome, what, dir, events).await;
     spent(
         events,
         &spec.resolver,
@@ -340,13 +380,13 @@ async fn commit_fix(
     git: &Git,
     resolver: &dyn Resolver,
     outcome: &Outcome,
-    names: &[&str],
+    what: &str,
     dir: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     match outcome {
         Outcome::Resolved => {}
-        Outcome::GaveUp(reason) => bail!("the agent gave up: {reason}"),
+        Outcome::GaveUp(reason) => bail!("{GAVE_UP}: {reason}"),
         Outcome::Failed(why) => bail!("the agent failed: {why}"),
     }
     if git.rev_parse(dir, "HEAD").await? != spec.head_sha {
@@ -358,11 +398,7 @@ async fn commit_fix(
     verify(spec, dir, events, "the fix").await?;
     git.commit_all(
         dir,
-        &format!(
-            "Fix {}\n\n{FIXED_BY}, {}",
-            names.join(", "),
-            resolver.name()
-        ),
+        &format!("Fix {what}\n\n{FIXED_BY}, {}", resolver.name()),
     )
     .await
 }
@@ -378,13 +414,23 @@ async fn review(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    answered: &[Answered],
-    sent_back: &[SentBack],
+    (answered, sent_back, since): (&[Answered], &[SentBack], Option<&str>),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
+    let queue_commits = match since {
+        Some(since) => {
+            // A rebase replays the PR, and leaves the head it went on from behind.
+            let on_it = git.is_ancestor(dir, since, &spec.head_sha).await;
+            let from = if on_it.unwrap_or(false) { since } else { &base };
+            let trailers = [FIXED_BY, RESOLVED_BY];
+            git.commits_with(dir, from, &spec.head_sha, &trailers)
+                .await?
+        }
+        None => Vec::new(),
+    };
     event(
         events,
         "reviewing",
@@ -402,6 +448,7 @@ async fn review(
             trunk: &spec.trunk,
             answered,
             sent_back,
+            queue_commits: &queue_commits,
             transcript: &transcript,
         })
         .await

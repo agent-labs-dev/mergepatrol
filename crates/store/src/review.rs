@@ -21,6 +21,11 @@ pub struct ReviewRecord {
     pub repo: RepoName,
     pub number: PrNumber,
     pub head_sha: String,
+    /// The approved head it goes on from: only what the queue's agent changed since needs
+    /// reading. `None` reads the whole PR.
+    pub since_head: Option<String>,
+    /// The queue's agent fixed what it sent back: it spent none of the author's rounds.
+    pub agent_fixed: bool,
     pub status: ReviewStatus,
     /// Why the agent could not review: a human reviews the whole PR.
     pub error: Option<String>,
@@ -119,6 +124,19 @@ pub trait ReviewStore: Send + Sync {
         before: &str,
         after: &str,
     ) -> Result<()>;
+    /// The queue's agent changed an approved PR from `before` to `after`, which waits for a
+    /// review of that change alone. It stays stale until `start_review`, as a tick does once the
+    /// PR's checks let it on. A review not yet approved passes on the approval it goes from.
+    async fn review_queue_change(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        before: &str,
+        after: &str,
+    ) -> Result<()>;
+    /// The queue's agent pushed a fix of what the review sent back.
+    async fn mark_agent_fixed(&self, id: i64) -> Result<()>;
     /// Who the review asks, changed.
     async fn set_asked(&self, id: i64, asked: &[String]) -> Result<()>;
     /// A human answered the review's asks. False if it no longer asks.
@@ -168,7 +186,7 @@ pub trait ReviewStore: Send + Sync {
 /// A review's columns, for `concat!`: sqlx takes only literal SQL.
 macro_rules! columns {
     () => {
-        r#"id, installation_id, repo, number, head_sha, status, error, attempts,
+        r#"id, installation_id, repo, number, head_sha, since_head, agent_fixed, status, error, attempts,
     summary, findings, asked, answers, answered_by, note, questions,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
     to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at"#
@@ -184,6 +202,8 @@ fn record(row: &PgRow) -> Result<ReviewRecord> {
         repo: RepoName::parse(&repo).with_context(|| format!("bad repo {repo:?}"))?,
         number: row.get::<i64, _>("number") as u64,
         head_sha: row.get("head_sha"),
+        since_head: row.get("since_head"),
+        agent_fixed: row.get("agent_fixed"),
         status: ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?,
         error: row.get("error"),
         attempts: row.get::<i32, _>("attempts") as u32,
@@ -395,6 +415,44 @@ impl ReviewStore for PgStore {
         .bind(pr as i64)
         .bind(before)
         .bind(after)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn review_queue_change(
+        &self,
+        installation_id: u64,
+        repo: &RepoName,
+        pr: PrNumber,
+        before: &str,
+        after: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_reviews
+                 (installation_id, repo, number, head_sha, status, since_head)
+             SELECT installation_id, repo, number, $5, 'stale',
+                 CASE status WHEN 'approved' THEN head_sha ELSE since_head END
+             FROM agent_reviews
+             WHERE installation_id = $1 AND repo = $2 AND number = $3 AND head_sha = $4
+               AND (status = 'approved' OR since_head IS NOT NULL)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(installation_id as i64)
+        .bind(repo.to_string())
+        .bind(pr as i64)
+        .bind(before)
+        .bind(after)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_agent_fixed(&self, id: i64) -> Result<()> {
+        sqlx::query(
+            "UPDATE agent_reviews SET agent_fixed = true, updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -818,6 +876,13 @@ mod tests {
             .unwrap();
         assert_eq!(store.reviews_of(1, &repo(), 7, 10).await.unwrap().len(), 1);
 
+        // Nor anything for the queue's agent to go on from.
+        store
+            .review_queue_change(1, &repo(), 7, "aaa", "fixed")
+            .await
+            .unwrap();
+        assert_eq!(store.reviews_of(1, &repo(), 7, 10).await.unwrap().len(), 1);
+
         // A push: a new head, a new review, which the latest one is.
         let next = store.start_review(1, &repo(), 7, "bbb").await.unwrap();
         assert_ne!(next.id, r.id);
@@ -856,6 +921,60 @@ mod tests {
                 .map(|r| r.id),
             Some(other.id)
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_queues_agent_changing_an_approved_pr_starts_a_review_of_that_change(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let r = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
+        store.claim_review(Duration::from_secs(600)).await.unwrap();
+        let done = ReviewDone {
+            status: ReviewStatus::Approved,
+            error: None,
+            summary: "s".into(),
+            findings: vec![judged("f1", false)],
+            asked: Vec::new(),
+        };
+        store.finish_review(r.id, &done).await.unwrap();
+        store
+            .review_queue_change(1, &repo(), 7, "aaa", "fixed")
+            .await
+            .unwrap();
+        let next = store.latest_review(1, &repo(), 7).await.unwrap().unwrap();
+        assert_eq!(next.status, ReviewStatus::Stale, "not before its checks");
+        assert_eq!(next.since_head.as_deref(), Some("aaa"));
+        assert_eq!(store.claim_review(Duration::ZERO).await.unwrap(), None);
+        assert!(next.findings.is_empty());
+
+        // A second fix before that review ends goes on from the same approval.
+        store
+            .review_queue_change(1, &repo(), 7, "fixed", "fixed again")
+            .await
+            .unwrap();
+        let last = store.latest_review(1, &repo(), 7).await.unwrap().unwrap();
+        assert_eq!(last.head_sha, "fixed again");
+        assert_eq!(last.since_head.as_deref(), Some("aaa"));
+
+        // Once that review approves, the next fix goes on from it.
+        let started = store
+            .start_review(1, &repo(), 7, "fixed again")
+            .await
+            .unwrap();
+        assert_eq!(started.since_head.as_deref(), Some("aaa"), "it keeps that");
+        assert_eq!(started.status, ReviewStatus::Pending);
+        store.claim_review(Duration::from_secs(600)).await.unwrap();
+        store.finish_review(last.id, &done).await.unwrap();
+        store
+            .review_queue_change(1, &repo(), 7, "fixed again", "fixed once more")
+            .await
+            .unwrap();
+        let next = store.latest_review(1, &repo(), 7).await.unwrap().unwrap();
+        assert_eq!(next.since_head.as_deref(), Some("fixed again"));
+
+        assert!(!next.agent_fixed);
+        store.mark_agent_fixed(next.id).await.unwrap();
+        let marked = store.review(next.id).await.unwrap().unwrap();
+        assert!(marked.agent_fixed);
     }
 
     #[sqlx::test(migrations = false)]

@@ -18,7 +18,7 @@ The hosted MergeLoop at https://mergeloop.ai runs the public GitHub App [Merge L
 2. Install the App on your organization or account, and choose its repos. GitHub sends you back to the dashboard.
 3. In **Settings**, pick a repo and **Set up**. MergeLoop opens a PR that adds its config file, [`.mergepatrol/mergepatrol.yml`](#repo-settings). Merge it, and the repo queues.
 4. In **Settings**, add an Anthropic or OpenAI API key. Create one for MergeLoop alone, with a spend limit.
-5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue. The dashboard puts the label on as you, so it takes triage access to the repo.
+5. Add the `mergepatrol` label to a PR, or queue it from the dashboard's **Queue** page, which lists the open PRs below the queue, and shows each queued PR's stage and the path it took. The dashboard puts the label on as you, so it takes triage access to the repo.
 6. In **You**, see your open PRs in every repo, by whose move it is, and the PRs that ask for your review or your team's, those the queue holds first. Approve, request changes or comment there, as you. A review waits 5 seconds before it goes to GitHub, so you can undo it.
 
 Public repos are free. Private repos cost $15 a seat a month, after a free trial: see [Pricing](#pricing). To run your own, see [Run it](#run-it).
@@ -26,6 +26,8 @@ Public repos are free. Private repos cost $15 a seat a month, after a free trial
 ## How it works
 
 ### What a queued PR needs
+
+A labeled PR gets ready on its own first, and no PR waits for another's: the agent resolves a conflict with its base, its checks run, and the agent fixes what fails. Then the agent reviews it. A PR that this cannot settle goes on to the queue as it is, which ejects it. Stacks and PRs from forks skip this. To run all of it in the queue instead, one PR at a time, a self-hosted MergeLoop sets `MERGEPATROL_PREP=false`.
 
 A labeled PR keeps its place in line, on hold, until GitHub would merge it and the queue can take it:
 
@@ -37,13 +39,13 @@ A labeled PR keeps its place in line, on hold, until GitHub would merge it and t
 
 Then it runs, rebased alone or tested in a [batch](#batches), and merges once its checks pass. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
 
-When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
+When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts. A conflict found in the queue goes back to getting ready, keeping its place, so the agent holds up no other PR.
 
-When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
+When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After three fixes that do not make the checks pass, the PR is ejected. A PR gets three fixes in all, for its checks and its review together, and a push from its author earns new ones. When the agent gives up because the failure is not the PR's to fix, as with a flaky test, an outage or a title since changed, an empty commit runs the checks once more, and a failure then ejects the PR.
 
 ### Automatic review
 
-Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. The author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
+Automatic review is on for every workspace with a model key: an agent reviews every queued PR before it takes its place in line. It reads the change and the code around it, and reports each thing it looked at with how sure it is. What it finds fine, it clears. A change it is sure enough of goes back to the PR's author, often the agent that built it, as a review comment on its line: one thread per finding, saying what to change. While the PR has fixes left, the agent's fix goes first and pushes a commit, which the next review checks. That is on with **Fix attempts**, and leaves out stacks and forks. If it cannot fix it, or the PR has no fixes left, the author works each thread: fix it and push, or reply with why it doesn't apply, then resolve it. Once every thread is resolved, the PR goes on to the merge queue with no human approval.
 
 A push gets a new review, which checks each finding sent back, with the author's replies in front of it. A finding still there gets a reply in its own thread, which opens again, never a new comment. A thread whose finding is fixed, or whose reply holds up in the code, is resolved. After three rounds that still send findings back, the next review asks a human instead. An author can also reply to a finding with `ask_agent_about_review`: the agent reads the code again, and withdraws the finding if the reply holds up.
 
@@ -51,7 +53,7 @@ A human is asked only about what the author cannot settle from the PR: a call on
 
 Each kind of change has a bar: how sure the agent must be to send a change back to the author. A lower bar sends back more. The defaults: 60% for security, 70% for dependencies and for public APIs, 80% for everything else, and migrations always go to a human. A change under the bar shows as a note and holds nothing.
 
-**Require resolved comments**, on by default, makes the gate wait for every review thread on the PR to be resolved, whoever started it: the agent's, a human's or a bot's. It is the same rule as GitHub's "Require conversation resolution before merging", so a repo can turn that on in its branch protection too, to hold merges made outside the queue. A repo sets it in its config file as `review.require_resolved`. The App hears of a resolved thread from the `pull_request_review_thread` event: an App created before the event was added must subscribe to it on GitHub, or the queue sees the thread resolved only on its next read of the PR. **Settings** shows how the agent's confidence has held up against the humans' answers, to set each bar by. A workspace can turn automatic review off. It does not review PRs from forks: a human reviews those. A rebase or a fix by the queue keeps the approval.
+**Require resolved comments**, on by default, makes the gate wait for every review thread on the PR to be resolved, whoever started it: the agent's, a human's or a bot's. It is the same rule as GitHub's "Require conversation resolution before merging", so a repo can turn that on in its branch protection too, to hold merges made outside the queue. A repo sets it in its config file as `review.require_resolved`. The App hears of a resolved thread from the `pull_request_review_thread` event: an App created before the event was added must subscribe to it on GitHub, or the queue sees the thread resolved only on its next read of the PR. **Settings** shows how the agent's confidence has held up against the humans' answers, to set each bar by. A workspace can turn automatic review off. It does not review PRs from forks: a human reviews those. A clean rebase by the queue keeps the approval. A fix by the queue's agent, or a conflict it resolved, does not: the PR merges once the agent has reviewed that change, on its own.
 
 Required checks that have not finished 3 hours after a rebase or a fix also eject the PR, with no fix, so a check that never finishes does not hold the queue forever. A required check that never reports at all goes sooner: once every check that did report has finished, the PR waits 30 minutes for the rest, then is ejected with a comment naming them. That is a PR that renames a required check, or a workflow that no longer runs it. A head on which no check has reported at all, as when CI has not started, waits out the 3 hours instead. Before it counts a check as never reported, the queue reads the head's GitHub Actions workflow runs: the 30 minutes do not run while one is still queued, waiting for an approval, or running. In a batch, either counts as a failure.
 
@@ -220,7 +222,7 @@ verify:
   - cargo check
 fix_ci:
   enabled: true    # an agent fixes failed required checks
-  attempts: 2      # 1 to 5 fixes, before the PR is ejected
+  attempts: 3      # 1 to 5 fixes, for its checks and its review, before the PR is ejected
 branches:          # queues besides the default branch's: exact names
   - release
 review:            # over the workspace's automatic review settings

@@ -23,8 +23,11 @@ pub struct RepoSnapshot {
     pub trunk_sha: String,
     /// Private, or internal: not open to everyone.
     pub private: bool,
-    /// `squash`, `merge` or `rebase`: the repo's default for this App.
+    /// `squash`, `merge` or `rebase`: the repo's default for this App, which GitHub says
+    /// whether or not the repo allows it.
     pub merge_method: String,
+    /// Of `squash`, `rebase` and `merge`, those the repo's settings allow.
+    pub merge_methods: Vec<String>,
     /// Open PRs with the trigger label, oldest first.
     pub labeled: Vec<PullRequest>,
     /// Queue labels the repo does not have yet.
@@ -55,6 +58,12 @@ pub struct PullRequest {
     /// Whether a code owner must still approve, which `reviewDecision` can leave out.
     #[serde(skip)]
     pub awaits_code_owner: bool,
+    /// The fixes its last commits show it used.
+    #[serde(default, deserialize_with = "fixes_in_commits")]
+    pub fix_commits: u32,
+    /// GitHub says it conflicts with its base. False while GitHub has yet to work that out.
+    #[serde(default, rename = "mergeable", deserialize_with = "conflicting")]
+    pub conflicting: bool,
     /// The stack the PR is a layer of. `None` outside a stack.
     #[serde(default)]
     pub stack: Option<StackRef>,
@@ -237,6 +246,8 @@ impl PullRequest {
                 })
                 .map(Person::from)
                 .collect(),
+            fixes: self.fix_commits,
+            fix_budget: 0,
             checks: d.commits["nodes"][0]["commit"]["statusCheckRollup"]["state"]
                 .as_str()
                 .map(str::to_owned),
@@ -367,9 +378,22 @@ macro_rules! summary_fields {
 
 /// A PR as the queue reads it: its files too, for the code owners, and whether its review
 /// threads are resolved, for the review's gate.
+fn fixes_in_commits<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    let commits = Value::deserialize(d)?;
+    let nodes = commits["nodes"].as_array().cloned().unwrap_or_default();
+    let messages = nodes.iter().rev();
+    Ok(mergepatrol_core::fixes_used(
+        messages.filter_map(|n| n["commit"]["message"].as_str()),
+    ))
+}
+
+fn conflicting<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.as_deref() == Some("CONFLICTING"))
+}
+
 const PR_FIELDS: &str = concat!(
     summary_fields!(),
-    " files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
+    " mergeable fixCommits: commits(last: 7) { nodes { commit { message } } } files(first: 100) { nodes { path } } reviewThreads(first: 100) { nodes { isResolved } }"
 );
 
 /// The labeled PRs a snapshot reads at a time. GraphQL charges a point per 100 requests its lists
@@ -637,6 +661,15 @@ impl RepoSnapshot {
                 .as_str()
                 .unwrap_or("MERGE")
                 .to_lowercase(),
+            merge_methods: [
+                ("squash", "squashMergeAllowed"),
+                ("rebase", "rebaseMergeAllowed"),
+                ("merge", "mergeCommitAllowed"),
+            ]
+            .into_iter()
+            .filter(|(_, field)| r[*field].as_bool().unwrap_or(true))
+            .map(|(method, _)| method.to_owned())
+            .collect(),
             labeled,
             missing_labels,
         })
@@ -677,6 +710,9 @@ impl Installation {
                 priority: label(name: $priority) {{ name }}
                 failed: label(name: $failed) {{ name }}
                 viewerDefaultMergeMethod
+                squashMergeAllowed
+                rebaseMergeAllowed
+                mergeCommitAllowed
                 defaultBranchRef {{ name target {{ oid }} }}
                 {code_owners}
                 pullRequests(states: OPEN, labels: [$label], first: $page, after: $after, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
@@ -797,6 +833,31 @@ impl Installation {
 
     /// The head of PR `number`, from its `refs/pull/<n>/head`: where a fork PR's head shows in
     /// the base repo.
+    /// The messages of the PR's last commits, newest first: as many as a fix budget can use.
+    pub async fn last_commit_messages(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+    ) -> Result<Vec<String>> {
+        let query = "query($owner: String!, $name: String!, $number: Int!) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $number) {
+                commits(last: 20) { nodes { commit { message } } }
+              }
+            }
+        }";
+        let vars = json!({ "owner": repo.owner, "name": repo.name, "number": number });
+        let data: Value = self.graphql("last_commit_messages", query, vars).await?;
+        let nodes = data["repository"]["pullRequest"]["commits"]["nodes"]
+            .as_array()
+            .context("the PR's commits")?;
+        Ok(nodes
+            .iter()
+            .rev()
+            .filter_map(|n| n["commit"]["message"].as_str().map(str::to_owned))
+            .collect())
+    }
+
     pub async fn pull_head(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
         let r: Value = self
             .rest(
@@ -1786,6 +1847,10 @@ mod tests {
                 { "requestedReviewer": {} },
             ] },
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "PENDING" } } }] },
+            "fixCommits": { "nodes": [
+                { "commit": { "message": "the author's" } },
+                { "commit": { "message": "Fix ci\n\nFixed-by: mergepatrol, a" } },
+            ] },
         }))
         .unwrap();
         let s = pr.summary();
@@ -1811,6 +1876,7 @@ mod tests {
             }]
         );
         assert_eq!(s.checks.as_deref(), Some("PENDING"));
+        assert_eq!(s.fixes, 1);
     }
 
     const FIX_COMMIT: &str = r#"{"message":"Fix test\n\nFixed-by: mergepatrol, claude (claude-opus-5-5)\nCo-authored-by: mergepatrol <m@x>"}"#;

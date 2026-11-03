@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
     AgentSettings, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, ModelOverrides, Person,
-    PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Step,
+    PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Stage, Step,
     TaskModel, WorkspaceDefaults,
 };
 use mergepatrol_github::{
@@ -36,12 +36,39 @@ pub struct LaneView {
     pub batch: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum StageView {
+    Rebase,
+    Checks,
+    Review,
+    Lane,
+}
+
+impl From<Stage> for StageView {
+    fn from(stage: Stage) -> Self {
+        match stage {
+            Stage::Rebase => StageView::Rebase,
+            Stage::Checks => StageView::Checks,
+            Stage::Review => StageView::Review,
+            Stage::Lane => StageView::Lane,
+        }
+    }
+}
+
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct EntryView {
     pub number: u32,
     pub priority: bool,
     pub state: EntryStateView,
+    /// Where it is on its way to the trunk. Null while on hold for what is no stage, as a draft.
+    pub stage: Option<StageView>,
+    /// The fixes it has used, for its checks and its review.
+    pub fixes: u32,
+    /// The fixes it gets.
+    pub fix_budget: u32,
     /// Why the PR is held.
     pub detail: Option<String>,
     /// Why the PR is held, typed.
@@ -139,7 +166,10 @@ impl EntryView {
             summary: pr,
             layers,
             heads: _,
+            recheck: _,
         } = e;
+        let stage = state.stage().map(StageView::from);
+        let (fixes, fix_budget) = (pr.fixes, pr.fix_budget);
         let (state, detail, hold) = match state {
             EntryState::Waiting => (EntryStateView::Waiting, None, None),
             EntryState::Held(reason) => (
@@ -153,6 +183,9 @@ impl EntryView {
             number: number as u32,
             priority,
             state,
+            stage,
+            fixes,
+            fix_budget,
             detail,
             hold,
             pull: pr.into(),
@@ -3475,6 +3508,7 @@ mod tests {
             summary: PrSummary::default(),
             layers: Vec::new(),
             heads: Vec::new(),
+            recheck: None,
         }
     }
 

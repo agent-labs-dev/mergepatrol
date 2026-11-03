@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{
     AgentSettings, Bar, CheckFailure, EntryState, Finding, Judged, Kind, LabelSpec, Labels, Lean,
-    Spend, Step, StepTimes, WorkspaceDefaults,
+    Spend, Stage, Step, StepTimes, WorkspaceDefaults,
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -55,6 +55,12 @@ struct State {
     strict: bool,
     /// The merge methods a ruleset allows, if one narrows them. The repo's default is `merge`.
     merge_methods: Option<Vec<String>>,
+    /// The checks that pass without running.
+    skipped: Vec<String>,
+    /// The fixes each PR's commits already used.
+    fixes_used: HashMap<PrNumber, u32>,
+    /// The merge methods the repo's settings allow, if they narrow them.
+    repo_merge_methods: Option<Vec<String>>,
     /// The checks on every commit, unless `checks_on` has the commit.
     checks: BTreeMap<String, CheckState>,
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
@@ -121,6 +127,8 @@ impl State {
                 title: format!("PR {number}"),
                 body: String::new(),
                 is_draft: false,
+                conflicting: false,
+                fix_commits: 0,
                 is_cross_repository: false,
                 review_decision: None,
                 base_ref_name: "main".into(),
@@ -259,9 +267,10 @@ impl Fake {
         if s.head(number) != sha {
             return Ok(MergeOutcome::Rejected("head moved".into()));
         }
-        if s.merge_methods
-            .as_ref()
-            .is_some_and(|m| !m.iter().any(|m| m == method))
+        if s.repo_merge_methods
+            .iter()
+            .chain(&s.merge_methods)
+            .any(|m| !m.iter().any(|m| m == method))
         {
             return Ok(MergeOutcome::Rejected(format!(
                 "{method} merges are not allowed on this repository."
@@ -344,6 +353,10 @@ impl GitHub for Fake {
             trunk_sha: s.trunk.clone(),
             private: s.private,
             merge_method: "merge".into(),
+            merge_methods: s
+                .repo_merge_methods
+                .clone()
+                .unwrap_or_else(|| ["squash", "rebase", "merge"].map(String::from).to_vec()),
             labeled: s
                 .prs
                 .values()
@@ -432,6 +445,7 @@ impl GitHub for Fake {
         }
         Ok(Checks {
             by_name: s.checks_of(sha),
+            skipped: s.skipped.iter().cloned().collect(),
             workflows_running: None,
         })
     }
@@ -441,6 +455,10 @@ impl GitHub for Fake {
         Ok(s.queued_workflows.iter().any(|h| h == sha))
     }
 
+    async fn fixes_used(&self, _: &RepoName, number: PrNumber) -> Result<u32> {
+        let s = self.state.lock().unwrap();
+        Ok(s.fixes_used.get(&number).copied().unwrap_or(0))
+    }
     async fn check_failures(
         &self,
         _: &RepoName,
@@ -595,6 +613,14 @@ struct Scripted {
     fixes: Mutex<Vec<Vec<String>>>,
     fix_works: bool,
     fix_fails: Option<String>,
+    fix_gives_up: Option<String>,
+    recheck_passes: bool,
+    /// CI skips the recheck's commit, which changes nothing.
+    recheck_skipped: bool,
+    /// These PRs conflict with the trunk, which GitHub has yet to say.
+    conflicts_on: Vec<PrNumber>,
+    /// A PR rebased once sits on the trunk: a later rebase leaves it as it is.
+    rebases_once: bool,
 }
 
 impl Scripted {
@@ -607,7 +633,17 @@ impl Scripted {
             fixes: Mutex::new(Vec::new()),
             fix_works: true,
             fix_fails: None,
+            fix_gives_up: None,
+            recheck_passes: false,
+            recheck_skipped: false,
+            conflicts_on: Vec::new(),
+            rebases_once: false,
         }
+    }
+
+    /// Counts one rebase, for `rebases_once` to leave the next as it is.
+    fn rebased_already(&self) {
+        *self.rebases.lock().unwrap() += 1;
     }
 
     /// The failed checks each fix was asked to fix.
@@ -628,6 +664,7 @@ impl Sandbox for Scripted {
         _: &RepoSnapshot,
         unit: &Unit,
         _: &RepoSettings,
+        agent: bool,
     ) -> Result<Event> {
         let n = {
             let mut n = self.rebases.lock().unwrap();
@@ -641,6 +678,17 @@ impl Sandbox for Scripted {
         };
         if let Some(reason) = &self.fail {
             return Ok(Event::RebaseFailed(reason.clone()));
+        }
+        if self.conflicts_on.contains(&unit.number) {
+            return Ok(match agent {
+                true => Event::RebaseFailed("the agent could not resolve it".into()),
+                false => Event::RebaseConflict,
+            });
+        }
+        if self.rebases_once && n > 1 {
+            let s = self.gh.state.lock().unwrap();
+            let (head, base) = (s.head(unit.top().number), s.trunk_of(&key.trunk));
+            return Ok(Event::Rebased { head, base });
         }
         let mut moved = Vec::new();
         let (head, base) = {
@@ -659,6 +707,27 @@ impl Sandbox for Scripted {
                 .await?;
         }
         Ok(Event::Rebased { head, base })
+    }
+
+    async fn recheck(
+        &self,
+        _: &LaneKey,
+        _: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        _: &RepoSettings,
+        head: &str,
+    ) -> Result<Event> {
+        let mut s = self.gh.state.lock().unwrap();
+        let top = format!("{head}-c");
+        s.push(unit.layers[layer].number, &top);
+        if self.recheck_passes {
+            let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+            s.checks_on.insert(top.clone(), passing);
+        } else if self.recheck_skipped {
+            s.checks_on.insert(top.clone(), BTreeMap::new());
+        }
+        Ok(Event::Fixed { head: top })
     }
 
     async fn fix(
@@ -680,18 +749,29 @@ impl Sandbox for Scripted {
         if let Some(reason) = &self.fix_fails {
             return Ok(Event::FixFailed(reason.clone()));
         }
-        let mut s = self.gh.state.lock().unwrap();
-        let mut top = format!("{head}-f{n}");
-        s.push(unit.layers[layer].number, &top);
-        if self.fix_works {
-            let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
-            s.checks_on.insert(top.clone(), passing);
+        if let Some(reason) = &self.fix_gives_up {
+            return Ok(Event::FixGaveUp(reason.clone()));
         }
-        // The layers above go onto the fix.
-        for pr in &unit.layers[layer + 1..] {
-            top = format!("{}-s{n}", s.head(pr.number));
-            s.push(pr.number, &top);
-        }
+        let number = unit.layers[layer].number;
+        let (fixed, top) = {
+            let mut s = self.gh.state.lock().unwrap();
+            let fixed = format!("{head}-f{n}");
+            s.push(number, &fixed);
+            if self.fix_works {
+                let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+                s.checks_on.insert(fixed.clone(), passing);
+            }
+            // The layers above go onto the fix.
+            let mut top = fixed.clone();
+            for pr in &unit.layers[layer + 1..] {
+                top = format!("{}-s{n}", s.head(pr.number));
+                s.push(pr.number, &top);
+            }
+            (fixed, top)
+        };
+        self.store
+            .review_queue_change(1, &repo(), number, head, &fixed)
+            .await?;
         Ok(Event::Fixed { head: top })
     }
 }
@@ -724,6 +804,13 @@ impl Mem {
             .find(|r| r.number == number)
             .unwrap();
         r.status = status;
+    }
+
+    /// The newest head of PR `number` with a review, and the head that review goes on from.
+    fn newest_review(&self, number: PrNumber) -> (String, Option<String>) {
+        let reviews = self.reviews.lock().unwrap();
+        let r = reviews.iter().rev().find(|r| r.number == number).unwrap();
+        (r.head_sha.clone(), r.since_head.clone())
     }
 
     /// Changes a finding of the PR's newest review, which has one from then on.
@@ -819,6 +906,8 @@ impl ReviewStore for Mem {
             repo: repo.clone(),
             number: pr,
             head_sha: head.to_owned(),
+            since_head: None,
+            agent_fixed: false,
             status: ReviewStatus::Pending,
             error: None,
             attempts: 0,
@@ -846,6 +935,37 @@ impl ReviewStore for Mem {
     }
     async fn stale_review(&self, _: i64) -> Result<()> {
         unreachable!()
+    }
+    async fn mark_agent_fixed(&self, _: i64) -> Result<()> {
+        unreachable!()
+    }
+    async fn review_queue_change(
+        &self,
+        _: u64,
+        _: &RepoName,
+        pr: PrNumber,
+        before: &str,
+        after: &str,
+    ) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        let from = reviews
+            .iter()
+            .find(|r| r.number == pr && r.head_sha == before)
+            .filter(|r| r.status == ReviewStatus::Approved || r.since_head.is_some())
+            .cloned();
+        if let Some(r) = from {
+            reviews.push(ReviewRecord {
+                id: r.id + 100,
+                head_sha: after.to_owned(),
+                since_head: match r.status {
+                    ReviewStatus::Approved => Some(r.head_sha),
+                    _ => r.since_head,
+                },
+                status: ReviewStatus::Stale,
+                ..r
+            });
+        }
+        Ok(())
     }
     async fn carry_review(
         &self,
@@ -1272,6 +1392,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             poll: Duration::from_secs(60),
             bind: "127.0.0.1:0".parse().unwrap(),
             max_jobs: 1,
+            prep: false,
             executor: ExecutorConfig::Local,
             job_proxy_url: "http://localhost:8080".into(),
             job_proxy_bind: None,
@@ -1296,6 +1417,8 @@ fn ctx(store: Arc<Mem>) -> Ctx {
         unpinned: Default::default(),
         billing: None,
         reviews: Default::default(),
+        caches: Default::default(),
+        prep: Default::default(),
     }
 }
 
@@ -1424,6 +1547,327 @@ async fn an_empty_config_file_follows_the_workspace() {
     assert!(matches!(run.tick().await, Ran::Idle));
     assert!(run.lane().is_empty(), "the PR has the instance's label");
     assert_eq!(*run.store.config_error.lock().unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.repo_merge_methods = Some(vec!["squash".into()]);
+    }));
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+/// A run that gets PRs ready off the lane.
+fn prep_run(setup: impl FnOnce(&mut State)) -> Run {
+    let mut run = Run::new(Fake::new(setup));
+    run.ctx.config.prep = true;
+    run
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_whose_checks_run_waits_off_the_lane_and_holds_up_no_other() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        let head = s.head(1);
+        s.checks_on.insert(
+            head,
+            BTreeMap::from([("ci".to_owned(), CheckState::Pending)]),
+        );
+    });
+    run.tick().await;
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepChecks)".into())]);
+    assert_eq!(run.merged(), [2], "#2 passes #1, which holds no job");
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_review_waits_for_green_checks() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Pending);
+    });
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(1, "Held(PrepChecks)".into())]);
+    assert!(run.store.reviews.lock().unwrap().is_empty());
+
+    run.gh
+        .state
+        .lock()
+        .unwrap()
+        .checks
+        .insert("ci".into(), CheckState::Passed);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_check_is_fixed_off_the_lane_while_fixes_are_left() {
+    let run = prep_run(failing_ci);
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    let fix = prep::Work::Fix {
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(1, fix)]);
+    // A tick does not ask twice.
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1);
+
+    let run = prep_run(|s| {
+        failing_ci(s);
+        s.fixes_used.insert(1, 3);
+    });
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.labels(1), [FAILED], "no fixes left: the lane ejects it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_the_lane_is_running_gets_no_job_off_it() {
+    let run = prep_run(failing_ci);
+    let mut lane = Lane::default();
+    lane.sync(&[Candidate {
+        number: 1,
+        priority: false,
+        hold: None,
+        summary: Default::default(),
+        layers: Vec::new(),
+        pin: None,
+    }]);
+    lane.activate(1);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    run.store.save_lane(&key, &lane).await.unwrap();
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.rebase.count(), 1, "the lane ran it again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_fix_and_a_check_fix_take_turns() {
+    let run = prep_run(failing_ci);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let claim = run.ctx.prep.claim(&key, 1).unwrap();
+    assert!(run.ctx.prep.claim(&key, 1).is_none(), "one job on a PR");
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    assert!(run.ctx.prep.asked().is_empty(), "the check fix waits");
+
+    // A queue that starts over leaves a claim that lives, and a claim ends with its job.
+    run.ctx.prep.start_over(&repo());
+    assert!(run.ctx.prep.claim(&key, 1).is_none());
+    drop(claim);
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1, "now it can");
+    assert!(run.ctx.prep.claim(&key, 1).is_none(), "and it holds the PR");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_aborted_before_it_first_runs_lets_go_of_its_pr() {
+    let run = prep_run(failing_ci);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    run.ctx.prep.abort_wanted(&repo()).await;
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    assert!(run.ctx.prep.claim(&key, 1).is_some(), "no job holds it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_queue_that_starts_over_forgets_the_jobs_it_stopped() {
+    let run = prep_run(failing_ci);
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1);
+    run.ctx.prep.start_over(&repo());
+    assert!(run.ctx.prep.asked().is_empty());
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked().len(), 1, "it asks again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_entry_says_what_fixes_it_has_used_of_its_budget() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().fix_commits = 2;
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Pending);
+    });
+    run.tick().await;
+    let lanes = run.store.lanes.lock().unwrap();
+    let entry = lanes.values().next().unwrap().entries[0].clone();
+    assert_eq!((entry.summary.fixes, entry.summary.fix_budget), (2, 3));
+    assert_eq!(entry.state.stage(), Some(Stage::Checks));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_is_rebased_off_the_lane() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+    });
+    assert!(matches!(run.tick().await, Ran::Idle));
+    assert_eq!(run.lane(), [(1, "Held(PrepRebasing)".into())]);
+    assert_eq!(run.ctx.prep.asked(), [(1, prep::Work::Rebase)]);
+    assert_eq!(run.rebase.count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_lane_finds_goes_back_off_it_and_the_next_pr_goes_on() {
+    let mut run = prep_run(prs(&[1, 2]));
+    run.rebase.conflicts_on = vec![1];
+    run.tick().await;
+    assert_eq!(run.lane()[0], (1, "Held(PrepRebasing)".into()));
+    assert!(!run.kinds(1).contains(&"ejected".to_owned()));
+    run.tick().await;
+    assert_eq!(run.ctx.prep.asked(), [(1, prep::Work::Rebase)]);
+    assert_eq!(run.merged(), [2]);
+    assert_eq!(run.lane(), [(1, "Held(PrepRebasing)".into())]);
+
+    // Its job ended with the head as it was: the lane's word on that head is used up.
+    run.ctx.prep.take(&repo());
+    run.ctx.prep.end_job(&(1, repo(), 1));
+    run.rebase.conflicts_on.clear();
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.merged(), [2, 1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_prep_could_not_settle_is_the_lanes_to_eject() {
+    let mut run = prep_run(prs(&[1]));
+    run.rebase.conflicts_on = vec![1];
+    let head = run.gh.with(|s| s.head(1));
+    run.ctx.prep.leave_to_lane((1, repo(), 1), &head);
+    run.tick().await;
+    assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn what_getting_ready_cannot_settle_goes_to_the_lane() {
+    let run = prep_run(failing_ci);
+    let head = run.gh.with(|s| s.head(1));
+    run.ctx.prep.leave_to_lane((1, repo(), 1), &head);
+    run.tick().await;
+    assert!(run.ctx.prep.asked().is_empty());
+    assert_eq!(run.rebase.count(), 1, "the lane took it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_required_check_no_workflow_runs_is_the_lanes_to_eject() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["never".into()];
+        s.checks.insert("other".into(), CheckState::Passed);
+    });
+    run.tick().await;
+    assert_eq!(run.rebase.count(), 1, "the lane took it");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_the_agent_resolved_needs_a_review_and_a_clean_rebase_keeps_its_approval() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+    }));
+    let settings = ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    };
+    *run.store.review_settings.lock().unwrap() = Some(settings.clone());
+    run.tick().await;
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.store.finish_review(2, ReviewStatus::Approved);
+
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let layers: Vec<_> = run.gh.with(|s| [1, 2].map(|n| s.prs[&n].clone()).to_vec());
+    let unit = Unit {
+        number: 1,
+        base: "main".into(),
+        layers,
+        stacked: true,
+    };
+    let heads: Vec<String> = unit
+        .layers
+        .iter()
+        .map(|pr| pr.head_ref_oid.clone())
+        .collect();
+    let rebased = vec!["clean".to_owned(), "resolved".to_owned()];
+    settle_reviews(&run.ctx, &key, &unit, &heads, &rebased, &[0, 1], &[1])
+        .await
+        .unwrap();
+
+    let hold = |number, head: &'static str| {
+        let (run, key, settings) = (&run, &key, &settings);
+        async move {
+            let heads = [(number, head, 0)];
+            review_hold(&run.ctx, key, settings, false, &heads)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        hold(1, "clean").await,
+        None,
+        "a clean rebase keeps its approval"
+    );
+    assert_eq!(hold(2, "resolved").await, Some(Hold::Reviewing));
+    let (_, since) = run.store.newest_review(2);
+    assert_eq!(
+        since.as_ref(),
+        Some(&heads[1]),
+        "it reads only the resolution"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_agents_fix_needs_a_review_of_itself_before_the_pr_merges() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.rebases_once = true;
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    run.tick().await;
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.tick().await;
+    assert!(run.merged().is_empty(), "the fix has no review yet");
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+    let (head, since) = run.store.newest_review(1);
+    assert!(head.contains("-f"), "{head}");
+    assert_eq!(
+        since.as_deref(),
+        Some("pr-1-r1"),
+        "only the fix needs reading"
+    );
+
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -2060,13 +2504,27 @@ async fn fixes_that_do_not_mend_the_checks_eject_after_the_attempts() {
     let mut run = Run::new(Fake::new(failing_ci));
     run.rebase.fix_works = false;
     run.tick().await;
-    assert_eq!(run.rebase.fixed().len(), 2);
+    assert_eq!(run.rebase.fixed().len(), 3);
     assert_eq!(run.labels(1), [FAILED]);
     let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
     assert!(
-        comment.contains("required checks failed: ci, after 2 fixes"),
+        comment.contains("required checks failed: ci, after 3 fixes"),
         "{comment}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn fixes_a_pr_used_before_this_job_count_against_its_budget() {
+    let mut run = Run::new(Fake::new(|s| {
+        failing_ci(s);
+        s.fixes_used.insert(1, 2);
+    }));
+    run.rebase.fix_works = false;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1, "one left of the three");
+    assert_eq!(run.labels(1), [FAILED]);
+    let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(comment.contains("after 3 fixes"), "{comment}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -2082,16 +2540,109 @@ async fn the_config_file_sets_the_fix_attempts() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_fix_the_agent_gives_up_on_ejects_with_its_reason() {
+async fn a_fix_that_fails_ejects_with_its_reason() {
     let mut run = Run::new(Fake::new(failing_ci));
-    run.rebase.fix_fails = Some("the agent gave up: a flaky test".into());
+    run.rebase.fix_fails = Some("the agent failed: over its time".into());
     run.tick().await;
     assert_eq!(run.labels(1), [FAILED]);
     let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
     assert!(
-        comment.contains("the fix failed: the agent gave up: a flaky test"),
+        comment.contains("the fix failed: the agent failed: over its time"),
         "{comment}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_the_agent_gives_up_on_runs_again_and_a_flaky_one_merges() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_passes = true;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_ci_skips_does_not_pass() {
+    let mut run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Failed);
+    }));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_skipped = true;
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_waits_out_the_grace_with_no_required_checks() {
+    let mut run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.checks.insert("ci".into(), CheckState::Failed);
+    }));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_passes = true;
+    let start = Instant::now();
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+    assert!(start.elapsed() >= NO_CHECKS_GRACE, "{:?}", start.elapsed());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_whose_check_is_skipped_does_not_pass() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_passes = true;
+    run.gh.with_mut(|s| s.skipped = vec!["ci".into()]);
+    run.tick().await;
+    assert!(run.merged().is_empty());
+    assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_recheck_holds_across_a_restart() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Passed);
+        s.skipped = vec!["ci".into()];
+    }));
+    run.ctx.prep.start_over(&repo());
+    let head = run.gh.with(|s| s.head(1));
+    let mut lane = Lane::default();
+    lane.sync(&[Candidate {
+        number: 1,
+        priority: false,
+        hold: None,
+        summary: Default::default(),
+        layers: Vec::new(),
+        pin: None,
+    }]);
+    lane.set_recheck(1, format!("{head}-c"), vec!["ci".into()]);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    run.store.save_lane(&key, &lane).await.unwrap();
+
+    // It runs on the head the recheck pushed: a clean rebase leaves that as it is.
+    let mut run = run;
+    run.rebase.rebases_once = true;
+    run.gh.with_mut(|s| s.push(1, &format!("{head}-c")));
+    run.rebase.rebased_already();
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]], "the skip is no pass");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_that_fails_again_after_the_agent_gave_up_ejects_with_no_second_fix() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_gives_up = Some("the agent gave up: the PR's title".into());
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -2409,6 +2960,8 @@ async fn a_failed_batch_is_bisected_to_the_pr_that_broke_it() {
             "batch",
             "batch-failed",
             "rebasing",
+            "published",
+            "fixing",
             "published",
             "fixing",
             "published",
