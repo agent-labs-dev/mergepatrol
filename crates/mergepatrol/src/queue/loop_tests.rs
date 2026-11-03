@@ -23,6 +23,8 @@ use mergepatrol_store::{
 use super::*;
 use crate::config::ExecutorConfig;
 
+mod getting_ready;
+
 const TRIGGER: &str = "mergepatrol";
 const FAILED: &str = "mergepatrol:failed";
 
@@ -851,11 +853,12 @@ impl Mem {
     }
 }
 
-/// The reviews a tick starts and reads. The review worker is not run here.
+/// The reviews a tick starts and reads, and a fix of one. The review worker is not run here.
 #[async_trait]
 impl ReviewStore for Mem {
-    async fn review(&self, _: i64) -> Result<Option<ReviewRecord>> {
-        unreachable!()
+    async fn review(&self, id: i64) -> Result<Option<ReviewRecord>> {
+        let reviews = self.reviews.lock().unwrap();
+        Ok(reviews.iter().find(|r| r.id == id).cloned())
     }
     async fn latest_review(
         &self,
@@ -940,8 +943,10 @@ impl ReviewStore for Mem {
     async fn release_reviews(&self) -> Result<u64> {
         unreachable!()
     }
-    async fn mark_agent_fixed(&self, _: i64) -> Result<()> {
-        unreachable!()
+    async fn mark_agent_fixed(&self, id: i64) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        reviews.iter_mut().find(|r| r.id == id).unwrap().agent_fixed = true;
+        Ok(())
     }
     async fn review_queue_change(
         &self,
@@ -1054,11 +1059,11 @@ impl ReviewStore for Mem {
     }
 }
 
-/// The queue loop reads GitHub past the cache.
+/// The queue loop reads GitHub past the cache, which only hears of what a job published.
 #[async_trait]
 impl ReadCache for Mem {
     async fn github_changed(&self, _: u64, _: &RepoName, _: &Change) -> Result<()> {
-        unreachable!()
+        Ok(())
     }
     async fn github_reads(&self, _: u64, _: &RepoName) -> Result<RepoReads> {
         unreachable!()
@@ -1397,7 +1402,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
             poll: Duration::from_secs(60),
             bind: "127.0.0.1:0".parse().unwrap(),
             max_jobs: 1,
-            prep: false,
+            prep: true,
             executor: ExecutorConfig::Local,
             job_proxy_url: "http://localhost:8080".into(),
             job_proxy_bind: None,
@@ -1445,9 +1450,22 @@ impl Run {
         }
     }
 
+    /// A run that leaves to the lane what getting ready takes on: for what a job in it does.
+    fn on_the_lane(gh: Arc<Fake>) -> Self {
+        let mut run = Self::new(gh);
+        run.ctx.config.prep = false;
+        run
+    }
+
     fn batching(gh: Arc<Fake>) -> Self {
         let mut run = Self::new(gh);
         run.ctx.config.repo_defaults.batch_size = 8;
+        run
+    }
+
+    fn batching_on_the_lane(gh: Arc<Fake>) -> Self {
+        let mut run = Self::batching(gh);
+        run.ctx.config.prep = false;
         run
     }
 
@@ -1564,11 +1582,8 @@ async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
 }
 
-/// A run that gets PRs ready off the lane.
 fn prep_run(setup: impl FnOnce(&mut State)) -> Run {
-    let mut run = Run::new(Fake::new(setup));
-    run.ctx.config.prep = true;
-    run
+    Run::new(Fake::new(setup))
 }
 
 #[tokio::test(start_paused = true)]
@@ -1851,7 +1866,7 @@ async fn a_conflict_the_agent_resolved_needs_a_review_and_a_clean_rebase_keeps_i
 
 #[tokio::test(start_paused = true)]
 async fn the_agents_fix_needs_a_review_of_itself_before_the_pr_merges() {
-    let mut run = Run::new(Fake::new(failing_ci));
+    let mut run = Run::on_the_lane(Fake::new(failing_ci));
     run.rebase.rebases_once = true;
     *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
         enabled: true,
@@ -1994,7 +2009,7 @@ async fn an_unresolved_thread_holds_an_approved_pr_until_it_is_resolved() {
 
 #[tokio::test(start_paused = true)]
 async fn an_author_push_during_its_checks_waits_for_a_review_before_the_merge() {
-    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
     *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
         enabled: true,
         ..ReviewSettings::default()
@@ -2028,7 +2043,7 @@ async fn with_the_review_off_nothing_waits_for_it() {
 async fn only_the_sandbox_takes_a_job_slot() {
     // Other repos' jobs hold every slot. The scripted sandbox takes none, so the PR's wait for
     // its checks, and its merge, must not either.
-    let mut run = Run::new(Fake::new(|s| {
+    let mut run = Run::on_the_lane(Fake::new(|s| {
         s.add_pr(1);
         s.checks.insert("ci".into(), CheckState::Pending);
         s.required = vec!["ci".into()];
@@ -2141,7 +2156,7 @@ async fn our_own_publish_is_not_an_author_push() {
 
 #[tokio::test(start_paused = true)]
 async fn an_author_push_while_checks_run_rebases_again() {
-    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
     run.gh.then(|s| {
         s.checks_on
             .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
@@ -2165,7 +2180,7 @@ async fn an_author_push_while_checks_run_rebases_again() {
 
 #[tokio::test(start_paused = true)]
 async fn the_trunk_moving_twice_outside_the_queue_ejects() {
-    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
     for n in 1..=2 {
         run.gh.then(move |s| {
             s.checks_on
@@ -2193,7 +2208,7 @@ async fn the_trunk_moving_twice_outside_the_queue_ejects() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_merged_by_hand_while_queued_leaves_without_a_rebase() {
-    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
     run.gh.then(|s| {
         s.checks_on
             .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
@@ -2226,7 +2241,7 @@ async fn a_failed_required_check_ejects() {
 
 #[tokio::test(start_paused = true)]
 async fn a_required_check_that_never_finishes_ejects_without_a_fix() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_pr(1);
         s.required = vec!["ci".into(), "e2e".into()];
         s.checks.insert("e2e".into(), CheckState::Pending);
@@ -2327,7 +2342,7 @@ fn sift_required(s: &mut State) {
 
 #[tokio::test(start_paused = true)]
 async fn a_required_check_that_never_reports_ejects_once_ci_is_done_naming_it() {
-    let run = Run::new(Fake::new(sift_required));
+    let run = Run::on_the_lane(Fake::new(sift_required));
     renamed_sift(&run, false);
     let start = tokio::time::Instant::now();
     run.tick().await;
@@ -2352,7 +2367,7 @@ async fn a_required_check_that_never_reports_ejects_once_ci_is_done_naming_it() 
 
 #[tokio::test(start_paused = true)]
 async fn a_required_check_still_running_is_waited_for_past_the_missing_bound() {
-    let run = Run::new(Fake::new(sift_required));
+    let run = Run::on_the_lane(Fake::new(sift_required));
     run.gh.then(|s| {
         s.checks_on
             .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
@@ -2376,7 +2391,7 @@ async fn a_required_check_still_running_is_waited_for_past_the_missing_bound() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_labeled_while_another_waits_for_checks_takes_its_place_at_once() {
-    let run = Run::new(Fake::new(sift_required));
+    let run = Run::on_the_lane(Fake::new(sift_required));
     // PR 1 waits on `sift`, which it renamed. PR 2 is labeled meanwhile, green.
     renamed_sift(&run, true);
     for _ in 0..8 {
@@ -2409,7 +2424,7 @@ async fn a_pr_labeled_while_another_waits_for_checks_takes_its_place_at_once() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_unlabeled_while_another_runs_leaves_the_queue_at_once() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_pr(1);
         s.add_pr(2);
     }));
@@ -2448,7 +2463,7 @@ fn failing_ci(s: &mut State) {
 
 #[tokio::test(start_paused = true)]
 async fn a_failed_required_check_is_fixed_then_merged() {
-    let run = Run::new(Fake::new(failing_ci));
+    let run = Run::on_the_lane(Fake::new(failing_ci));
     run.tick().await;
     assert_eq!(run.rebase.fixed(), [["ci"]]);
     assert_eq!(
@@ -2469,7 +2484,7 @@ async fn a_failed_required_check_is_fixed_then_merged() {
 /// its step at zero.
 #[tokio::test(start_paused = true)]
 async fn each_step_of_a_job_has_an_event_that_begins_it() {
-    let run = Run::new(Fake::new(failing_ci));
+    let run = Run::on_the_lane(Fake::new(failing_ci));
     run.tick().await;
     let kinds = run.kinds(1);
     let events: Vec<(f64, &str)> = kinds
@@ -2506,7 +2521,7 @@ async fn a_ruleset_added_while_a_pr_waits_holds_its_merge() {
 
 #[tokio::test(start_paused = true)]
 async fn fixes_that_do_not_mend_the_checks_eject_after_the_attempts() {
-    let mut run = Run::new(Fake::new(failing_ci));
+    let mut run = Run::on_the_lane(Fake::new(failing_ci));
     run.rebase.fix_works = false;
     run.tick().await;
     assert_eq!(run.rebase.fixed().len(), 3);
@@ -2520,7 +2535,7 @@ async fn fixes_that_do_not_mend_the_checks_eject_after_the_attempts() {
 
 #[tokio::test(start_paused = true)]
 async fn fixes_a_pr_used_before_this_job_count_against_its_budget() {
-    let mut run = Run::new(Fake::new(|s| {
+    let mut run = Run::on_the_lane(Fake::new(|s| {
         failing_ci(s);
         s.fixes_used.insert(1, 2);
     }));
@@ -2534,7 +2549,7 @@ async fn fixes_a_pr_used_before_this_job_count_against_its_budget() {
 
 #[tokio::test(start_paused = true)]
 async fn the_config_file_sets_the_fix_attempts() {
-    let mut run = Run::new(Fake::new(|s| {
+    let mut run = Run::on_the_lane(Fake::new(|s| {
         failing_ci(s);
         s.config = Some("version: 1\nfix_ci: { attempts: 1 }\n".into());
     }));
@@ -2546,7 +2561,7 @@ async fn the_config_file_sets_the_fix_attempts() {
 
 #[tokio::test(start_paused = true)]
 async fn a_fix_that_fails_ejects_with_its_reason() {
-    let mut run = Run::new(Fake::new(failing_ci));
+    let mut run = Run::on_the_lane(Fake::new(failing_ci));
     run.rebase.fix_fails = Some("the agent failed: over its time".into());
     run.tick().await;
     assert_eq!(run.labels(1), [FAILED]);
@@ -2559,7 +2574,7 @@ async fn a_fix_that_fails_ejects_with_its_reason() {
 
 #[tokio::test(start_paused = true)]
 async fn a_check_the_agent_gives_up_on_runs_again_and_a_flaky_one_merges() {
-    let mut run = Run::new(Fake::new(failing_ci));
+    let mut run = Run::on_the_lane(Fake::new(failing_ci));
     run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
     run.rebase.recheck_passes = true;
     run.tick().await;
@@ -2569,7 +2584,7 @@ async fn a_check_the_agent_gives_up_on_runs_again_and_a_flaky_one_merges() {
 
 #[tokio::test(start_paused = true)]
 async fn a_recheck_ci_skips_does_not_pass() {
-    let mut run = Run::new(Fake::new(|s| {
+    let mut run = Run::on_the_lane(Fake::new(|s| {
         s.add_pr(1);
         s.checks.insert("ci".into(), CheckState::Failed);
     }));
@@ -2582,7 +2597,7 @@ async fn a_recheck_ci_skips_does_not_pass() {
 
 #[tokio::test(start_paused = true)]
 async fn a_recheck_waits_out_the_grace_with_no_required_checks() {
-    let mut run = Run::new(Fake::new(|s| {
+    let mut run = Run::on_the_lane(Fake::new(|s| {
         s.add_pr(1);
         s.checks.insert("ci".into(), CheckState::Failed);
     }));
@@ -2596,7 +2611,7 @@ async fn a_recheck_waits_out_the_grace_with_no_required_checks() {
 
 #[tokio::test(start_paused = true)]
 async fn a_recheck_whose_check_is_skipped_does_not_pass() {
-    let mut run = Run::new(Fake::new(failing_ci));
+    let mut run = Run::on_the_lane(Fake::new(failing_ci));
     run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
     run.rebase.recheck_passes = true;
     run.gh.with_mut(|s| s.skipped = vec!["ci".into()]);
@@ -2643,7 +2658,7 @@ async fn a_recheck_holds_across_a_restart() {
 
 #[tokio::test(start_paused = true)]
 async fn a_check_that_fails_again_after_the_agent_gave_up_ejects_with_no_second_fix() {
-    let mut run = Run::new(Fake::new(failing_ci));
+    let mut run = Run::on_the_lane(Fake::new(failing_ci));
     run.rebase.fix_gives_up = Some("the agent gave up: the PR's title".into());
     run.tick().await;
     assert_eq!(run.rebase.fixed().len(), 1);
@@ -2823,7 +2838,7 @@ async fn the_history_keeps_each_pr_that_leaves_the_queue() {
 
 #[tokio::test(start_paused = true)]
 async fn removing_the_label_cancels_the_job() {
-    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
     run.gh.then(|s| {
         s.checks_on
             .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
@@ -3001,7 +3016,7 @@ async fn a_strict_trunk_merges_one_pr_at_a_time() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_whose_own_checks_have_not_passed_runs_alone() {
-    let run = Run::batching(Fake::new(|s| {
+    let run = Run::batching_on_the_lane(Fake::new(|s| {
         prs(&[1, 2, 3])(s);
         let head = s.head(1);
         s.checks_on
@@ -3976,7 +3991,7 @@ async fn a_retargeted_pr_leaves_its_queue_for_its_new_branch() {
 
 #[tokio::test(start_paused = true)]
 async fn a_pr_retargeted_while_its_checks_run_is_not_merged_into_its_old_branch() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_branch("release");
         s.config = Some(RELEASE.into());
         s.add_pr(1);
@@ -4085,7 +4100,7 @@ fn saved_lane(store: &Mem, trunk: &str) -> Option<Vec<(PrNumber, EntryState)>> {
 
 #[tokio::test(start_paused = true)]
 async fn while_a_pr_waits_for_checks_the_other_lanes_sync_but_not_one_a_restart_cut_short() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_branch("release");
         s.add_branch("hotfix");
         s.config = Some("version: 1\nbranches: [release, hotfix]\n".into());
@@ -4136,7 +4151,7 @@ async fn while_a_pr_waits_for_checks_the_other_lanes_sync_but_not_one_a_restart_
 
 #[tokio::test(start_paused = true)]
 async fn a_sync_that_fails_partway_while_a_pr_runs_is_done_again_whole() {
-    let run = Run::new(Fake::new(|s| {
+    let run = Run::on_the_lane(Fake::new(|s| {
         s.add_pr(1);
         s.checks.insert("ci".into(), CheckState::Pending);
     }));
@@ -4170,7 +4185,7 @@ async fn a_sync_that_fails_partway_while_a_pr_runs_is_done_again_whole() {
 
 #[tokio::test(start_paused = true)]
 async fn a_required_check_whose_workflow_is_queued_is_waited_for_past_the_missing_bound() {
-    let run = Run::new(Fake::new(sift_required));
+    let run = Run::on_the_lane(Fake::new(sift_required));
     // `ci` passed, and the workflow that runs `sift` waits in its concurrency group: no check
     // run of GitHub Actions is on the head yet.
     run.gh.then(|s| {

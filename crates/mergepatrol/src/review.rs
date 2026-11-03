@@ -207,7 +207,7 @@ pub(crate) fn still_fixable(pr: &PullRequest, label: &str, trunk: &str, head: &s
 
 /// While the PR has fixes left, the agent's fix goes first. Without one, or if the agent cannot
 /// fix it, the findings wait for the author, as they would anyway.
-async fn fix_sent_back(
+pub(crate) async fn fix_sent_back(
     ctx: &Ctx,
     gh: &Installation,
     key: &LaneKey,

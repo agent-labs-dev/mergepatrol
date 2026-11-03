@@ -1,0 +1,973 @@
+//! Getting a PR ready, end to end: the real jobs, with their locks and their publishing, against
+//! a GitHub on localhost and an agent that needs no model. The GitHub answers from the loop tests'
+//! `Fake`, and keeps its objects in a real repo, which the queue's git cache fetches from. Each
+//! part is real git and sockets, so time runs: a job waits out `prep::drain`'s two seconds.
+
+use std::future::Future;
+use std::path::Path;
+use std::pin::Pin;
+use std::process::{Command, Stdio};
+
+use base64::Engine;
+use mergepatrol_core::FIXED_BY;
+use mergepatrol_executor::protocol::JobResult;
+use mergepatrol_git::cache_path;
+use serde_json::{Value, json};
+use tokio::sync::Barrier;
+
+use super::*;
+use crate::job::LEFT_CONFLICT;
+use crate::review::fix_sent_back;
+
+/// How long a scenario may take to end. It ends far sooner, or it is stuck.
+const SETTLES_WITHIN: Duration = Duration::from_secs(60);
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    git_with(dir, args, &[], None)
+}
+
+fn git_with(dir: &Path, args: &[&str], env: &[(&str, &str)], input: Option<&[u8]>) -> String {
+    use std::io::Write;
+    let mut child = Command::new("git")
+        .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.unwrap_or_default())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+fn commit(dir: &Path, file: &str, content: &str, message: &str) -> String {
+    std::fs::write(dir.join(file), content).unwrap();
+    git(dir, &["add", file]);
+    git(dir, &["commit", "-q", "-m", message]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+/// What the agent does on the job in front of it, beside its work, as a test scripts it.
+type During = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// The job as the sandbox would run it, with a fake in place of the model: a rebase that resolves
+/// each conflict, or a fix that adds a commit.
+struct Agent {
+    origin: PathBuf,
+    /// Each job takes the next, to run while the agent works.
+    during: Mutex<VecDeque<During>>,
+    /// Why the agent cannot do any job, if it cannot.
+    fails: Mutex<Option<String>>,
+    tasks: Mutex<Vec<Task>>,
+}
+
+impl Agent {
+    fn work(&self, spec: &JobSpec, dir: &Path) -> std::result::Result<Vec<JobEvent>, String> {
+        let url = self.origin.to_str().unwrap();
+        git(dir, &["clone", "-q", url, "."]);
+        git(dir, &["checkout", "-q", "--detach", &spec.head_sha]);
+        if !matches!(spec.task, Task::Rebase) {
+            commit(dir, "fix.txt", "fixed\n", &format!("Fix it\n\n{FIXED_BY}"));
+            return Ok(Vec::new());
+        }
+        let upstream = match &spec.upstream {
+            Some(upstream) => upstream.clone(),
+            None => git(dir, &["merge-base", &spec.trunk_sha, "HEAD"]),
+        };
+        let rebased = Command::new("git")
+            .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
+            .args(["rebase", "-q", "--onto", &spec.trunk_sha, &upstream])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        if rebased.status.success() {
+            return Ok(Vec::new());
+        }
+        let conflicts = git(dir, &["diff", "--name-only", "--diff-filter=U"]);
+        if spec.leave_conflicts {
+            return Err(format!("{LEFT_CONFLICT} in {conflicts}"));
+        }
+        for file in conflicts.lines() {
+            std::fs::write(dir.join(file), "resolved\n").unwrap();
+        }
+        git(dir, &["add", "-A"]);
+        git_with(
+            dir,
+            &["rebase", "--continue"],
+            &[("GIT_EDITOR", "true")],
+            None,
+        );
+        Ok(vec![JobEvent {
+            kind: "resolved".into(),
+            message: conflicts,
+        }])
+    }
+}
+
+#[async_trait]
+impl Executor for Agent {
+    async fn run(&self, _: &str, spec: &JobSpec, out: &Path) -> Result<JobResult> {
+        self.tasks.lock().unwrap().push(spec.task.clone());
+        let during = self.during.lock().unwrap().pop_front();
+        if let Some(during) = during {
+            during.await;
+        }
+        let failed = |reason, events| JobResult {
+            outcome: JobOutcome::Failed { reason },
+            events,
+        };
+        if let Some(reason) = self.fails.lock().unwrap().clone() {
+            return Ok(failed(reason, Vec::new()));
+        }
+        let dir = tempfile::tempdir()?;
+        let events = match self.work(spec, dir.path()) {
+            Ok(events) => events,
+            Err(reason) => return Ok(failed(reason, Vec::new())),
+        };
+        let exclude = match spec.task {
+            Task::Rebase => &spec.trunk_sha,
+            _ => &spec.head_sha,
+        };
+        tokio::fs::create_dir_all(out).await?;
+        let head = git(dir.path(), &["rev-parse", "HEAD"]);
+        Git.create_bundle(dir.path(), &out.join(BUNDLE_FILE), &head, exclude)
+            .await?;
+        Ok(JobResult {
+            outcome: JobOutcome::Done,
+            events,
+        })
+    }
+}
+
+/// A PR as GraphQL gives it.
+fn pr_node(pr: &PullRequest) -> Value {
+    let none = json!({ "nodes": [] });
+    let labels: Vec<Value> = pr.labels.iter().map(|l| json!({ "name": l })).collect();
+    json!({
+        "number": pr.number,
+        "state": pr.state,
+        "title": pr.title,
+        "body": pr.body,
+        "isDraft": pr.is_draft,
+        "isCrossRepository": pr.is_cross_repository,
+        "reviewDecision": null,
+        "baseRefName": pr.base_ref_name,
+        "headRefName": pr.head_ref_name,
+        "headRefOid": pr.head_ref_oid,
+        "labels": { "nodes": labels },
+        "stack": pr.stack.as_ref().map(|s| {
+            json!({ "number": s.number, "baseRefName": s.base_ref_name })
+        }),
+        "mergeable": if pr.conflicting { "CONFLICTING" } else { "MERGEABLE" },
+        "url": "", "createdAt": "", "additions": 0, "deletions": 0, "changedFiles": 0,
+        "author": null,
+        "latestOpinionatedReviews": none,
+        "reviewRequests": none,
+        "commits": none,
+    })
+}
+
+/// A repository as a snapshot gives it. A job reads only what is about the repo.
+fn repository_node(trunk: &str) -> Value {
+    let label = json!({ "name": TRIGGER });
+    json!({
+        "id": "R",
+        "isPrivate": false,
+        "trigger": label, "priority": label, "failed": label,
+        "viewerDefaultMergeMethod": "MERGE",
+        "squashMergeAllowed": true, "rebaseMergeAllowed": true, "mergeCommitAllowed": true,
+        "defaultBranchRef": { "name": "main", "target": { "oid": trunk } },
+        "pullRequests": { "nodes": [], "pageInfo": { "hasNextPage": false, "endCursor": null } },
+    })
+}
+
+/// `updateRefs`: every branch moves, or none does.
+fn update_refs(gh: &Fake, origin: &Path, updates: &[Value]) -> Value {
+    let str_of = |u: &Value, key: &str| u[key].as_str().unwrap().to_owned();
+    if updates.iter().any(|u| {
+        let name = str_of(u, "name");
+        git(origin, &["rev-parse", &name]) != str_of(u, "beforeOid")
+    }) {
+        return json!({ "errors": [{ "message": "a ref moved" }] });
+    }
+    let mut s = gh.state.lock().unwrap();
+    for u in updates {
+        let (name, after) = (str_of(u, "name"), str_of(u, "afterOid"));
+        git(origin, &["update-ref", &name, &after]);
+        let branch = name.strip_prefix("refs/heads/").unwrap();
+        s.branches.insert(branch.into(), after.clone());
+        if let Some(pr) = s.prs.values_mut().find(|p| p.head_ref_name == branch) {
+            pr.head_ref_oid = after;
+            pr.conflicting = false;
+        }
+    }
+    json!({ "data": { "updateRefs": { "clientMutationId": null } } })
+}
+
+fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
+    let (query, vars) = (body["query"].as_str().unwrap(), &body["variables"]);
+    if query.contains("updateRefs") {
+        return update_refs(gh, origin, vars["updates"].as_array().unwrap());
+    }
+    let s = gh.state.lock().unwrap();
+    if query.contains("pullRequests(") {
+        return json!({ "data": { "repository": repository_node(&s.trunk) } });
+    }
+    let pr = &s.prs[&vars["number"].as_u64().unwrap()];
+    if query.contains("commits(last: 20)") {
+        let log = git(
+            origin,
+            &["log", "-n", "20", "--format=%B%x1e", &pr.head_ref_oid],
+        );
+        let nodes: Vec<Value> = log
+            .split('\u{1e}')
+            .rev()
+            .map(|m| json!({ "commit": { "message": m.trim() } }))
+            .collect();
+        let commits = json!({ "commits": { "nodes": nodes } });
+        return json!({ "data": { "repository": { "pullRequest": commits } } });
+    }
+    json!({ "data": { "repository": { "pullRequest": pr_node(pr) } } })
+}
+
+/// The Git Data API, on the repo at `origin`: `base_tree` with `tree`'s entries applied.
+fn create_tree(origin: &Path, body: &Value) -> String {
+    let index = tempfile::tempdir().unwrap();
+    let index = index.path().join("index");
+    let env = [("GIT_INDEX_FILE", index.to_str().unwrap())];
+    let base = body["base_tree"].as_str().unwrap();
+    git_with(origin, &["read-tree", base], &env, None);
+    for entry in body["tree"].as_array().unwrap() {
+        let path = entry["path"].as_str().unwrap();
+        let info = match entry["sha"].as_str() {
+            Some(sha) => format!("{},{sha},{path}", entry["mode"].as_str().unwrap()),
+            None => String::new(),
+        };
+        let args = match info.is_empty() {
+            true => vec!["update-index", "--force-remove", path],
+            false => vec!["update-index", "--add", "--cacheinfo", &info],
+        };
+        git_with(origin, &args, &env, None);
+    }
+    git_with(origin, &["write-tree"], &env, None)
+}
+
+/// GitHub's answer to one request. Refs go to the `Fake` too, which is what a tick reads.
+fn answer(gh: &Fake, origin: &Path, method: &str, path: &str, body: &str) -> (u16, String) {
+    let body: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let sha_of = |sha: String| json!({ "sha": sha }).to_string();
+    if path.ends_with("/access_tokens") {
+        return (201, json!({ "token": "read" }).to_string());
+    }
+    if path == "/graphql" {
+        return (200, graphql(gh, origin, &body).to_string());
+    }
+    let Some(rest) = path.strip_prefix("/repos/o/r/") else {
+        return (404, "{}".into());
+    };
+    if let Some(branch) = rest.strip_prefix("git/ref/heads/") {
+        let s = gh.state.lock().unwrap();
+        let sha = match branch {
+            "main" => Some(&s.trunk),
+            _ => s.branches.get(branch),
+        };
+        return match sha {
+            Some(sha) => (200, json!({ "object": { "sha": sha } }).to_string()),
+            None => (404, "{}".into()),
+        };
+    }
+    if let Some(commit) = rest.strip_prefix("commits/") {
+        let sha = commit.split('/').next().unwrap();
+        let failed: Vec<Value> = gh
+            .with(|s| s.checks_of(sha))
+            .into_iter()
+            .filter(|(_, state)| *state == CheckState::Failed)
+            .map(|(name, _)| json!({ "id": 1, "name": name, "conclusion": "failure" }))
+            .collect();
+        let total = failed.len();
+        let runs = json!({ "check_runs": failed, "total_count": total });
+        return (200, runs.to_string());
+    }
+    match (method, rest) {
+        ("POST", "git/blobs") => {
+            let content = body["content"].as_str().unwrap();
+            let content = base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .unwrap();
+            let args = ["hash-object", "-w", "--stdin"];
+            let sha = git_with(origin, &args, &[], Some(&content));
+            (201, sha_of(sha))
+        }
+        ("POST", "git/trees") => (201, sha_of(create_tree(origin, &body))),
+        ("POST", "git/commits") => {
+            let (tree, parent) = (
+                body["tree"].as_str().unwrap(),
+                body["parents"][0].as_str().unwrap(),
+            );
+            let message = body["message"].as_str().unwrap().as_bytes();
+            let args = ["commit-tree", tree, "-p", parent, "-F", "-"];
+            (201, sha_of(git_with(origin, &args, &[], Some(message))))
+        }
+        ("POST", "git/refs") => {
+            let (name, sha) = (body["ref"].as_str().unwrap(), body["sha"].as_str().unwrap());
+            git(origin, &["update-ref", name, sha]);
+            let branch = name.strip_prefix("refs/heads/").unwrap();
+            gh.with_mut(|s| s.branches.insert(branch.into(), sha.into()));
+            (201, "{}".into())
+        }
+        ("DELETE", _) => {
+            let name = format!("refs/{}", rest.strip_prefix("git/refs/").unwrap());
+            let branch = name.strip_prefix("refs/heads/").unwrap();
+            if gh.with_mut(|s| s.branches.remove(branch)).is_none() {
+                return (422, "{}".into());
+            }
+            git(origin, &["update-ref", "-d", &name]);
+            (204, String::new())
+        }
+        _ => (404, "{}".into()),
+    }
+}
+
+/// PR `number`, at the head its branch `pr-<number>` has in the repo.
+fn add_pr(s: &mut State, number: PrNumber, origin: &Path) {
+    s.add_pr(number);
+    point_at_branch(s, number, origin);
+}
+
+fn point_at_branch(s: &mut State, number: PrNumber, origin: &Path) {
+    let branch = format!("pr-{number}");
+    let head = git(origin, &["rev-parse", &branch]);
+    s.branches.insert(branch, head.clone());
+    s.prs.get_mut(&number).unwrap().head_ref_oid = head;
+}
+
+/// A queue with its real jobs: its ticks read the `Fake`, the jobs reach it over HTTP.
+struct World {
+    _tmp: tempfile::TempDir,
+    origin: PathBuf,
+    ctx: Arc<Ctx>,
+    store: Arc<Mem>,
+    gh: Arc<Fake>,
+    installation: Installation,
+    agent: Arc<Agent>,
+}
+
+impl World {
+    /// `origin` builds the repo, on `main`, and `setup` what GitHub says of it, with the trunk at
+    /// its last commit. Two jobs may run at once.
+    async fn new(origin_of: impl FnOnce(&Path), setup: impl FnOnce(&mut State, &Path)) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-q", "-b", "main"]);
+        origin_of(&origin);
+
+        let gh = Fake::new(|s| {
+            s.required = vec!["ci".into()];
+            s.trunk = git(&origin, &["rev-parse", "main"]);
+            setup(s, &origin);
+        });
+        let (answers, at) = (gh.clone(), origin.clone());
+        let installation = mergepatrol_github::fake::answered_by(move |method, path, body| {
+            answer(&answers, &at, method, path, body)
+        })
+        .await;
+
+        let agent = Arc::new(Agent {
+            origin: origin.clone(),
+            during: Default::default(),
+            fails: Default::default(),
+            tasks: Default::default(),
+        });
+        let store = Arc::new(Mem::default());
+        let mut ctx = ctx(store.clone());
+        ctx.config.data_dir = tmp.path().join("data");
+        ctx.executor = agent.clone();
+        ctx.jobs = Semaphore::new(2);
+        // The cache's `origin` is GitHub's URL, whatever the test: it is sent here.
+        let cache = cache_path(&ctx.config.data_dir, "o", "r");
+        std::fs::create_dir_all(&cache).unwrap();
+        git(&cache, &["init", "--bare", "-q"]);
+        let instead = format!("url.{}.insteadOf", origin.display());
+        git(&cache, &["config", &instead, &clone_url(&repo())]);
+
+        Self {
+            _tmp: tmp,
+            origin,
+            ctx: Arc::new(ctx),
+            store,
+            gh,
+            installation,
+            agent,
+        }
+    }
+
+    /// One PR off `main`, on a repo with a `shared.txt`. `pr_file` and `trunk_file` are what each
+    /// side changes: the same file conflicts.
+    async fn one_pr(pr_file: &'static str, trunk_file: &'static str) -> Self {
+        Self::new(
+            |o| {
+                commit(o, "shared.txt", "base\n", "start");
+                git(o, &["checkout", "-q", "-b", "pr-1"]);
+                commit(o, pr_file, "from the pr\n", "the PR's change");
+                git(o, &["checkout", "-q", "main"]);
+                commit(o, trunk_file, "from main\n", "the trunk's change");
+            },
+            |s, o| add_pr(s, 1, o),
+        )
+        .await
+    }
+
+    /// `prep::drain`, until it is dropped. It forgets what was asked before it started: a test
+    /// starts it first.
+    async fn drain(&self) -> Spawned {
+        let (ctx, gh) = (self.ctx.clone(), self.installation.clone());
+        let drain = Spawned(tokio::spawn(prep::drain(ctx, gh, repo())));
+        tokio::task::yield_now().await;
+        drain
+    }
+
+    async fn tick(&self) {
+        let sandbox = JobSandbox {
+            ctx: &self.ctx,
+            gh: &self.installation,
+        };
+        tick(&self.ctx, &*self.gh, &sandbox, &repo()).await.unwrap();
+    }
+
+    /// Ticks until `done`.
+    async fn tick_until(&self, done: impl Fn(&Self) -> bool) {
+        let since = Instant::now();
+        while !done(self) {
+            assert!(
+                since.elapsed() < SETTLES_WITHIN,
+                "stuck: {:?}, {:?}",
+                self.lane(),
+                self.kinds(1)
+            );
+            self.tick().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Waits for `done`, with no tick to help it.
+    async fn until(&self, done: impl Fn(&Self) -> bool) {
+        let since = Instant::now();
+        while !done(self) {
+            assert!(since.elapsed() < SETTLES_WITHIN, "stuck: {:?}", self.lane());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn merged(&self) -> Vec<PrNumber> {
+        self.gh.with(|s| s.merged.clone())
+    }
+
+    fn lane(&self) -> Vec<(PrNumber, String)> {
+        let lanes = self.store.lanes.lock().unwrap();
+        lanes
+            .values()
+            .flat_map(|l| &l.entries)
+            .map(|e| (e.number, format!("{:?}", e.state)))
+            .collect()
+    }
+
+    fn kinds(&self, number: PrNumber) -> Vec<String> {
+        let events = self.store.events.lock().unwrap();
+        events
+            .iter()
+            .filter(|(n, ..)| *n == number)
+            .map(|(_, kind, _)| kind.clone())
+            .collect()
+    }
+
+    fn did(&self, number: PrNumber, kind: &str) -> bool {
+        self.kinds(number).iter().any(|k| k == kind)
+    }
+
+    fn tasks(&self) -> Vec<Task> {
+        self.agent.tasks.lock().unwrap().clone()
+    }
+
+    /// The branch as the repo has it, which only a publish moves.
+    fn branch(&self, name: &str) -> String {
+        git(&self.origin, &["rev-parse", name])
+    }
+
+    fn key(&self) -> LaneKey {
+        LaneKey {
+            installation_id: 1,
+            repo: repo(),
+            trunk: "main".into(),
+        }
+    }
+
+    fn pr(&self, number: PrNumber) -> PullRequest {
+        self.gh.with(|s| s.prs[&number].clone())
+    }
+
+    /// `f` runs while the agent works on the next job.
+    fn during(&self, f: impl Future<Output = ()> + Send + 'static) {
+        self.agent.during.lock().unwrap().push_back(Box::pin(f));
+    }
+
+    /// The review of PR 1 finished and sent a finding back to its author: its id.
+    async fn sent_back(&self) -> i64 {
+        let head = self.pr(1).head_ref_oid;
+        let r = self.store.start_review(1, &repo(), 1, &head).await;
+        let r = r.unwrap();
+        self.store.with_finding(1, |f| f.sent_back = true);
+        self.store.finish_review(1, ReviewStatus::Changes);
+        r.id
+    }
+
+    /// What the review worker does with a review that sent findings back.
+    async fn fix_review(&self, review: i64) {
+        fix_sent_back(
+            &self.ctx,
+            &self.installation,
+            &self.key(),
+            &self.pr(1),
+            &self.ctx.config.repo_defaults,
+            review,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn review_on(&self) {
+        *self.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+            enabled: true,
+            ..ReviewSettings::default()
+        });
+    }
+}
+
+fn checks_fail(s: &mut State, number: PrNumber) {
+    let failed = BTreeMap::from([("ci".to_owned(), CheckState::Failed)]);
+    s.checks_on.insert(s.head(number), failed);
+}
+
+#[tokio::test]
+async fn a_conflict_the_lane_finds_is_rebased_off_it_then_merges() {
+    let world = World::one_pr("shared.txt", "shared.txt").await;
+    let before = world.pr(1).head_ref_oid;
+    let _drain = world.drain().await;
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(PrepRebasing)".into())]);
+    assert_eq!(world.branch("pr-1"), before, "the lane leaves it as it is");
+
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    assert_eq!(world.tasks(), [Task::Rebase, Task::Rebase]);
+    assert!(world.did(1, "resolved"), "{:?}", world.kinds(1));
+    assert!(world.did(1, "published"));
+    assert!(!world.did(1, "ejected"));
+    let head = world.branch("pr-1");
+    let shown = git(&world.origin, &["show", &format!("{head}:shared.txt")]);
+    assert_eq!(shown, "resolved");
+    let on = git(&world.origin, &["rev-parse", &format!("{head}~1")]);
+    assert_eq!(on, git(&world.origin, &["rev-parse", "main"]));
+}
+
+#[tokio::test]
+async fn a_conflict_github_shows_is_rebased_before_the_lane_sees_it() {
+    let world = World::one_pr("shared.txt", "shared.txt").await;
+    world.gh.with_mut(|s| {
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+    });
+    let _drain = world.drain().await;
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    assert_eq!(world.tasks(), [Task::Rebase], "the lane needs no agent");
+}
+
+#[tokio::test]
+async fn a_failed_check_is_fixed_off_the_lane_then_merges() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| checks_fail(s, 1));
+    let _drain = world.drain().await;
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(PrepFixing)".into())]);
+
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    let Task::FixChecks { failures } = &world.tasks()[0] else {
+        panic!("{:?}", world.tasks());
+    };
+    assert_eq!(failures[0].name, "ci");
+    assert!(failures[0].details.contains("failure"), "{failures:?}");
+    assert!(world.did(1, "fixing"));
+    // The lane then rebased it, with the fix on top of the PR's own commit.
+    let log = git(&world.origin, &["log", "--format=%B", "main..pr-1"]);
+    assert!(log.starts_with("Fix it") && log.contains(FIXED_BY), "{log}");
+    assert!(log.contains("the PR's change"), "{log}");
+}
+
+#[tokio::test]
+async fn a_review_s_findings_are_fixed_and_reviewed_again() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(Reviewing)".into())]);
+    let before = world.pr(1).head_ref_oid;
+
+    let review = world.sent_back().await;
+    world.fix_review(review).await;
+    let Task::FixReview { findings } = &world.tasks()[0] else {
+        panic!("{:?}", world.tasks());
+    };
+    assert_eq!(findings[0].id, "f1");
+    let head = world.branch("pr-1");
+    assert_ne!(head, before);
+    let message = git(&world.origin, &["log", "-1", "--format=%B", &head]);
+    assert!(message.contains(FIXED_BY), "{message}");
+    assert!(world.did(1, "review-fixing") && world.did(1, "review-fixed"));
+    let first = world.store.review(review).await.unwrap().unwrap();
+    assert!(first.agent_fixed, "the author's rounds are not spent");
+
+    // The next tick reviews what the agent pushed, and that review lets it go on.
+    world.tick().await;
+    assert_eq!(world.store.newest_review(1).0, head);
+    assert_eq!(world.lane(), [(1, "Held(Reviewing)".into())]);
+    assert!(world.merged().is_empty());
+    world.store.finish_review(1, ReviewStatus::Approved);
+    world.tick_until(|w| !w.merged().is_empty()).await;
+}
+
+#[tokio::test]
+async fn a_fix_the_agent_cannot_make_leaves_the_findings_to_the_author() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    *world.agent.fails.lock().unwrap() = Some("the agent gave up".into());
+    let before = world.pr(1).head_ref_oid;
+    let review = world.sent_back().await;
+    world.fix_review(review).await;
+    assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
+    assert_eq!(world.branch("pr-1"), before);
+    let first = world.store.review(review).await.unwrap().unwrap();
+    assert!(!first.agent_fixed);
+}
+
+#[tokio::test]
+async fn a_pr_with_no_fixes_left_gets_no_review_fix() {
+    let world = World::new(
+        |o| {
+            commit(o, "shared.txt", "base\n", "start");
+            git(o, &["checkout", "-q", "-b", "pr-1"]);
+            commit(o, "feature.txt", "from the pr\n", "the PR's change");
+            for i in 0..3 {
+                commit(
+                    o,
+                    "fix.txt",
+                    &format!("{i}\n"),
+                    &format!("Fix\n\n{FIXED_BY}"),
+                );
+            }
+            git(o, &["checkout", "-q", "main"]);
+        },
+        |s, o| add_pr(s, 1, o),
+    )
+    .await;
+    let review = world.sent_back().await;
+    world.fix_review(review).await;
+    assert!(world.tasks().is_empty(), "the budget is its commits");
+    assert!(!world.did(1, "review-fixing"));
+}
+
+#[tokio::test]
+async fn a_job_that_fails_leaves_the_pr_to_the_lane() {
+    // A check it cannot fix.
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| checks_fail(s, 1));
+    *world.agent.fails.lock().unwrap() = Some("the agent broke".into());
+    let _drain = world.drain().await;
+    world.tick_until(|w| w.did(1, "ejected")).await;
+    assert!(world.did(1, "prep-left"), "{:?}", world.kinds(1));
+    assert_eq!(world.gh.with(|s| s.prs[&1].labels.clone()), [FAILED]);
+    assert_eq!(world.tasks().len(), 2, "off the lane, then on it");
+
+    // A conflict it cannot resolve.
+    let world = World::one_pr("shared.txt", "shared.txt").await;
+    world.gh.with_mut(|s| {
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+    });
+    *world.agent.fails.lock().unwrap() = Some("the agent broke".into());
+    let _drain = world.drain().await;
+    world.tick_until(|w| w.did(1, "ejected")).await;
+    assert!(world.did(1, "prep-left"), "{:?}", world.kinds(1));
+    assert_eq!(world.tasks(), [Task::Rebase, Task::Rebase]);
+}
+
+#[tokio::test]
+async fn a_pr_that_left_before_its_job_starts_gets_no_agent() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| checks_fail(s, 1));
+    let _drain = world.drain().await;
+    world.tick().await;
+    world
+        .gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.clear());
+    let key = world.key();
+    world.until(|w| w.ctx.prep.claim(&key, 1).is_some()).await;
+    assert!(world.tasks().is_empty());
+}
+
+/// How a PR leaves, and what it does to GitHub.
+type Departure = (&'static str, fn(&mut State));
+
+/// What makes a PR leave the queue, or the trunk it was queued for.
+fn departures() -> [Departure; 3] {
+    [
+        ("closed", |s| {
+            s.prs.get_mut(&1).unwrap().state = "CLOSED".into();
+        }),
+        ("unlabeled", |s| s.prs.get_mut(&1).unwrap().labels.clear()),
+        ("retargeted", |s| {
+            s.add_branch("other");
+            s.retarget(1, "other");
+        }),
+    ]
+}
+
+#[tokio::test]
+async fn a_pr_that_leaves_while_its_review_fix_runs_gets_no_push() {
+    for (how, leaves) in departures() {
+        let world = World::one_pr("feature.txt", "other.txt").await;
+        let before = world.pr(1).head_ref_oid;
+        let gh = world.gh.clone();
+        world.during(async move { gh.with_mut(leaves) });
+        let review = world.sent_back().await;
+        world.fix_review(review).await;
+        assert_eq!(world.tasks().len(), 1, "{how}");
+        assert_eq!(world.branch("pr-1"), before, "{how}");
+        assert!(world.did(1, "review-unfixed"), "{how}");
+        assert!(!world.did(1, "review-fixed"), "{how}");
+    }
+}
+
+#[tokio::test]
+async fn a_pr_that_leaves_while_its_review_fix_waits_for_the_cache_gets_no_push() {
+    for (how, leaves) in departures() {
+        let world = World::one_pr("feature.txt", "other.txt").await;
+        let before = world.pr(1).head_ref_oid;
+        // The lane has the cache as the agent ends, and the PR leaves before it lets go.
+        let (ctx, gh) = (world.ctx.clone(), world.gh.clone());
+        world.during(async move {
+            let cache = ctx.caches.lock(&repo()).await;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                gh.with_mut(leaves);
+                drop(cache);
+            });
+        });
+        let review = world.sent_back().await;
+        world.fix_review(review).await;
+        assert_eq!(world.tasks().len(), 1, "{how}");
+        assert_eq!(world.branch("pr-1"), before, "{how}");
+        assert!(!world.did(1, "review-fixed"), "{how}");
+    }
+}
+
+#[tokio::test]
+async fn a_pr_that_leaves_while_its_rebase_runs_gets_no_push() {
+    for (how, leaves) in departures() {
+        let world = World::one_pr("shared.txt", "shared.txt").await;
+        world.gh.with_mut(|s| {
+            s.prs.get_mut(&1).unwrap().conflicting = true;
+        });
+        let before = world.pr(1).head_ref_oid;
+        let gh = world.gh.clone();
+        world.during(async move { gh.with_mut(leaves) });
+        let _drain = world.drain().await;
+        world.tick().await;
+        let key = world.key();
+        world.until(|w| !w.tasks().is_empty()).await;
+        world.until(|w| w.ctx.prep.claim(&key, 1).is_some()).await;
+        assert_eq!(world.branch("pr-1"), before, "{how}");
+        assert!(!world.did(1, "published"), "{how}");
+        assert!(!world.did(1, "prep-left"), "{how}: nothing for the lane");
+    }
+}
+
+#[tokio::test]
+async fn a_job_waits_for_the_cache_but_the_agent_does_not_hold_it() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    let review = world.sent_back().await;
+
+    // The fetch waits for whoever has the cache.
+    let held = world.ctx.caches.lock(&repo()).await;
+    let fixing = world.fix_review(review);
+    let waited = tokio::time::timeout(Duration::from_millis(300), fixing).await;
+    assert!(waited.is_err(), "it went on past the lock");
+    assert!(world.tasks().is_empty(), "no agent before the fetch");
+    drop(held);
+
+    // While the agent works, the cache is free.
+    let ctx = world.ctx.clone();
+    world.during(async move {
+        let free = tokio::time::timeout(Duration::from_secs(5), ctx.caches.lock(&repo())).await;
+        free.expect("the agent's job holds the cache");
+    });
+    world.fix_review(review).await;
+    assert!(world.did(1, "review-fixed"), "{:?}", world.kinds(1));
+}
+
+#[tokio::test]
+async fn jobs_on_two_prs_run_at_once_on_one_cache() {
+    let world = World::new(
+        |o| {
+            commit(o, "shared.txt", "base\n", "start");
+            for n in [1, 2] {
+                git(o, &["checkout", "-q", "-b", &format!("pr-{n}"), "main"]);
+                commit(o, &format!("f{n}.txt"), "from the pr\n", "a change");
+            }
+            git(o, &["checkout", "-q", "main"]);
+        },
+        |s, o| {
+            add_pr(s, 1, o);
+            add_pr(s, 2, o);
+            checks_fail(s, 1);
+            checks_fail(s, 2);
+        },
+    )
+    .await;
+    // Each waits in its agent for the other.
+    let both = Arc::new(Barrier::new(2));
+    for _ in 0..2 {
+        let both = both.clone();
+        world.during(async move {
+            both.wait().await;
+        });
+    }
+    let heads = [world.pr(1).head_ref_oid, world.pr(2).head_ref_oid];
+    let _drain = world.drain().await;
+    world.tick().await;
+    assert_eq!(world.ctx.prep.asked().len(), 2);
+    world
+        .until(|w| w.did(1, "published") && w.did(2, "published"))
+        .await;
+    assert_ne!(world.branch("pr-1"), heads[0]);
+    assert_ne!(world.branch("pr-2"), heads[1]);
+}
+
+/// A stack of `pr-1` under `pr-2`, with an approval each. The trunk changes `trunk_file`.
+async fn approved_stack(
+    lower: &'static str,
+    upper: &'static str,
+    trunk_file: &'static str,
+) -> World {
+    let world = World::new(
+        |o| {
+            commit(o, "shared.txt", "base\n", "start");
+            git(o, &["checkout", "-q", "-b", "pr-1"]);
+            commit(o, lower, "from layer 1\n", "layer 1");
+            git(o, &["checkout", "-q", "-b", "pr-2"]);
+            commit(o, upper, "from layer 2\n", "layer 2");
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, trunk_file, "from main\n", "the trunk's change");
+        },
+        |s, o| {
+            s.add_stack(1, &[1, 2], &[1, 2]);
+            point_at_branch(s, 1, o);
+            point_at_branch(s, 2, o);
+        },
+    )
+    .await;
+    for n in [1, 2] {
+        let head = world.pr(n).head_ref_oid;
+        let r = world
+            .store
+            .start_review(1, &repo(), n, &head)
+            .await
+            .unwrap();
+        world.store.finish_review(r.number, ReviewStatus::Approved);
+    }
+    world
+}
+
+async fn rebase_stack(world: &World) -> Event {
+    let unit = Unit {
+        number: 1,
+        base: "main".into(),
+        layers: vec![world.pr(1), world.pr(2)],
+        stacked: true,
+    };
+    let (key, settings) = (world.key(), &world.ctx.config.repo_defaults);
+    let snap = GitHub::snapshot(&world.installation, &repo(), &settings.labels()).await;
+    let snap = snap.unwrap();
+    let sandbox = JobSandbox {
+        ctx: &world.ctx,
+        gh: &world.installation,
+    };
+    sandbox
+        .rebase(&key, &snap, &unit, settings, true)
+        .await
+        .unwrap()
+}
+
+/// The status of the review on PR `number`'s head, and the head it goes on from.
+fn review_of_head(world: &World, number: PrNumber) -> (ReviewStatus, Option<String>) {
+    let head = world.pr(number).head_ref_oid;
+    let reviews = world.store.reviews.lock().unwrap();
+    let r = reviews
+        .iter()
+        .find(|r| r.number == number && r.head_sha == head);
+    let r = r.expect("a review of the new head");
+    (r.status, r.since_head.clone())
+}
+
+#[tokio::test]
+async fn only_the_layer_whose_conflict_the_agent_resolved_loses_its_approval() {
+    // The conflict is in the upper layer.
+    let world = approved_stack("lower.txt", "shared.txt", "shared.txt").await;
+    let upper = world.pr(2).head_ref_oid;
+    let event = rebase_stack(&world).await;
+    assert!(matches!(event, Event::Rebased { .. }), "{event:?}");
+    assert_eq!(review_of_head(&world, 1), (ReviewStatus::Approved, None));
+    assert_eq!(
+        review_of_head(&world, 2),
+        (ReviewStatus::Stale, Some(upper)),
+        "the next review looks at what the agent wrote"
+    );
+
+    // The conflict is in the lower layer.
+    let world = approved_stack("shared.txt", "upper.txt", "shared.txt").await;
+    let lower = world.pr(1).head_ref_oid;
+    let event = rebase_stack(&world).await;
+    assert!(matches!(event, Event::Rebased { .. }), "{event:?}");
+    assert_eq!(
+        review_of_head(&world, 1),
+        (ReviewStatus::Stale, Some(lower))
+    );
+    assert_eq!(review_of_head(&world, 2), (ReviewStatus::Approved, None));
+
+    // The branches moved together, and the one the upper layer's job read is gone.
+    assert_eq!(world.branch("pr-1"), world.pr(1).head_ref_oid);
+    assert_eq!(world.branch("pr-2"), world.pr(2).head_ref_oid);
+    let below = git(&world.origin, &["rev-parse", "pr-2~1"]);
+    assert_eq!(below, world.branch("pr-1"));
+    assert!(
+        world
+            .gh
+            .with(|s| !s.branches.contains_key("mergepatrol/restack-1"))
+    );
+}
+
+#[tokio::test]
+async fn a_clean_rebase_keeps_every_layers_approval() {
+    let world = approved_stack("lower.txt", "upper.txt", "other.txt").await;
+    let event = rebase_stack(&world).await;
+    assert!(matches!(event, Event::Rebased { .. }), "{event:?}");
+    assert_eq!(review_of_head(&world, 1), (ReviewStatus::Approved, None));
+    assert_eq!(review_of_head(&world, 2), (ReviewStatus::Approved, None));
+}
