@@ -820,6 +820,28 @@ impl Installation {
             .collect())
     }
 
+    /// Whether `label` queues the PR: it is on the PR, or on any open layer of its stack, which
+    /// the label on one layer queues whole.
+    pub async fn labeled_for_queue(
+        &self,
+        repo: &RepoName,
+        pr: &PullRequest,
+        label: &str,
+    ) -> Result<bool> {
+        if pr.has_label(label) {
+            return Ok(true);
+        }
+        let Some(stack) = &pr.stack else {
+            return Ok(false);
+        };
+        for n in self.stack_layers(repo, stack.number).await? {
+            if n != pr.number && self.pull_request(repo, n).await?.has_label(label) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn branch_sha(&self, repo: &RepoName, branch: &str) -> Result<String> {
         let r: Value = self
             .rest(
@@ -1616,6 +1638,56 @@ mod tests {
         format!(
             r#"{{"number":{number},"state":"OPEN","title":"t","body":"","isDraft":false,"isCrossRepository":false,"reviewDecision":null,"baseRefName":"main","headRefName":"b{number}","headRefOid":"h{number}","labels":{{"nodes":[{{"name":"mp"}}]}},"files":{{"nodes":[]}},"stack":null,"url":"u","createdAt":"2026-10-01T00:00:00Z","additions":0,"deletions":0,"changedFiles":0,"author":null,"latestOpinionatedReviews":{{"nodes":[]}},"reviewRequests":{{"nodes":[]}},"commits":{{"nodes":[]}}}}"#
         )
+    }
+
+    /// A PR of stack 9, with `labels`.
+    fn layer(number: u64, labels: &[&str]) -> Value {
+        let mut node: Value = serde_json::from_str(&pr_node(number)).unwrap();
+        node["labels"]["nodes"] = labels.iter().map(|l| json!({ "name": l })).collect();
+        node["stack"] = json!({ "number": 9, "baseRefName": "main" });
+        node
+    }
+
+    fn pull_response(node: Value) -> &'static str {
+        leak(json!({ "data": { "repository": { "pullRequest": node } } }).to_string())
+    }
+
+    #[tokio::test]
+    async fn the_label_on_any_open_layer_queues_a_stack_and_on_no_layer_it_does_not() {
+        let repo = RepoName::parse("o/r").unwrap();
+        let of = |node: Value| serde_json::from_value::<PullRequest>(node).unwrap();
+        let stack = r#"{"pull_requests":[{"number":1,"state":"open"},{"number":2,"state":"open"},{"number":3,"state":"merged"}]}"#;
+
+        // On the PR itself: GitHub need not be asked.
+        let (gh, requests) = fake::serve(vec![]).await;
+        let labeled = of(layer(2, &["mp"]));
+        assert!(gh.labeled_for_queue(&repo, &labeled, "mp").await.unwrap());
+        assert!(requests.lock().unwrap().is_empty());
+
+        // On a layer below: the whole stack is queued.
+        let bare = of(layer(2, &[]));
+        let (gh, _) = fake::serve(vec![
+            (200, "", stack),
+            (200, "", pull_response(layer(1, &["mp"]))),
+        ])
+        .await;
+        assert!(gh.labeled_for_queue(&repo, &bare, "mp").await.unwrap());
+
+        // On no open layer: only the other layer is read, not the PR again or the merged one.
+        let (gh, requests) = fake::serve(vec![
+            (200, "", stack),
+            (200, "", pull_response(layer(1, &["other"]))),
+        ])
+        .await;
+        assert!(!gh.labeled_for_queue(&repo, &bare, "mp").await.unwrap());
+        assert_eq!(requests.lock().unwrap().len(), 2);
+
+        // Outside a stack, a PR's own labels are the answer.
+        let (gh, requests) = fake::serve(vec![]).await;
+        let mut alone = bare.clone();
+        alone.stack = None;
+        assert!(!gh.labeled_for_queue(&repo, &alone, "mp").await.unwrap());
+        assert!(requests.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -173,8 +173,9 @@ impl std::fmt::Display for RepoName {
 }
 
 /// Whether a PR has been told to merge, the only state in which the queue acts on it: it is
-/// open, it carries the repo's trigger label, and its lane holds a place for it. Autonomous work
-/// never starts on a PR being opened, pushed to, labeled otherwise, reviewed or checked.
+/// open, it or a layer of its stack carries the repo's trigger label, and its lane holds a place
+/// for it. Autonomous work never starts on a PR being opened, pushed to, labeled otherwise,
+/// reviewed or checked.
 pub fn merge_requested(open: bool, labeled: bool, in_lane: bool) -> bool {
     open && labeled && in_lane
 }

@@ -139,8 +139,7 @@ fn may_act(review: &ReviewRecord, merge_requested: bool) -> bool {
     review.status == ReviewStatus::Asks && merge_requested
 }
 
-/// Whether the PR has been told to merge: open, carrying the repo's trigger label, and holding a
-/// place in its lane.
+/// Whether the PR has been told to merge, by the repo's trigger label as its settings name it.
 async fn told_to_merge(
     app: &AppState,
     gh: &Installation,
@@ -150,7 +149,7 @@ async fn told_to_merge(
     let defaults = app.store.inherited(gh.id, &app.repo_defaults).await?;
     let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
     let settings = RepoSettings::from_file(file.text.as_deref(), &defaults).unwrap_or(defaults);
-    merge_requested(app.store.as_ref(), gh.id, repo, pr, &settings.label).await
+    merge_requested(app.store.as_ref(), gh, repo, pr, &settings.label).await
 }
 
 /// Approves the review for an approval of its head on GitHub: every ask is fine.

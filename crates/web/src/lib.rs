@@ -36,7 +36,7 @@ pub use auth::{
     UserView,
 };
 pub use billing::{AccessView, BillingView, PricingView, RedirectView};
-pub use gate::{in_lane, merge_requested};
+pub use gate::merge_requested;
 pub use review::*;
 pub use webhook::Wake;
 
