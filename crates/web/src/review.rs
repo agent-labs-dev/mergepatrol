@@ -894,6 +894,7 @@ mod tests {
         ReviewRecord {
             since_head: None,
             agent_fixed: false,
+            claim: 0,
             id: 1,
             installation_id: 1,
             repo: RepoName::parse("o/r").unwrap(),

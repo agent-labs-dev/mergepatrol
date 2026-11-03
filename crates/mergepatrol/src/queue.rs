@@ -48,7 +48,7 @@ const CHECKS_POLL: Duration = Duration::from_secs(15);
 const NO_CHECKS_GRACE: Duration = Duration::from_secs(120);
 /// How often the instance running the queues checks that it still holds the queue lock, and
 /// how often the others try to take it.
-pub(crate) const LOCK_EVERY: Duration = Duration::from_secs(5);
+const LOCK_EVERY: Duration = Duration::from_secs(5);
 /// How often to delete what nothing reads anymore.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
 /// How long a job's output, with its agent's transcript, stays on disk: to look into a job.
@@ -229,7 +229,7 @@ pub async fn lead(ctx: Arc<Ctx>, store: Arc<PgStore>, mut stop: watch::Receiver<
                     Spawned::spawn(crate::redeliver::redeliver(ctx.clone()), &alive),
                     Spawned::spawn(crate::inbox::read_changed(ctx.clone()), &alive),
                     Spawned::spawn(crate::inbox::index(ctx.clone()), &alive),
-                    Spawned::spawn(crate::review::run(ctx.clone()), &alive),
+                    Spawned::spawn(crate::review::run(ctx.clone(), alive.clone()), &alive),
                 );
                 let stopping = loop {
                     tokio::select! {
@@ -350,7 +350,7 @@ async fn prune_job_outputs(jobs: &Path, age: Duration) -> Result<usize> {
 }
 
 /// Held by every queue task until it has stopped: the channel closes once all have.
-type Alive = mpsc::Sender<()>;
+pub(crate) type Alive = mpsc::Sender<()>;
 
 /// A spawned queue task, which is stopped when it is dropped: stopping a task stops the ones it
 /// runs.

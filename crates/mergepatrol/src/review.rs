@@ -22,7 +22,7 @@ use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
 
 use crate::github::GitHub;
-use crate::queue::{Ctx, LOCK_EVERY, app_credentials, fix_findings, job_spec, record, unix_now};
+use crate::queue::{Alive, Ctx, app_credentials, fix_findings, job_spec, record, unix_now};
 
 /// Reviews running at once, across workspaces. Each also takes one of the sandbox's job slots.
 const REVIEWS_AT_ONCE: usize = 4;
@@ -31,9 +31,6 @@ const POLL: Duration = Duration::from_secs(5);
 /// A run taken this long ago lost its worker, as to a panic: it runs again. A restart needs no
 /// such wait: the next worker lets go of everything at the start of `run`.
 const STALE: Duration = Duration::from_secs(45 * 60);
-/// How long a worker whose instance lost the queue lock may run on: `lead` waits `LOCK_EVERY` to
-/// check the lock, and as long again for the check.
-const HANDOVER: Duration = LOCK_EVERY.saturating_mul(2);
 /// How many runs may fail on errors outside the PR before a human reviews it instead.
 const ATTEMPTS: u32 = 3;
 const RETRY_AFTER: Duration = Duration::from_secs(60);
@@ -45,8 +42,7 @@ const CODEOWNERS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWN
 
 /// Runs reviews and questions as they come, until the queue lock is lost: dropping the future
 /// stops the runs it started.
-pub async fn run(ctx: Arc<Ctx>) {
-    tokio::time::sleep(HANDOVER).await;
+pub async fn run(ctx: Arc<Ctx>, alive: Alive) {
     match ctx.store.release_reviews().await {
         Ok(0) => {}
         Ok(released) => tracing::info!(released, "took back reviews a restart cut short"),
@@ -58,8 +54,11 @@ pub async fn run(ctx: Arc<Ctx>) {
         while running.len() < REVIEWS_AT_ONCE {
             match next(&ctx).await {
                 Ok(Some(work)) => {
-                    let ctx = ctx.clone();
-                    running.spawn(async move { work.run(&ctx).await });
+                    let (ctx, alive) = (ctx.clone(), alive.clone());
+                    running.spawn(async move {
+                        let _alive = alive;
+                        work.run(&ctx).await
+                    });
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -146,7 +145,7 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
     // A fork PR's head is its pull ref's, which its GraphQL lags behind: no run, so no check.
     if !pr.is_cross_repository && pr.head_ref_oid != r.head_sha {
         // A newer head has its own review, which the next tick starts.
-        return ctx.store.stale_review(r.id).await;
+        return ctx.store.stale_review(r.id, r.claim).await;
     }
     let key = lane_key(&r, &pr);
     let settings = settings(ctx, &gh, &r.repo).await?;
@@ -170,7 +169,9 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
     let output = match found {
         Ok(output) => output,
         Err(why) if r.attempts + 1 < ATTEMPTS && !why.starts_with(NO_KEY) => {
-            ctx.store.retry_review(r.id, &why, RETRY_AFTER).await?;
+            ctx.store
+                .retry_review(r.id, r.claim, &why, RETRY_AFTER)
+                .await?;
             return Ok(());
         }
         Err(why) => {
@@ -456,7 +457,7 @@ async fn finish(
         findings,
         asked,
     };
-    if !ctx.store.finish_review(r.id, &done).await? {
+    if !ctx.store.finish_review(r.id, r.claim, &done).await? {
         return Ok(());
     }
     let (kind, message) = match (&error, status) {
@@ -810,7 +811,13 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
     };
     let answer = answer.await.map_err(|e| format!("{e:#}"));
     let withdrawn = sent_back && answer.as_deref().is_ok_and(withdraws);
-    ctx.store.answer_question(r.id, &q.id, answer).await?;
+    if !ctx
+        .store
+        .answer_question(r.id, r.claim, &q.id, answer)
+        .await?
+    {
+        return Ok(());
+    }
     if withdrawn && let Some(status) = ctx.store.withdraw_finding(r.id, &q.finding).await? {
         tracing::info!(repo = %r.repo, pr = r.number, finding = %q.finding, status = status.as_str(), "the agent withdrew a finding");
         if let Some(key) = &lane {
@@ -847,6 +854,7 @@ mod tests {
         ReviewRecord {
             since_head: None,
             agent_fixed: false,
+            claim: 0,
             id,
             installation_id: 1,
             repo: RepoName::parse("o/r").unwrap(),
@@ -953,6 +961,7 @@ mod tests {
         // The agent's own rounds are not the author's.
         let fixed = |id| ReviewRecord {
             agent_fixed: true,
+            claim: 0,
             ..back(id)
         };
         assert!(!rounds_spent(&[fixed(3), fixed(2), fixed(1)]));
