@@ -700,11 +700,20 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
             change("Needs a tool the checkout lacks", serde_json::json!({
                 "command": "no-such-tool test", "files": []
             })),
+            change("Leaves something behind", serde_json::json!({
+                "command": "touch from-a-command; exit 1", "files": []
+            })),
+            change("Sees what others left", serde_json::json!({
+                "command": "test ! -e leftover && test ! -e from-a-command", "files": []
+            })),
         ]
     })
     .to_string();
-    // The agent writes its test, and something it does not name.
-    let shell = "printf 'grep -q fixed app.txt\\n' > check.sh && echo noise > noise.txt";
+    // The agent writes its test, something it does not name, and an ignored file, as a build or
+    // an install would.
+    let shell = "printf 'grep -q fixed app.txt\\n' > check.sh && echo noise > noise.txt \
+        && printf 'leftover\\nfrom-a-command\\n' >> \"$(git rev-parse --git-path info/exclude)\" \
+        && touch leftover";
     let out = tmp.path().join("out");
     let result = with_fake_claude_running(tmp.path(), shell, &answer)
         .run("t8", &spec, &out)
@@ -727,6 +736,9 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
     assert!(evidence(2).output.contains(".github/check.sh"));
     // A command the shell cannot find shows the checkout, not the PR.
     assert!(!evidence(3).failed, "{:?}", evidence(3));
+    // Each command runs on a fresh tree: no ignored file the agent or an earlier command left.
+    assert!(evidence(4).failed);
+    assert!(!evidence(5).failed, "{:?}", evidence(5));
 
     // The fix: the review's test is in place, and passes once the fix is in.
     let mut fix = |dir: &Path, shell: &str| {

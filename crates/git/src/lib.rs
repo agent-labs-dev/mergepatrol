@@ -490,10 +490,11 @@ impl Git {
         self.run(wt, &diff).await
     }
 
-    /// Puts the worktree back at `rev`: what is not ignored, as it is there.
+    /// Puts the worktree back at `rev` as a fresh checkout has it: ignored files go too, as build
+    /// output and installed packages left behind could change what a command shows.
     pub async fn reset_to(&self, wt: &Path, rev: &str) -> Result<()> {
         self.run(wt, &["reset", "-q", "--hard", rev]).await?;
-        self.run(wt, &["clean", "-q", "-fd"]).await?;
+        self.run(wt, &["clean", "-q", "-fdx"]).await?;
         Ok(())
     }
 
@@ -758,8 +759,12 @@ mod tests {
             .unwrap();
         assert!(patch.contains("+b") && patch.contains("+t") && !patch.contains("other"));
 
+        std::fs::write(dir.join(".git/info/exclude"), "build\n").unwrap();
+        std::fs::create_dir(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/out"), "stale\n").unwrap();
         Git.reset_to(dir, &head).await.unwrap();
         assert!(!dir.join("test.txt").exists() && !dir.join("other.txt").exists());
+        assert!(!dir.join("build").exists(), "ignored leftovers go too");
         assert!(!Git.holds(dir, &patch).await.unwrap());
         Git.apply(dir, &patch).await.unwrap();
         assert_eq!(
