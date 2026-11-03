@@ -2809,6 +2809,18 @@ pub(crate) async fn job_spec(
     Ok((spec, granted))
 }
 
+/// Whether a rebase job's agent resolved a conflict: what it wrote needs a review.
+fn agent_resolved(events: &[JobEvent]) -> bool {
+    let resolved = SpendTask::Rebase.event_kind(true);
+    events.iter().any(|e| e.kind == resolved)
+}
+
+/// The layers `moved` that keep their approval, of a rebase that `resolved` conflicts in others.
+fn clean_moves(moved: &[usize], resolved: &[usize]) -> Vec<usize> {
+    let clean = moved.iter().filter(|i| !resolved.contains(i));
+    clean.copied().collect()
+}
+
 /// Runs a job in the sandbox, with its output in `out`: what it told of. `Err` says why it failed.
 async fn run_sandboxed(
     ctx: &Ctx,
@@ -3052,10 +3064,9 @@ async fn rebase_and_publish(
         }
         bail!("publishing failed: {e:#}");
     }
-    let carried: Vec<(PrNumber, &str, &str)> = moved
-        .iter()
-        .filter(|i| !resolved.contains(i))
-        .map(|&i| {
+    let carried: Vec<(PrNumber, &str, &str)> = clean_moves(&moved, &resolved)
+        .into_iter()
+        .map(|i| {
             (
                 unit.layers[i].number,
                 heads[i].as_str(),
@@ -3182,10 +3193,7 @@ async fn rebase_layers(
         let (spec, _granted) =
             job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
         let events = run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
-        if events
-            .iter()
-            .any(|e| e.kind == SpendTask::Rebase.event_kind(true))
-        {
+        if agent_resolved(&events) {
             resolved.push(i);
         }
         let local_head = check_job_output(
@@ -3468,6 +3476,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("may not: .github/ci.yml"), "{err}");
+    }
+
+    #[test]
+    fn a_conflict_the_agent_resolved_loses_the_approval_and_a_clean_rebase_keeps_it() {
+        let event = |kind: &str| JobEvent {
+            kind: kind.into(),
+            message: String::new(),
+        };
+        assert!(agent_resolved(&[event("conflict"), event("resolved")]));
+        assert!(!agent_resolved(&[event("rebased")]));
+        assert!(!agent_resolved(&[event("conflict"), event("unresolved")]));
+        assert_eq!(clean_moves(&[0, 1, 2], &[1]), [0, 2]);
+        assert_eq!(clean_moves(&[0], &[]), [0]);
     }
 
     #[tokio::test]

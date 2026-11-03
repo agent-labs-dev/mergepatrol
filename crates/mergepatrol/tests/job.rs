@@ -350,16 +350,21 @@ async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
             .run("t9", &spec, &out)
             .await
             .unwrap();
-        (result.outcome, out.join(BUNDLE_FILE).exists())
+        let resolved = result.events.iter().any(|e| e.kind == "resolved");
+        (result.outcome, out.join(BUNDLE_FILE).exists(), resolved)
     };
 
-    let (outcome, bundled) = run("echo generated > shared.txt").await;
+    let (outcome, bundled, resolved) = run("echo generated > shared.txt").await;
     assert!(matches!(outcome, JobOutcome::Done), "{outcome:?}");
     assert!(bundled);
+    assert!(
+        resolved,
+        "the orchestrator reads this to withhold the approval"
+    );
 
     let committed = "echo generated > shared.txt && git add -A && \
         git -c user.name=a -c user.email=a@example.com commit -qm moved";
-    let (outcome, bundled) = run(committed).await;
+    let (outcome, bundled, _) = run(committed).await;
     let JobOutcome::Failed { reason } = outcome else {
         panic!("{outcome:?}")
     };
