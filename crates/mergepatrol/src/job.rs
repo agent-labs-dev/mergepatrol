@@ -828,9 +828,23 @@ const TAIL_BYTES: usize = 4_000;
 
 /// Runs a command from the repo's root. One that runs past the timeout did not pass.
 async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
+    use std::process::Stdio;
     let mut c = tokio::process::Command::new("sh");
-    c.current_dir(dir).args(["-c", cmd]).kill_on_drop(true);
-    let Ok(output) = tokio::time::timeout(VERIFY_TIMEOUT, c.output()).await else {
+    c.current_dir(dir)
+        .args(["-c", cmd])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // A group of its own, so that what it started stops with it.
+        .process_group(0)
+        .kill_on_drop(true);
+    let child = c.spawn()?;
+    let group = child.id();
+    let done = tokio::time::timeout(VERIFY_TIMEOUT, child.wait_with_output()).await;
+    if let Some(group) = group {
+        stop_group(group).await;
+    }
+    let Ok(output) = done else {
         return Ok(Ran {
             passed: false,
             timed_out: true,
@@ -855,6 +869,23 @@ async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
     })
 }
 
+/// Stops every process left in a command's group, and waits until none is: one left running, a
+/// test runner or an install, could write into the tree of the next command.
+async fn stop_group(group: u32) {
+    let Ok(group) = i32::try_from(group) else {
+        return;
+    };
+    // SAFETY: `kill` takes any pid and signal; a negative pid names the group.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
+    for _ in 0..50 {
+        // SAFETY: signal 0 only asks whether the group has a process left.
+        if unsafe { libc::kill(-group, 0) } != 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Runs the repo's verify commands, which must pass after `what` the agent did.
 async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &str) -> Result<()> {
     for cmd in &spec.verify {
@@ -873,6 +904,20 @@ async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn what_a_command_starts_stops_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = run_command(dir.path(), "(sleep 1; touch late) >/dev/null 2>&1 & exit 1")
+            .await
+            .unwrap();
+        assert!(!ran.passed);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !dir.path().join("late").exists(),
+            "the background job was stopped"
+        );
+    }
 
     #[tokio::test]
     async fn a_commands_output_is_kept_short_however_long_its_lines() {
