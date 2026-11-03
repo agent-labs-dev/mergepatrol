@@ -49,11 +49,16 @@ impl Step {
             "enqueued" | "released" | "batch-stopped" | "batch-failed" => Step::Waiting,
             "held" => Step::Held,
             "rebasing" => Step::Rebasing,
-            "published" | "batch" | "batch-resumed" => Step::Checks,
+            "published" | "rebase-skipped" | "batch" | "batch-resumed" => Step::Checks,
             "fixing" => Step::Fixing,
             _ => return None,
         })
     }
+}
+
+/// The step a PR is in, from the kinds of its events, newest first.
+pub fn current_step<'a>(mut kinds: impl Iterator<Item = &'a str>) -> Option<Step> {
+    kinds.find_map(Step::begun_by)
 }
 
 /// Seconds in each step, every step present.
@@ -108,6 +113,13 @@ mod tests {
         ]);
         assert_eq!(times[&Step::Waiting], 10.0);
         assert_eq!(times[&Step::Checks], 90.0);
+    }
+
+    #[test]
+    fn the_current_step_is_the_one_the_newest_event_began() {
+        let newest_first = ["review-resolved", "published", "rebasing", "enqueued"];
+        assert_eq!(current_step(newest_first.into_iter()), Some(Step::Checks));
+        assert_eq!(current_step(["job"].into_iter()), None);
     }
 
     #[test]

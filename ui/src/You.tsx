@@ -982,7 +982,7 @@ function stepOf(p: InboxPullView, click?: Click["kind"]): Step {
   if (click === "dequeueing") return { state: "queued", label: "Leaving the queue…" };
   const q = p.queue;
   if (q?.state === "active")
-    return { state: "queued", label: "Testing", detail: "merges if its checks pass" };
+    return { state: "queued", label: "In the merge lane", detail: "merges if its checks pass" };
   if (q?.state === "waiting")
     return {
       state: "queued",

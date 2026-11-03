@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use mergepatrol_core::{
     AgentSettings, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, ModelOverrides, Person,
     PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Stage, Step,
-    TaskModel, WorkspaceDefaults,
+    TaskModel, WorkspaceDefaults, current_step,
 };
 use mergepatrol_github::{
     App, AsUser, BranchFile, CheckRunState, GitObject, InboxPull, Installation, Proposal,
@@ -46,6 +46,18 @@ pub enum StageView {
     Lane,
 }
 
+/// What the merge lane is doing with its active PR.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum ActiveStepView {
+    Rebasing,
+    /// Its checks, or its batch's, must pass.
+    Checks,
+    Fixing,
+    Merging,
+}
+
 impl From<Stage> for StageView {
     fn from(stage: Stage) -> Self {
         match stage {
@@ -65,6 +77,9 @@ pub struct EntryView {
     pub state: EntryStateView,
     /// Where it is on its way to the trunk. Null while on hold for what is no stage, as a draft.
     pub stage: Option<StageView>,
+    /// What the queue is doing with it now. Null unless `state` is `active`, or until its job
+    /// has begun.
+    pub step: Option<ActiveStepView>,
     /// The fixes it has used, for its checks and its review.
     pub fixes: u32,
     /// The fixes it gets.
@@ -158,7 +173,11 @@ impl From<Person> for PersonView {
 }
 
 impl EntryView {
-    fn new(e: Entry, review: Option<crate::review::ReviewBriefView>) -> Self {
+    fn new(
+        e: Entry,
+        step: Option<ActiveStepView>,
+        review: Option<crate::review::ReviewBriefView>,
+    ) -> Self {
         let Entry {
             number,
             priority,
@@ -184,6 +203,7 @@ impl EntryView {
             priority,
             state,
             stage,
+            step,
             fixes,
             fix_budget,
             detail,
@@ -920,24 +940,44 @@ pub(crate) async fn lanes(
         .filter(|(key, _)| repo.as_ref().is_none_or(|r| key.repo == *r))
         .collect();
     let (lanes, reviews) = reviewed(&app, id, lanes).await?;
-    Ok(Json(
-        lanes
-            .into_iter()
-            .map(|(key, lane)| LaneView {
-                repo: key.repo.to_string(),
-                trunk: key.trunk,
-                batch: lane.batch_pr.map(|n| n as u32),
-                entries: in_merge_order(lane.entries)
-                    .into_iter()
-                    .map(|e| {
-                        let shown = review_layer(&e);
-                        let review = reviews.get(&(key.repo.clone(), shown)).map(Into::into);
-                        EntryView::new(e, review)
-                    })
-                    .collect(),
-            })
-            .collect(),
-    ))
+    let mut views = Vec::with_capacity(lanes.len());
+    for (key, lane) in lanes {
+        let merging = lane.merging.as_ref().map(|m| m.number);
+        let mut entries = Vec::with_capacity(lane.entries.len());
+        for e in in_merge_order(lane.entries) {
+            let step = match (e.state == EntryState::Active, merging == Some(e.number)) {
+                (true, true) => Some(ActiveStepView::Merging),
+                (true, false) => active_step(&app, id, &key.repo, e.number).await?,
+                (false, _) => None,
+            };
+            let shown = review_layer(&e);
+            let review = reviews.get(&(key.repo.clone(), shown)).map(Into::into);
+            entries.push(EntryView::new(e, step, review));
+        }
+        views.push(LaneView {
+            repo: key.repo.to_string(),
+            trunk: key.trunk,
+            batch: lane.batch_pr.map(|n| n as u32),
+            entries,
+        });
+    }
+    Ok(Json(views))
+}
+
+/// What the job of active PR `number` is at, from its newest events.
+async fn active_step(
+    app: &AppState,
+    id: u64,
+    repo: &RepoName,
+    number: u64,
+) -> anyhow::Result<Option<ActiveStepView>> {
+    let events = app.store.events(id, repo, Some(number), 20).await?;
+    Ok(match current_step(events.iter().map(|e| e.kind.as_str())) {
+        Some(Step::Rebasing) => Some(ActiveStepView::Rebasing),
+        Some(Step::Checks) => Some(ActiveStepView::Checks),
+        Some(Step::Fixing) => Some(ActiveStepView::Fixing),
+        Some(Step::Waiting | Step::Held) | None => None,
+    })
 }
 
 /// The lanes with each held PR's review hold as its newest review has it now, which a lane only
@@ -3529,7 +3569,7 @@ mod tests {
 
     #[test]
     fn an_entry_has_its_pull_request_fields_at_the_top() {
-        let view = EntryView::new(entry(1, true, EntryState::Waiting), None);
+        let view = EntryView::new(entry(1, true, EntryState::Waiting), None, None);
         let json = serde_json::to_value(view).unwrap();
         assert_eq!(json["number"], 1);
         assert_eq!(json["title"], "");

@@ -76,6 +76,8 @@ struct State {
     conflicts: Vec<PrNumber>,
     /// PRs whose merge GitHub rejects.
     rejects: Vec<PrNumber>,
+    /// PRs whose next merge GitHub rejects.
+    rejects_once: Vec<PrNumber>,
     /// PRs whose squash merge comes out as another tree than the batch's.
     diverges: Vec<PrNumber>,
     /// The titles of the draft PRs opened, and the branches deleted.
@@ -295,6 +297,12 @@ impl Fake {
             }
             if s.rejects.contains(n) {
                 return Ok(MergeOutcome::Rejected("Base branch was modified".into()));
+            }
+            if let Some(i) = s.rejects_once.iter().position(|r| r == n) {
+                s.rejects_once.remove(i);
+                return Ok(MergeOutcome::Rejected(
+                    "Pull Request is not mergeable".into(),
+                ));
             }
         }
         s.merges += 1;
@@ -1509,6 +1517,104 @@ async fn a_labeled_pr_is_rebased_checked_and_merged() {
     assert_eq!(run.gh.with(|s| s.trunk.clone()), "merge-1");
     assert!(run.lane().is_empty());
     assert!(matches!(run.tick().await, Ran::Idle));
+}
+
+/// One PR behind the trunk, whose checks passed.
+fn behind_and_green(s: &mut State) {
+    s.add_pr(1);
+    s.behind.push("pr-1-v0".into());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_green_pr_that_merges_cleanly_skips_the_rebase() {
+    let run = Run::new(Fake::new(behind_and_green));
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.rebase.count(), 0);
+    assert_eq!(run.kinds(1), ["enqueued", "rebase-skipped", "merged"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_on_a_strict_trunk_is_rebased_though_it_merges_cleanly() {
+    let run = Run::new(Fake::new(|s| {
+        behind_and_green(s);
+        s.strict = true;
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_whose_checks_are_still_running_is_rebased() {
+    let run = Run::new(Fake::new(|s| {
+        behind_and_green(s);
+        let pending = BTreeMap::from([("ci".to_owned(), CheckState::Pending)]);
+        s.checks_on.insert("pr-1-v0".into(), pending);
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_with_no_checks_yet_is_rebased() {
+    let run = Run::new(Fake::new(|s| {
+        behind_and_green(s);
+        s.checks.clear();
+    }));
+    run.drain().await;
+    assert_eq!(run.rebase.count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_github_refuses_without_a_rebase_rebases_after_all() {
+    let run = Run::new(Fake::new(|s| {
+        behind_and_green(s);
+        s.rejects_once.push(1);
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.rebase.count(), 1);
+    assert_eq!(
+        run.kinds(1),
+        [
+            "enqueued",
+            "rebase-skipped",
+            "base-moved",
+            "rebasing",
+            "published",
+            "merged"
+        ]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_suspect_of_a_failed_batch_is_rebased() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.behind.push("pr-1-v0".into());
+        s.breaks = Some(2);
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    // 1-2 failed, so 1 alone is a suspect, rebased though it would merge as it is.
+    assert_eq!(
+        &run.kinds(1)[..4],
+        ["enqueued", "batch", "batch-failed", "rebasing"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_green_fork_pr_behind_the_trunk_needs_no_edits_by_maintainers() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.prs.get_mut(&1).unwrap().maintainer_can_modify = false;
+        s.behind.push("pr-1-v0".into());
+    }));
+    run.drain().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.rebase.count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -3464,6 +3570,13 @@ fn fork_pr(s: &mut State) {
     s.add_fork_pr(1);
 }
 
+/// Its head behind the trunk, with a failed check: only a rebase gets it merged.
+fn behind_and_failing(s: &mut State) {
+    s.behind.push("pr-1-v0".into());
+    let failed = BTreeMap::from([("ci".to_owned(), CheckState::Failed)]);
+    s.checks_on.insert("pr-1-v0".into(), failed);
+}
+
 fn last_comment(run: &Run) -> String {
     run.gh.with(|s| s.comments.last().unwrap().1.clone())
 }
@@ -3648,7 +3761,7 @@ async fn a_fork_pr_that_needs_a_rebase_waits_until_its_author_allows_edits() {
     let run = Run::new(Fake::new(|s| {
         fork_pr(s);
         s.prs.get_mut(&1).unwrap().maintainer_can_modify = false;
-        s.behind.push("pr-1-v0".into());
+        behind_and_failing(s);
     }));
     assert!(matches!(run.tick().await, Ran::Idle));
     assert_eq!(run.kinds(1), ["enqueued", "held"]);
@@ -3680,7 +3793,7 @@ async fn a_fork_pr_behind_the_trunk_from_an_organization_is_ejected() {
         let pr = s.prs.get_mut(&1).unwrap();
         pr.maintainer_can_modify = false;
         pr.head_repository.as_mut().unwrap().owner.kind = "Organization".into();
-        s.behind.push("pr-1-v0".into());
+        behind_and_failing(s);
     }));
     run.drain().await;
     assert_eq!(run.labels(1), [FAILED]);
@@ -3695,7 +3808,7 @@ async fn a_fork_pr_behind_the_trunk_from_an_organization_is_ejected() {
 async fn a_fork_pr_behind_the_trunk_that_changes_workflows_is_ejected() {
     let run = Run::new(Fake::new(|s| {
         fork_pr(s);
-        s.behind.push("pr-1-v0".into());
+        behind_and_failing(s);
         s.change_workflows.push(1);
     }));
     run.drain().await;

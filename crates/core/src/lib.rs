@@ -24,7 +24,7 @@ pub use review::{
     ReviewOverrides, ReviewSettings, ReviewStatus, Route, SentBack, review_status, review_url,
 };
 pub use spend::{Spend, SpendTask};
-pub use steps::{Step, StepTimes, step_times};
+pub use steps::{Step, StepTimes, current_step, step_times};
 
 use serde::{Deserialize, Serialize};
 

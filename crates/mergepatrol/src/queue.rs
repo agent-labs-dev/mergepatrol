@@ -1462,7 +1462,7 @@ enum Block {
 }
 
 /// Why the queue cannot take fork PR `pr` on now, onto the trunk at `trunk_sha`. A PR already on
-/// the trunk needs nothing pushed to its fork.
+/// the trunk, or that merges as it is, needs nothing pushed to its fork.
 async fn fork_block(
     gh: &dyn GitHub,
     key: &LaneKey,
@@ -1474,7 +1474,7 @@ async fn fork_block(
     if gh.awaiting_approval(repo, &pr.head_ref_oid).await? {
         return Ok(Some(Block::Hold(Hold::WorkflowApproval)));
     }
-    if !gh.behind(repo, trunk_sha, &pr.head_ref_oid).await? {
+    if !gh.behind(repo, trunk_sha, &pr.head_ref_oid).await? || green_and_clean(gh, key, pr).await? {
         return Ok(None);
     }
     let rebase_it = format!("rebase it onto `{trunk}` yourself");
@@ -1622,6 +1622,39 @@ async fn batchable(
         ready.push(unit.clone());
     }
     Ok(ready)
+}
+
+/// Whether a rebase of `unit` would only cost a run of CI: a lone PR behind the trunk that GitHub
+/// merges as it is. A suspect of a failed batch rebases all the same, to learn whether it is what
+/// broke the batch.
+async fn merges_as_is(gh: &dyn GitHub, key: &LaneKey, lane: &Lane, unit: &Unit) -> Result<bool> {
+    let pr = unit.top();
+    let suspect = lane
+        .bisect
+        .as_ref()
+        .is_some_and(|b| b.suspects.contains(&unit.number));
+    if unit.stacked || suspect {
+        return Ok(false);
+    }
+    let trunk = gh.branch_sha(&key.repo, &key.trunk).await?;
+    Ok(gh.behind(&key.repo, &trunk, &pr.head_ref_oid).await?
+        && green_and_clean(gh, key, pr).await?)
+}
+
+/// Whether GitHub merges `pr` as it is: no conflict, a trunk that is not strict, and its checks
+/// passed on its head.
+async fn green_and_clean(gh: &dyn GitHub, key: &LaneKey, pr: &PullRequest) -> Result<bool> {
+    let repo = &key.repo;
+    if pr.conflicting {
+        return Ok(false);
+    }
+    let rules = gh.branch_rules(repo, &key.trunk).await?;
+    if rules.strict {
+        return Ok(false);
+    }
+    // With none required, an empty list of checks would pass: CI may not have started.
+    let checks = gh.checks(repo, &pr.head_ref_oid).await?;
+    Ok(!checks.by_name.is_empty() && checks.verdict(&rules.checks).0 == CheckState::Passed)
 }
 
 async fn finish(
@@ -2386,6 +2419,9 @@ async fn run_job(
     let mut failing = 0;
     let mut unreported = Unreported::default();
     let mut sync = SyncWhileRunning::new();
+    // Only the job's first pass may skip the rebase, and `as_is` says it did.
+    let mut may_skip_rebase = true;
+    let mut as_is = false;
 
     loop {
         let mut now = unit.refreshed(gh, repo).await?;
@@ -2414,6 +2450,22 @@ async fn run_job(
 
         let event = match &job.phase {
             Phase::Rebasing => 'rebase: {
+                as_is = std::mem::take(&mut may_skip_rebase)
+                    && merges_as_is(gh, key, lane, &now).await?;
+                if as_is {
+                    let base = gh.branch_sha(repo, &key.trunk).await?;
+                    heads = now.branch_heads(gh, repo).await?;
+                    record_all(ctx, key, &prs, "rebase-skipped", &key.trunk).await?;
+                    let comment = format!(
+                        "Skipping the rebase: this merges cleanly into `{}`, and its checks passed.",
+                        key.trunk
+                    );
+                    comment_all(gh, repo, &prs, &comment).await?;
+                    break 'rebase Event::Rebased {
+                        head: now.top().head_ref_oid.clone(),
+                        base,
+                    };
+                }
                 if now.fork() {
                     let trunk = gh.branch_sha(repo, &key.trunk).await?;
                     match fork_block(gh, key, &trunk, now.top()).await? {
@@ -2591,7 +2643,14 @@ async fn run_job(
                         MergeOutcome::Rejected(r) => {
                             lane.merging = None;
                             ctx.store.save_lane(key, lane).await?;
-                            Event::MergeRejected(r)
+                            // What GitHub refused was the head the rebase skipped.
+                            match std::mem::take(&mut as_is) {
+                                true => {
+                                    record_all(ctx, key, &prs, "base-moved", &r).await?;
+                                    Event::BaseMoved
+                                }
+                                false => Event::MergeRejected(r),
+                            }
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 <img src="assets/banner.svg" alt="MergeLoop: a merge queue for GitHub, with an agent on conflicts" width="100%">
 
-MergeLoop is a merge queue for GitHub. Add a label to a pull request, and MergeLoop rebases it onto its base branch, waits for the required checks, and merges it.
+MergeLoop is a merge queue for GitHub. Add a label to a pull request, and MergeLoop rebases it onto its base branch if it has to, waits for the required checks, and merges it.
 
 Status: early. Expect rough edges, and [tell us](https://github.com/agent-labs-dev/mergeloop/issues/new/choose) what breaks.
 
@@ -37,7 +37,7 @@ A labeled PR keeps its place in line, on hold, until GitHub would merge it and t
 - With **Automatic review** on, the agent's review holds nothing, and every review thread on the PR is resolved: its author fixed or answered each comment, and a human answered anything the review asked.
 - On the hosted MergeLoop, a private repo has a subscription, and a public repo's workspace is under the [fair-use limit](#pricing).
 
-Then it runs, rebased alone or tested in a [batch](#batches), and merges once its checks pass. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
+Then it runs alone or tested in a [batch](#batches), and merges once its checks pass. Alone, it is rebased unless GitHub can already merge it as it is: its checks passed on its head, it has no conflict, it is not a stack, and the branch is not strict about being up to date. That skips a run of CI, at the cost of merging a PR that was not tested with the branch's newest commits. Turn on "Require branches to be up to date" to always rebase. Only the base branch's required checks count. A branch with no required checks counts every check on the commit, so turn on required checks for CI that must pass. The merge uses the repo's default merge method on GitHub. The PR's comment and the dashboard say what holds a PR.
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts. A conflict found in the queue goes back to getting ready, keeping its place, so the agent holds up no other PR.
 
