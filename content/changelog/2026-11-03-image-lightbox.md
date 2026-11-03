@@ -1,6 +1,7 @@
 ---
 title: See a PR's images without leaving MergeLoop
 kind: improved
+pr: 207
 image: /changelog/image-lightbox/after.png
 ---
 
