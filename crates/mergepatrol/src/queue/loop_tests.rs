@@ -1527,6 +1527,66 @@ async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_conflict_the_agent_resolved_needs_a_review_and_a_clean_rebase_keeps_its_approval() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.add_pr(2);
+    }));
+    let settings = ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    };
+    *run.store.review_settings.lock().unwrap() = Some(settings.clone());
+    run.tick().await;
+    run.store.finish_review(1, ReviewStatus::Approved);
+    run.store.finish_review(2, ReviewStatus::Approved);
+
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let layers: Vec<_> = run.gh.with(|s| [1, 2].map(|n| s.prs[&n].clone()).to_vec());
+    let unit = Unit {
+        number: 1,
+        base: "main".into(),
+        layers,
+        stacked: true,
+    };
+    let heads: Vec<String> = unit
+        .layers
+        .iter()
+        .map(|pr| pr.head_ref_oid.clone())
+        .collect();
+    let rebased = vec!["clean".to_owned(), "resolved".to_owned()];
+    settle_reviews(&run.ctx, &key, &unit, &heads, &rebased, &[0, 1], &[1])
+        .await
+        .unwrap();
+
+    let hold = |number, head: &'static str| {
+        let (run, key, settings) = (&run, &key, &settings);
+        async move {
+            let heads = [(number, head, 0)];
+            review_hold(&run.ctx, key, settings, false, &heads)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        hold(1, "clean").await,
+        None,
+        "a clean rebase keeps its approval"
+    );
+    assert_eq!(hold(2, "resolved").await, Some(Hold::Reviewing));
+    let (_, since) = run.store.newest_review(2);
+    assert_eq!(
+        since.as_ref(),
+        Some(&heads[1]),
+        "it reads only the resolution"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn the_agents_fix_needs_a_review_of_itself_before_the_pr_merges() {
     let mut run = Run::new(Fake::new(failing_ci));
     run.rebase.rebases_once = true;

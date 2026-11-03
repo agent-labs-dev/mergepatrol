@@ -2809,6 +2809,34 @@ pub(crate) async fn job_spec(
     Ok((spec, granted))
 }
 
+/// A rebase moved the layers `moved` from `heads` to `rebased`: an approval stays with a clean
+/// one, and a layer whose conflict the agent `resolved` waits for a review of that.
+async fn settle_reviews(
+    ctx: &Ctx,
+    key: &LaneKey,
+    unit: &Unit,
+    heads: &[String],
+    rebased: &[String],
+    moved: &[usize],
+    resolved: &[usize],
+) -> Result<()> {
+    let carried: Vec<(PrNumber, &str, &str)> = clean_moves(moved, resolved)
+        .into_iter()
+        .map(|i| {
+            (
+                unit.layers[i].number,
+                heads[i].as_str(),
+                rebased[i].as_str(),
+            )
+        })
+        .collect();
+    carry_reviews(ctx, key, &carried).await?;
+    for &i in resolved {
+        review_change(ctx, key, unit.layers[i].number, &heads[i], &rebased[i]).await?;
+    }
+    Ok(())
+}
+
 /// Whether a rebase job's agent resolved a conflict: what it wrote needs a review.
 fn agent_resolved(events: &[JobEvent]) -> bool {
     let resolved = SpendTask::Rebase.event_kind(true);
@@ -3064,20 +3092,7 @@ async fn rebase_and_publish(
         }
         bail!("publishing failed: {e:#}");
     }
-    let carried: Vec<(PrNumber, &str, &str)> = clean_moves(&moved, &resolved)
-        .into_iter()
-        .map(|i| {
-            (
-                unit.layers[i].number,
-                heads[i].as_str(),
-                rebased[i].as_str(),
-            )
-        })
-        .collect();
-    carry_reviews(ctx, key, &carried).await?;
-    for &i in &resolved {
-        review_change(ctx, key, unit.layers[i].number, &heads[i], &rebased[i]).await?;
-    }
+    settle_reviews(ctx, key, unit, &heads, &rebased, &moved, &resolved).await?;
     Ok(Event::Rebased {
         head: rebased.pop().expect("a unit has a PR"),
         base: trunk,
