@@ -257,43 +257,6 @@ export function useAgentReview(workspace: number, repo: string, pr: number) {
   });
 }
 
-const STAGES = ["Agent review", "Human", "Wait", "Test", "Merge"] as const;
-
-/** Where a PR is between the review and the merge. */
-function Stages({ at, human }: { at: number; human: "skip" | "ask" }) {
-  return (
-    <ol className="flex flex-wrap items-center gap-1 text-xs">
-      {STAGES.map((s, i) => {
-        const skipped = s === "Human" && human === "skip";
-        const now = i === at;
-        return (
-          <li key={s} className="flex items-center gap-1">
-            <span
-              className={`rounded-full px-2 py-0.5 ${
-                skipped
-                  ? "text-faint line-through"
-                  : now
-                    ? s === "Human"
-                      ? "bg-amber-500 font-medium text-white"
-                      : s === "Agent review"
-                        ? "bg-violet-600 font-medium text-white"
-                        : "bg-fg font-medium text-surface"
-                    : i < at
-                      ? "bg-sunken text-fg-2"
-                      : "text-muted ring-1 ring-line ring-inset"
-              }`}
-            >
-              {i < at && !skipped && "✓ "}
-              {s}
-            </span>
-            {i < STAGES.length - 1 && <span className="text-faint">→</span>}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
 function ClearedList({
   findings,
   open: opened = false,
@@ -338,7 +301,7 @@ function ClearedList({
 export const reviewedPr = (e: Gated & { number: number; layers: number[] }) =>
   e.hold?.layer ?? e.layers.at(-1) ?? e.number;
 
-/** The gate in a queued PR's detail: the stages, and what the review waits for. */
+/** The gate in a queued PR's detail: what the review waits for. */
 export function Gate({
   workspace,
   repo,
@@ -358,18 +321,8 @@ export function Gate({
   const asks = r.findings.filter((f) => f.asked);
   const back = r.findings.filter((f) => f.sent_back || f.withdrawn);
   const cleared = r.findings.filter((f) => !f.asked && !f.sent_back && !f.withdrawn);
-  const human = r.answered_by || r.status === "asks" ? "ask" : "skip";
-  const at =
-    reason === "reviewing"
-      ? 0
-      : reason === "review_asks" || reason === "review_changes"
-        ? 1
-        : entry.state === "active"
-          ? 3
-          : 2;
   return (
     <section className="mt-5 space-y-4">
-      <Stages at={at} human={human} />
       {reason === "reviewing" && (
         <p className="text-sm text-muted">
           The agent is reviewing it, since {timeAgo(r.created_at)}. What it finds to fix goes back
