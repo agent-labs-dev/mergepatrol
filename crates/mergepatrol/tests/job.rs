@@ -162,6 +162,27 @@ async fn a_stack_layer_replays_only_its_own_commits_onto_the_layer_below() {
 }
 
 #[tokio::test]
+async fn a_rebase_that_leaves_nothing_says_so() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (_, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let out = tmp.path().join("out");
+    let result = executor()
+        .run("t5", &spec(&origin, &trunk, &trunk), &out)
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(
+        reason.contains("its changes are already on main"),
+        "{reason}"
+    );
+}
+
+#[tokio::test]
 async fn conflict_without_a_key_fails_with_the_reason() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");
@@ -203,7 +224,6 @@ async fn fix_without_a_key_fails_with_the_reason() {
         panic!("{result:?}")
     };
     assert!(reason.contains("no Anthropic API key"), "{reason}");
-    assert_eq!(result.events[0].kind, "fixing");
     assert!(!out.join(BUNDLE_FILE).exists());
 }
 
@@ -230,7 +250,6 @@ async fn an_openai_fix_runs_codex_and_needs_its_key() {
     };
     // Codex says whose key is missing; the Claude CLI would ask for Anthropic's.
     assert!(reason.contains("no OpenAI API key"), "{reason}");
-    assert_eq!(result.events[0].kind, "fixing");
     assert!(!out.join(BUNDLE_FILE).exists());
 }
 

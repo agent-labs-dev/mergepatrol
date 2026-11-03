@@ -39,7 +39,7 @@ Then it runs, rebased alone or tested in a [batch](#batches), and merges once it
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts.
 
-When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, or when the agent gives up because the failure is not the PR's to fix (a flaky test, an outage), the PR is ejected.
+When a PR's required checks fail, an agent fixes them too. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After two fixes that do not make the checks pass, the PR is ejected. When the agent gives up because the failure is not the PR's to fix, as with a flaky test, an outage or a title since changed, an empty commit runs the checks once more, and a failure then ejects the PR.
 
 ### Automatic review
 

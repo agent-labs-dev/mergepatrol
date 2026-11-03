@@ -147,6 +147,12 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     let (exclude, done) = match &spec.task {
         Task::Rebase => {
             rebase(spec, &git, resolver, dir, out, events).await?;
+            if git.rev_parse(dir, "HEAD").await? == spec.trunk_sha {
+                bail!(
+                    "nothing is left to merge: its changes are already on {}",
+                    spec.trunk
+                );
+            }
             (&spec.trunk_sha, "rebased")
         }
         Task::FixChecks { failures } => {
@@ -294,6 +300,10 @@ async fn rebase(
     Ok(())
 }
 
+/// How a fix's failure starts when the agent found nothing in the code to fix: the orchestrator
+/// reads it from the job's reason.
+pub(crate) const GAVE_UP: &str = "the agent gave up";
+
 /// Has the agent fix the failed checks, and commits its fix on top of the PR head.
 async fn fix(
     spec: &JobSpec,
@@ -305,7 +315,6 @@ async fn fix(
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     let names: Vec<&str> = failures.iter().map(|f| f.name.as_str()).collect();
-    event(events, "fixing", names.join(", "));
     let transcript = out
         .join("transcripts")
         .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
@@ -346,7 +355,7 @@ async fn commit_fix(
 ) -> Result<()> {
     match outcome {
         Outcome::Resolved => {}
-        Outcome::GaveUp(reason) => bail!("the agent gave up: {reason}"),
+        Outcome::GaveUp(reason) => bail!("{GAVE_UP}: {reason}"),
         Outcome::Failed(why) => bail!("the agent failed: {why}"),
     }
     if git.rev_parse(dir, "HEAD").await? != spec.head_sha {

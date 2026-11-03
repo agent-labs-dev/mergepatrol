@@ -55,6 +55,8 @@ struct State {
     strict: bool,
     /// The merge methods a ruleset allows, if one narrows them. The repo's default is `merge`.
     merge_methods: Option<Vec<String>>,
+    /// The merge methods the repo's settings allow, if they narrow them.
+    repo_merge_methods: Option<Vec<String>>,
     /// The checks on every commit, unless `checks_on` has the commit.
     checks: BTreeMap<String, CheckState>,
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
@@ -259,9 +261,10 @@ impl Fake {
         if s.head(number) != sha {
             return Ok(MergeOutcome::Rejected("head moved".into()));
         }
-        if s.merge_methods
-            .as_ref()
-            .is_some_and(|m| !m.iter().any(|m| m == method))
+        if s.repo_merge_methods
+            .iter()
+            .chain(&s.merge_methods)
+            .any(|m| !m.iter().any(|m| m == method))
         {
             return Ok(MergeOutcome::Rejected(format!(
                 "{method} merges are not allowed on this repository."
@@ -344,6 +347,10 @@ impl GitHub for Fake {
             trunk_sha: s.trunk.clone(),
             private: s.private,
             merge_method: "merge".into(),
+            merge_methods: s
+                .repo_merge_methods
+                .clone()
+                .unwrap_or_else(|| ["squash", "rebase", "merge"].map(String::from).to_vec()),
             labeled: s
                 .prs
                 .values()
@@ -595,6 +602,8 @@ struct Scripted {
     fixes: Mutex<Vec<Vec<String>>>,
     fix_works: bool,
     fix_fails: Option<String>,
+    fix_gives_up: Option<String>,
+    recheck_passes: bool,
 }
 
 impl Scripted {
@@ -607,6 +616,8 @@ impl Scripted {
             fixes: Mutex::new(Vec::new()),
             fix_works: true,
             fix_fails: None,
+            fix_gives_up: None,
+            recheck_passes: false,
         }
     }
 
@@ -661,6 +672,25 @@ impl Sandbox for Scripted {
         Ok(Event::Rebased { head, base })
     }
 
+    async fn recheck(
+        &self,
+        _: &LaneKey,
+        _: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        _: &RepoSettings,
+        head: &str,
+    ) -> Result<Event> {
+        let mut s = self.gh.state.lock().unwrap();
+        let top = format!("{head}-c");
+        s.push(unit.layers[layer].number, &top);
+        if self.recheck_passes {
+            let passing = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+            s.checks_on.insert(top.clone(), passing);
+        }
+        Ok(Event::Fixed { head: top })
+    }
+
     async fn fix(
         &self,
         _: &LaneKey,
@@ -679,6 +709,9 @@ impl Sandbox for Scripted {
         };
         if let Some(reason) = &self.fix_fails {
             return Ok(Event::FixFailed(reason.clone()));
+        }
+        if let Some(reason) = &self.fix_gives_up {
+            return Ok(Event::FixGaveUp(reason.clone()));
         }
         let mut s = self.gh.state.lock().unwrap();
         let mut top = format!("{head}-f{n}");
@@ -1427,6 +1460,16 @@ async fn an_empty_config_file_follows_the_workspace() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
+    let run = Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.repo_merge_methods = Some(vec!["squash".into()]);
+    }));
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
 async fn with_the_review_on_a_pr_keeps_its_place_until_the_agent_or_a_human_approves() {
     let run = Run::new(Fake::new(|s| {
         s.add_pr(1);
@@ -2082,16 +2125,35 @@ async fn the_config_file_sets_the_fix_attempts() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_fix_the_agent_gives_up_on_ejects_with_its_reason() {
+async fn a_fix_that_fails_ejects_with_its_reason() {
     let mut run = Run::new(Fake::new(failing_ci));
-    run.rebase.fix_fails = Some("the agent gave up: a flaky test".into());
+    run.rebase.fix_fails = Some("the agent failed: over its time".into());
     run.tick().await;
     assert_eq!(run.labels(1), [FAILED]);
     let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
     assert!(
-        comment.contains("the fix failed: the agent gave up: a flaky test"),
+        comment.contains("the fix failed: the agent failed: over its time"),
         "{comment}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_the_agent_gives_up_on_runs_again_and_a_flaky_one_merges() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_gives_up = Some("the agent gave up: a flaky test".into());
+    run.rebase.recheck_passes = true;
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_check_that_fails_again_after_the_agent_gave_up_ejects_with_no_second_fix() {
+    let mut run = Run::new(Fake::new(failing_ci));
+    run.rebase.fix_gives_up = Some("the agent gave up: the PR's title".into());
+    run.tick().await;
+    assert_eq!(run.rebase.fixed().len(), 1);
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 #[tokio::test(start_paused = true)]

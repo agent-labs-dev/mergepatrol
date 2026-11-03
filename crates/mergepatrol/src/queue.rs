@@ -38,6 +38,7 @@ use crate::cached::{Cached, Reader};
 use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
+use crate::job::GAVE_UP;
 use crate::publish::{Publish, create_commits, publish};
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
@@ -57,7 +58,7 @@ const SUPERVISE_EVERY: Duration = Duration::from_secs(10);
 /// that adds or removes it is quicker.
 const DISCOVER_EVERY: Duration = Duration::from_secs(5 * 60);
 const RESOLVER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const RESOLVER_MAX_TURNS: u32 = 50;
+const RESOLVER_MAX_TURNS: u32 = 100;
 const MERGE_RETRIES: u32 = 15;
 const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// How long a PR's job may keep failing on errors outside it, such as a GitHub outage, before
@@ -66,6 +67,8 @@ const JOB_ERRORS_FOR: Duration = Duration::from_secs(30 * 60);
 /// A fix may change any file but these: CI's own config, and the queue's.
 const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
 /// How long to wait for a fork PR's pull ref to follow a push to the fork.
+/// The empty commit that runs a PR's checks again.
+const RECHECK_MESSAGE: &str = "Run the checks again\n\nThe agent found nothing to fix in the code.";
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
 const PIN_WAIT: Duration = Duration::from_secs(5 * 60);
@@ -2117,10 +2120,13 @@ async fn checks_verdict(
     })
 }
 
-/// The method to merge into the trunk with: the repo's default, unless the trunk's rulesets do
-/// not allow it.
+/// The method to merge into the trunk with: the repo's default, unless the repo's settings or the
+/// trunk's rulesets do not allow it.
 async fn merge_method(gh: &dyn GitHub, key: &LaneKey, snap: &RepoSnapshot) -> Result<String> {
-    let rules = gh.branch_rules(&key.repo, &key.trunk).await?;
+    let mut rules = gh.branch_rules(&key.repo, &key.trunk).await?;
+    rules
+        .merge_methods
+        .retain(|m| snap.merge_methods.contains(m));
     Ok(rules.merge_method(&snap.merge_method))
 }
 
@@ -2437,6 +2443,25 @@ async fn run_job(
                 }
                 event
             }
+            Phase::Rechecking { failed, .. } => {
+                let what = failed.join(", ");
+                record_all(ctx, key, &prs, "rechecking", &what).await?;
+                let comment = format!(
+                    "The agent found nothing to fix in the code for {what}. Running the checks again."
+                );
+                comment_all(gh, repo, &prs, &comment).await?;
+                let event = sandbox
+                    .recheck(key, snap, &now, failing, settings, &heads[failing])
+                    .await?;
+                published_at = Instant::now();
+                if let Event::Fixed { head } = &event {
+                    heads = now.branch_heads(gh, repo).await?;
+                    record_all(ctx, key, &prs, "published", head).await?;
+                    let comment = format!("Pushed {head}. Waiting for checks.");
+                    comment_all(gh, repo, &prs, &comment).await?;
+                }
+                event
+            }
             Phase::Merging { head } => {
                 // An author's push during the job made heads the review never saw: what
                 // merges is what was reviewed, or what the queue made of it.
@@ -2505,6 +2530,18 @@ trait Sandbox: Send + Sync {
         base: &str,
         failures: &[CheckFailure],
     ) -> Result<Event>;
+
+    /// Runs the checks of layer `layer` again on a new commit of `head`'s files: `Event::Fixed`
+    /// with the new head of the top layer.
+    async fn recheck(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        head: &str,
+    ) -> Result<Event>;
 }
 
 /// A sandboxed job, whose result is checked, then published through the Git Data API. A layer
@@ -2527,6 +2564,31 @@ impl JobSandbox<'_> {
         event
     }
 
+    /// The layers above `layer` onto what `event` published on it, if it did.
+    async fn restack(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        event: Event,
+    ) -> Result<Event> {
+        if !matches!(event, Event::Fixed { .. }) || layer + 1 == unit.layers.len() {
+            return Ok(event);
+        }
+        // The layers above the fix go onto it.
+        Ok(
+            match rebase_and_publish(self.ctx, self.gh, key, snap, unit, layer + 1, settings)
+                .await?
+            {
+                Event::Rebased { head, .. } => Event::Fixed { head },
+                Event::RebaseFailed(r) => Event::FixFailed(format!("restacking after it: {r}")),
+                event => event,
+            },
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn fix_and_restack(
         &self,
@@ -2543,19 +2605,7 @@ impl JobSandbox<'_> {
             self.ctx, self.gh, key, snap, unit, layer, settings, head, base, failures,
         )
         .await?;
-        if !matches!(fixed, Event::Fixed { .. }) || layer + 1 == unit.layers.len() {
-            return Ok(fixed);
-        }
-        // The layers above the fix go onto it.
-        Ok(
-            match rebase_and_publish(self.ctx, self.gh, key, snap, unit, layer + 1, settings)
-                .await?
-            {
-                Event::Rebased { head, .. } => Event::Fixed { head },
-                Event::RebaseFailed(r) => Event::FixFailed(format!("restacking after it: {r}")),
-                event => event,
-            },
-        )
+        self.restack(key, snap, unit, layer, settings, fixed).await
     }
 }
 
@@ -2586,6 +2636,24 @@ impl Sandbox for JobSandbox<'_> {
         let event = self
             .fix_and_restack(key, snap, unit, layer, settings, head, base, failures)
             .await;
+        self.published(key, event).await
+    }
+
+    async fn recheck(
+        &self,
+        key: &LaneKey,
+        snap: &RepoSnapshot,
+        unit: &Unit,
+        layer: usize,
+        settings: &RepoSettings,
+        head: &str,
+    ) -> Result<Event> {
+        let event = async {
+            let pushed = push_recheck(self.ctx, self.gh, key, snap, &unit.layers[layer], head);
+            let pushed = pushed.await?;
+            self.restack(key, snap, unit, layer, settings, pushed).await
+        }
+        .await;
         self.published(key, event).await
     }
 }
@@ -2819,8 +2887,41 @@ async fn fix_and_publish(
     Ok(match fixed.await {
         Ok(Ok(sha)) => Event::Fixed { head: sha },
         Ok(Err(event)) => event,
-        Err(e) => Event::FixFailed(format!("{e:#}")),
+        Err(e) => {
+            let reason = format!("{e:#}");
+            match reason.starts_with(GAVE_UP) {
+                true => Event::FixGaveUp(reason),
+                false => Event::FixFailed(reason),
+            }
+        }
     })
+}
+
+/// Pushes an empty commit on `head`, on which CI runs anew and reads the PR as it is now. A
+/// re-run through the Actions API would read the PR as it was, and need another permission.
+async fn push_recheck(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    pr: &PullRequest,
+    head: &str,
+) -> Result<Event> {
+    let repo = &key.repo;
+    let tree = gh.commit_tree(repo, head).await?;
+    let sha = gh.create_commit(repo, RECHECK_MESSAGE, &tree, head).await?;
+    if let Err(e) = gh
+        .force_update_branch(&snap.id, &pr.head_ref_name, head, &sha)
+        .await
+    {
+        // `updateRefs` refuses when the branch moved: the author pushed.
+        if gh.branch_sha(repo, &pr.head_ref_name).await? != head {
+            return Ok(Event::HeadMoved);
+        }
+        bail!("publishing failed: {e:#}");
+    }
+    carry_reviews(ctx, key, &[(pr.number, head, &sha)]).await?;
+    Ok(Event::Fixed { head: sha })
 }
 
 /// Rebases the unit's layers from `from` up and publishes them: the bottom onto the trunk, each

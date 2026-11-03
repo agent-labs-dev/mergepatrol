@@ -23,8 +23,11 @@ pub struct RepoSnapshot {
     pub trunk_sha: String,
     /// Private, or internal: not open to everyone.
     pub private: bool,
-    /// `squash`, `merge` or `rebase`: the repo's default for this App.
+    /// `squash`, `merge` or `rebase`: the repo's default for this App, which GitHub says
+    /// whether or not the repo allows it.
     pub merge_method: String,
+    /// Of `squash`, `rebase` and `merge`, those the repo's settings allow.
+    pub merge_methods: Vec<String>,
     /// Open PRs with the trigger label, oldest first.
     pub labeled: Vec<PullRequest>,
     /// Queue labels the repo does not have yet.
@@ -637,6 +640,15 @@ impl RepoSnapshot {
                 .as_str()
                 .unwrap_or("MERGE")
                 .to_lowercase(),
+            merge_methods: [
+                ("squash", "squashMergeAllowed"),
+                ("rebase", "rebaseMergeAllowed"),
+                ("merge", "mergeCommitAllowed"),
+            ]
+            .into_iter()
+            .filter(|(_, field)| r[*field].as_bool().unwrap_or(true))
+            .map(|(method, _)| method.to_owned())
+            .collect(),
             labeled,
             missing_labels,
         })
@@ -677,6 +689,9 @@ impl Installation {
                 priority: label(name: $priority) {{ name }}
                 failed: label(name: $failed) {{ name }}
                 viewerDefaultMergeMethod
+                squashMergeAllowed
+                rebaseMergeAllowed
+                mergeCommitAllowed
                 defaultBranchRef {{ name target {{ oid }} }}
                 {code_owners}
                 pullRequests(states: OPEN, labels: [$label], first: $page, after: $after, orderBy: {{ field: CREATED_AT, direction: ASC }}) {{
