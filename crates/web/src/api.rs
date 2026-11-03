@@ -928,9 +928,12 @@ pub(crate) async fn lanes(
         .repo
         .map(|r| RepoName::parse(&r).ok_or(ApiError::bad_request("repo must be owner/name")))
         .transpose()?;
-    let id = match &repo {
-        Some(repo) => caller.repo(&app, id, repo).await?,
-        None => caller.workspace(id)?,
+    let (id, readable) = match &repo {
+        Some(repo) => (caller.repo(&app, id, repo).await?, None),
+        None => {
+            let (id, readable) = caller.workspace_repos(&app, id).await?;
+            (id, Some(readable))
+        }
     };
     let lanes: Vec<(LaneKey, Lane)> = app
         .store
@@ -938,6 +941,7 @@ pub(crate) async fn lanes(
         .await?
         .into_iter()
         .filter(|(key, _)| repo.as_ref().is_none_or(|r| key.repo == *r))
+        .filter(|(key, _)| readable.as_ref().is_none_or(|r| r.contains(&key.repo)))
         .collect();
     let (lanes, reviews) = reviewed(&app, id, lanes).await?;
     let mut views = Vec::with_capacity(lanes.len());
@@ -1122,10 +1126,12 @@ impl HistoryQuery {
             .transpose()
     }
 
-    fn slice<'a>(&'a self, repo: Option<&'a RepoName>) -> Slice<'a> {
+    /// Of `repo`, or every repo, within the repos `within`.
+    fn slice<'a>(&'a self, repo: Option<&'a RepoName>, within: &'a [String]) -> Slice<'a> {
         Slice {
             repo,
             author: self.author.as_deref(),
+            within: Some(within),
         }
     }
 
@@ -1143,7 +1149,7 @@ pub(crate) async fn history(
     Path(id): Path<u64>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<ExitsPage>, ApiError> {
-    let id = caller.workspace(id)?;
+    let (id, readable) = caller.workspace_repos(&app, id).await?;
     let repo = q.repo()?;
     let outcomes: &[&str] = match q.outcome {
         None => &[],
@@ -1155,7 +1161,7 @@ pub(crate) async fn history(
         .store
         .exits(&ExitQuery {
             installation_id: id,
-            slice: q.slice(repo.as_ref()),
+            slice: q.slice(repo.as_ref(), readable.names()),
             outcomes,
             days: match q.pr {
                 Some(_) if repo.is_some() => None,
@@ -1181,9 +1187,9 @@ pub(crate) async fn history_stats(
     Path(id): Path<u64>,
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<HistoryStatsView>, ApiError> {
-    let id = caller.workspace(id)?;
+    let (id, readable) = caller.workspace_repos(&app, id).await?;
     let (repo, days) = (q.repo()?, q.days()?);
-    let slice = q.slice(repo.as_ref());
+    let slice = q.slice(repo.as_ref(), readable.names());
     // Each repo's of the author's, and each author's of the repo's, so either can break down
     // the other.
     let by_repo = Slice {
@@ -1265,13 +1271,14 @@ impl From<ExitRecord> for ExitView {
     }
 }
 
-/// The repos this workspace's installation can access, and whether MergeLoop runs on each.
+/// The repos this workspace's installation can access that the user can read, and whether
+/// MergeLoop runs on each.
 pub(crate) async fn repos(
     State(app): State<AppState>,
     caller: Caller,
     Path(id): Path<u64>,
 ) -> Result<Json<Vec<RepoView>>, ApiError> {
-    let id = caller.workspace(id)?;
+    let (id, readable) = caller.workspace_repos(&app, id).await?;
     let known: HashMap<RepoName, RepoState> = app
         .store
         .repos()
@@ -1285,6 +1292,7 @@ pub(crate) async fn repos(
         .repositories()
         .await?
         .into_iter()
+        .filter(|r| readable.contains(&r.repo))
         .map(|r| {
             let state = known.get(&r.repo);
             RepoView {
@@ -1887,6 +1895,11 @@ pub(crate) async fn you(
     let user = caller.user()?;
     let ids = user.installations();
     let inbox = app.store.inbox(user.login(), ids, MERGED_FOR).await?;
+    // Authored or asked to review is not enough: the user may since have lost the repo.
+    let mut readable = HashMap::new();
+    for &id in ids {
+        readable.insert(id, user.readable(&app, id).await?);
+    }
     let on: HashSet<(u64, RepoName)> = app
         .store
         .repos()
@@ -1906,6 +1919,9 @@ pub(crate) async fn you(
                 let p = InboxPull::from_node(&row.node)
                     .inspect_err(|e| tracing::warn!(error = %format!("{e:#}"), "an inbox PR"))
                     .ok()?;
+                if !readable.get(&row.installation_id)?.contains(&p.repo) {
+                    return None;
+                }
                 Some(InboxPullView {
                     number: p.pr.number as u32,
                     base: p.pr.merges_into().to_owned(),
@@ -2265,8 +2281,9 @@ pub(crate) async fn propose_repo_config(
     Path((id, owner, name)): Path<(u64, String, String)>,
     Json(body): Json<RepoSettingsView>,
 ) -> Result<Json<UpdatePullView>, ApiError> {
-    let id = caller.workspace(id)?;
+    caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
     let token = caller.github_token(&app)?;
     let settings = RepoSettings::from(body);
     settings
@@ -2584,8 +2601,9 @@ pub(crate) async fn update_repo_skill(
     caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
 ) -> Result<Json<UpdatePullView>, ApiError> {
-    let id = caller.workspace(id)?;
+    caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
     let token = caller.github_token(&app)?;
     let gh = installation(&app, id).await?;
     let (SkillView { state, paths, .. }, base) = repo_skill(&gh, &repo).await?;
@@ -2763,8 +2781,9 @@ pub(crate) async fn update_repo(
     caller: Caller,
     Path((id, owner, name)): Path<(u64, String, String)>,
 ) -> Result<Json<RepoUpdateView>, ApiError> {
-    let id = caller.workspace(id)?;
+    caller.workspace(id)?;
     let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
     let token = caller.github_token(&app)?;
     let skip = |why: String| {
         Ok(Json(RepoUpdateView {

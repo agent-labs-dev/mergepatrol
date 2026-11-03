@@ -1,7 +1,8 @@
 //! Who may use the dashboard.
 //!
 //! Anyone with a GitHub account can sign in. A user sees the workspaces (installations of the
-//! App) that GitHub lets them access, as of their sign-in.
+//! App) that GitHub lets them access, as of their sign-in, and in each only the repos GitHub
+//! lets them read.
 //!
 //! Self-hosted, before the GitHub App exists: the server logs a setup token, and whoever has it
 //! creates the App (the manifest flow). The hosted App comes from the environment instead.
@@ -10,9 +11,9 @@
 //! reads their installations from GitHub again once an hour, so a user who loses access to an
 //! installation loses its workspace within the hour.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
@@ -195,6 +196,50 @@ impl SignedIn {
         }
         Ok(token.access_token)
     }
+
+    /// The repos of workspace `id` the user can read, as GitHub said within `SEEN_FOR`.
+    pub(crate) async fn readable(&self, state: &AppState, id: u64) -> Result<Readable, ApiError> {
+        let id = self.workspace(id)?;
+        let token = self.github_token(state)?;
+        let key = (hash(&token), id);
+        if let Some(repos) = state.seen.repos.get(&key) {
+            return Ok(repos);
+        }
+        let repos = match setup::user_installation_repos(&token, id).await {
+            Ok(repos) => repos,
+            Err(e) if e.is::<Revoked>() => {
+                return Err(ApiError::Status(
+                    StatusCode::UNAUTHORIZED,
+                    "Sign in again first.".into(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let repos = Readable::new(repos);
+        state.seen.repos.put(key, repos.clone());
+        Ok(repos)
+    }
+}
+
+/// The repos of a workspace that a signed-in user can read, as `owner/name`.
+#[derive(Clone)]
+pub(crate) struct Readable(Arc<(Vec<String>, HashSet<String>)>);
+
+impl Readable {
+    fn new(names: Vec<String>) -> Self {
+        let lower = names.iter().map(|n| n.to_lowercase()).collect();
+        Self(Arc::new((names, lower)))
+    }
+
+    /// GitHub's repo names ignore case.
+    pub(crate) fn contains(&self, repo: &RepoName) -> bool {
+        self.0.1.contains(&repo.to_string().to_lowercase())
+    }
+
+    /// Their names as GitHub writes them, as the store keeps them.
+    pub(crate) fn names(&self) -> &[String] {
+        &self.0.0
+    }
 }
 
 impl FromRequestParts<AppState> for SignedIn {
@@ -254,13 +299,25 @@ impl Caller {
         }
     }
 
-    /// The workspace, for a call across its repos: a signed-in user's only.
+    /// The workspace, for a call across it that shows no repo's data: a signed-in user's only.
     pub(crate) fn workspace(&self, id: u64) -> Result<u64, ApiError> {
         self.user()?.workspace(id)
     }
 
-    /// The workspace, for a call on one of its repos: a user's, or one that a GitHub token can
-    /// read the repo of.
+    /// The workspace, for a call across its repos, and the repos in it the user can read: a
+    /// signed-in user's only. The call shows nothing of the others.
+    pub(crate) async fn workspace_repos(
+        &self,
+        state: &AppState,
+        id: u64,
+    ) -> Result<(u64, Readable), ApiError> {
+        let user = self.user()?;
+        let id = user.workspace(id)?;
+        Ok((id, user.readable(state, id).await?))
+    }
+
+    /// The workspace, for a call on one of its repos that the caller can read: a user's, or one
+    /// that a GitHub token can read the repo of.
     pub(crate) async fn repo(
         &self,
         state: &AppState,
@@ -268,7 +325,8 @@ impl Caller {
         repo: &RepoName,
     ) -> Result<u64, ApiError> {
         match self {
-            Self::User(user) => user.workspace(id),
+            Self::User(user) if user.readable(state, id).await?.contains(repo) => Ok(id),
+            Self::User(_) => Err(no_repo(repo)),
             Self::Token(_) if self.workspace_of(state, repo).await? == id => Ok(id),
             Self::Token(_) => Err(no_repo(repo)),
         }
@@ -454,6 +512,8 @@ pub(crate) struct Seen {
     tokens: Recent<String, ()>,
     /// The repos each token can read.
     reads: Recent<(String, RepoName), ()>,
+    /// The repos of each installation that each signed-in user's token can read.
+    repos: Recent<(String, u64), Readable>,
     /// The App's installation on each repo, or none.
     installations: Recent<RepoName, Option<u64>>,
     /// Whether each token's user administers a repo.
@@ -467,6 +527,12 @@ impl Seen {
         self.tokens.put(hash(token), ());
         self.reads.put((hash(token), repo.clone()), ());
         self.installations.put(repo.clone(), installation);
+    }
+
+    /// As if GitHub had said that `token`'s user reads `repos` of installation `id`, and no other.
+    pub(crate) fn assume_repos(&self, token: &str, id: u64, repos: &[&str]) {
+        let repos = repos.iter().map(|r| (*r).to_owned()).collect();
+        self.repos.put((hash(token), id), Readable::new(repos));
     }
 
     /// As if GitHub had said whether `token`'s user administers `repo`.
