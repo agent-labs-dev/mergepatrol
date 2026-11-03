@@ -936,6 +936,9 @@ impl ReviewStore for Mem {
     async fn stale_review(&self, _: i64) -> Result<()> {
         unreachable!()
     }
+    async fn release_reviews(&self) -> Result<u64> {
+        unreachable!()
+    }
     async fn mark_agent_fixed(&self, _: i64) -> Result<()> {
         unreachable!()
     }

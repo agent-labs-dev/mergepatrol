@@ -28,7 +28,8 @@ use crate::queue::{Ctx, app_credentials, fix_findings, job_spec, record, unix_no
 const REVIEWS_AT_ONCE: usize = 4;
 /// How often to look for work a wake-up missed: a question asked on another instance.
 const POLL: Duration = Duration::from_secs(5);
-/// A run taken this long ago was cut short, as by a restart: it runs again.
+/// A run taken this long ago lost its worker, as to a panic: it runs again. A restart needs no
+/// such wait: the next worker lets go of everything at the start of `run`.
 const STALE: Duration = Duration::from_secs(45 * 60);
 /// How many runs may fail on errors outside the PR before a human reviews it instead.
 const ATTEMPTS: u32 = 3;
@@ -42,6 +43,11 @@ const CODEOWNERS: [&str; 3] = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWN
 /// Runs reviews and questions as they come, until the queue lock is lost: dropping the future
 /// stops the runs it started.
 pub async fn run(ctx: Arc<Ctx>) {
+    match ctx.store.release_reviews().await {
+        Ok(0) => {}
+        Ok(released) => tracing::info!(released, "took back reviews a restart cut short"),
+        Err(e) => tracing::error!(error = %format!("{e:#}"), "could not take back reviews"),
+    }
     let mut running = JoinSet::new();
     loop {
         while running.try_join_next().is_some() {}

@@ -114,6 +114,9 @@ pub trait ReviewStore: Send + Sync {
     async fn retry_review(&self, id: i64, error: &str, after: Duration) -> Result<()>;
     /// The PR moved on before the review finished.
     async fn stale_review(&self, id: i64) -> Result<()>;
+    /// Lets go of every review and question a worker took, for the next to take them now: the
+    /// worker that starts with the queue lock is the only one, so the runs they had are gone.
+    async fn release_reviews(&self) -> Result<u64>;
     /// The queue moved the PR from `before` to `after`, a head it made: a rebase, or a fix of
     /// its checks. An approval of `before` holds for `after`, which is not reviewed again.
     async fn carry_review(
@@ -379,6 +382,18 @@ impl ReviewStore for PgStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn release_reviews(&self) -> Result<u64> {
+        let released = sqlx::query(
+            "UPDATE agent_reviews
+             SET status = CASE status WHEN 'running' THEN 'pending' ELSE status END,
+                 claimed_at = NULL, updated_at = now()
+             WHERE claimed_at IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(released.rows_affected())
     }
 
     async fn stale_review(&self, id: i64) -> Result<()> {
@@ -921,6 +936,38 @@ mod tests {
                 .map(|r| r.id),
             Some(other.id)
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn the_next_worker_takes_what_a_restart_cut_short_at_once(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let stale = Duration::from_secs(600);
+        let cut = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
+        store.claim_review(stale).await.unwrap().unwrap();
+        let asked = store.start_review(1, &repo(), 8, "bbb").await.unwrap();
+        store.claim_review(stale).await.unwrap().unwrap();
+        let done = ReviewDone {
+            status: ReviewStatus::Asks,
+            error: None,
+            summary: "s".into(),
+            findings: vec![judged("f1", true)],
+            asked: vec!["mona".into()],
+        };
+        store.finish_review(asked.id, &done).await.unwrap();
+        store
+            .add_question(asked.id, "f1", "why?", "mona")
+            .await
+            .unwrap();
+        store.claim_question(stale).await.unwrap().unwrap();
+        assert_eq!(store.claim_review(stale).await.unwrap(), None, "taken");
+        assert_eq!(store.claim_question(stale).await.unwrap(), None, "taken");
+
+        assert_eq!(store.release_reviews().await.unwrap(), 2);
+
+        let again = store.claim_review(stale).await.unwrap().unwrap();
+        assert_eq!(again.id, cut.id);
+        let (r, _) = store.claim_question(stale).await.unwrap().unwrap();
+        assert_eq!((r.id, r.status), (asked.id, ReviewStatus::Asks));
     }
 
     #[sqlx::test(migrations = false)]
