@@ -771,7 +771,8 @@ fn api_headers() -> reqwest::header::HeaderMap {
     h
 }
 
-/// A GitHub on localhost that answers each request with the next scripted response.
+/// A GitHub on localhost that answers each request with the next scripted response, or as a
+/// function says.
 #[cfg(any(test, feature = "testing"))]
 pub mod fake {
     use std::sync::{Arc, Mutex};
@@ -818,6 +819,39 @@ pub mod fake {
                 conn.write_all(response.as_bytes()).await.unwrap();
             }
         });
+        (installation(api), requests)
+    }
+
+    /// An installation that talks to `answer`, which gets each request's method, path and body,
+    /// and gives its status and body: for a fake with state of its own.
+    pub async fn answered_by(
+        answer: impl Fn(&str, &str, &str) -> (u16, String) + Send + Sync + 'static,
+    ) -> Installation {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let answer = Arc::new(answer);
+        tokio::spawn(async move {
+            loop {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                let answer = answer.clone();
+                tokio::spawn(async move {
+                    let request = read_request(&mut conn).await;
+                    let (head, body) = request.split_once("\r\n\r\n").unwrap_or((&request, ""));
+                    let mut line = head.lines().next().unwrap_or_default().split(' ');
+                    let (method, path) = (line.next().unwrap_or(""), line.next().unwrap_or(""));
+                    let (status, body) = answer(method, path, body);
+                    let response = format!(
+                        "HTTP/1.1 {status} Answered\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    conn.write_all(response.as_bytes()).await.unwrap();
+                });
+            }
+        });
+        installation(api)
+    }
+
+    fn installation(api: String) -> Installation {
         let app = App {
             app_id: 1,
             key: Arc::new(jsonwebtoken::EncodingKey::from_secret(b"unused")),
@@ -826,12 +860,11 @@ pub mod fake {
             alg: jsonwebtoken::Algorithm::HS256,
         };
         let token = Some(("t".into(), SystemTime::now() + Duration::from_secs(3600)));
-        let inst = Installation {
+        Installation {
             id: 1,
             app,
             token: Arc::new(tokio::sync::Mutex::new(token)),
-        };
-        (inst, requests)
+        }
     }
 
     /// The request's head and body, read in full.
