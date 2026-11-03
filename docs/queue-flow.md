@@ -32,7 +32,7 @@ flowchart TD
     review -- "passed" --> gates["GitHub would merge it: required reviews, no changes requested"]
 
     subgraph lane ["Merge lane: one at a time"]
-        batch["Batch or alone, on the current trunk"]
+        batch["Batch on the current trunk, or alone"]
     end
 
     gates --> batch
@@ -46,11 +46,11 @@ flowchart TD
 
 Dashed is planned, and not built.
 
-- **Rebase** runs only on a conflict with the trunk. A batch merges PRs as they are, and a PR alone is rebased in the lane.
+- **Rebase** runs only on a conflict with the trunk. A batch merges PRs as they are. A PR alone is rebased in the lane, unless GitHub can merge it as it is: not a stack, no conflict, a trunk that is not strict, checks passed on its head, and not a suspect of a failed batch.
 - **Fixes** are one budget for a PR, shared by CI and review: `fix_ci.attempts`, 3 by default. They are counted from the `Fixed-by:` commits on top of the author's last commit, so a push from the author earns new ones.
 - **A fix or an agent's conflict resolution** needs a review of that change alone. A clean rebase keeps its approval.
 - **A review's fix** covers only what it sent back. A human keeps what the review asks about, and a PR with no fixes left waits for its author.
 - **Getting ready never ejects.** What it cannot settle goes on to the lane, whose job ejects as it always did: a stack or a fork, a failed job, no fixes left, or a check that never finishes.
-- **The lane's job** still rebases a PR that runs alone, waits for its checks and fixes them. Only a conflict goes back to getting ready.
+- **The lane's job** rebases a PR that runs alone when it must, waits for its checks and fixes them. A skipped rebase means the PR merges on checks that ran before the trunk's newest commits, so nothing tested the two together. If GitHub refuses that merge, the job rebases after all. Only a conflict goes back to getting ready.
 
 The code is `crates/mergepatrol/src/queue/prep.rs` for getting ready, `run_job` in `crates/mergepatrol/src/queue.rs` for the lane, and `fix_sent_back` in `crates/mergepatrol/src/review.rs` for a review's fix.

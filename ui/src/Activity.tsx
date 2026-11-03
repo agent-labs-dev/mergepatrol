@@ -90,11 +90,12 @@ function back(events: EventView[], kind: string) {
 /** Oldest first, from the last `enqueued`: a PR queued again starts over. */
 const sinceEnqueued = (events: EventView[]) => back(events, "enqueued").reverse();
 
-/** Oldest first, from the last rebase onto the trunk: the queue starts over when either side
- * moves. */
+/** Oldest first, from the last rebase onto the trunk, or the skip of it: the queue starts over
+ * when either side moves. */
 function latestRun(events: EventView[]) {
-  const run = back(back(events, "enqueued"), "rebasing").reverse();
-  return run[0]?.kind === "rebasing" ? run : [];
+  const queued = back(events, "enqueued");
+  const i = queued.findIndex((e) => e.kind === "rebasing" || e.kind === "rebase-skipped");
+  return i === -1 ? [] : queued.slice(0, i + 1).reverse();
 }
 
 function Summary({ events, repo }: { events: EventView[]; repo: string }) {
@@ -186,6 +187,10 @@ function stagesOf(run: EventView[]) {
   };
   for (const e of run) {
     if (e.kind === "rebasing") s.Rebase = "running";
+    if (e.kind === "rebase-skipped") {
+      s.Rebase = "done";
+      s.Checks = "running";
+    }
     if (e.kind === "published") {
       if (s.Rebase === "running") s.Rebase = "done";
       if (s.Fix === "running") s.Fix = "done";

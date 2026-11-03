@@ -15,6 +15,7 @@ import {
   queuePull,
   readyPull,
 } from "./api";
+import type { ActiveStepView } from "./api/ActiveStepView";
 import type { ChecksView } from "./api/ChecksView";
 import type { EntryView } from "./api/EntryView";
 import type { LaneView } from "./api/LaneView";
@@ -425,6 +426,7 @@ const asItem = (p: OpenPullView): Item => ({
   priority: false,
   state: "open",
   stage: null,
+  step: null,
   fixes: 0,
   fix_budget: 0,
   layers: [],
@@ -709,7 +711,7 @@ function RowActions({ item, actions, busy }: { item: Item; actions: Actions; bus
 const stateBadge: Record<Item["state"], [string, string]> = {
   open: ["Not queued", "bg-surface text-muted ring-line-strong"],
   active: [
-    "Testing",
+    "Starting",
     "bg-blue-50 text-blue-700 ring-blue-600/20 dark:bg-blue-400/10 dark:text-blue-300 dark:ring-blue-400/30",
   ],
   waiting: ["Waiting", "bg-sunken text-fg-2 ring-neutral-500/20"],
@@ -717,6 +719,13 @@ const stateBadge: Record<Item["state"], [string, string]> = {
     "Held",
     "bg-amber-50 text-amber-800 ring-amber-600/20 dark:bg-amber-400/10 dark:text-amber-300 dark:ring-amber-400/30",
   ],
+};
+
+const stepLabel: Record<ActiveStepView, string> = {
+  rebasing: "Rebasing",
+  checks: "Running checks",
+  fixing: "Fixing checks",
+  merging: "Merging",
 };
 
 const ejectedBadge = [
@@ -730,7 +739,9 @@ function State({ entry }: { entry: Item }) {
     : ((entry.state === "open" ? null : reviewBadge({ ...entry, state: entry.state })) ??
       (entry.state === "held" && entry.hold?.reason === "review_required"
         ? ["Needs a reviewer", stateBadge.held[1]]
-        : stateBadge[entry.state]));
+        : entry.step
+          ? [stepLabel[entry.step], stateBadge.active[1]]
+          : stateBadge[entry.state]));
   return (
     <span
       className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}
@@ -907,6 +918,7 @@ function Track({ entry: e, labels }: { entry: Item; labels?: boolean }) {
  * message says more). */
 const pathSteps: Record<string, [string, boolean, boolean]> = {
   rebasing: ["Rebasing", false, false],
+  "rebase-skipped": ["Rebase skipped", false, false],
   conflict: ["Conflict", true, true],
   resolved: ["Conflict resolved", false, false],
   unresolved: ["Could not resolve the conflict", true, false],
