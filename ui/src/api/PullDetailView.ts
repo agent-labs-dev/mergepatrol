@@ -9,7 +9,8 @@ import type { TimelineItemView } from "./TimelineItemView";
  */
 export type PullDetailView = { 
 /**
- * The description as GitHub renders it, sanitized by GitHub.
+ * The description as GitHub renders it, sanitized by GitHub. In a private repo, images of
+ * its own files carry short-lived signed URLs, so any page can load them.
  */
 body_html: string, labels: Array<LabelView>, 
 /**

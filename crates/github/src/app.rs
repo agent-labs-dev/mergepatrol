@@ -465,7 +465,7 @@ impl Installation {
 pub struct AsUser {
     http: reqwest::Client,
     api: String,
-    token: String,
+    pub(crate) token: String,
 }
 
 impl AsUser {
@@ -781,7 +781,7 @@ pub mod fake {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{App, Installation};
+    use super::{App, AsUser, Installation};
 
     /// A response: status, extra header lines, body.
     pub type Scripted = (u16, &'static str, &'static str);
@@ -792,6 +792,17 @@ pub mod fake {
             request.lines().next().unwrap_or_default().to_owned()
         })
         .await
+    }
+
+    /// A user, by their token, who talks to the fake. The request lines it got.
+    pub async fn as_user(responses: Vec<Scripted>) -> (AsUser, Arc<Mutex<Vec<String>>>) {
+        let (inst, requests) = serve(responses).await;
+        let user = AsUser {
+            http: inst.app.http,
+            api: inst.app.api,
+            token: "t".into(),
+        };
+        (user, requests)
     }
 
     /// As [`serve`], with the requests in full.

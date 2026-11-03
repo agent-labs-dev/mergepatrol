@@ -1373,7 +1373,8 @@ pub(crate) async fn open_pulls(
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct PullDetailView {
-    /// The description as GitHub renders it, sanitized by GitHub.
+    /// The description as GitHub renders it, sanitized by GitHub. In a private repo, images of
+    /// its own files carry short-lived signed URLs, so any page can load them.
     pub body_html: String,
     pub labels: Vec<LabelView>,
     /// The head commit's check runs and commit statuses.
@@ -1588,7 +1589,10 @@ pub(crate) async fn pull_detail(
     let repo = repo_name(owner, name)?;
     caller.repo(&app, id, &repo).await?;
     let gh = AsUser::new(caller.github_token(&app)?)?;
-    let detail = as_user(gh.pull_detail(&repo, number).await, &repo)?;
+    let detail = as_user(
+        gh.pull_detail(&repo, number, &app.signed_images).await,
+        &repo,
+    )?;
     Ok(Json(detail.into()))
 }
 

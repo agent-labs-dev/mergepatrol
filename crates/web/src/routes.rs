@@ -195,7 +195,7 @@ pub(crate) static ROUTES: &[Route] = &[
     route!(GET "/api/w/{id}/repos/{owner}/{name}/open", api::open_pulls, tool!("list_open_pulls", Reads,
         "The repo's open PRs into its default branch that are not queued, last updated first, up to 50.")),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}", api::pull_detail, tool!("get_pull", Reads,
-        "An open PR's description, labels, checks, and timeline.")),
+        "An open PR's description, labels, checks, and timeline. In a private repo, images of its own files in the description and comments carry short-lived signed URLs.")),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/diff", api::pull_diff, tool!("get_pull_diff", Reads,
         "A PR's changes, or one of its commits', as `git diff` prints them.",
         opt("commit", Ty::Str, "One of the PR's commits, by full SHA. The whole PR without one."))),

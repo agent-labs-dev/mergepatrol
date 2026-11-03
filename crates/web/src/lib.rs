@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response};
 use mergepatrol_analytics::Analytics;
 use mergepatrol_billing::Billing;
 use mergepatrol_core::RepoSettings;
-use mergepatrol_github::AppCredentials;
+use mergepatrol_github::{AppCredentials, SignedImages};
 use mergepatrol_resolver::ChatGptAuth;
 use mergepatrol_store::{GITHUB_APP, Scope, Store, Vault};
 use secrecy::ExposeSecret;
@@ -76,6 +76,8 @@ struct AppState {
     seen: Arc<auth::Seen>,
     /// The `/api/v1` calls each caller has left.
     budgets: Arc<v1::Budgets>,
+    /// The signed URLs of private repos' images, by viewer.
+    signed_images: Arc<SignedImages>,
 }
 
 impl AppState {
@@ -112,6 +114,7 @@ fn state(store: Arc<dyn Store>, vault: Arc<Vault>, config: WebConfig) -> AppStat
         chatgpt: config.chatgpt,
         seen: Arc::default(),
         budgets: Arc::default(),
+        signed_images: Arc::default(),
     }
 }
 
