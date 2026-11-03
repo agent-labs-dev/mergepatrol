@@ -947,7 +947,11 @@ pub(crate) async fn lanes(
         for e in in_merge_order(lane.entries) {
             let step = match (e.state == EntryState::Active, merging == Some(e.number)) {
                 (true, true) => Some(ActiveStepView::Merging),
-                (true, false) => active_step(&app, id, &key.repo, e.number).await?,
+                // A job records its events on each of a stack's layers, not the stack.
+                (true, false) => {
+                    let top = e.layers.last().copied().unwrap_or(e.number);
+                    active_step(&app, id, &key.repo, top).await?
+                }
                 (false, _) => None,
             };
             let shown = review_layer(&e);

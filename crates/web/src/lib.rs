@@ -1950,6 +1950,60 @@ mod tests {
     const BEARER: (&str, &str) = ("authorization", "Bearer ghp_y");
 
     #[sqlx::test(migrations = false)]
+    async fn the_lane_says_what_its_active_job_is_doing(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Lane, PendingMerge, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, store) = v1_router(pool).await;
+        let key = LaneKey {
+            installation_id: 1,
+            repo: RepoName::parse("o/r").unwrap(),
+            trunk: "main".into(),
+        };
+        let entry = |number, layers: Vec<u64>| Entry {
+            number,
+            priority: false,
+            state: EntryState::Active,
+            summary: PrSummary::default(),
+            layers,
+            heads: Vec::new(),
+            recheck: None,
+        };
+        let mut lane = Lane {
+            entries: vec![entry(10, vec![2, 3])],
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        let step = |router: Router| async move {
+            let res = v1_get(&router, "/api/w/1/lanes?repo=o/r", &[BEARER]).await;
+            assert_eq!(res.status(), StatusCode::OK);
+            json_of(res).await[0]["entries"][0]["step"].clone()
+        };
+
+        // Before the job's first event.
+        assert_eq!(step(router.clone()).await, serde_json::Value::Null);
+        // A stack's events are its layers'.
+        for (kind, shown) in [
+            ("rebasing", "rebasing"),
+            ("published", "checks"),
+            ("fixing", "fixing"),
+            ("rebase-skipped", "checks"),
+        ] {
+            for layer in [2, 3] {
+                store.record(&key, layer, kind, "").await.unwrap();
+            }
+            assert_eq!(step(router.clone()).await, shown, "after {kind}");
+        }
+        lane.merging = Some(PendingMerge {
+            number: 10,
+            prs: vec![2, 3],
+            top: 3,
+            head: "h".into(),
+        });
+        store.save_lane(&key, &lane).await.unwrap();
+        assert_eq!(step(router.clone()).await, "merging");
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn v1_says_where_each_pr_is(pool: PgPool) {
         use mergepatrol_core::{Entry, EntryState, Hold, Lane, PrSummary};
         use mergepatrol_store::LaneKey;
