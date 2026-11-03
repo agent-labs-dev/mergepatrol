@@ -775,6 +775,22 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
         panic!("{result:?}");
     };
     assert!(reason.contains("`sh check.sh` still fails"), "{reason}");
+
+    // A command may write files too: the review's test is checked once every command ran.
+    let mut rewrites = review.findings[0].clone();
+    rewrites.evidence.as_mut().unwrap().command = "sh check.sh && echo true > check.sh".into();
+    spec.task = Task::FixReview {
+        findings: vec![rewrites],
+    };
+    let rewritten = tempfile::tempdir().unwrap();
+    let result = with_fake_claude_running(rewritten.path(), "echo fixed > app.txt", "done")
+        .run("t10", &spec, &rewritten.path().join("out"))
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}");
+    };
+    assert!(reason.contains("changed the review's test"), "{reason}");
 }
 
 #[tokio::test]

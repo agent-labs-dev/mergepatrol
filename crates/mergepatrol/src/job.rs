@@ -774,7 +774,8 @@ async fn apply_evidence(git: &Git, dir: &Path, findings: &[Finding]) -> Result<(
     Ok(())
 }
 
-/// After the fix, each command that showed a finding passes, with the review's test as it was.
+/// After the fix, each command that showed a finding passes, and the review's tests are as they
+/// were: checked once every command ran, as a command may write files too.
 async fn evidence_passes(
     git: &Git,
     dir: &Path,
@@ -782,12 +783,6 @@ async fn evidence_passes(
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     for e in shown(findings) {
-        if !e.patch.is_empty() && !git.holds(dir, &e.patch).await? {
-            bail!(
-                "the fix changed the review's test in {}",
-                e.files.join(", ")
-            );
-        }
         event(events, "evidence", e.command.as_str());
         let ran = run_command(dir, &e.command).await?;
         if !ran.passed {
@@ -795,6 +790,14 @@ async fn evidence_passes(
                 "`{}` still fails after the fix:\n```\n{}\n```",
                 e.command,
                 ran.tail
+            );
+        }
+    }
+    for e in shown(findings) {
+        if !e.patch.is_empty() && !git.holds(dir, &e.patch).await? {
+            bail!(
+                "the fix changed the review's test in {}",
+                e.files.join(", ")
             );
         }
     }
@@ -818,8 +821,10 @@ struct Ran {
     tail: String,
 }
 
-/// How many lines of what a command printed a failure keeps.
+/// How much of the end of what a command printed a failure keeps: its last lines, and at most
+/// this many bytes of them, as a line may be long.
 const TAIL_LINES: usize = 20;
+const TAIL_BYTES: usize = 4_000;
 
 /// Runs a command from the repo's root. One that runs past the timeout did not pass.
 async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
@@ -837,11 +842,16 @@ async fn run_command(dir: &Path, cmd: &str) -> Result<Ran> {
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     let lines: Vec<&str> = text.lines().collect();
+    let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
+    let mut cut = tail.len().saturating_sub(TAIL_BYTES);
+    while !tail.is_char_boundary(cut) {
+        cut += 1;
+    }
     Ok(Ran {
         passed: output.status.success(),
         timed_out: false,
         not_run: matches!(output.status.code(), Some(126 | 127)),
-        tail: lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n"),
+        tail: tail[cut..].to_owned(),
     })
 }
 
@@ -863,6 +873,20 @@ async fn verify(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>, what: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_commands_output_is_kept_short_however_long_its_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = run_command(dir.path(), "yes é | head -n 50000 | tr -d '\\n'; exit 1")
+            .await
+            .unwrap();
+        assert!(!ran.passed);
+        assert!(
+            ran.tail.len() <= TAIL_BYTES && ran.tail.ends_with('é'),
+            "{}",
+            ran.tail.len()
+        );
+    }
 
     #[test]
     fn a_review_reads_from_the_agents_json_in_or_out_of_a_code_block() {

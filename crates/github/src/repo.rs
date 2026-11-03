@@ -1403,7 +1403,11 @@ impl Installation {
             all.push_str(&format!("\n\n**`{place}`**\n{}", c.body));
         }
         let _: Value = self
-            .rest(Method::POST, &path, Some(review(&[], all.trim())))
+            .rest(
+                Method::POST,
+                &path,
+                Some(review(&[], &fit_comment(all.trim()))),
+            )
             .await?;
         Ok(())
     }
@@ -1630,6 +1634,36 @@ impl Installation {
             }
         }
         Ok(())
+    }
+}
+
+/// The most characters GitHub takes in a comment or a review's body.
+const COMMENT_CHARS: usize = 65_536;
+
+/// A comment GitHub takes: one too long loses its end, which says so.
+fn fit_comment(text: &str) -> std::borrow::Cow<'_, str> {
+    const CUT: &str = "\n\n… (cut: too long for GitHub)";
+    if text.chars().count() <= COMMENT_CHARS {
+        return text.into();
+    }
+    let keep: String = text
+        .chars()
+        .take(COMMENT_CHARS - CUT.chars().count())
+        .collect();
+    format!("{keep}{CUT}").into()
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+
+    #[test]
+    fn a_comment_too_long_for_github_loses_its_end() {
+        assert_eq!(fit_comment("short"), "short");
+        let long = "é".repeat(COMMENT_CHARS + 10);
+        let fit = fit_comment(&long);
+        assert_eq!(fit.chars().count(), COMMENT_CHARS);
+        assert!(fit.ends_with("too long for GitHub)"));
     }
 }
 

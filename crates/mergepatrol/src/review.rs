@@ -718,11 +718,7 @@ async fn post(
     for f in &held {
         let title = norm(&f.finding.title);
         if let Some(t) = before.iter().find(|t| title_of(t).as_ref() == Some(&title)) {
-            let body = format!(
-                "Still holds on `{short}`: {}\n\n{}\n\n{REPLY_MARK}",
-                f.finding.finding,
-                still(f)
-            );
+            let body = still_holds(f, short);
             gh.reply_in_thread(&r.repo, r.number, t.comment_id, &body)
                 .await?;
             if t.resolved {
@@ -739,7 +735,7 @@ async fn post(
         new.push(ThreadComment {
             path,
             line,
-            body: thread_body(f),
+            body: thread_body(f, short),
         });
     }
     if done.error.is_some() || !held.is_empty() {
@@ -791,10 +787,10 @@ fn still(f: &Judged) -> String {
 /// 65536 characters.
 const PATCH_BYTES: usize = 40_000;
 
-/// What MergeLoop ran to show a finding, and what it printed: the author runs the same.
-fn shows_it(e: &Evidence) -> String {
+/// What MergeLoop ran on `head` to show a finding, and what it printed: the author runs the same.
+fn shows_it(e: &Evidence, head: &str) -> String {
     let mut text = format!(
-        "**Shows it:** MergeLoop ran `{}` on this head and it failed:\n\n```\n{}\n```\n\n",
+        "**Shows it:** MergeLoop ran `{}` on `{head}` and it failed:\n\n```\n{}\n```\n\n",
         e.command,
         e.output.trim_end()
     );
@@ -813,8 +809,27 @@ fn shows_it(e: &Evidence) -> String {
     text
 }
 
-/// The comment that starts a finding's thread.
-fn thread_body(f: &Judged) -> String {
+/// What a finding's evidence showed on `head`, if MergeLoop saw it fail.
+fn shown(f: &Judged, head: &str) -> String {
+    match &f.finding.evidence {
+        Some(e) if e.failed => shows_it(e, head),
+        _ => String::new(),
+    }
+}
+
+/// The reply in a finding's thread when a later head's review finds it again, with the evidence
+/// that head's run showed.
+fn still_holds(f: &Judged, head: &str) -> String {
+    format!(
+        "Still holds on `{head}`: {}\n\n{}{}\n\n{REPLY_MARK}",
+        f.finding.finding,
+        shown(f, head),
+        still(f)
+    )
+}
+
+/// The comment that starts a finding's thread on `head`.
+fn thread_body(f: &Judged, head: &str) -> String {
     let to = match f.asked {
         true => "For a human",
         false => "Sent back to the author",
@@ -823,10 +838,7 @@ fn thread_body(f: &Judged) -> String {
         None => " (about the whole PR)",
         Some(_) => "",
     };
-    let shows = match &f.finding.evidence {
-        Some(e) if e.failed => shows_it(e),
-        _ => String::new(),
-    };
+    let shows = shown(f, head);
     format!(
         "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{shows}{}\n\n{MARK}{} -->",
         f.finding.id,
@@ -1048,7 +1060,7 @@ mod tests {
             id: "t".into(),
             resolved: false,
             comment_id: 1,
-            body: thread_body(&f),
+            body: thread_body(&f, "abc1234"),
             reply: None,
         };
         assert_eq!(
@@ -1061,14 +1073,24 @@ mod tests {
         assert!(
             thread
                 .body
-                .contains("ran `cargo test retry_stops` on this head and it failed")
+                .contains("ran `cargo test retry_stops` on `abc1234` and it failed")
         );
         assert!(thread.body.contains("test retry_stops ... FAILED"));
         assert!(thread.body.contains("in tests/retry.rs"));
         assert!(thread.body.contains("+fn retry_stops() {}"));
         // What the agent only says it ran shows nothing.
         f.finding.evidence.as_mut().unwrap().failed = false;
-        assert!(!thread_body(&f).contains("Shows it"));
+        assert!(!thread_body(&f, "abc1234").contains("Shows it"));
+        // Found again on a later head: the reply shows what that head's run printed.
+        f.finding.evidence.as_mut().unwrap().failed = true;
+        f.finding.evidence.as_mut().unwrap().output = "test retry_stops ... FAILED again".into();
+        let reply = still_holds(&f, "def5678");
+        assert!(reply.contains("Still holds on `def5678`"), "{reply}");
+        assert!(
+            reply.contains("ran `cargo test retry_stops` on `def5678`"),
+            "{reply}"
+        );
+        assert!(reply.contains("FAILED again"), "{reply}");
     }
 
     #[test]
