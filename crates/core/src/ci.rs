@@ -28,6 +28,9 @@ const NEEDS_A_HOST: [&str; 6] = ["gh ", "ssh ", "kubectl", "aws ", "gcloud", "te
 /// A shell line that only joins with others inside `if`, `for` or `while`.
 const CONTROL_FLOW: [&str; 7] = ["if ", "for ", "while ", "then", "else", "do", "done"];
 
+/// How a shell line ends when its command goes on to the next line, where `&&` cannot join it.
+const CONTINUES: [&str; 4] = ["\\", "&&", "||", "|"];
+
 /// The checks `files` (a repo's workflows, by path) run for a pull request, in the order they
 /// appear. Empty when none of them can run outside CI.
 pub fn verify_from_ci(files: &[(String, String)]) -> Vec<String> {
@@ -60,7 +63,8 @@ fn runs_for_a_pull_request(yaml: &str) -> bool {
 
 /// The commands a workflow's steps run: a one-line `run:`, or a `run: |` block joined with
 /// `&&`, run from the step's `working-directory` or the inherited `defaults.run` one. A block
-/// that holds control flow is left out: its lines do not join that way.
+/// that holds control flow, or a command that goes on past its line, is left out: its lines do
+/// not join that way.
 fn run_commands(yaml: &str) -> Vec<String> {
     let lines: Vec<&str> = yaml.lines().collect();
     let mut commands = Vec::new();
@@ -153,7 +157,7 @@ fn run_commands(yaml: &str) -> Vec<String> {
         // A folded block (`>`) is one command YAML joins with spaces, not lines to chain; skip it.
         if value.starts_with('>')
             || block.iter().any(|l| l.starts_with('#'))
-            || holds_control_flow(&block)
+            || !lines_join(&block)
             // A heredoc's body is data, not commands; joining it with `&&` breaks the shell.
             || block.iter().any(|l| l.contains("<<"))
         {
@@ -212,10 +216,10 @@ fn strip_inline_comment(line: &str) -> String {
     line.to_owned()
 }
 
-fn holds_control_flow(lines: &[String]) -> bool {
-    lines.iter().any(|l| {
-        let l = l.trim_start();
-        CONTROL_FLOW.iter().any(|c| l.starts_with(c)) || l.ends_with('\\')
+/// Whether each line is a whole command, so `&&` can join them.
+fn lines_join(lines: &[String]) -> bool {
+    !lines.iter().any(|l| {
+        CONTROL_FLOW.iter().any(|c| l.starts_with(c)) || CONTINUES.iter().any(|c| l.ends_with(c))
     })
 }
 
@@ -352,6 +356,25 @@ jobs:
           fi
 ";
         assert!(verify_from_ci(&files(yaml)).is_empty());
+    }
+
+    #[test]
+    fn a_block_whose_command_goes_on_past_its_line_is_left_out() {
+        for open in [
+            "test 1 = 1 &&",
+            "test 1 = 2 ||",
+            "cargo test |",
+            "cargo test \\",
+        ] {
+            let yaml = format!(
+                "on: pull_request\njobs:\n  check:\n    steps:\n      - run: |\n          {open}\n          test 2 = 2\n      - run: cargo fmt --check\n"
+            );
+            assert_eq!(
+                verify_from_ci(&files(&yaml)),
+                ["cargo fmt --check"],
+                "{open}"
+            );
+        }
     }
 
     #[test]
