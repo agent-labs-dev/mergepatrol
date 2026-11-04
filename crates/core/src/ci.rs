@@ -142,7 +142,12 @@ fn run_commands(yaml: &str) -> Vec<String> {
             if next.len() - next.trim_start().len() <= key_indent {
                 break;
             }
-            block.push(text.to_owned());
+            let line_text = strip_inline_comment(text);
+            if line_text.is_empty() {
+                i += 1;
+                continue;
+            }
+            block.push(line_text);
             i += 1;
         }
         // A folded block (`>`) is one command YAML joins with spaces, not lines to chain; skip it.
@@ -173,6 +178,29 @@ fn scalar(value: &str) -> String {
     }
 }
 
+/// A shell line with its trailing comment removed. Joining lines with `&&` would otherwise let an
+/// inline `#` comment swallow every command after it. A `#` inside a quote is kept.
+fn strip_inline_comment(line: &str) -> String {
+    let mut quote: Option<char> = None;
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                '#' if i == 0 || line[..i].ends_with(char::is_whitespace) => {
+                    return line[..i].trim_end().to_owned();
+                }
+                _ => {}
+            },
+        }
+    }
+    line.to_owned()
+}
+
 fn holds_control_flow(lines: &[String]) -> bool {
     lines.iter().any(|l| {
         let l = l.trim_start();
@@ -188,9 +216,16 @@ fn runs_in_a_checkout(command: &str) -> bool {
     if needed.into_iter().any(|n| lower.contains(n)) {
         return false;
     }
-    // A step that only prints is not a check.
-    let first = command.split_whitespace().next().unwrap_or_default();
-    first != "echo" && first != "printf" && !command.trim().is_empty()
+    // A step that only prints is not a check: keep it only when one of its commands is a check,
+    // so a status message ahead of the tests does not discard them.
+    command
+        .split("&&")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .any(|c| {
+            let first = c.split_whitespace().next().unwrap_or_default();
+            first != "echo" && first != "printf"
+        })
 }
 
 #[cfg(test)]
@@ -345,5 +380,36 @@ jobs:
     #[test]
     fn a_file_that_is_not_a_workflow_is_no_check() {
         assert!(verify_from_ci(&[("ci.txt".to_owned(), CI.to_owned())]).is_empty());
+    }
+
+    #[test]
+    fn an_inline_comment_does_not_hide_the_checks_after_it() {
+        let yaml = "\
+on: pull_request
+jobs:
+  check:
+    steps:
+      - run: |
+          true # setup finished
+          test 1 = 2
+";
+        assert_eq!(verify_from_ci(&files(yaml)), ["true && test 1 = 2"]);
+    }
+
+    #[test]
+    fn a_status_message_does_not_discard_the_check_after_it() {
+        let yaml = "\
+on: pull_request
+jobs:
+  check:
+    steps:
+      - run: |
+          echo \"starting\"
+          cargo test
+";
+        assert_eq!(
+            verify_from_ci(&files(yaml)),
+            ["echo \"starting\" && cargo test"]
+        );
     }
 }
