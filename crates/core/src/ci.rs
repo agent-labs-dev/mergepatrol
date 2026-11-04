@@ -59,29 +59,78 @@ fn runs_for_a_pull_request(yaml: &str) -> bool {
 }
 
 /// The commands a workflow's steps run: a one-line `run:`, or a `run: |` block joined with
-/// `&&`. A block that holds control flow is left out: its lines do not join that way.
+/// `&&`, run from the step's `working-directory` or the inherited `defaults.run` one. A block
+/// that holds control flow is left out: its lines do not join that way.
 fn run_commands(yaml: &str) -> Vec<String> {
     let lines: Vec<&str> = yaml.lines().collect();
     let mut commands = Vec::new();
+    // The `defaults.run.working-directory` in effect, by the indent of its `defaults:` key.
+    let mut defaults: Vec<(usize, String)> = Vec::new();
+    let mut defaults_indent = 0;
+    // The step being read: the indent of its keys, its command and its working directory.
+    let mut step: Option<(usize, Option<String>, Option<String>)> = None;
+    let finish = |step: Option<(usize, Option<String>, Option<String>)>,
+                  defaults: &[(usize, String)],
+                  commands: &mut Vec<String>| {
+        if let Some((_, Some(run), dir)) = step {
+            match dir.or_else(|| defaults.last().map(|(_, d)| d.clone())) {
+                Some(dir) => commands.push(format!("cd {dir} && {run}")),
+                None => commands.push(run),
+            }
+        }
+    };
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
         i += 1;
         let trimmed = line.trim_start();
-        let step = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-        let Some(value) = step.strip_prefix("run:") else {
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if step.as_ref().is_some_and(|(k, _, _)| indent < *k) {
+            finish(step.take(), &defaults, &mut commands);
+        }
+        defaults.retain(|(d, _)| indent >= *d);
+        let item = trimmed.strip_prefix("- ");
+        let key = item.unwrap_or(trimmed).trim_start();
+        // The indent of this line's key, past any sequence marker.
+        let key_indent = line.len() - key.len();
+        // A sequence item starts a step, unless it is a list nested inside the current one.
+        if item.is_some() && step.as_ref().is_none_or(|(k, _, _)| key_indent <= *k) {
+            finish(step.take(), &defaults, &mut commands);
+            step = Some((key_indent, None, None));
+        }
+        if key.starts_with("defaults:") {
+            defaults_indent = key_indent;
+        }
+        if let Some(dir) = key.strip_prefix("working-directory:") {
+            let dir = scalar(dir.trim());
+            match step.as_mut() {
+                Some((k, _, d)) if *k == key_indent => *d = Some(dir),
+                Some(_) => {}
+                None => defaults.push((defaults_indent, dir)),
+            }
+            continue;
+        }
+        let Some(value) = key.strip_prefix("run:") else {
             continue;
         };
+        let Some((k, run, _)) = step.as_mut() else {
+            continue;
+        };
+        if *k != key_indent {
+            continue;
+        }
         let value = value.trim();
         if value.is_empty() {
             continue;
         }
         if !value.starts_with(['|', '>']) {
-            commands.push(value.trim_matches(['"', '\''].as_slice()).to_owned());
+            *run = Some(scalar(value));
             continue;
         }
-        // A block: the lines under it, indented past the `run:`.
-        let indent = line.len() - trimmed.len();
+        // A block: the lines under it, indented past the `run:` key.
         let mut block: Vec<String> = Vec::new();
         while i < lines.len() {
             let next = lines[i];
@@ -90,7 +139,7 @@ fn run_commands(yaml: &str) -> Vec<String> {
                 i += 1;
                 continue;
             }
-            if next.len() - next.trim_start().len() <= indent {
+            if next.len() - next.trim_start().len() <= key_indent {
                 break;
             }
             block.push(text.to_owned());
@@ -99,9 +148,25 @@ fn run_commands(yaml: &str) -> Vec<String> {
         if block.iter().any(|l| l.starts_with('#')) || holds_control_flow(&block) {
             continue;
         }
-        commands.push(block.join(" && "));
+        *run = Some(block.join(" && "));
     }
+    finish(step, &defaults, &mut commands);
     commands
+}
+
+/// A one-line YAML scalar's value: a quoted scalar unquoted, a plain one as it is.
+fn scalar(value: &str) -> String {
+    let quoted = |q: char| value.len() >= 2 && value.starts_with(q) && value.ends_with(q);
+    if quoted('\'') {
+        value[1..value.len() - 1].replace("''", "'")
+    } else if quoted('"') {
+        value[1..value.len() - 1]
+            .replace("\\\\", "\0")
+            .replace("\\\"", "\"")
+            .replace('\0', "\\")
+    } else {
+        value.to_owned()
+    }
 }
 
 fn holds_control_flow(lines: &[String]) -> bool {
@@ -164,10 +229,31 @@ jobs:
         assert_eq!(
             verify_from_ci(&files(CI)),
             [
-                "corepack enable && pnpm install --frozen-lockfile && pnpm check",
+                "cd ui && corepack enable && pnpm install --frozen-lockfile && pnpm check",
                 "cargo fmt --all --check",
                 "cargo test --workspace --locked",
             ]
+        );
+    }
+
+    #[test]
+    fn a_step_runs_from_the_working_directory_its_job_defaults_to() {
+        let yaml = "\
+on: pull_request
+jobs:
+  ui:
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - run: pnpm check
+  core:
+    steps:
+      - run: cargo test
+";
+        assert_eq!(
+            verify_from_ci(&files(yaml)),
+            ["cd ui && pnpm check", "cargo test"]
         );
     }
 
