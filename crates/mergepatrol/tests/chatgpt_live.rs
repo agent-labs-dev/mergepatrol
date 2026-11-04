@@ -122,7 +122,7 @@ async fn codex_resolves_a_conflict_on_a_chatgpt_plan() {
             pr_body: "Adds a comma and an exclamation mark.",
             commit_message: "Add punctuation to the greeting",
             trunk: "main",
-            verify_commands: &[],
+            verify: &mergepatrol_resolver::Verify::None,
             transcript: &transcript,
         })
         .await

@@ -23,7 +23,7 @@ use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
     ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
-    ResolveRequest, Resolver, ReviewRequest, new_title,
+    ResolveRequest, Resolver, ReviewRequest, Verify, new_title,
 };
 use tokio::io::AsyncReadExt;
 
@@ -102,6 +102,52 @@ async fn run_to(spec: &JobSpec, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The checks the agent runs: the repo's verify commands, or, for a repo that sets none, the
+/// commands its own CI runs for a pull request, read from the checkout. MergeLoop runs only the
+/// configured ones itself: a command picked from CI tells the agent what to run, and is never a
+/// reason to eject a PR.
+async fn checks_for(spec: &JobSpec, dir: &Path, events: &mut Vec<JobEvent>) -> Verify {
+    if !spec.verify.is_empty() {
+        return Verify::Configured(spec.verify.clone());
+    }
+    let ci = checks_from_ci(dir).await;
+    if ci.is_empty() {
+        return Verify::None;
+    }
+    event(
+        events,
+        "verify",
+        format!("the repo sets no verify commands: {} from its CI", ci.len()),
+    );
+    Verify::Ci(ci)
+}
+
+/// The commands the repo's own workflows run for a pull request, read from the checkout.
+async fn checks_from_ci(dir: &Path) -> Vec<String> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(dir.join(".github/workflows")).await else {
+        return Vec::new();
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(text) = tokio::fs::read_to_string(&path).await else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        files.push((name, text));
+    }
+    // The workflows in a fixed order, so a review of the same head sees the same commands.
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    mergepatrol_core::verify_from_ci(&files)
+}
+
 fn event(events: &mut Vec<JobEvent>, kind: &str, message: impl Into<String>) {
     let message = message.into();
     eprintln!("{kind}: {message}");
@@ -140,6 +186,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
         }
     }
     git.checkout_detached(dir, &spec.head_sha).await?;
+    let checks = checks_for(spec, dir, events).await;
 
     let resolver = resolver(&spec.resolver);
     let resolver = resolver.as_ref();
@@ -147,7 +194,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     // The bundle holds the commits on top of what the orchestrator already has.
     let (exclude, done) = match &spec.task {
         Task::Rebase => {
-            rebase(spec, &git, resolver, dir, out, events).await?;
+            rebase(spec, &git, resolver, &checks, dir, out, events).await?;
             if git.rev_parse(dir, "HEAD").await? == spec.trunk_sha {
                 bail!(
                     "nothing is left to merge: its changes are already on {}",
@@ -163,6 +210,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
                 spec,
                 &git,
                 resolver,
+                &checks,
                 (failures, &[], &what),
                 dir,
                 out,
@@ -177,6 +225,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
                 spec,
                 &git,
                 resolver,
+                &checks,
                 (&[], findings, what),
                 dir,
                 out,
@@ -192,7 +241,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             since,
         } => {
             let earlier = (answered.as_slice(), sent_back.as_slice(), since.as_deref());
-            return review(spec, &git, resolver, earlier, dir, out, events).await;
+            return review(spec, &git, resolver, &checks, earlier, dir, out, events).await;
         }
         Task::Question {
             finding,
@@ -245,6 +294,7 @@ async fn rebase(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
+    checks: &Verify,
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
@@ -283,7 +333,7 @@ async fn rebase(
                 pr_body: &spec.pr_body,
                 commit_message: &commit_message,
                 trunk: &spec.trunk,
-                verify_commands: &spec.verify,
+                verify: checks,
                 transcript: &transcript,
             })
             .await
@@ -340,10 +390,12 @@ pub(crate) const GAVE_UP: &str = "the agent gave up";
 pub(crate) const RETITLED: &str = "the agent proposes the title: ";
 
 /// Has the agent fix the failed checks, and commits its fix on top of the PR head.
+#[allow(clippy::too_many_arguments)]
 async fn fix(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
+    checks: &Verify,
     (failures, findings, what): (&[CheckFailure], &[Finding], &str),
     dir: &Path,
     out: &Path,
@@ -361,7 +413,7 @@ async fn fix(
             pr_title: &spec.pr_title,
             pr_body: &spec.pr_body,
             trunk: &spec.trunk,
-            verify_commands: &spec.verify,
+            verify: checks,
             transcript: &transcript,
         })
         .await
@@ -429,6 +481,7 @@ async fn review(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
+    checks: &Verify,
     (answered, sent_back, since): (&[Answered], &[SentBack], Option<&str>),
     dir: &Path,
     out: &Path,
@@ -464,7 +517,7 @@ async fn review(
             answered,
             sent_back,
             queue_commits: &queue_commits,
-            verify_commands: &spec.verify,
+            verify: checks,
             transcript: &transcript,
         })
         .await

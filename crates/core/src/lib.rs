@@ -1,6 +1,7 @@
 //! The queue: lanes, entries, the state machine of one job, and a repo's settings. Pure logic,
 //! no I/O.
 
+mod ci;
 mod hold;
 mod job;
 mod lane;
@@ -9,6 +10,7 @@ mod review;
 mod spend;
 mod steps;
 
+pub use ci::verify_from_ci;
 pub use hold::Hold;
 pub use job::{CHECKS_MISSING_FOR, CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
 pub use lane::{
