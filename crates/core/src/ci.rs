@@ -182,14 +182,23 @@ fn scalar(value: &str) -> String {
 /// inline `#` comment swallow every command after it. A `#` inside a quote is kept.
 fn strip_inline_comment(line: &str) -> String {
     let mut quote: Option<char> = None;
+    let mut escaped = false;
     for (i, c) in line.char_indices() {
+        // A backslash escapes the next character, except inside single quotes.
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match quote {
             Some(q) => {
-                if c == q {
+                if c == '\\' && q == '"' {
+                    escaped = true;
+                } else if c == q {
                     quote = None;
                 }
             }
             None => match c {
+                '\\' => escaped = true,
                 '\'' | '"' => quote = Some(c),
                 '#' if i == 0 || line[..i].ends_with(char::is_whitespace) => {
                     return line[..i].trim_end().to_owned();
@@ -224,7 +233,9 @@ fn runs_in_a_checkout(command: &str) -> bool {
         .filter(|c| !c.is_empty())
         .any(|c| {
             let first = c.split_whitespace().next().unwrap_or_default();
-            first != "echo" && first != "printf"
+            // Only a lone `echo` or `printf` is known to just print: one that a `;`, `|` or `&`
+            // joins to another command may run a check after it.
+            (first != "echo" && first != "printf") || c.contains([';', '|', '&', '\n', '`'])
         })
 }
 
