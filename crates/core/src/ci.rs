@@ -154,6 +154,8 @@ fn run_commands(yaml: &str) -> Vec<String> {
         if value.starts_with('>')
             || block.iter().any(|l| l.starts_with('#'))
             || holds_control_flow(&block)
+            // A heredoc's body is data, not commands; joining it with `&&` breaks the shell.
+            || block.iter().any(|l| l.contains("<<"))
         {
             continue;
         }
@@ -350,6 +352,22 @@ jobs:
           fi
 ";
         assert!(verify_from_ci(&files(yaml)).is_empty());
+    }
+
+    #[test]
+    fn a_block_with_a_heredoc_is_left_out_rather_than_joined() {
+        let yaml = "\
+on: pull_request
+jobs:
+  check:
+    steps:
+      - run: |
+          python3 - <<'PY'
+          assert (1 == 1)
+          PY
+      - run: cargo test
+";
+        assert_eq!(verify_from_ci(&files(yaml)), ["cargo test"]);
     }
 
     #[test]
