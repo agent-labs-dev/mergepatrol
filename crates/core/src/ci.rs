@@ -145,7 +145,11 @@ fn run_commands(yaml: &str) -> Vec<String> {
             block.push(text.to_owned());
             i += 1;
         }
-        if block.iter().any(|l| l.starts_with('#')) || holds_control_flow(&block) {
+        // A folded block (`>`) is one command YAML joins with spaces, not lines to chain; skip it.
+        if value.starts_with('>')
+            || block.iter().any(|l| l.starts_with('#'))
+            || holds_control_flow(&block)
+        {
             continue;
         }
         *run = Some(block.join(" && "));
@@ -300,6 +304,21 @@ jobs:
           fi
 ";
         assert!(verify_from_ci(&files(yaml)).is_empty());
+    }
+
+    #[test]
+    fn a_folded_block_is_left_out_rather_than_split_into_commands() {
+        let yaml = "\
+on: pull_request
+jobs:
+  check:
+    steps:
+      - run: >-
+          cargo test
+          --workspace
+      - run: cargo fmt --check
+";
+        assert_eq!(verify_from_ci(&files(yaml)), ["cargo fmt --check"]);
     }
 
     #[test]
