@@ -59,7 +59,7 @@ async fn claude_resolves_a_rename_conflict() {
             pr_body: "Adds a comma and an exclamation mark.",
             commit_message: "Add punctuation to the greeting",
             trunk: "main",
-            verify_commands: &[],
+            verify: &mergepatrol_resolver::Verify::None,
             transcript: &wt.join("transcript.jsonl"),
         })
         .await

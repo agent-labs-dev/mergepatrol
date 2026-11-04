@@ -3013,7 +3013,7 @@ async fn skill_paths(gh: &Installation, repo: &RepoName) -> Result<Vec<String>, 
 /// The settings as a PR's body lists them.
 fn settings_list(settings: &RepoSettings) -> String {
     let verify = if settings.verify.is_empty() {
-        "none".to_owned()
+        "none: the agent uses the checks this repo's CI runs".to_owned()
     } else {
         settings
             .verify

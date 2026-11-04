@@ -241,6 +241,8 @@ The agent has three tasks: resolving a rebase's conflicts, fixing failed checks,
 
 The verify commands run after an agent resolution or fix, before the publish.
 
+A repo that sets none is not left without checks. MergeLoop reads the workflows in `.github/workflows/` that run on a pull request, and gives the agent the commands they run for it: a review makes one of them fail to show that a change is needed, and a fix runs it before the publish. MergeLoop never uses a command it read from CI to eject a PR, only the ones your file declares, so set `verify` to pin what a resolution and a fix must pass. A workflow step that needs the workflow's context, a secret or another host is left out: the job has the toolchains, not your CI's services.
+
 A fix runs in the sandbox, like a rebase, while the PR keeps its place at the head of the queue. It may change any file except those under `.github/` and `.mergepatrol/`. The agent gets each failed check's output and annotations, and for a GitHub Actions job, the end of its log. The log needs the App's `actions: read` permission: an App created before this permission existed must be given it on GitHub, or the agent works from the output alone.
 
 A repo queues once its default branch has the file. MergeLoop looks for it in every repo every 5 minutes, and at once when a push webhook adds or removes it. **Turn on** and **Turn off** in **Settings** override the file, until you choose **Follow the config file**.

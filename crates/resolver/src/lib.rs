@@ -22,6 +22,48 @@ use anyhow::Result;
 use async_trait::async_trait;
 use mergepatrol_core::{Answer, Answered, CheckFailure, Finding, SentBack};
 
+/// The checks a job's agent runs: the repo's verify commands, or, for a repo that sets none, the
+/// commands its own CI runs for a pull request. `None` when the repo has neither.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum Verify {
+    #[default]
+    None,
+    /// From the repo's config file: a resolution or a fix must pass them.
+    Configured(Vec<String>),
+    /// From the repo's CI, because its config sets no verify commands.
+    Ci(Vec<String>),
+}
+
+impl Verify {
+    /// How many commands it holds.
+    pub fn len(&self) -> usize {
+        match self {
+            Verify::None => 0,
+            Verify::Configured(c) | Verify::Ci(c) => c.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn commands(&self) -> &[String] {
+        match self {
+            Verify::None => &[],
+            Verify::Configured(c) | Verify::Ci(c) => c,
+        }
+    }
+
+    /// The commands as a prompt lists them.
+    fn listed(&self) -> String {
+        self.commands()
+            .iter()
+            .map(|c| format!("- `{c}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 pub struct ResolveRequest<'a> {
     pub workdir: &'a Path,
     pub conflicted_files: &'a [String],
@@ -30,7 +72,7 @@ pub struct ResolveRequest<'a> {
     /// The message of the PR commit that did not apply.
     pub commit_message: &'a str,
     pub trunk: &'a str,
-    pub verify_commands: &'a [String],
+    pub verify: &'a Verify,
     /// Where to write the agent's transcript.
     pub transcript: &'a Path,
 }
@@ -43,7 +85,7 @@ pub struct FixRequest<'a> {
     pub pr_title: &'a str,
     pub pr_body: &'a str,
     pub trunk: &'a str,
-    pub verify_commands: &'a [String],
+    pub verify: &'a Verify,
     pub transcript: &'a Path,
 }
 
@@ -60,7 +102,7 @@ pub struct ReviewRequest<'a> {
     /// author's replies.
     pub sent_back: &'a [SentBack],
     /// The repo's verify commands: how it runs its checks, which a review's evidence builds on.
-    pub verify_commands: &'a [String],
+    pub verify: &'a Verify,
     /// What the queue's agent committed on a version already approved, as "sha subject". When
     /// any, only these need reading.
     pub queue_commits: &'a [String],
@@ -136,39 +178,50 @@ pub fn new_title(text: &str) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// The `verify` paragraph of a prompt.
-fn verify_section(commands: &[String], after: &str) -> String {
-    if commands.is_empty() {
-        return "This repo has no verify commands.".to_owned();
+/// The `verify` paragraph of a prompt: what a resolution or a fix must pass. A repo that sets no
+/// verify commands is checked by the commands its own CI runs, which its config does not pin.
+fn verify_section(verify: &Verify, after: &str) -> String {
+    match verify {
+        Verify::Configured(_) => format!(
+            "After you {after}, run these commands. They must pass:\n{}",
+            verify.listed()
+        ),
+        Verify::Ci(_) => format!(
+            "This repo sets no verify commands, so its own CI is the check. After you {after}, run \
+the command that covers what you changed; it must pass:\n{}",
+            verify.listed()
+        ),
+        Verify::None => format!(
+            "This repo sets no verify commands, and its CI runs nothing a checkout can run. After \
+you {after}, run what the repo's tools let you, and say what you could not check."
+        ),
     }
-    let cmds = commands
-        .iter()
-        .map(|c| format!("- `{c}`"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("After you {after}, run these commands. They must pass:\n{cmds}")
 }
 
 /// How a review learns to run the repo, to build its evidence on. The checkout has common
 /// toolchains, not the repo's dependencies: those come from its verify commands, if it has any,
 /// or from the evidence itself.
-fn checks_section(commands: &[String]) -> String {
+fn checks_section(verify: &Verify) -> String {
     let setup = "The checkout has git and common toolchains (Node with pnpm, Rust, Go, Python, Bun) \
 but none of the repo's dependencies. MergeLoop runs each `evidence` command again in a fresh \
 checkout, so make it install what it needs first, e.g. `pnpm install --frozen-lockfile && pnpm \
 vitest run src/retry.test.ts`.";
-    if commands.is_empty() {
-        return format!(
-            "This repo declares no verify commands: find how it runs its tests in its docs, CI \
-workflows and config. {setup}"
-        );
+    match verify {
+        Verify::None => format!(
+            "This repo declares no verify commands, and its CI runs nothing a checkout can run: \
+find how it runs its tests in its docs and its config. {setup}"
+        ),
+        Verify::Ci(_) => format!(
+            "This repo declares no verify commands, so these are the checks its own CI runs, from \
+`.github/workflows/`. A command that fails on the PR because of what a finding says is its \
+`evidence`:\n{}\n\n{setup}",
+            verify.listed()
+        ),
+        Verify::Configured(_) => format!(
+            "The repo declares these verify commands, which a fix must pass:\n{}\n\n{setup}",
+            verify.listed()
+        ),
     }
-    let cmds = commands
-        .iter()
-        .map(|c| format!("- `{c}`"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("The repo declares these verify commands, which a fix must pass:\n{cmds}\n\n{setup}")
 }
 
 pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
@@ -178,7 +231,7 @@ pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
         .map(|f| format!("- {f}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let verify = verify_section(req.verify_commands, "resolve");
+    let verify = verify_section(req.verify, "resolve");
     format!(
         "You are resolving a rebase conflict for a merge queue.
 
@@ -253,7 +306,7 @@ in {}.",
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    let verify = verify_section(req.verify_commands, "fix");
+    let verify = verify_section(req.verify, "fix");
     format!(
         "You are fixing what a code review found in a pull request, for a merge queue.
 
@@ -303,7 +356,7 @@ pub(crate) fn fix_prompt(req: &FixRequest<'_>) -> String {
         .map(|f| format!("## {}\n\n{}", f.name, f.details.trim()))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let verify = verify_section(req.verify_commands, "fix");
+    let verify = verify_section(req.verify, "fix");
     format!(
         "You are fixing the failed CI checks of a pull request for a merge queue.
 
@@ -516,7 +569,7 @@ Reply with the JSON alone, in this shape, and nothing else:
         title = req.pr_title,
         body = req.pr_body,
         base = req.base,
-        verify = checks_section(req.verify_commands),
+        verify = checks_section(req.verify),
     )
 }
 
@@ -594,7 +647,7 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             queue_commits: &[],
-            verify_commands: &["cargo test".into()],
+            verify: &Verify::Configured(vec!["cargo test".into()]),
             transcript: Path::new("t"),
         });
         assert!(review.contains("what its description sets out to do"));
@@ -615,11 +668,28 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             queue_commits: &[],
-            verify_commands: &[],
+            verify: &Verify::None,
             transcript: Path::new("t"),
         });
         assert!(bare.contains("declares no verify commands"));
         assert!(bare.contains("make it install what it needs first"));
+        // A repo that sets none is checked by the commands its own CI runs, named for the agent
+        // that has to make one fail.
+        let ci = review_prompt(&ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            queue_commits: &[],
+            verify: &Verify::Ci(vec!["pnpm vitest run".into()]),
+            transcript: Path::new("t"),
+        });
+        assert!(ci.contains("declares no verify commands"));
+        assert!(ci.contains("checks its own CI runs"));
+        assert!(ci.contains("- `pnpm vitest run`"));
         assert!(review.contains("`security` finding needs none"));
     }
 }

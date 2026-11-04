@@ -451,7 +451,7 @@ export function RepoSettings({
         <Field
           id={`${id}-verify`}
           label="Verify commands"
-          hint="One per line. They run after the agent resolves or fixes"
+          hint="One per line. They run after the agent resolves or fixes. Empty: the agent uses the checks your CI runs"
         >
           <textarea
             id={`${id}-verify`}
