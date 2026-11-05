@@ -352,7 +352,7 @@ const THREADS: &str = "Review threads{on} hold the PR: {detail}. Work each unres
 2. Read each thread and the code it points at. Fix it, or decide it doesn't apply, for a reason the code shows: a file and line, a test, a doc. Only a call on scope, product or design, access you lack, or a change outside the repo is for a human.
 3. Commit the fixes together, as few commits as you can: each push gets a new review. Fetch and rebase onto the remote branch, then push once.
 4. Reply in each thread you worked: the fix's short SHA and one line on what changed, or the reason it doesn't apply. Then resolve it: `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"ID\"}) { thread { isResolved } } }'`. Resolve only after the push. A thread for a human: reply with the decision needed and who should make it, and leave it unresolved.
-5. To have MergeLoop's reviewer settle one of its findings now, rather than on the next push, reply to it with `mergeloop call ask_agent_about_review` and `{\"repo\", \"number\", \"head_sha\", \"finding\", \"question\"}`.
+5. To have MergeLoop's reviewer settle one of its findings now, rather than on the next push, reply to it with `mergeloop call ask_agent_about_review` and `{\"repo\", \"number\", \"head_sha\", \"finding\", \"question\"}`. That runs MergeLoop's own agent, so not in a repo whose config sets `agent.runs: local`: there, your reply in the thread is enough, and the next review reads it.
 
 Never answer MergeLoop's review of a PR you built with `answer_agent_review`, or approve it with `review_pull`. Then run `{then}`.";
 
@@ -540,5 +540,10 @@ mod tests {
         assert!(v.brief.contains("on #4, a layer of its stack"));
         assert!(v.brief.contains("pullRequest(number: 4)"));
         assert!(v.brief.ends_with(&format!("Then run `{}`.", v.then)));
+        // Asking MergeLoop's agent about a finding is not for a repo where the author's runs.
+        assert!(
+            v.brief
+                .contains("not in a repo whose config sets `agent.runs: local`")
+        );
     }
 }
