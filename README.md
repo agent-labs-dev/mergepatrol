@@ -284,9 +284,12 @@ claude mcp add --transport http mergeloop https://mergeloop.ai/mcp \
 An agent with a shell lands a PR with the `mergeloop` command, which calls the MCP server:
 
 ```sh
-cargo install --locked --git https://github.com/agent-labs-dev/mergeloop mergeloop-cli
+mkdir -p ~/.local/bin && gh release download cli-latest -R agent-labs-dev/mergeloop \
+  -p "mergeloop-$(uname -s)-$(uname -m).tar.gz" -O - | tar -xz -C ~/.local/bin
 mergeloop            # the current branch's PR; or 123, owner/name#123, or its URL
 ```
+
+Each push to `main` that changes it rebuilds it, for macOS and Linux on Apple silicon, Intel and Arm, into the `cli-latest` prerelease. Or build it: `cargo install --locked --git https://github.com/agent-labs-dev/mergeloop mergeloop-cli`.
 
 `mergeloop` queues the PR, waits until it needs something of the agent, prints that need as JSON, and exits. `brief` says what to do, such as working the review's threads or fixing what got the PR ejected, and `then` is the command to run once done, which waits for the next need. The exit code says what kind it is: 0 work for the agent, 10 merged, 11 ejected, 12 waiting on a human, 2 an error. An agent runs it in the background, so it hears of the next need as soon as there is one, and nothing runs between needs. `mergeloop call <tool> '<json>'` runs any other tool, as a brief names it.
 
