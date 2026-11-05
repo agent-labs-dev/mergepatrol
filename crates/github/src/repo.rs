@@ -855,31 +855,6 @@ impl Installation {
 
     /// The head of PR `number`, from its `refs/pull/<n>/head`: where a fork PR's head shows in
     /// the base repo.
-    /// The messages of the PR's last commits, newest first: as many as a fix budget can use.
-    pub async fn last_commit_messages(
-        &self,
-        repo: &RepoName,
-        number: PrNumber,
-    ) -> Result<Vec<String>> {
-        let query = "query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              pullRequest(number: $number) {
-                commits(last: 20) { nodes { commit { message } } }
-              }
-            }
-        }";
-        let vars = json!({ "owner": repo.owner, "name": repo.name, "number": number });
-        let data: Value = self.graphql("last_commit_messages", query, vars).await?;
-        let nodes = data["repository"]["pullRequest"]["commits"]["nodes"]
-            .as_array()
-            .context("the PR's commits")?;
-        Ok(nodes
-            .iter()
-            .rev()
-            .filter_map(|n| n["commit"]["message"].as_str().map(str::to_owned))
-            .collect())
-    }
-
     pub async fn pull_head(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
         let r: Value = self
             .rest(
@@ -1145,6 +1120,57 @@ impl Installation {
             )
             .await?;
         r["number"].as_u64().context("PR number")
+    }
+
+    /// The messages of every commit on PR `number`, oldest first.
+    pub async fn commit_messages(&self, repo: &RepoName, number: PrNumber) -> Result<Vec<String>> {
+        let query = "query($owner: String!, $name: String!, $number: Int!, $after: String) {
+            repository(owner: $owner, name: $name) {
+              pullRequest(number: $number) {
+                commits(first: 100, after: $after) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes { commit { message } }
+                }
+              }
+            }
+        }";
+        let mut messages = Vec::new();
+        let mut after = Value::Null;
+        loop {
+            let vars =
+                json!({ "owner": repo.owner, "name": repo.name, "number": number, "after": after });
+            let data: Value = self.graphql("commit_messages", query, vars).await?;
+            let commits = &data["repository"]["pullRequest"]["commits"];
+            let nodes = commits["nodes"].as_array().context("the PR's commits")?;
+            messages.extend(
+                nodes
+                    .iter()
+                    .filter_map(|n| n["commit"]["message"].as_str().map(str::to_owned)),
+            );
+            if commits["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
+                return Ok(messages);
+            }
+            after = commits["pageInfo"]["endCursor"].clone();
+        }
+    }
+
+    /// The PR's description as GitHub has it now, uncached.
+    pub async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
+        let r: Value = self
+            .rest(Method::GET, &format!("/repos/{repo}/pulls/{number}"), None)
+            .await?;
+        Ok(r["body"].as_str().unwrap_or_default().to_owned())
+    }
+
+    pub async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
+        let _: Value = self
+            .rest(
+                Method::PATCH,
+                &format!("/repos/{repo}/pulls/{number}"),
+                Some(json!({ "body": body })),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn set_title(&self, repo: &RepoName, number: PrNumber, title: &str) -> Result<()> {

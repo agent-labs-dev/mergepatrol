@@ -16,7 +16,7 @@ use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
     EjectReason, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber,
     PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, Runs, SpendTask, Transition,
+    ReviewStatus, Runs, SpendTask, Transition, body_closing_commit_issues,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -1799,11 +1799,19 @@ async fn merged(
 /// PRs for dequeued.
 async fn start_merge(
     ctx: &Ctx,
+    gh: &dyn GitHub,
     key: &LaneKey,
+    snap: &RepoSnapshot,
     lane: &mut Lane,
     unit: &Unit,
     head: &str,
 ) -> Result<()> {
+    // GitHub honours closing keywords only on a merge into the default branch.
+    if key.trunk == snap.default_branch {
+        for pr in &unit.layers {
+            carry_closing_issues(gh, &key.repo, pr.number).await?;
+        }
+    }
     lane.merging = Some(PendingMerge {
         number: unit.number,
         prs: unit.prs(),
@@ -1811,6 +1819,19 @@ async fn start_merge(
         head: head.to_owned(),
     });
     ctx.store.save_lane(key, lane).await
+}
+
+/// Names in the PR's body each issue its commits close, so the merge closes them however the
+/// repo squashes: a squash message without the commit bodies drops their closing keywords. The
+/// body is read fresh just before the write, so an edit made while the PR waited survives.
+async fn carry_closing_issues(gh: &dyn GitHub, repo: &RepoName, number: PrNumber) -> Result<()> {
+    let messages = gh.commit_messages(repo, number).await?;
+    let messages = messages.iter().map(String::as_str);
+    let body = gh.pr_body(repo, number).await?;
+    if let Some(body) = body_closing_commit_issues(&body, messages, &repo.to_string()) {
+        gh.set_body(repo, number, &body).await?;
+    }
+    Ok(())
 }
 
 /// Sees through the merge a restart cut short, and whether it merged. Asked again while it is
@@ -2213,7 +2234,7 @@ async fn merge_batch(
         }
         let top = tested.top();
         let method = merge_method(gh, key, snap).await?;
-        start_merge(ctx, key, lane, tested, &top.head_ref_oid).await?;
+        start_merge(ctx, gh, key, snap, lane, &now, &top.head_ref_oid).await?;
         match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &method).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
@@ -2709,7 +2730,7 @@ async fn run_job(
                 } else {
                     let top = now.top().number;
                     let method = merge_method(gh, key, snap).await?;
-                    start_merge(ctx, key, lane, &now, head).await?;
+                    start_merge(ctx, gh, key, snap, lane, &now, head).await?;
                     match gh.merge(repo, top, head, &method).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),
                         MergeOutcome::Rejected(r) => {
