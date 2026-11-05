@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use mergepatrol_core::{CHECKS_TIMEOUT, Event, Hold, PrNumber, RepoName, RepoSettings};
+use mergepatrol_core::{CHECKS_TIMEOUT, Event, Hold, PrNumber, RepoName, RepoSettings, Runs};
 use mergepatrol_executor::protocol::Task;
 use mergepatrol_github::{CheckState, Installation, RepoSnapshot};
 use mergepatrol_store::LaneKey;
@@ -107,6 +107,13 @@ impl Prep {
     fn take_conflict(&self, id: &PrId, head: &str) -> bool {
         let mut conflicts = self.conflicts.lock().unwrap();
         conflicts.remove_entry(id).is_some_and(|(_, h)| h == head)
+    }
+
+    /// Whether the lane found a conflict on `head`, for as long as it is the head: the author's
+    /// agent settles it with a push.
+    fn conflict_on(&self, id: &PrId, head: &str) -> bool {
+        let conflicts = self.conflicts.lock().unwrap();
+        conflicts.get(id).is_some_and(|h| h == head)
     }
 
     /// Asks for `wanted`, or, if a job has the PR since the tick looked, holds it for that one.
@@ -257,7 +264,23 @@ pub(super) async fn hold(
         work,
         token: 0,
     };
-    if ctx.prep.take_conflict(&id, head) || unit.layers.iter().any(|pr| pr.conflicting) {
+    // Where the author's agent works it, the PR waits for that agent's push: no job here.
+    let author = settings.agent.runs == Runs::Local;
+    let on_layer = |number, hold| match unit.stacked {
+        true => Hold::Layer {
+            number,
+            hold: Box::new(hold),
+        },
+        false => hold,
+    };
+    if author {
+        if let Some(pr) = unit.layers.iter().find(|pr| pr.conflicting) {
+            return Ok(Some(on_layer(pr.number, Hold::AuthorRebase)));
+        }
+        if ctx.prep.conflict_on(&id, head) {
+            return Ok(Some(Hold::AuthorRebase));
+        }
+    } else if ctx.prep.take_conflict(&id, head) || unit.layers.iter().any(|pr| pr.conflicting) {
         let wanted = want(Work::Rebase);
         return Ok(Some(ctx.prep.want(id, Hold::PrepRebasing, wanted)));
     }
@@ -270,6 +293,10 @@ pub(super) async fn hold(
         let (state, names) = checks.verdict(&required);
         match state {
             CheckState::Passed => {}
+            CheckState::Failed if author => {
+                let checks = names;
+                return Ok(Some(on_layer(pr.number, Hold::AuthorFix { checks })));
+            }
             CheckState::Failed => {
                 let used = unit.fixes_used(gh, &key.repo).await?;
                 return Ok((used < settings.fix_ci.allowed()).then(|| {

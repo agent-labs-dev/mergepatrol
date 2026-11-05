@@ -266,6 +266,7 @@ mod tests {
                 label: "mergepatrol".into(),
                 batch_size: 8,
                 agent: mergepatrol_core::AgentSettings {
+                    runs: Default::default(),
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),

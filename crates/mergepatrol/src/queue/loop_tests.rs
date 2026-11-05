@@ -1459,6 +1459,7 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                 // One PR at a time, unless a test batches.
                 batch_size: 1,
                 agent: AgentSettings {
+                    runs: Default::default(),
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),

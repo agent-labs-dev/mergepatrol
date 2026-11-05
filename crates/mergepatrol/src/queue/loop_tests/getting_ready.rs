@@ -754,6 +754,85 @@ async fn a_failed_check_is_fixed_off_the_lane_then_merges() {
     assert!(log.contains("the PR's change"), "{log}");
 }
 
+/// A repo whose PRs' authors run the agent.
+const AUTHORS_AGENT: &str = "agent:\n  runs: local\n";
+
+#[tokio::test]
+async fn with_the_authors_agent_a_conflict_waits_for_their_push_then_merges() {
+    let world = World::one_pr("shared.txt", "shared.txt").await;
+    world.gh.with_mut(|s| s.config = Some(AUTHORS_AGENT.into()));
+    let before = world.pr(1).head_ref_oid;
+    let _drain = world.drain().await;
+    for _ in 0..3 {
+        world.tick().await;
+    }
+    assert_eq!(world.lane(), [(1, "Held(AuthorRebase)".into())]);
+    assert_eq!(world.branch("pr-1"), before, "nothing pushed to it");
+
+    // The author's agent rebases it, keeping the PR's side, and pushes.
+    git(&world.origin, &["checkout", "-q", "pr-1"]);
+    git(&world.origin, &["rebase", "-q", "-X", "theirs", "main"]);
+    git(&world.origin, &["checkout", "-q", "main"]);
+    world.gh.with_mut(|s| point_at_branch(s, 1, &world.origin));
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    // Only the lane's plain rebases, which leave a conflict as it is.
+    assert!(
+        world.tasks().iter().all(|t| *t == Task::Rebase),
+        "{:?}",
+        world.tasks()
+    );
+    assert!(
+        !world.did(1, "resolved"),
+        "MergeLoop's agent resolved nothing"
+    );
+    assert!(!world.did(1, "ejected"));
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_a_failed_check_waits_for_their_fix_then_merges() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.config = Some(AUTHORS_AGENT.into());
+        checks_fail(s, 1);
+    });
+    let _drain = world.drain().await;
+    for _ in 0..3 {
+        world.tick().await;
+    }
+    let held = r#"Held(AuthorFix { checks: ["ci"] })"#;
+    assert_eq!(world.lane(), [(1, held.into())]);
+    assert!(!world.did(1, "fixing"));
+
+    // The author's agent commits a fix on top, and pushes: its checks pass.
+    git(&world.origin, &["checkout", "-q", "pr-1"]);
+    commit(&world.origin, "feature.txt", "fixed\n", "Fix the check");
+    git(&world.origin, &["checkout", "-q", "main"]);
+    world.gh.with_mut(|s| point_at_branch(s, 1, &world.origin));
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    let fixed = |t: &Task| matches!(t, Task::FixChecks { .. });
+    assert!(!world.tasks().iter().any(fixed), "{:?}", world.tasks());
+    assert!(!world.did(1, "fixing"));
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_a_failure_the_lane_finds_goes_back_to_them_without_fixes() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        // MergeLoop's fixes are off: the author's still go on.
+        s.config = Some(format!("{AUTHORS_AGENT}fix_ci:\n  enabled: false\n"));
+        s.checks.insert("ci".into(), CheckState::Failed);
+        let passed = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+        s.checks_on.insert(s.head(1), passed);
+    });
+    let _drain = world.drain().await;
+    for _ in 0..3 {
+        world.tick().await;
+    }
+    let held = r#"Held(AuthorFix { checks: ["ci"] })"#;
+    assert_eq!(world.lane(), [(1, held.into())], "{:?}", world.kinds(1));
+    assert!(!world.did(1, "ejected"));
+}
+
 #[tokio::test]
 async fn a_failure_the_lane_finds_is_fixed_off_it_then_merges() {
     let world = World::one_pr("feature.txt", "other.txt").await;

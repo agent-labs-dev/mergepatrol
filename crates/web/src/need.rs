@@ -36,6 +36,10 @@ pub enum NeedKind {
     Threads,
     /// A reviewer whose approval is required asked for changes: make them.
     Changes,
+    /// It conflicts with its base branch: rebase it, resolving the conflict.
+    Conflict,
+    /// Required checks failed: fix them.
+    FixChecks,
     /// It is a draft: publish it once its work is done.
     Draft,
     /// It waits on a human: nothing for the agent to do.
@@ -58,6 +62,8 @@ impl NeedKind {
             | NeedKind::Wait
             | NeedKind::Threads
             | NeedKind::Changes
+            | NeedKind::Conflict
+            | NeedKind::FixChecks
             | NeedKind::Draft => 0,
             NeedKind::Merged => 10,
             NeedKind::Ejected => 11,
@@ -164,7 +170,7 @@ fn view(
     let number = status.number;
     let then = format!("mergeloop {}#{number} --after {id}", status.repo);
     NeedView {
-        brief: brief(&need, &status.repo, number, &then),
+        brief: brief(&need, &status, &then),
         needs: need.kind,
         exit_code: need.kind.exit_code(),
         id,
@@ -231,6 +237,8 @@ fn need(status: &PullStateView, exit: Option<&ExitRecord>) -> Need {
     let kind = match hold.reason {
         HoldReasonView::ReviewChanges | HoldReasonView::UnresolvedThreads => NeedKind::Threads,
         HoldReasonView::ChangesRequested => NeedKind::Changes,
+        HoldReasonView::AuthorRebase => NeedKind::Conflict,
+        HoldReasonView::AuthorFix => NeedKind::FixChecks,
         HoldReasonView::Draft => NeedKind::Draft,
         HoldReasonView::ReviewAsks
         | HoldReasonView::ReviewRequired
@@ -267,10 +275,16 @@ fn need_id(need: &Need, exit: Option<&ExitRecord>, newest: Option<&EventRecord>)
 }
 
 /// What the agent does about the need.
-fn brief(need: &Need, repo: &str, number: u32, then: &str) -> String {
+fn brief(need: &Need, status: &PullStateView, then: &str) -> String {
+    let (repo, number) = (status.repo.as_str(), status.number);
+    let trunk = status.queue.as_ref().map_or("main", |q| q.trunk.as_str());
     let pr = need.layer.unwrap_or(number);
     let on = match need.layer {
         Some(layer) if layer != number => format!(" on #{layer}, a layer of its stack,"),
+        _ => String::new(),
+    };
+    let of = match need.layer {
+        Some(layer) if layer != number => format!(" (a layer of #{number}'s stack)"),
         _ => String::new(),
     };
     let detail = &need.detail;
@@ -289,6 +303,12 @@ fn brief(need: &Need, repo: &str, number: u32, then: &str) -> String {
             .replace("{then}", then),
         NeedKind::Changes => format!(
             "A reviewer whose approval the branch requires asked for changes{on}. Read their review (`gh pr view {pr} --repo {repo} --comments`), make the changes, fetch and rebase onto the remote branch, push once, and reply to each of their comments with what changed. The PR goes on once they approve. Then run `{then}`."
+        ),
+        NeedKind::Conflict => format!(
+            "#{pr}{of} conflicts with its base branch, `{trunk}`, and MergeLoop leaves the rebase to you. Fetch, then rebase its branch onto `origin/{trunk}` (in a stack, each layer onto the one below it, bottom first). Resolve each conflict so that both sides' changes still do what they meant to, then run the repo's tests. Push with `--force-with-lease`. Then run `{then}`."
+        ),
+        NeedKind::FixChecks => format!(
+            "On #{pr}{of}, {detail}. MergeLoop leaves the fix to you: read why each failed (`gh pr checks {pr} --repo {repo}`, then `gh run view <run> --repo {repo} --log-failed`), fix the cause in a commit on top, fetch, rebase onto the remote branch, and push. If a failure is not the PR's to fix, such as a flaky test or an outage, run the failed jobs again with `gh run rerun <run> --repo {repo} --failed` instead. Then run `{then}`."
         ),
         NeedKind::Draft => format!(
             "#{pr} is a draft{on}. If its work is done, publish it with `mergeloop call ready_pull {args}`. If not, finish it first, or tell the user it waits on them. Then run `{then}`."
@@ -396,6 +416,8 @@ mod tests {
         assert_eq!(kind(HoldReasonView::ReviewAsks), NeedKind::Human);
         assert_eq!(kind(HoldReasonView::ReviewRequired), NeedKind::Human);
         assert_eq!(kind(HoldReasonView::Reviewing), NeedKind::Wait);
+        assert_eq!(kind(HoldReasonView::AuthorRebase), NeedKind::Conflict);
+        assert_eq!(kind(HoldReasonView::AuthorFix), NeedKind::FixChecks);
         assert_eq!(kind(HoldReasonView::PrepFixing), NeedKind::Wait);
     }
 
@@ -468,6 +490,24 @@ mod tests {
             "acknowledging a manual removal must not tell the CLI to queue the PR again"
         );
         assert!(removed.brief.contains("mergeloop call queue_pull"));
+    }
+
+    #[test]
+    fn a_conflict_left_to_the_author_says_what_to_rebase_onto() {
+        let v = view(
+            status(held(HoldReasonView::AuthorRebase, Some(4))),
+            None,
+            None,
+            None,
+        );
+        assert_eq!((v.needs, v.exit_code), (NeedKind::Conflict, 0));
+        assert!(
+            v.brief
+                .starts_with("#4 (a layer of #6's stack) conflicts with its base branch, `main`"),
+            "{}",
+            v.brief
+        );
+        assert!(v.brief.contains("onto `origin/main`"));
     }
 
     #[test]

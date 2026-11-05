@@ -5,8 +5,8 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
     AgentSettings, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, ModelOverrides, Person,
-    PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Stage, Step,
-    TaskModel, WorkspaceDefaults, current_step,
+    PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Runs, Spend, SpendTask, Stage,
+    Step, TaskModel, WorkspaceDefaults, current_step,
 };
 use mergepatrol_github::{
     App, AsUser, BranchFile, CheckRunState, DiffOf, GitObject, InboxPull, Installation, Proposal,
@@ -658,6 +658,10 @@ pub struct SetRepo {
 #[derive(Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RepoSettingsView {
+    /// Who resolves conflicts and fixes failed checks: MergeLoop's agent, or the author's.
+    #[serde(default)]
+    #[ts(type = "\"hosted\" | \"local\"")]
+    pub runs: Runs,
     pub label: String,
     pub batch_size: u32,
     #[ts(type = "\"anthropic\" | \"openai\" | \"openrouter\"")]
@@ -734,6 +738,7 @@ impl From<ModelOverridesView> for ModelOverrides {
 impl From<RepoSettings> for RepoSettingsView {
     fn from(s: RepoSettings) -> Self {
         RepoSettingsView {
+            runs: s.agent.runs,
             label: s.label,
             batch_size: s.batch_size as u32,
             provider: s.agent.provider,
@@ -755,6 +760,7 @@ impl From<RepoSettingsView> for RepoSettings {
             label: v.label.trim().to_owned(),
             batch_size: v.batch_size as usize,
             agent: AgentSettings {
+                runs: v.runs,
                 provider: v.provider,
                 model: v.model.trim().to_owned(),
                 effort: v.effort,
@@ -2452,6 +2458,7 @@ impl From<WorkspaceDefaultsView> for WorkspaceDefaults {
             label: v.label.trim().to_owned(),
             batch_size: v.batch_size as usize,
             agent: AgentSettings {
+                runs: Default::default(),
                 provider: v.provider,
                 model: v.model.trim().to_owned(),
                 effort: v.effort,
@@ -3384,6 +3391,17 @@ mod tests {
 
     fn settings() -> RepoSettings {
         RepoSettings::from(serde_json::from_str::<RepoSettingsView>(FORM).unwrap())
+    }
+
+    /// The dashboard's form has no control for it, and keeps what the file says.
+    #[test]
+    fn the_settings_form_keeps_who_runs_the_agent() {
+        let mut local = settings();
+        local.agent.runs = Runs::Local;
+        assert_eq!(
+            RepoSettings::from(RepoSettingsView::from(local.clone())),
+            local
+        );
     }
 
     /// A file that says nothing over `s`, and one that spells out a setting it already follows.

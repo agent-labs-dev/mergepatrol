@@ -209,6 +209,7 @@ version: 1
 label: mergepatrol
 batch_size: 8
 agent:                  # the default model, which every task runs unless it overrides it
+  runs: hosted          # or local: the PR's author's agent resolves conflicts and fixes checks
   provider: anthropic   # or openai
   model: claude-opus-5-5
   effort: medium        # low, medium, high, xhigh or max
@@ -238,6 +239,8 @@ review:            # over the workspace's automatic review settings
 The agent runs Claude Code for Anthropic's models, and Codex for OpenAI's, with the workspace's key for the provider from **Settings**. A workspace signed in to ChatGPT runs Codex on its plan instead of the OpenAI key. A file that sets another provider than the instance's default must set its model too.
 
 The agent has three tasks: resolving a rebase's conflicts, fixing failed checks, and reviewing. Each runs the default model unless `agent.overrides` gives it its own. A task that sets another provider than the default's must set its model too. The dashboard offers each provider's current models by name; the file takes the model's API id, and may name any model the provider serves. A file that still says `resolver:`, the section's old name, reads as `agent:`.
+
+`agent.runs: local` leaves a PR's conflicts and failed checks to the agent of its author, such as Claude Code or Codex on their machine, which runs [`mergeloop`](#the-mergeloop-command). While a PR gets ready, a conflict with its base branch or a failed required check holds it, keeping its place, and MergeLoop's agent does not run on it: `mergeloop` tells the author's agent what to rebase or which checks to fix, and the push settles it. The fix budget of `fix_ci` counts only MergeLoop's fixes, so it does not bound the author's. MergeLoop's agent still reviews the PR, and still resolves conflicts for a self-hosted MergeLoop that sets `MERGEPATROL_PREP=false`, which gets PRs ready in the queue instead. The default, `hosted`, runs MergeLoop's agent, as above.
 
 The verify commands run after an agent resolution or fix, before the publish.
 

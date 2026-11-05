@@ -36,6 +36,14 @@ pub enum Hold {
     PrepChecks,
     /// Getting ready off the lane: the agent fixes its failed checks.
     PrepFixing,
+    /// Getting ready off the lane, where the author's agent works it (`agent.runs: local`): it
+    /// conflicts with the trunk, for that agent to resolve.
+    AuthorRebase,
+    /// Getting ready off the lane, where the author's agent works it: these required checks
+    /// failed, for that agent to fix.
+    AuthorFix {
+        checks: Vec<String>,
+    },
     /// The agent is reviewing it, the queue's first gate.
     Reviewing,
     /// The agent's review asks a human about what it was not sure of.
@@ -74,6 +82,8 @@ impl Hold {
             Hold::PrepRebasing
             | Hold::PrepChecks
             | Hold::PrepFixing
+            | Hold::AuthorRebase
+            | Hold::AuthorFix { .. }
             | Hold::Draft
             | Hold::ReviewRequired
             | Hold::ChangesRequested
@@ -91,6 +101,14 @@ impl Hold {
         matches!(
             self.innermost(),
             Hold::PrepRebasing | Hold::PrepChecks | Hold::PrepFixing
+        )
+    }
+
+    /// Whether it waits for the author's agent to settle what getting ready found.
+    pub fn of_author(&self) -> bool {
+        matches!(
+            self.innermost(),
+            Hold::AuthorRebase | Hold::AuthorFix { .. }
         )
     }
 
@@ -150,6 +168,11 @@ impl fmt::Display for Hold {
             Hold::PrepRebasing => f.write_str("the agent is resolving its conflict"),
             Hold::PrepChecks => f.write_str("its checks are running"),
             Hold::PrepFixing => f.write_str("the agent is fixing its checks"),
+            Hold::AuthorRebase => f.write_str("it conflicts with its base branch"),
+            Hold::AuthorFix { checks } => {
+                let checks: Vec<String> = checks.iter().map(|c| format!("`{c}`")).collect();
+                write!(f, "required checks failed: {}", checks.join(", "))
+            }
             Hold::Reviewing => f.write_str("the agent is reviewing it"),
             Hold::ReviewAsks => {
                 f.write_str("the agent's review asks a human about what it was not sure of")
