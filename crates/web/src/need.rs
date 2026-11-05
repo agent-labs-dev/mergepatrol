@@ -40,6 +40,8 @@ pub enum NeedKind {
     Conflict,
     /// Required checks failed: fix them.
     FixChecks,
+    /// The queue waits for the author's agent to review it, as MergeLoop's agent would.
+    Review,
     /// It is a draft: publish it once its work is done.
     Draft,
     /// It waits on a human: nothing for the agent to do.
@@ -64,6 +66,7 @@ impl NeedKind {
             | NeedKind::Changes
             | NeedKind::Conflict
             | NeedKind::FixChecks
+            | NeedKind::Review
             | NeedKind::Draft => 0,
             NeedKind::Merged => 10,
             NeedKind::Ejected => 11,
@@ -139,7 +142,16 @@ async fn read(
     let exits = app.store.last_exits(id, repo, &[number]).await?;
     let exit = exits.iter().find(|e| e.pr == number);
     let newest = app.store.events(id, repo, Some(number), 1).await?;
-    Ok(view(status, exit, newest.first(), after))
+    let mut view = view(status, exit, newest.first(), after);
+    // What the review asks of the author's agent is on the review, which the worker wrote.
+    if view.needs == NeedKind::Review {
+        let pr = view.layer.map_or(number, u64::from);
+        let review = app.store.latest_review(id, repo, pr).await?;
+        if let Some(asked) = review.and_then(|r| r.brief) {
+            view.brief = format!("{asked}\n\nThen run `{}`.", view.then);
+        }
+    }
+    Ok(view)
 }
 
 /// The need of a PR, from where the queue has it, how it last left the queue, and its newest
@@ -239,6 +251,7 @@ fn need(status: &PullStateView, exit: Option<&ExitRecord>) -> Need {
         HoldReasonView::ChangesRequested => NeedKind::Changes,
         HoldReasonView::AuthorRebase => NeedKind::Conflict,
         HoldReasonView::AuthorFix => NeedKind::FixChecks,
+        HoldReasonView::AuthorReview => NeedKind::Review,
         HoldReasonView::Draft => NeedKind::Draft,
         HoldReasonView::ReviewAsks
         | HoldReasonView::ReviewRequired
@@ -309,6 +322,10 @@ fn brief(need: &Need, status: &PullStateView, then: &str) -> String {
         ),
         NeedKind::FixChecks => format!(
             "On #{pr}{of}, {detail}. MergeLoop leaves the fix to you: read why each failed (`gh pr checks {pr} --repo {repo}`, then `gh run view <run> --repo {repo} --log-failed`), fix the cause in a commit on top, fetch, rebase onto the remote branch, and push. If a failure is not the PR's to fix, such as a flaky test or an outage, run the failed jobs again with `gh run rerun <run> --repo {repo} --failed` instead. Then run `{then}`."
+        ),
+        // `read` puts the review's own brief in place of this.
+        NeedKind::Review => format!(
+            "#{pr}{of} waits for your agent's review, whose brief is not written yet. Run `{then}` again in a minute."
         ),
         NeedKind::Draft => format!(
             "#{pr} is a draft{on}. If its work is done, publish it with `mergeloop call ready_pull {args}`. If not, finish it first, or tell the user it waits on them. Then run `{then}`."
@@ -418,6 +435,7 @@ mod tests {
         assert_eq!(kind(HoldReasonView::Reviewing), NeedKind::Wait);
         assert_eq!(kind(HoldReasonView::AuthorRebase), NeedKind::Conflict);
         assert_eq!(kind(HoldReasonView::AuthorFix), NeedKind::FixChecks);
+        assert_eq!(kind(HoldReasonView::AuthorReview), NeedKind::Review);
         assert_eq!(kind(HoldReasonView::PrepFixing), NeedKind::Wait);
     }
 

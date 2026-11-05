@@ -2478,6 +2478,67 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
+    async fn next_need_hands_the_authors_agent_the_review_its_worker_wrote(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Hold, Lane, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_has_config(1, &repo, true).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo: repo.clone(),
+            trunk: "main".into(),
+        };
+        let lane = Lane {
+            entries: vec![Entry {
+                number: 6,
+                priority: false,
+                state: EntryState::Held(Hold::Reviewing),
+                summary: PrSummary::default(),
+                layers: Vec::new(),
+                heads: Vec::new(),
+                recheck: None,
+            }],
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        let r = store.start_review(1, &repo, 6, "h6").await.unwrap();
+        let claim = store
+            .claim_review(std::time::Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
+        store
+            .await_author(r.id, claim, "Review #6 as follows.")
+            .await
+            .unwrap();
+
+        let res = v1_get(&router, "/api/w/1/repos/o/r/pulls/6/next", &[BEARER]).await;
+        let need = json_of(res).await;
+        assert_eq!(need["needs"], "review");
+        assert_eq!(need["status"]["queue"]["hold"]["reason"], "author_review");
+        let brief = need["brief"].as_str().unwrap();
+        assert!(brief.starts_with("Review #6 as follows."), "{brief}");
+        assert!(brief.ends_with(&format!("Then run `{}`.", need["then"].as_str().unwrap())));
+
+        // A review not in the shape the brief gives is turned away before anything else.
+        let bad = serde_json::json!({ "head_sha": "h6", "review": { "findings": "none" } });
+        let req = Request::post("/api/w/1/repos/o/r/pulls/6/agent-review/by-author")
+            .header(BEARER.0, BEARER.1)
+            .header("content-type", "application/json")
+            .body(Body::from(bad.to_string()))
+            .unwrap();
+        let res = send(&router, req).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            text_of(res)
+                .await
+                .contains("not in the shape its brief gives")
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
     async fn v1_says_whether_a_repo_uses_mergepatrol(pool: PgPool) {
         let (router, store) = v1_router(pool).await;
         let repo = RepoName::parse("o/r").unwrap();

@@ -721,8 +721,10 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
     let saved = ctx.store.review_settings(installation).await?;
     let mut review = saved.clone().unwrap_or_default().with(&settings.review);
     // On by default, but a review needs the workspace's model key: without one, a workspace
-    // that never chose waits for no review, rather than for a human in its place.
-    if review.enabled && saved.is_none() && settings.review.enabled.is_none() {
+    // that never chose waits for no review, rather than for a human in its place. The author's
+    // agent needs none.
+    let hosted = settings.agent.runs == Runs::Hosted;
+    if hosted && review.enabled && saved.is_none() && settings.review.enabled.is_none() {
         review.enabled = ctx
             .chatgpt
             .credential(
@@ -735,11 +737,10 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
     }
     // For the status to tell before a PR is queued: whether the billing gate covers the repo,
     // and which keys the agent's tasks need.
-    let hosted = settings.agent.runs == Runs::Hosted;
     let agent: Vec<AgentTask> = [
         (SpendTask::Rebase, hosted),
         (SpendTask::Fix, hosted && settings.fix_ci.allowed() > 0),
-        (SpendTask::Review, review.enabled),
+        (SpendTask::Review, hosted && review.enabled),
     ]
     .into_iter()
     .filter(|(_, runs)| *runs)

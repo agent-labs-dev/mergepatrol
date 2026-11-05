@@ -573,6 +573,26 @@ Reply with the JSON alone, in this shape, and nothing else:
     )
 }
 
+/// The review as the agent of the PR's author runs it, on their machine, in place of MergeLoop's
+/// sandbox: the same prompt, with where to run it and how to post what it found.
+pub fn author_review_brief(req: &ReviewRequest<'_>, repo: &str, number: u64, head: &str) -> String {
+    format!(
+        "MergeLoop asks you for its review of #{number}, in place of its own agent. Run it as a \
+fresh agent, or in a subagent with no other context: you did not write this PR, and you hold it \
+to the code. Work in a checkout of its head of its own, not the one you work in: `git fetch origin \
+{head} && git worktree add --detach <dir> {head}`, and remove it once done. Nothing reruns your \
+`evidence` after you: name only a command you ran there and saw fail. Commit and push nothing.
+
+{prompt}
+
+Once you have the JSON, post it as `review`, with the head it is of: `mergeloop call post_review \
+-`, given `{{\"repo\": \"{repo}\", \"number\": {number}, \"posted\": {{\"head_sha\": \"{head}\", \"review\": <the JSON>}}}}` \
+on stdin. MergeLoop judges each finding as it does its own: back to the author as a review \
+thread, to a human, or cleared.",
+        prompt = review_prompt(req),
+    )
+}
+
 pub(crate) fn question_prompt(req: &QuestionRequest<'_>) -> String {
     let f = req.finding;
     let place = match (&f.file, f.line) {
@@ -691,6 +711,36 @@ mod prompt_tests {
         assert!(ci.contains("checks its own CI runs"));
         assert!(ci.contains("- `pnpm vitest run`"));
         assert!(review.contains("`security` finding needs none"));
+    }
+}
+
+#[cfg(test)]
+mod author_review_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn the_authors_agent_reviews_the_head_apart_and_posts_it() {
+        let req = ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            queue_commits: &[],
+            verify: &Verify::None,
+            transcript: Path::new("t"),
+        };
+        let brief = author_review_brief(&req, "o/r", 5, "h1");
+        assert!(brief.contains(&review_prompt(&req)));
+        assert!(brief.contains("git worktree add --detach <dir> h1"));
+        assert!(brief.contains("mergeloop call post_review -"));
+        assert!(brief.contains(
+            r#"{"repo": "o/r", "number": 5, "posted": {"head_sha": "h1", "review": <the JSON>}}"#
+        ));
     }
 }
 

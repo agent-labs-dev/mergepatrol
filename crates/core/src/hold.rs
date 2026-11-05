@@ -50,6 +50,9 @@ pub enum Hold {
     },
     /// The agent is reviewing it, the queue's first gate.
     Reviewing,
+    /// The queue's first gate, where the author's agent works it (`agent.runs: local`): it waits
+    /// for that agent to post its review.
+    AuthorReview,
     /// The agent's review asks a human about what it was not sure of.
     ReviewAsks,
     /// The agent sent findings back to the author, or a human answering its review asked for
@@ -80,6 +83,7 @@ impl Hold {
     pub fn of_review(&self) -> bool {
         match self.innermost() {
             Hold::Reviewing
+            | Hold::AuthorReview
             | Hold::ReviewAsks
             | Hold::ReviewChanges
             | Hold::UnresolvedThreads { .. } => true,
@@ -190,6 +194,7 @@ impl fmt::Display for Hold {
                 )
             }
             Hold::Reviewing => f.write_str("the agent is reviewing it"),
+            Hold::AuthorReview => f.write_str("it waits for the review by its author's agent"),
             Hold::ReviewAsks => {
                 f.write_str("the agent's review asks a human about what it was not sure of")
             }

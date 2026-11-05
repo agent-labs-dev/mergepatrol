@@ -175,6 +175,8 @@ pub enum HoldReasonView {
     PrepChecks,
     /// Getting ready off the lane: the agent fixes its failed checks.
     PrepFixing,
+    /// It waits for the review by its author's agent (`agent.runs: local`).
+    AuthorReview,
     /// Getting ready off the lane: it conflicts with its base branch, for the author's agent to
     /// resolve (`agent.runs: local`).
     AuthorRebase,
@@ -238,6 +240,7 @@ impl From<&Hold> for HoldView {
             Hold::AuthorRebase { .. } => HoldReasonView::AuthorRebase,
             Hold::AuthorFix { .. } => HoldReasonView::AuthorFix,
             Hold::Reviewing => HoldReasonView::Reviewing,
+            Hold::AuthorReview => HoldReasonView::AuthorReview,
             Hold::ReviewAsks => HoldReasonView::ReviewAsks,
             Hold::ReviewChanges => HoldReasonView::ReviewChanges,
             Hold::UnresolvedThreads { .. } => HoldReasonView::UnresolvedThreads,

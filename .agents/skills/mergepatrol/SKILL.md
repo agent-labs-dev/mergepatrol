@@ -23,7 +23,7 @@ When the `mergeloop` MCP server (or its existing `mergepatrol` connection) is co
 
 ## With the `mergeloop` command
 
-When `mergeloop` is on the PATH, land a PR with it instead of the steps below: run `mergeloop` (the current branch's PR, or `mergeloop <number>`) in the background. It queues the PR, and exits once the PR needs something of you, printing a `brief` of what to do and a `then` to run once done. Do what the brief says, run `then`, and go on until it exits 10, merged. Exit 12 means it waits on a human: tell the user what for, and run `then` again in the background. Over MCP alone, `next_need` is the same loop. In a repo whose config sets `agent.runs: local`, MergeLoop's agent leaves a PR's conflicts and failed checks to you: `mergeloop` says so, as a `conflict` or `fix-checks` need.
+When `mergeloop` is on the PATH, land a PR with it instead of the steps below: run `mergeloop` (the current branch's PR, or `mergeloop <number>`) in the background. It queues the PR, and exits once the PR needs something of you, printing a `brief` of what to do and a `then` to run once done. Do what the brief says, run `then`, and go on until it exits 10, merged. Exit 12 means it waits on a human: tell the user what for, and run `then` again in the background. Over MCP alone, `next_need` is the same loop. In a repo whose config sets `agent.runs: local`, MergeLoop's agent leaves a PR's conflicts, failed checks and review to you: `mergeloop` says so, as a `conflict`, `fix-checks` or `review` need. Run a `review` in a fresh subagent, as its brief says, never in the session that built the PR.
 
 ## What the queue does
 

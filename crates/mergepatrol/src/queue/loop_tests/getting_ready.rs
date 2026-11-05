@@ -632,6 +632,12 @@ impl World {
     /// The review of PR 1's head ends with a finding the agent is `confidence` sure of: sent
     /// back to the author when it is sure enough. The review's id.
     async fn conclude(&self, confidence: u8) -> i64 {
+        let settings = self.ctx.config.repo_defaults.clone();
+        self.conclude_with(confidence, &settings).await
+    }
+
+    /// `conclude`, in a repo with these settings.
+    async fn conclude_with(&self, confidence: u8, settings: &RepoSettings) -> i64 {
         let head = self.pr(1).head_ref_oid;
         let r = self.store.start_review(1, &repo(), 1, &head).await.unwrap();
         let finding = Finding {
@@ -661,7 +667,6 @@ impl World {
             findings: vec![finding],
         };
         let (key, pr) = (self.key(), self.pr(1));
-        let settings = &self.ctx.config.repo_defaults;
         let bars = ReviewSettings::default();
         conclude(
             &self.ctx,
@@ -754,8 +759,25 @@ async fn a_failed_check_is_fixed_off_the_lane_then_merges() {
     assert!(log.contains("the PR's change"), "{log}");
 }
 
-/// A repo whose PRs' authors run the agent.
-const AUTHORS_AGENT: &str = "agent:\n  runs: local\n";
+/// A repo whose PRs' authors run the agent. Its review, which needs no model key there, is off:
+/// no review worker runs here.
+const AUTHORS_AGENT: &str = "agent:\n  runs: local\nreview:\n  enabled: false\n";
+
+#[tokio::test]
+async fn with_the_authors_agent_a_pr_is_reviewed_without_a_model_key() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world
+        .gh
+        .with_mut(|s| s.config = Some("agent:\n  runs: local\n".into()));
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(Reviewing)".into())]);
+    let reviews = world.store.reviews.lock().unwrap().clone();
+    assert_eq!(
+        reviews.len(),
+        1,
+        "a review of its head, for the author's agent"
+    );
+}
 
 #[tokio::test]
 async fn with_the_authors_agent_a_conflict_waits_for_their_push_then_merges() {
@@ -1393,6 +1415,23 @@ async fn a_finding_the_fix_leaves_is_posted_after_it() {
     });
     let review = world.conclude(100).await;
     assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
+    assert_eq!(world.posted(), [1], "one thread, for the author");
+    assert!(!world.fixing(review));
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_its_reviews_findings_go_to_the_author_unfixed() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    let mut settings = world.ctx.config.repo_defaults.clone();
+    settings.agent.runs = mergepatrol_core::Runs::Local;
+    let review = world.conclude_with(100, &settings).await;
+    assert!(
+        world.tasks().iter().all(|t| *t == Task::Rebase),
+        "{:?}",
+        world.tasks()
+    );
     assert_eq!(world.posted(), [1], "one thread, for the author");
     assert!(!world.fixing(review));
 }

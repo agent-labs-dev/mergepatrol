@@ -209,7 +209,7 @@ version: 1
 label: mergepatrol
 batch_size: 8
 agent:                  # the default model, which every task runs unless it overrides it
-  runs: hosted          # or local: the PR's author's agent resolves conflicts and fixes checks
+  runs: hosted          # or local: the PR's author's agent resolves conflicts, fixes checks, reviews
   provider: anthropic   # or openai
   model: claude-opus-5-5
   effort: medium        # low, medium, high, xhigh or max
@@ -240,7 +240,7 @@ The agent runs Claude Code for Anthropic's models, and Codex for OpenAI's, with 
 
 The agent has three tasks: resolving a rebase's conflicts, fixing failed checks, and reviewing. Each runs the default model unless `agent.overrides` gives it its own. A task that sets another provider than the default's must set its model too. The dashboard offers each provider's current models by name; the file takes the model's API id, and may name any model the provider serves. A file that still says `resolver:`, the section's old name, reads as `agent:`.
 
-`agent.runs: local` leaves a PR's conflicts and failed checks to the agent of its author, such as Claude Code or Codex on their machine, which runs [`mergeloop`](#the-mergeloop-command). While a PR gets ready, a conflict with its base branch or a failed required check holds it, keeping its place, and MergeLoop's agent does not run on it: `mergeloop` tells the author's agent what to rebase or which checks to fix, and the push settles it. The fix budget of `fix_ci` counts only MergeLoop's fixes, so it does not bound the author's. MergeLoop's agent still reviews the PR, and still resolves conflicts for a self-hosted MergeLoop that sets `MERGEPATROL_PREP=false`, which gets PRs ready in the queue instead. The default, `hosted`, runs MergeLoop's agent, as above.
+`agent.runs: local` leaves a PR's conflicts and failed checks to the agent of its author, such as Claude Code or Codex on their machine, which runs [`mergeloop`](#the-mergeloop-command). While a PR gets ready, a conflict with its base branch or a failed required check holds it, keeping its place, and MergeLoop's agent does not run on it: `mergeloop` tells the author's agent what to rebase or which checks to fix, and the push settles it. The fix budget of `fix_ci` counts only MergeLoop's fixes, so it does not bound the author's. The review, too, waits for the author's agent: `mergeloop` hands it the prompt MergeLoop's own agent would run, with what the last review sent back, to run in a fresh subagent on a checkout of the PR's head, and the agent posts what it found with `post_review`. MergeLoop judges each finding against the repo's bars as it does its own, sends what must change back to the author as review threads, and starts no fix of its own. An `evidence` command counts as failed on the agent's word, as nothing runs it again. Answering a question about a finding still takes the workspace's model key. MergeLoop's agent still resolves conflicts for a self-hosted MergeLoop that sets `MERGEPATROL_PREP=false`, which gets PRs ready in the queue instead. The default, `hosted`, runs MergeLoop's agent, as above.
 
 The verify commands run after an agent resolution or fix, before the publish.
 
@@ -321,6 +321,7 @@ A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell
 | `answer_agent_review` | Answers what the agent's review asks, as your review on GitHub | |
 | `ask_agent_about_review` | Asks the agent about one of its findings, or replies to one it sent back | |
 | `ask_agent_review_reviewers` | Asks others to answer the agent's review | |
+| `post_review` | Posts the review a PR's author's agent ran, where the repo sets `agent.runs: local` | |
 | `mark_pull_seen` | Marks a PR read in your inbox | Yes |
 | `snooze_pull` | Puts a PR out of your inbox for a while | Yes |
 | `unsnooze_pull` | Puts a snoozed PR back in your inbox | Yes |

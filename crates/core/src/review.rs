@@ -324,6 +324,8 @@ pub enum ReviewStatus {
     /// Waiting for the agent.
     Pending,
     Running,
+    /// Waiting for the agent of the PR's author to post its review (`agent.runs: local`).
+    Author,
     /// Waiting for a human's answers.
     Asks,
     Approved,
@@ -339,6 +341,7 @@ impl ReviewStatus {
         match self {
             ReviewStatus::Pending => "pending",
             ReviewStatus::Running => "running",
+            ReviewStatus::Author => "author",
             ReviewStatus::Asks => "asks",
             ReviewStatus::Approved => "approved",
             ReviewStatus::Changes => "changes",
@@ -350,6 +353,7 @@ impl ReviewStatus {
         [
             ReviewStatus::Pending,
             ReviewStatus::Running,
+            ReviewStatus::Author,
             ReviewStatus::Asks,
             ReviewStatus::Approved,
             ReviewStatus::Changes,
@@ -367,6 +371,7 @@ impl ReviewStatus {
             ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale => {
                 Some(Hold::Reviewing)
             }
+            ReviewStatus::Author => Some(Hold::AuthorReview),
             ReviewStatus::Asks => Some(Hold::ReviewAsks),
             ReviewStatus::Changes => Some(Hold::ReviewChanges),
         }
