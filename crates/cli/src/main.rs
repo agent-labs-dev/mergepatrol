@@ -198,6 +198,11 @@ fn gh(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_owned())
 }
 
+/// A wait's brief without the command to run next, which `land` runs itself.
+fn waiting(brief: &str) -> &str {
+    brief.split_once(". Run `").map_or(brief, |(said, _)| said)
+}
+
 /// Queues the PR, and waits until it needs the agent: prints that need, and returns its exit
 /// code.
 async fn land(client: &Client, repo: &str, number: u64, mut after: Option<String>) -> Result<u8> {
@@ -211,10 +216,11 @@ async fn land(client: &Client, repo: &str, number: u64, mut after: Option<String
         let id = need["id"].as_str().unwrap_or_default().to_owned();
         match need["needs"].as_str() {
             Some("wait") => {
-                // For whoever watches the terminal, once per change.
+                // For whoever watches the terminal, once per change. The brief's command is
+                // for a caller of `next_need`: this keeps waiting itself.
                 let brief = need["brief"].as_str().unwrap_or_default();
                 if brief != said {
-                    eprintln!("mergeloop: {brief}");
+                    eprintln!("mergeloop: {}; waiting", waiting(brief));
                     said = brief.to_owned();
                 }
             }
@@ -361,6 +367,16 @@ enum Retry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wait_says_what_it_waits_on_not_what_to_run() {
+        let brief = "Nothing for you yet: its checks are running. Run `mergeloop o/r#5 --after x`.";
+        assert_eq!(
+            waiting(brief),
+            "Nothing for you yet: its checks are running"
+        );
+        assert_eq!(waiting("Queued."), "Queued.");
+    }
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
