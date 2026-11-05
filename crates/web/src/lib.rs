@@ -9,6 +9,7 @@ mod changelog;
 mod docs;
 mod gate;
 mod mcp;
+mod need;
 mod oauth;
 mod pr_reply;
 mod review;
@@ -2401,6 +2402,78 @@ mod tests {
         for field in ["queue", "merged", "ejected"] {
             assert_eq!(at(4, field), serde_json::Value::Null);
         }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn next_need_says_what_the_agent_does_and_waits_for_a_newer_one(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Hold, Lane, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_has_config(1, &repo, true).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo,
+            trunk: "main".into(),
+        };
+        let lane = Lane {
+            entries: vec![Entry {
+                number: 6,
+                priority: false,
+                // Not the agent review's hold, which a review in the store would decide.
+                state: EntryState::Held(Hold::ChangesRequested),
+                summary: PrSummary::default(),
+                layers: Vec::new(),
+                heads: Vec::new(),
+                recheck: None,
+            }],
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        store
+            .record(&key, 6, "held", "a reviewer requested changes")
+            .await
+            .unwrap();
+        let next = |query: String| {
+            let router = router.clone();
+            async move {
+                let path = format!("/api/w/1/repos/o/r/pulls/6/next{query}");
+                let res = v1_get(&router, &path, &[BEARER]).await;
+                assert_eq!(res.status(), StatusCode::OK);
+                json_of(res).await
+            }
+        };
+
+        let changes = next(String::new()).await;
+        assert_eq!(changes["needs"], "changes");
+        assert_eq!(changes["exit_code"], 0);
+        assert_eq!(
+            changes["status"]["queue"]["hold"]["reason"],
+            "changes_requested"
+        );
+        let id = changes["id"].as_str().unwrap().to_owned();
+        assert_eq!(changes["then"], format!("mergeloop o/r#6 --after {id}"));
+        // Seen, and nothing newer: it waits.
+        let seen = next(format!("?after={id}")).await;
+        assert_eq!(
+            (seen["needs"].clone(), seen["id"].clone()),
+            ("wait".into(), id.clone().into())
+        );
+
+        // Ejected: the agent fixes it, and its next call queues it again.
+        store.save_lane(&key, &Lane::default()).await.unwrap();
+        store
+            .record_exit(&key, 6, "ejected", "checks failed", &PrSummary::default())
+            .await
+            .unwrap();
+        let ejected = next(format!("?after={id}")).await;
+        assert_eq!(ejected["needs"], "ejected");
+        assert_eq!(ejected["exit_code"], 11);
+        let again = next(format!("?after={}", ejected["id"].as_str().unwrap())).await;
+        assert_eq!(again["needs"], "queue");
+        // Queued, not yet in a lane: nothing newer.
+        let queued = next(format!("?after={}", again["id"].as_str().unwrap())).await;
+        assert_eq!(queued["needs"], "wait");
     }
 
     #[sqlx::test(migrations = false)]

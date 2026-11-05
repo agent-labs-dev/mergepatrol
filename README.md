@@ -276,6 +276,19 @@ claude mcp add --transport http mergeloop https://mergeloop.ai/mcp \
   --header "Authorization: Bearer $(gh auth token)"
 ```
 
+### The `mergeloop` command
+
+An agent with a shell lands a PR with the `mergeloop` command, which calls the MCP server:
+
+```sh
+cargo install --locked --git https://github.com/agent-labs-dev/mergeloop mergeloop-cli
+mergeloop            # the current branch's PR; or 123, owner/name#123, or its URL
+```
+
+`mergeloop` queues the PR, waits until it needs something of the agent, prints that need as JSON, and exits. `brief` says what to do, such as working the review's threads or fixing what got the PR ejected, and `then` is the command to run once done, which waits for the next need. The exit code says what kind it is: 0 work for the agent, 10 merged, 11 ejected, 12 waiting on a human, 2 an error. An agent runs it in the background, so it hears of the next need as soon as there is one, and nothing runs between needs. `mergeloop call <tool> '<json>'` runs any other tool, as a brief names it.
+
+It acts as the GitHub token from `gh auth token`, or `MERGELOOP_TOKEN`, against `https://mergeloop.ai`, or `MERGELOOP_URL`. The `next_need` tool is the same loop, for an agent over MCP alone.
+
 A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell which of its workspaces such a token belongs to. The tools marked **Sign-in** work across a workspace, so they need the sign-in, and show only the workspace's repos you can read. Each tool takes the repo as `repo`, `owner/name`, or the workspace as `workspace`, its installation ID. `get_session` lists those IDs for a sign-in; with a GitHub token it answers `status: "signed_out"`, with no workspaces, so a token's calls name a `repo`.
 
 <!-- tools: the order of `ROUTES` in crates/web/src/routes.rs -->
@@ -295,6 +308,7 @@ A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell
 | `get_pull` | A PR's description, labels, checks, and timeline | |
 | `get_pull_diff` | A PR's changes, or one commit's | |
 | `pull_status` | Where a PR is, as `/api/v1` below says, and its latest events | |
+| `next_need` | What a PR needs next from the agent that queued it, with what to do: waits for a newer one with `after` and `wait` | |
 | `queue_pull` | Queues a PR, or its stack. `priority` puts it at the front. Says when it goes on hold whatever the PR, or the agent has no model key | |
 | `dequeue_pull` | Takes a PR, and its stack, out of the queue | |
 | `close_pull` | Closes a PR | |
@@ -485,6 +499,7 @@ With `MERGEPATROL_POSTHOG_KEY`, the hosted MergeLoop sends product analytics to 
 | `web` | The HTTP server: JSON API and the dashboard |
 | `analytics` | Product analytics in PostHog, for the hosted MergeLoop |
 | `mergepatrol` | The binary: the orchestrator, and `mergepatrol job` for the sandbox |
+| `cli` | `mergeloop`, the command an agent lands a PR with: a client of the MCP server |
 
 ## Compared to GitHub's merge queue
 

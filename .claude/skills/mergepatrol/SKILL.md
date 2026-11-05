@@ -21,6 +21,10 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 When the `mergeloop` MCP server (or its existing `mergepatrol` connection) is connected, use its tools instead of the labels: `queue_pull` (with `priority` for the front of the queue), `dequeue_pull`, `pull_status` and `list_queue`. They change the same labels, as the GitHub user or bot the server was connected as, so everything below still holds. `pull_status` reads where a PR is without parsing MergeLoop's comment. The server's other tools do what the MergeLoop dashboard does, such as reviewing a PR or reading why the queue ejected one.
 
+## With the `mergeloop` command
+
+When `mergeloop` is on the PATH, land a PR with it instead of the steps below: run `mergeloop` (the current branch's PR, or `mergeloop <number>`) in the background. It queues the PR, and exits once the PR needs something of you, printing a `brief` of what to do and a `then` to run once done. Do what the brief says, run `then`, and go on until it exits 10, merged. Exit 12 means it waits on a human: tell the user what for, and run `then` again in the background. Over MCP alone, `next_need` is the same loop.
+
 ## What the queue does
 
 MergeLoop rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in `.mergepatrol/mergepatrol.yml`: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
