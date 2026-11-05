@@ -155,10 +155,9 @@ impl Entry {
         }
     }
 
-    /// The entry as its PRs' newest reviews, by `status`, hold it now. A tick sets holds, and
-    /// one that runs a job saves no other PR's until the job ends, or a poll into its wait for
-    /// checks: an answer to a review, or the agent finishing one, would show only then. Only an entry the review holds changes: the
-    /// tick that held it found the gate on, and every gate before it open.
+    /// The entry as its PRs' newest reviews, by `status`, holds it now. A review that holds the
+    /// entry now shows at once. One that no longer holds it leaves the saved hold for the tick to
+    /// clear, so the view matches what the queue acts on.
     pub fn with_review(mut self, status: impl Fn(PrNumber) -> Option<ReviewStatus>) -> Self {
         let EntryState::Held(hold) = &self.state else {
             return self;
@@ -173,8 +172,8 @@ impl Entry {
             .map(|n| (n, status(n).unwrap_or(ReviewStatus::Pending)));
         self.state = match Hold::of_reviews(!self.layers.is_empty(), layers) {
             Some(hold) => EntryState::Held(hold),
-            // On to the gates after the review's: the next tick holds it for one, if any.
-            None => EntryState::Waiting,
+            // Cleared: the next tick clears the saved hold.
+            None => return self,
         };
         self
     }
@@ -695,7 +694,9 @@ mod tests {
     #[test]
     fn a_review_hold_shows_the_reviews_as_they_are_now() {
         use EntryState::{Held, Waiting};
-        use Hold::{Draft, ReviewAsks, ReviewChanges, ReviewRequired, Reviewing};
+        use Hold::{
+            Draft, ReviewAsks, ReviewChanges, ReviewRequired, Reviewing, UnresolvedThreads,
+        };
         use ReviewStatus::{Approved, Asks, Changes, Running};
         let on = |number, hold| {
             Held(Hold::Layer {
@@ -706,8 +707,14 @@ mod tests {
         // Each case: the saved state, the newest review's status of each PR (#9 alone, or the
         // stack #7 then #8), and the state shown.
         let cases = [
-            // An answer while the lane runs another PR's job.
-            (Held(ReviewAsks), vec![(9, Approved)], Waiting),
+            // A review that has cleared leaves the saved hold until the next tick.
+            (Held(ReviewAsks), vec![(9, Approved)], Held(ReviewAsks)),
+            // The thread count is the tick's to recount.
+            (
+                Held(UnresolvedThreads { count: 1 }),
+                vec![(9, Approved)],
+                Held(UnresolvedThreads { count: 1 }),
+            ),
             (Held(ReviewAsks), vec![(9, Changes)], Held(ReviewChanges)),
             (Held(Reviewing), vec![(9, Asks)], Held(ReviewAsks)),
             (Held(ReviewAsks), vec![(9, Asks)], Held(ReviewAsks)),
@@ -726,7 +733,12 @@ mod tests {
             (
                 on(8, ReviewAsks),
                 vec![(7, Approved), (8, Approved)],
-                Waiting,
+                on(8, ReviewAsks),
+            ),
+            (
+                on(7, UnresolvedThreads { count: 2 }),
+                vec![(7, Approved), (8, Approved)],
+                on(7, UnresolvedThreads { count: 2 }),
             ),
         ];
         for (state, statuses, shown) in cases {
