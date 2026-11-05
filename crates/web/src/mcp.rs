@@ -149,6 +149,16 @@ async fn request(
             "Bad arguments: missing field `{missing}`."
         )));
     }
+    // An `{id}` route that a repo names takes the repo, or a workspace of the signed in caller.
+    if workspace_from_repo
+        && route.path_args().any(|(param, ..)| *param == "id")
+        && !args.contains_key("workspace")
+        && !args.contains_key("repo")
+    {
+        return Err(ApiError::bad_request(
+            "Bad arguments: pass `repo` as owner/name, or sign in to MergeLoop and pass `workspace`.",
+        ));
+    }
     let repo = match args.get("repo") {
         Some(repo) => Some(
             repo.as_str()
