@@ -253,6 +253,12 @@ fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
     if query.contains("pullRequests(") {
         return json!({ "data": { "repository": repository_node(&s.trunk) } });
     }
+    // A file of the default branch, as a review that asks a human reads CODEOWNERS: none.
+    if query.contains("file(path: $path)") {
+        let target = json!({ "oid": s.trunk, "file": null });
+        let branch = json!({ "name": "main", "target": target });
+        return json!({ "data": { "repository": { "defaultBranchRef": branch } } });
+    }
     let pr = &s.prs[&vars["number"].as_u64().unwrap()];
     if query.contains("commits(last: 20)") {
         let log = git(
@@ -1417,6 +1423,46 @@ async fn a_finding_the_fix_leaves_is_posted_after_it() {
     assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
     assert_eq!(world.posted(), [1], "one thread, for the author");
     assert!(!world.fixing(review));
+}
+
+#[tokio::test]
+async fn an_unsubmitted_author_review_does_not_reset_completed_review_rounds() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    world.sent_back().await;
+    // Three completed reviews sent findings back. A fourth head waited for its
+    // author's agent, but another push superseded it before anything was posted.
+    {
+        let mut reviews = world.store.reviews.lock().unwrap();
+        let mut completed = reviews[0].clone();
+        reviews.clear();
+        for id in 1..=3 {
+            completed.id = id;
+            completed.head_sha = format!("completed-head-{id}");
+            reviews.push(completed.clone());
+        }
+    }
+    let abandoned = world
+        .store
+        .start_review(1, &repo(), 1, "superseded-author-head")
+        .await
+        .unwrap();
+    world
+        .store
+        .await_author(abandoned.id, abandoned.claim, "Review this head")
+        .await
+        .unwrap();
+
+    let mut settings = world.ctx.config.repo_defaults.clone();
+    settings.agent.runs = mergepatrol_core::Runs::Local;
+    let id = world.conclude_with(90, &settings).await;
+    let finished = world.store.review(id).await.unwrap().unwrap();
+    assert_eq!(
+        finished.status,
+        ReviewStatus::Asks,
+        "an unsubmitted review is not a completed round: three completed send-backs still require a human"
+    );
 }
 
 #[tokio::test]

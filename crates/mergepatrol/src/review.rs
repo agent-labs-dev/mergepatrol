@@ -506,7 +506,10 @@ async fn earlier_reviews(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<ReviewRecord
             && e.head_sha != r.head_sha
             && !matches!(
                 e.status,
-                ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale
+                ReviewStatus::Pending
+                    | ReviewStatus::Running
+                    | ReviewStatus::Author
+                    | ReviewStatus::Stale
             )
     });
     Ok(earlier)
