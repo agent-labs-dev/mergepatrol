@@ -1809,7 +1809,7 @@ async fn start_merge(
     // GitHub honours closing keywords only on a merge into the default branch.
     if key.trunk == snap.default_branch {
         for pr in &unit.layers {
-            carry_closing_issues(gh, &key.repo, pr.number).await?;
+            carry_closing_issues(gh, &key.repo, pr).await?;
         }
     }
     lane.merging = Some(PendingMerge {
@@ -1824,8 +1824,13 @@ async fn start_merge(
 /// Names in the PR's body each issue its commits close, so the merge closes them however the
 /// repo squashes: a squash message without the commit bodies drops their closing keywords. The
 /// body is read fresh just before the write, so an edit made while the PR waited survives.
-async fn carry_closing_issues(gh: &dyn GitHub, repo: &RepoName, number: PrNumber) -> Result<()> {
+/// Nothing is written when the head moved off the one tested: its commits may close other issues.
+async fn carry_closing_issues(gh: &dyn GitHub, repo: &RepoName, pr: &PullRequest) -> Result<()> {
+    let number = pr.number;
     let messages = gh.commit_messages(repo, number).await?;
+    if gh.pull_head(repo, number).await? != pr.head_ref_oid {
+        return Ok(());
+    }
     let messages = messages.iter().map(String::as_str);
     let body = gh.pr_body(repo, number).await?;
     if let Some(body) = body_closing_commit_issues(&body, messages, &repo.to_string()) {

@@ -23,20 +23,31 @@ fn closed_in(text: &str, repo: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// `text` with its fenced blocks and inline code spans blanked out.
+/// `text` with its fenced blocks and inline code spans blanked out. A fence closes only on a
+/// run of its own character at least as long as the one that opened it.
 fn without_code(text: &str) -> String {
     let mut prose = String::new();
-    let mut fenced = false;
+    let mut fence: Option<(char, usize)> = None;
     for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-        } else if !fenced {
+        let run = fence_run(line);
+        match (fence, run) {
+            (None, Some(open)) => fence = Some(open),
+            (Some((c, n)), Some((rc, rn))) if rc == c && rn >= n => fence = None,
+            (Some(_), _) => {}
             // Odd-numbered pieces between backticks are code.
-            prose.extend(line.split('`').step_by(2).flat_map(|p| [p, " "]));
+            (None, None) => prose.extend(line.split('`').step_by(2).flat_map(|p| [p, " "])),
         }
         prose.push('\n');
     }
     prose
+}
+
+/// The fence character and run length a line starts with: three or more backticks or tildes.
+fn fence_run(line: &str) -> Option<(char, usize)> {
+    let line = line.trim_start();
+    let c = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let n = line.chars().take_while(|&x| x == c).count();
+    (n >= 3).then_some((c, n))
 }
 
 fn issue_ref(word: &str, repo: &str) -> Option<String> {
@@ -83,7 +94,7 @@ mod tests {
 
     #[test]
     fn copies_what_only_a_commit_closes() {
-        let cases: [(&str, &[&str], Option<&str>); 12] = [
+        let cases: [(&str, &[&str], Option<&str>); 14] = [
             (
                 "What changed.",
                 &["feat: x\n\nFixes #4371"],
@@ -116,6 +127,12 @@ mod tests {
                 Some("```\nFixes #4\n```\n\nCloses #4"),
             ),
             ("Body", &["Use `Fixes #4` here"], None),
+            ("Body", &["````\n```\nFixes #4\n```\n````"], None),
+            (
+                "Body",
+                &["~~~\nFixes #4\n~~~\nFixes #5"],
+                Some("Body\n\nCloses #5"),
+            ),
         ];
         for (body, messages, want) in cases {
             let got = body_closing_commit_issues(body, messages.iter().copied(), "o/r");
