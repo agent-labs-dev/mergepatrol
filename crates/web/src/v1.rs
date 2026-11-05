@@ -235,7 +235,7 @@ impl From<&Hold> for HoldView {
             Hold::PrepRebasing => HoldReasonView::PrepRebasing,
             Hold::PrepChecks => HoldReasonView::PrepChecks,
             Hold::PrepFixing => HoldReasonView::PrepFixing,
-            Hold::AuthorRebase => HoldReasonView::AuthorRebase,
+            Hold::AuthorRebase { .. } => HoldReasonView::AuthorRebase,
             Hold::AuthorFix { .. } => HoldReasonView::AuthorFix,
             Hold::Reviewing => HoldReasonView::Reviewing,
             Hold::ReviewAsks => HoldReasonView::ReviewAsks,

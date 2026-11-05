@@ -275,10 +275,12 @@ pub(super) async fn hold(
     };
     if author {
         if let Some(pr) = unit.layers.iter().find(|pr| pr.conflicting) {
-            return Ok(Some(on_layer(pr.number, Hold::AuthorRebase)));
+            let head = pr.head_ref_oid.clone();
+            return Ok(Some(on_layer(pr.number, Hold::AuthorRebase { head })));
         }
         if ctx.prep.conflict_on(&id, head) {
-            return Ok(Some(Hold::AuthorRebase));
+            let head = head.to_owned();
+            return Ok(Some(Hold::AuthorRebase { head }));
         }
     } else if ctx.prep.take_conflict(&id, head) || unit.layers.iter().any(|pr| pr.conflicting) {
         let wanted = want(Work::Rebase);
@@ -294,8 +296,8 @@ pub(super) async fn hold(
         match state {
             CheckState::Passed => {}
             CheckState::Failed if author => {
-                let checks = names;
-                return Ok(Some(on_layer(pr.number, Hold::AuthorFix { checks })));
+                let (head, checks) = (sha.to_owned(), names);
+                return Ok(Some(on_layer(pr.number, Hold::AuthorFix { head, checks })));
             }
             CheckState::Failed => {
                 let used = unit.fixes_used(gh, &key.repo).await?;

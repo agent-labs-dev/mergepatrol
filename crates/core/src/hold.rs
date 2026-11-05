@@ -36,12 +36,16 @@ pub enum Hold {
     PrepChecks,
     /// Getting ready off the lane: the agent fixes its failed checks.
     PrepFixing,
-    /// Getting ready off the lane, where the author's agent works it (`agent.runs: local`): it
-    /// conflicts with the trunk, for that agent to resolve.
-    AuthorRebase,
+    /// Getting ready off the lane, where the author's agent works it (`agent.runs: local`): its
+    /// `head` conflicts with the trunk, for that agent to resolve. A push that still conflicts
+    /// is a new hold, for the agent to hear of.
+    AuthorRebase {
+        head: String,
+    },
     /// Getting ready off the lane, where the author's agent works it: these required checks
-    /// failed, for that agent to fix.
+    /// failed on `head`, for that agent to fix.
     AuthorFix {
+        head: String,
         checks: Vec<String>,
     },
     /// The agent is reviewing it, the queue's first gate.
@@ -82,7 +86,7 @@ impl Hold {
             Hold::PrepRebasing
             | Hold::PrepChecks
             | Hold::PrepFixing
-            | Hold::AuthorRebase
+            | Hold::AuthorRebase { .. }
             | Hold::AuthorFix { .. }
             | Hold::Draft
             | Hold::ReviewRequired
@@ -108,7 +112,7 @@ impl Hold {
     pub fn of_author(&self) -> bool {
         matches!(
             self.innermost(),
-            Hold::AuthorRebase | Hold::AuthorFix { .. }
+            Hold::AuthorRebase { .. } | Hold::AuthorFix { .. }
         )
     }
 
@@ -140,6 +144,11 @@ impl Hold {
     }
 }
 
+/// A commit as a hold names it.
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 impl fmt::Display for Hold {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -168,10 +177,17 @@ impl fmt::Display for Hold {
             Hold::PrepRebasing => f.write_str("the agent is resolving its conflict"),
             Hold::PrepChecks => f.write_str("its checks are running"),
             Hold::PrepFixing => f.write_str("the agent is fixing its checks"),
-            Hold::AuthorRebase => f.write_str("it conflicts with its base branch"),
-            Hold::AuthorFix { checks } => {
+            Hold::AuthorRebase { head } => {
+                write!(f, "`{}` conflicts with its base branch", short(head))
+            }
+            Hold::AuthorFix { head, checks } => {
                 let checks: Vec<String> = checks.iter().map(|c| format!("`{c}`")).collect();
-                write!(f, "required checks failed: {}", checks.join(", "))
+                write!(
+                    f,
+                    "required checks failed on `{}`: {}",
+                    short(head),
+                    checks.join(", ")
+                )
             }
             Hold::Reviewing => f.write_str("the agent is reviewing it"),
             Hold::ReviewAsks => {

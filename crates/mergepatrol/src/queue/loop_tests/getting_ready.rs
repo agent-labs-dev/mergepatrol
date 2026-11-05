@@ -766,7 +766,8 @@ async fn with_the_authors_agent_a_conflict_waits_for_their_push_then_merges() {
     for _ in 0..3 {
         world.tick().await;
     }
-    assert_eq!(world.lane(), [(1, "Held(AuthorRebase)".into())]);
+    let held = format!("Held(AuthorRebase {{ head: {before:?} }})");
+    assert_eq!(world.lane(), [(1, held)]);
     assert_eq!(world.branch("pr-1"), before, "nothing pushed to it");
 
     // The author's agent rebases it, keeping the PR's side, and pushes.
@@ -799,8 +800,9 @@ async fn with_the_authors_agent_a_failed_check_waits_for_their_fix_then_merges()
     for _ in 0..3 {
         world.tick().await;
     }
-    let held = r#"Held(AuthorFix { checks: ["ci"] })"#;
-    assert_eq!(world.lane(), [(1, held.into())]);
+    let head = world.pr(1).head_ref_oid;
+    let held = format!(r#"Held(AuthorFix {{ head: {head:?}, checks: ["ci"] }})"#);
+    assert_eq!(world.lane(), [(1, held)]);
     assert!(!world.did(1, "fixing"));
 
     // The author's agent commits a fix on top, and pushes: its checks pass.
@@ -828,9 +830,56 @@ async fn with_the_authors_agent_a_failure_the_lane_finds_goes_back_to_them_witho
     for _ in 0..3 {
         world.tick().await;
     }
-    let held = r#"Held(AuthorFix { checks: ["ci"] })"#;
-    assert_eq!(world.lane(), [(1, held.into())], "{:?}", world.kinds(1));
+    // On the head the lane rebased, whose checks failed.
+    let head = world.pr(1).head_ref_oid;
+    let held = format!(r#"Held(AuthorFix {{ head: {head:?}, checks: ["ci"] }})"#);
+    assert_eq!(world.lane(), [(1, held)], "{:?}", world.kinds(1));
     assert!(!world.did(1, "ejected"));
+}
+
+#[tokio::test]
+async fn review_a_local_fix_that_still_fails_makes_a_new_need() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.config = Some(AUTHORS_AGENT.into());
+        checks_fail(s, 1);
+    });
+    world.tick().await;
+    let hold_message = || {
+        let lanes = world.store.lanes.lock().unwrap();
+        let entry = &lanes[&world.key()].entries[0];
+        let EntryState::Held(hold) = &entry.state else {
+            panic!("expected an author hold, got {:?}", entry.state);
+        };
+        assert!(hold.of_author());
+        hold.to_string()
+    };
+    let before = (hold_message(), world.store.events.lock().unwrap().clone());
+
+    // The agent follows the fix-checks brief, but its attempted fix still fails CI.
+    // CI can finish between queue ticks, so the queue need not observe Pending.
+    git(&world.origin, &["checkout", "-q", "pr-1"]);
+    commit(
+        &world.origin,
+        "feature.txt",
+        "attempted fix\n",
+        "Try fixing CI",
+    );
+    git(&world.origin, &["checkout", "-q", "main"]);
+    world.gh.with_mut(|s| {
+        point_at_branch(s, 1, &world.origin);
+        checks_fail(s, 1);
+    });
+    world.tick().await;
+    world.tick().await;
+
+    // next_need hashes the hold and newest queue event, with no head SHA. If both
+    // stay unchanged, the agent running `then --after <id>` waits forever.
+    let after = (hold_message(), world.store.events.lock().unwrap().clone());
+    assert_ne!(
+        after, before,
+        "a new head that still fails must change next_need's inputs so the author can act again"
+    );
 }
 
 #[tokio::test]
