@@ -1799,19 +1799,11 @@ async fn merged(
 /// PRs for dequeued.
 async fn start_merge(
     ctx: &Ctx,
-    gh: &dyn GitHub,
     key: &LaneKey,
-    snap: &RepoSnapshot,
     lane: &mut Lane,
     unit: &Unit,
     head: &str,
 ) -> Result<()> {
-    // GitHub honours closing keywords only on a merge into the default branch.
-    if key.trunk == snap.default_branch {
-        for pr in &unit.layers {
-            carry_closing_issues(gh, &key.repo, pr).await?;
-        }
-    }
     lane.merging = Some(PendingMerge {
         number: unit.number,
         prs: unit.prs(),
@@ -1821,14 +1813,37 @@ async fn start_merge(
     ctx.store.save_lane(key, lane).await
 }
 
-/// Names in the PR's body each issue its commits close, so the merge closes them however the
-/// repo squashes: a squash message without the commit bodies drops their closing keywords. The
-/// body is read fresh just before the write, so an edit made while the PR waited survives.
-/// Nothing is written when the head moved off the one tested: its commits may close other issues.
-async fn carry_closing_issues(gh: &dyn GitHub, repo: &RepoName, pr: &PullRequest) -> Result<()> {
-    let number = pr.number;
+/// Names in each layer's body each issue its commits close, so the merge closes them however
+/// the repo squashes: a squash message without the commit bodies drops their closing keywords.
+/// GitHub honours them only on a merge into the default branch. A layer whose head moved off
+/// the one tested gets nothing, as its commits may close other issues. It never holds up the
+/// merge: a failure leaves the issues to close by hand.
+async fn carry_closing_issues(
+    gh: &dyn GitHub,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    unit: &Unit,
+    tested: &[String],
+) {
+    if key.trunk != snap.default_branch {
+        return;
+    }
+    for (pr, head) in unit.layers.iter().zip(tested) {
+        if let Err(error) = carry_layer(gh, &key.repo, pr.number, head).await {
+            tracing::warn!(%error, repo = %key.repo, pr = pr.number, "could not name the issues its commits close");
+        }
+    }
+}
+
+/// The body is read fresh just before the write, so an edit made while the PR waited survives.
+async fn carry_layer(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    number: PrNumber,
+    tested: &str,
+) -> Result<()> {
     let messages = gh.commit_messages(repo, number).await?;
-    if gh.pull_head(repo, number).await? != pr.head_ref_oid {
+    if gh.pull_head(repo, number).await? != tested {
         return Ok(());
     }
     let messages = messages.iter().map(String::as_str);
@@ -2239,7 +2254,8 @@ async fn merge_batch(
         }
         let top = tested.top();
         let method = merge_method(gh, key, snap).await?;
-        start_merge(ctx, gh, key, snap, lane, &now, &top.head_ref_oid).await?;
+        carry_closing_issues(gh, key, snap, &now, &head_shas(tested)).await;
+        start_merge(ctx, key, lane, &now, &top.head_ref_oid).await?;
         match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &method).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
@@ -2735,7 +2751,8 @@ async fn run_job(
                 } else {
                     let top = now.top().number;
                     let method = merge_method(gh, key, snap).await?;
-                    start_merge(ctx, gh, key, snap, lane, &now, head).await?;
+                    carry_closing_issues(gh, key, snap, &now, &heads).await;
+                    start_merge(ctx, key, lane, &now, head).await?;
                     match gh.merge(repo, top, head, &method).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),
                         MergeOutcome::Rejected(r) => {
