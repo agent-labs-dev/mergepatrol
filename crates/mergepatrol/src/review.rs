@@ -357,7 +357,14 @@ async fn author_brief(
 ) -> Result<String> {
     let (answered, sent_back) = earlier(ctx, gh, r).await?;
     let verify = match settings.verify.is_empty() {
-        true => Verify::None,
+        true => {
+            let ci =
+                mergepatrol_core::verify_from_ci(&gh.workflows_at(&r.repo, &r.head_sha).await?);
+            match ci.is_empty() {
+                true => Verify::None,
+                false => Verify::Ci(ci),
+            }
+        }
         false => Verify::Configured(settings.verify.clone()),
     };
     let base = format!("$(git merge-base origin/{} HEAD)", pr.merges_into());
@@ -382,6 +389,9 @@ async fn author_brief(
 fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput, String> {
     let mut output: ReviewOutput = serde_json::from_value(review.clone())
         .map_err(|e| format!("The review the author's agent posted does not read: {e}."))?;
+    if let Some(by) = review["by"].as_str() {
+        output.summary = format!("@{by}'s agent reviewed this. {}", output.summary);
+    }
     for (i, f) in output.findings.iter_mut().enumerate() {
         f.id = format!("f{}", i + 1);
         f.confidence = f.confidence.min(100);
@@ -1115,6 +1125,12 @@ mod tests {
         assert_eq!(output.findings[0].confidence, 100);
         assert!(output.findings[0].shows_the_change());
         assert!(posted_review(&serde_json::json!({ "findings": "no" })).is_err());
+        // Whoever posted it is named, as any writer of the repo may review for its author.
+        let by = serde_json::json!({ "summary": "s", "findings": [], "by": "octo" });
+        assert_eq!(
+            posted_review(&by).unwrap().summary,
+            "@octo's agent reviewed this. s"
+        );
     }
 
     fn review(id: i64, sent_back: bool, answered_by: Option<&str>) -> ReviewRecord {

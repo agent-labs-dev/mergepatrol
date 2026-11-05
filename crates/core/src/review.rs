@@ -270,7 +270,7 @@ impl Finding {
 /// agent names it; only MergeLoop's own run of it on the PR's head counts.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Evidence {
-    /// What to run from the repo's root, e.g. `cargo test -p core retry_stops`.
+    /// What to run from the repo's root, e.g. `pnpm vitest run src/retry.test.ts`.
     pub command: String,
     /// The files the agent wrote or changed to show it: a test, most often.
     #[serde(default)]

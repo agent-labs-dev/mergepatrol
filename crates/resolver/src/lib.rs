@@ -201,11 +201,19 @@ you {after}, run what the repo's tools let you, and say what you could not check
 /// How a review learns to run the repo, to build its evidence on. The checkout has common
 /// toolchains, not the repo's dependencies: those come from its verify commands, if it has any,
 /// or from the evidence itself.
-fn checks_section(verify: &Verify) -> String {
-    let setup = "The checkout has git and common toolchains (Node with pnpm, Rust, Go, Python, Bun) \
-but none of the repo's dependencies. MergeLoop runs each `evidence` command again in a fresh \
-checkout, so make it install what it needs first, e.g. `pnpm install --frozen-lockfile && pnpm \
-vitest run src/retry.test.ts`.";
+fn checks_section(verify: &Verify, by: Reviewer) -> String {
+    let setup = match by {
+        Reviewer::Sandbox => {
+            "The checkout has git and common toolchains (Node with pnpm, Rust, Go, \
+Python, Bun) but none of the repo's dependencies. MergeLoop runs each `evidence` command again in \
+a fresh checkout, so make it install what it needs first, e.g. `pnpm install --frozen-lockfile && \
+pnpm vitest run src/retry.test.ts`."
+        }
+        Reviewer::Author => {
+            "Run them in your checkout of the PR's head, installing what they \
+need first."
+        }
+    };
     match verify {
         Verify::None => format!(
             "This repo declares no verify commands, and its CI runs nothing a checkout can run: \
@@ -425,14 +433,26 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "checked": ["What you verified, so a human need not"],
       "would_clear": "What would have let you decide alone",
       "suggestion": "The change you would ask the author for. Empty when there is none.",
-      "evidence": { "command": "cargo test -p core retry_stops", "files": ["crates/core/tests/retry.rs"] },
+      "evidence": { "command": "pnpm vitest run src/retry.test.ts", "files": ["src/retry.test.ts"] },
       "needs_human": false,
       "related": [{ "file": "path", "line": 41, "why": "What this code told you" }]
     }
   ]
 }"#;
 
+/// Who runs a review, which decides who runs its evidence: MergeLoop, again, after its own
+/// agent, or no one, after the author's.
+#[derive(Clone, Copy)]
+enum Reviewer {
+    Sandbox,
+    Author,
+}
+
 pub(crate) fn review_prompt(req: &ReviewRequest<'_>) -> String {
+    prompt_for(req, Reviewer::Sandbox)
+}
+
+fn prompt_for(req: &ReviewRequest<'_>, by: Reviewer) -> String {
     let answered = if req.answered.is_empty() {
         String::new()
     } else {
@@ -543,13 +563,10 @@ the agent that wrote the PR, who must fix it before the PR can merge.
 Every finding you lean `change` on, except a `security` one, must carry `evidence`: a command, \
 run from the repo's root, that fails on this PR because of what the finding says, and the files \
 you wrote for it, most often one focused test. Write the test, run the command, and see it fail \
-for that reason before you report it. After the review MergeLoop runs each command on the PR \
-alone, with only the files it names, and a command it does not see fail does not go back to the \
-author: MergeLoop shows the finding as a note that holds nothing. So name every file the command \
-needs, and keep each finding's files apart from the others'. If you cannot make a command fail, \
-lean `fine` and say in `unsure` what you could not show. A `security` finding needs none: the \
-code showing the hole is enough to close it. A finding you report again for a fix that is still \
-missing carries its `evidence` again, written anew.
+for that reason before you report it. {rerun} If you cannot make a command fail, lean `fine` and \
+say in `unsure` what you could not show. A `security` finding needs none: the code showing the \
+hole is enough to close it. A finding with no evidence gives `\"evidence\": null`. A finding you \
+report again for a fix that is still missing carries its `evidence` again, written anew.
 
 Set `needs_human` to true only for a change the author cannot make from the PR and its \
 description: a call on scope, product or design that the PR does not settle, access or \
@@ -569,7 +586,16 @@ Reply with the JSON alone, in this shape, and nothing else:
         title = req.pr_title,
         body = req.pr_body,
         base = req.base,
-        verify = checks_section(req.verify),
+        verify = checks_section(req.verify, by),
+        rerun = match by {
+            Reviewer::Sandbox => "After the review MergeLoop runs each command on the PR alone, \
+with only the files it names, and a command it does not see fail does not go back to the author: \
+MergeLoop shows the finding as a note that holds nothing. So name every file the command needs, \
+and keep each finding's files apart from the others'.",
+            Reviewer::Author => "MergeLoop runs none of them again: it takes your word that \
+each failed. So name only a command you ran on the PR's head and saw fail for that reason, with \
+every file it needs.",
+        },
     )
 }
 
@@ -580,8 +606,8 @@ pub fn author_review_brief(req: &ReviewRequest<'_>, repo: &str, number: u64, hea
         "MergeLoop asks you for its review of #{number}, in place of its own agent. Run it as a \
 fresh agent, or in a subagent with no other context: you did not write this PR, and you hold it \
 to the code. Work in a checkout of its head of its own, not the one you work in: `git fetch origin \
-{head} && git worktree add --detach <dir> {head}`, and remove it once done. Nothing reruns your \
-`evidence` after you: name only a command you ran there and saw fail. Commit and push nothing.
+{head} && git worktree add --detach <dir> {head}`, and remove it once done. Commit and push \
+nothing.
 
 {prompt}
 
@@ -589,7 +615,7 @@ Once you have the JSON, post it as `review`, with the head it is of: `mergeloop 
 -`, given `{{\"repo\": \"{repo}\", \"number\": {number}, \"posted\": {{\"head_sha\": \"{head}\", \"review\": <the JSON>}}}}` \
 on stdin. MergeLoop judges each finding as it does its own: back to the author as a review \
 thread, to a human, or cleared.",
-        prompt = review_prompt(req),
+        prompt = prompt_for(req, Reviewer::Author),
     )
 }
 
@@ -735,7 +761,11 @@ mod author_review_tests {
             transcript: Path::new("t"),
         };
         let brief = author_review_brief(&req, "o/r", 5, "h1");
-        assert!(brief.contains(&review_prompt(&req)));
+        // The prompt of MergeLoop's own review, but no one reruns the author's evidence.
+        assert!(brief.contains("You are reviewing a pull request"));
+        assert!(brief.contains("MergeLoop runs none of them again"));
+        assert!(!brief.contains("MergeLoop runs each"));
+        assert!(brief.contains("in your checkout of the PR's head"));
         assert!(brief.contains("git worktree add --detach <dir> h1"));
         assert!(brief.contains("mergeloop call post_review -"));
         assert!(brief.contains(

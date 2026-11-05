@@ -253,6 +253,10 @@ fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
     if query.contains("pullRequests(") {
         return json!({ "data": { "repository": repository_node(&s.trunk) } });
     }
+    // The workflows a review of the author's agent reads its checks from: none.
+    if query.contains("$workflows") {
+        return json!({ "data": { "repository": { "object": null } } });
+    }
     // A file of the default branch, as a review that asks a human reads CODEOWNERS: none.
     if query.contains("file(path: $path)") {
         let target = json!({ "oid": s.trunk, "file": null });
