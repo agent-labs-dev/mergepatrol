@@ -264,7 +264,7 @@ fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
         return json!({ "data": { "repository": { "defaultBranchRef": branch } } });
     }
     let pr = &s.prs[&vars["number"].as_u64().unwrap()];
-    if query.contains("commits(last: 20)") {
+    if query.contains("commits(first: 100") {
         let log = git(
             origin,
             &["log", "-n", "20", "--format=%B%x1e", &pr.head_ref_oid],
@@ -274,7 +274,8 @@ fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
             .rev()
             .map(|m| json!({ "commit": { "message": m.trim() } }))
             .collect();
-        let commits = json!({ "commits": { "nodes": nodes } });
+        let page = json!({ "hasNextPage": false, "endCursor": null });
+        let commits = json!({ "commits": { "nodes": nodes, "pageInfo": page } });
         return json!({ "data": { "repository": { "pullRequest": commits } } });
     }
     json!({ "data": { "repository": { "pullRequest": pr_node(pr) } } })

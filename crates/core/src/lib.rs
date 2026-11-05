@@ -2,6 +2,7 @@
 //! no I/O.
 
 mod ci;
+mod closing;
 mod hold;
 mod job;
 mod lane;
@@ -11,6 +12,7 @@ mod spend;
 mod steps;
 
 pub use ci::verify_from_ci;
+pub use closing::body_closing_commit_issues;
 pub use hold::Hold;
 pub use job::{CHECKS_MISSING_FOR, CHECKS_TIMEOUT, EjectReason, Event, Job, Phase, Transition};
 pub use lane::{

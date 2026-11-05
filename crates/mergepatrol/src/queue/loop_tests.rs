@@ -59,6 +59,8 @@ struct State {
     merge_methods: Option<Vec<String>>,
     /// The checks that pass without running.
     skipped: Vec<String>,
+    /// Each PR's commit messages, oldest first.
+    commit_messages: HashMap<PrNumber, Vec<String>>,
     /// The fixes each PR's commits already used.
     fixes_used: HashMap<PrNumber, u32>,
     /// The merge methods the repo's settings allow, if they narrow them.
@@ -470,6 +472,25 @@ impl GitHub for Fake {
         Ok(s.queued_workflows.iter().any(|h| h == sha))
     }
 
+    async fn commit_messages(&self, _: &RepoName, number: PrNumber) -> Result<Vec<String>> {
+        let s = self.state.lock().unwrap();
+        Ok(s.commit_messages.get(&number).cloned().unwrap_or_default())
+    }
+    async fn pr_body(&self, _: &RepoName, number: PrNumber) -> Result<String> {
+        let s = self.state.lock().unwrap();
+        Ok(s.prs
+            .get(&number)
+            .map(|pr| pr.body.clone())
+            .unwrap_or_default())
+    }
+    async fn set_body(&self, _: &RepoName, number: PrNumber, body: &str) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        let Some(pr) = s.prs.get_mut(&number) else {
+            bail!("PATCH /pulls/{number}: 404");
+        };
+        pr.body = body.into();
+        Ok(())
+    }
     async fn fixes_used(&self, _: &RepoName, number: PrNumber) -> Result<u32> {
         let s = self.state.lock().unwrap();
         Ok(s.fixes_used.get(&number).copied().unwrap_or(0))
@@ -1729,6 +1750,21 @@ async fn a_green_fork_pr_behind_the_trunk_needs_no_edits_by_maintainers() {
     run.drain().await;
     assert_eq!(run.merged(), [1]);
     assert_eq!(run.rebase.count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_closes_the_issues_the_prs_commits_close() {
+    let run = Run::batching(Fake::new(|s| {
+        prs(&[1, 2])(s);
+        s.prs.get_mut(&1).unwrap().body = "What changed.".into();
+        s.commit_messages
+            .insert(1, vec!["feat: x\n\nFixes #9".into()]);
+        s.commit_messages.insert(2, vec!["fix: y".into()]);
+    }));
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+    let bodies = run.gh.with(|s| [1, 2].map(|n| s.prs[&n].body.clone()));
+    assert_eq!(bodies, ["What changed.\n\nCloses #9", ""]);
 }
 
 #[tokio::test(start_paused = true)]

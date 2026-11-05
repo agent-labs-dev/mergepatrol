@@ -76,6 +76,11 @@ pub trait GitHub: Send + Sync {
     async fn add_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()>;
     async fn remove_label(&self, repo: &RepoName, number: PrNumber, label: &str) -> Result<()>;
     async fn sticky_comment(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()>;
+    /// The messages of every commit on PR `number`, oldest first.
+    async fn commit_messages(&self, repo: &RepoName, number: PrNumber) -> Result<Vec<String>>;
+    /// The PR's description as GitHub has it now, never from a cache.
+    async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String>;
+    async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()>;
 }
 
 #[async_trait]
@@ -120,9 +125,9 @@ impl GitHub for Installation {
         Installation::workflows_running(self, repo, sha).await
     }
     async fn fixes_used(&self, repo: &RepoName, number: PrNumber) -> Result<u32> {
-        let messages = Installation::last_commit_messages(self, repo, number).await?;
+        let messages = Installation::commit_messages(self, repo, number).await?;
         Ok(mergepatrol_core::fixes_used(
-            messages.iter().map(String::as_str),
+            messages.iter().rev().map(String::as_str),
         ))
     }
     async fn check_failures(
@@ -189,5 +194,14 @@ impl GitHub for Installation {
     }
     async fn sticky_comment(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
         Installation::sticky_comment(self, repo, number, body).await
+    }
+    async fn commit_messages(&self, repo: &RepoName, number: PrNumber) -> Result<Vec<String>> {
+        Installation::commit_messages(self, repo, number).await
+    }
+    async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
+        Installation::pr_body(self, repo, number).await
+    }
+    async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
+        Installation::set_body(self, repo, number, body).await
     }
 }
