@@ -147,10 +147,11 @@ fn view(
     let exit = exit.filter(|_| status.queue.is_none());
     let mut need = need(&status, exit);
     let mut id = need_id(&need, exit, newest);
-    // The agent saw it ejected or removed, and runs `then`: it queues it again, and waits on that
+    // The agent saw it ejected, and runs `then`: it queues it again, and waits on that
     // until the queue takes it.
     let requeue = format!("{id}-q");
-    if matches!(need.kind, NeedKind::Ejected | NeedKind::Removed)
+    // Not one someone took out: only they, or the user, queue it again.
+    if need.kind == NeedKind::Ejected
         && (after == Some(id.as_str()) || after == Some(requeue.as_str()))
     {
         need = Need {
@@ -299,7 +300,7 @@ fn brief(need: &Need, repo: &str, number: u32, then: &str) -> String {
             "MergeLoop ejected #{number}: {detail}. Fix the cause on its branch, then fetch, rebase onto the remote branch, and push. Then run `{then}`, which queues it again."
         ),
         NeedKind::Removed => format!(
-            "#{number} was taken out of the queue ({detail}), not by a failure. Don't queue it again unless the user asks you to. If they do, run `{then}`, which queues it again."
+            "#{number} was taken out of the queue ({detail}), not by a failure. Don't queue it again unless the user asks you to: if they do, run `mergeloop call queue_pull {args}`. Tell the user, then run `{then}` in the background: it returns once someone queues it again."
         ),
         NeedKind::Merged => format!("#{number} merged, as {detail}. Nothing is left to do."),
         NeedKind::Off => format!(
@@ -447,6 +448,26 @@ mod tests {
             Some(&again.id),
         );
         assert_eq!((queued.needs, queued.id), (NeedKind::Queue, again.id));
+    }
+
+    #[test]
+    fn acknowledging_removal_does_not_authorize_requeue() {
+        let removed = view(status(None), Some(&exit(8, "dequeued")), None, None);
+        assert_eq!((removed.needs, removed.exit_code), (NeedKind::Removed, 12));
+        // `after` acknowledges a need; the tool describes it as waiting for a newer one.
+        // The agent has not received permission to reverse the user's removal.
+        let acknowledged = view(
+            status(None),
+            Some(&exit(8, "dequeued")),
+            None,
+            Some(&removed.id),
+        );
+        assert_ne!(
+            acknowledged.needs,
+            NeedKind::Queue,
+            "acknowledging a manual removal must not tell the CLI to queue the PR again"
+        );
+        assert!(removed.brief.contains("mergeloop call queue_pull"));
     }
 
     #[test]
