@@ -780,6 +780,24 @@ mod tests {
         )
         .await;
         assert!(text(json_of(res).await).starts_with("Bad arguments: missing field `number`"));
+        // A repo names the workspace: a call with neither says so.
+        let res = mcp(&router, auth, call("list_queue", serde_json::json!({}))).await;
+        let err = text(json_of(res).await);
+        assert!(
+            err.contains("`repo`") && err.contains("`workspace`"),
+            "{err}"
+        );
+        let res = mcp(
+            &router,
+            auth,
+            call("list_history", serde_json::json!({ "days": 7 })),
+        )
+        .await;
+        let err = text(json_of(res).await);
+        assert!(
+            err.contains("`repo`") && err.contains("`workspace`"),
+            "{err}"
+        );
         let args = serde_json::json!({ "repo": "acme", "number": 7 });
         let res = mcp(&router, auth, call("queue_pull", args)).await;
         assert_eq!(text(json_of(res).await), "`repo` must be owner/name.");
