@@ -257,6 +257,8 @@ pub(crate) async fn set_review_settings(
 pub enum AgentReviewStatusView {
     Pending,
     Running,
+    /// Waiting for the author's agent to post its review.
+    Author,
     Asks,
     Approved,
     Changes,
@@ -268,6 +270,7 @@ impl From<ReviewStatus> for AgentReviewStatusView {
         match s {
             ReviewStatus::Pending => Self::Pending,
             ReviewStatus::Running => Self::Running,
+            ReviewStatus::Author => Self::Author,
             ReviewStatus::Asks => Self::Asks,
             ReviewStatus::Approved => Self::Approved,
             ReviewStatus::Changes => Self::Changes,
@@ -752,6 +755,51 @@ fn answers_of(
     Ok(answers)
 }
 
+/// The review the author's agent ran, as MergeLoop's own agent writes one.
+#[derive(Deserialize)]
+pub struct PostReview {
+    pub head_sha: String,
+    pub review: serde_json::Value,
+}
+
+/// What a posted review must hold for the worker to judge it.
+#[derive(Deserialize)]
+struct Posted {
+    #[expect(dead_code, reason = "only read to check its shape")]
+    summary: String,
+    #[expect(dead_code, reason = "only read to check its shape")]
+    findings: Vec<mergepatrol_core::Finding>,
+}
+
+/// The author's agent posts its review of a head the queue asked it to review, in a repo whose
+/// agent runs on the author's side. The worker judges it within seconds, as it does its own.
+pub(crate) async fn post_review(
+    State(app): State<AppState>,
+    caller: Caller,
+    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
+    Json(body): Json<PostReview>,
+) -> Result<StatusCode, ApiError> {
+    let repo = repo_name(owner, name)?;
+    let id = caller.repo(&app, id, &repo).await?;
+    if let Err(e) = serde_json::from_value::<Posted>(body.review.clone()) {
+        return Err(ApiError::bad_request(&format!(
+            "The review is not in the shape its brief gives: {e}."
+        )));
+    }
+    reviewer(&caller, &app, &repo).await?;
+    let taken = app
+        .store
+        .submit_review(id, &repo, number, &body.head_sha, &body.review)
+        .await?;
+    if !taken {
+        return Err(ApiError::Status(
+            StatusCode::CONFLICT,
+            "No review of that head waits for your agent: the PR moved on, MergeLoop's agent reviews this repo, or a review was posted already.".into(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct AskAgent {
@@ -940,6 +988,8 @@ mod tests {
             answered_by: None,
             note: String::new(),
             questions: Vec::new(),
+            brief: None,
+            submitted: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

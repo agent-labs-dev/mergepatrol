@@ -21,6 +21,17 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 When the `mergeloop` MCP server (or its existing `mergepatrol` connection) is connected, use its tools instead of the labels: `queue_pull` (with `priority` for the front of the queue), `dequeue_pull`, `pull_status` and `list_queue`. They change the same labels, as the GitHub user or bot the server was connected as, so everything below still holds. `pull_status` reads where a PR is without parsing MergeLoop's comment. The server's other tools do what the MergeLoop dashboard does, such as reviewing a PR or reading why the queue ejected one.
 
+## With the `mergeloop` command
+
+Land a PR with the `mergeloop` command instead of the steps below. If it is not on the PATH, install it, for macOS or Linux:
+
+```sh
+mkdir -p ~/.local/bin && gh release download cli-latest -R agent-labs-dev/mergeloop \
+  -p "mergeloop-$(uname -s)-$(uname -m).tar.gz" -O - | tar -xz -C ~/.local/bin
+```
+
+Call it as `~/.local/bin/mergeloop` when that is not on the PATH. It acts as `gh auth token`, against `https://mergeloop.ai`; a self-hosted MergeLoop sets `MERGELOOP_URL`. Then run `mergeloop` (the current branch's PR, or `mergeloop <number>`) in the background. It queues the PR, and exits once the PR needs something of you, printing a `brief` of what to do and a `then` to run once done. Do what the brief says, run `then`, and go on until it exits 10, merged. Exit 12 means it waits on a human: tell the user what for, and run `then` again in the background. Over MCP alone, `next_need` is the same loop. In a repo whose config sets `agent.runs: local`, MergeLoop's agent leaves a PR's conflicts, failed checks and review to you: `mergeloop` says so, as a `conflict`, `fix-checks` or `review` need. Run a `review` in a fresh subagent, as its brief says, never in the session that built the PR.
+
 ## What the queue does
 
 MergeLoop rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in `.mergepatrol/mergepatrol.yml`: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
@@ -82,7 +93,7 @@ A PR with no unresolved thread and nothing asked of a human goes on to the queue
 
 - Never call `answer_agent_review` on a PR you built, and never approve your own PR with `review_pull`. That would answer your own review.
 - After three reviews in a row that send findings back, the next one asks a human about what is still left. Don't try to beat it with a fourth fix: mark those `needs-human`.
-- To have the reviewer settle a finding now rather than on the next push, reply to it with `ask_agent_about_review`, giving its `head_sha` and finding id. Its answer, in `questions`, ends `VERDICT: withdrawn` or `VERDICT: stands`.
+- To have the reviewer settle a finding now rather than on the next push, reply to it with `ask_agent_about_review`, giving its `head_sha` and finding id. Its answer, in `questions`, ends `VERDICT: withdrawn` or `VERDICT: stands`. It runs MergeLoop's own agent, so not in a repo whose config sets `agent.runs: local`: there, your reply in the thread is enough, and the next review reads it.
 - A finding about what wasn't checked, such as "never run on a device" or "no tests cover this", is yours to close while you can: run it, or write the test, and say what you ran in its reply. Only when you can't, such as having no device, is it `needs-human`, and it says what a human would have to run.
 
 ### The ledger

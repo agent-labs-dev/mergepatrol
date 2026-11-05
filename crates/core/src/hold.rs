@@ -36,8 +36,23 @@ pub enum Hold {
     PrepChecks,
     /// Getting ready off the lane: the agent fixes its failed checks.
     PrepFixing,
+    /// Getting ready off the lane, where the author's agent works it (`agent.runs: local`): its
+    /// `head` conflicts with the trunk, for that agent to resolve. A push that still conflicts
+    /// is a new hold, for the agent to hear of.
+    AuthorRebase {
+        head: String,
+    },
+    /// Getting ready off the lane, where the author's agent works it: these required checks
+    /// failed on `head`, for that agent to fix.
+    AuthorFix {
+        head: String,
+        checks: Vec<String>,
+    },
     /// The agent is reviewing it, the queue's first gate.
     Reviewing,
+    /// The queue's first gate, where the author's agent works it (`agent.runs: local`): it waits
+    /// for that agent to post its review.
+    AuthorReview,
     /// The agent's review asks a human about what it was not sure of.
     ReviewAsks,
     /// The agent sent findings back to the author, or a human answering its review asked for
@@ -68,12 +83,15 @@ impl Hold {
     pub fn of_review(&self) -> bool {
         match self.innermost() {
             Hold::Reviewing
+            | Hold::AuthorReview
             | Hold::ReviewAsks
             | Hold::ReviewChanges
             | Hold::UnresolvedThreads { .. } => true,
             Hold::PrepRebasing
             | Hold::PrepChecks
             | Hold::PrepFixing
+            | Hold::AuthorRebase { .. }
+            | Hold::AuthorFix { .. }
             | Hold::Draft
             | Hold::ReviewRequired
             | Hold::ChangesRequested
@@ -91,6 +109,14 @@ impl Hold {
         matches!(
             self.innermost(),
             Hold::PrepRebasing | Hold::PrepChecks | Hold::PrepFixing
+        )
+    }
+
+    /// Whether it waits for the author's agent to settle what getting ready found.
+    pub fn of_author(&self) -> bool {
+        matches!(
+            self.innermost(),
+            Hold::AuthorRebase { .. } | Hold::AuthorFix { .. }
         )
     }
 
@@ -122,6 +148,11 @@ impl Hold {
     }
 }
 
+/// A commit as a hold names it.
+fn short(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 impl fmt::Display for Hold {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -150,7 +181,20 @@ impl fmt::Display for Hold {
             Hold::PrepRebasing => f.write_str("the agent is resolving its conflict"),
             Hold::PrepChecks => f.write_str("its checks are running"),
             Hold::PrepFixing => f.write_str("the agent is fixing its checks"),
+            Hold::AuthorRebase { head } => {
+                write!(f, "`{}` conflicts with its base branch", short(head))
+            }
+            Hold::AuthorFix { head, checks } => {
+                let checks: Vec<String> = checks.iter().map(|c| format!("`{c}`")).collect();
+                write!(
+                    f,
+                    "required checks failed on `{}`: {}",
+                    short(head),
+                    checks.join(", ")
+                )
+            }
             Hold::Reviewing => f.write_str("the agent is reviewing it"),
+            Hold::AuthorReview => f.write_str("it waits for the review by its author's agent"),
             Hold::ReviewAsks => {
                 f.write_str("the agent's review asks a human about what it was not sure of")
             }

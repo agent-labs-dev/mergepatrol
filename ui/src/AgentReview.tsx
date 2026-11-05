@@ -56,8 +56,14 @@ export function reviewBadge(e: Gated): [string, string] | null {
       return ["Checks", reviewTones.reviewing];
     case "prep_fixing":
       return ["Fixing", reviewTones.reviewing];
+    case "author_rebase":
+      return ["Conflict", reviewTones.sentBack];
+    case "author_fix":
+      return ["Checks failed", reviewTones.sentBack];
     case "reviewing":
       return ["Reviewing", reviewTones.reviewing];
+    case "author_review":
+      return ["Author's agent reviews", reviewTones.reviewing];
     case "review_asks":
       return ["Needs a human", reviewTones.asks];
     case "review_changes":

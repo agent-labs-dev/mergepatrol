@@ -1,0 +1,75 @@
+# Builds the `mergeloop` command for macOS and Linux. A PR that touches it checks every build;
+# each push to main that does publishes them to the cli-latest prerelease, which the skill
+# installs from, so its download URLs never change.
+name: cli
+
+on:
+  pull_request:
+    paths: ["crates/cli/**", "Cargo.lock", ".github/workflows/cli.yml"]
+  push:
+    branches: [main]
+    paths: ["crates/cli/**", "Cargo.lock", ".github/workflows/cli.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # `asset` is `mergeloop-$(uname -s)-$(uname -m)`, as the install line asks for it.
+          - { target: aarch64-apple-darwin, runner: blacksmith-6vcpu-macos-26, asset: mergeloop-Darwin-arm64 }
+          - { target: x86_64-apple-darwin, runner: blacksmith-6vcpu-macos-26, asset: mergeloop-Darwin-x86_64 }
+          - { target: x86_64-unknown-linux-gnu, runner: blacksmith-2vcpu-ubuntu-2404, asset: mergeloop-Linux-x86_64 }
+          - { target: aarch64-unknown-linux-gnu, runner: blacksmith-2vcpu-ubuntu-2404-arm, asset: mergeloop-Linux-aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked -p mergeloop-cli --target ${{ matrix.target }}
+      - run: tar -czf ${{ matrix.asset }}.tar.gz -C target/${{ matrix.target }}/release mergeloop
+      # The build that runs where it was built says it runs.
+      - if: ${{ !contains(matrix.target, 'x86_64-apple') }}
+        run: target/${{ matrix.target }}/release/mergeloop --version
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}.tar.gz
+
+  # One rolling prerelease, as the menu bar app has, so a v* release stays Latest.
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: cli-latest
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          merge-multiple: true
+      - run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true
+          else
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" \
+              --title "mergeloop command (latest)" \
+              --notes "The mergeloop command, built from main, for macOS and Linux. Install: gh release download cli-latest -R $GH_REPO -p \"mergeloop-\$(uname -s)-\$(uname -m).tar.gz\" -O - | tar -xz -C ~/.local/bin"
+          fi
+          gh release upload "$TAG" mergeloop-*.tar.gz --clobber

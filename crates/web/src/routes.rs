@@ -13,7 +13,7 @@ use axum::http::Method;
 use axum::routing::{MethodFilter, MethodRouter, on};
 use serde_json::{Map, Value, json};
 
-use crate::{AppState, api, auth, billing, changelog, mcp, oauth, review, v1, webhook};
+use crate::{AppState, api, auth, billing, changelog, mcp, need, oauth, review, v1, webhook};
 
 pub(crate) struct Route {
     pub method: Method,
@@ -203,6 +203,10 @@ pub(crate) static ROUTES: &[Route] = &[
         opt("base", Ty::Str, "For the whole PR: its base commit, by full SHA, as `get_pull` gives it. With `head`."))),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/status", api::pull_status, tool!("pull_status", Reads,
         "Where a PR is, as `GET /api/v1/repos/{owner}/{name}/pulls/{number}` says it: whether the repo's queue runs (`mergepatrol`, with `hold` when any PR queued there now goes on hold, and `missing_key` when the workspace has no model key for the agent's tasks), the PR's place in the queue (`queue`, null when it is not queued, with its `stage` and a typed `hold` while held), how it last left the queue (`merged` or `ejected`), its dashboard link (`url`), and its latest queue events, newest first.")),
+    route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/next", need::next_need, tool!("next_need", Reads,
+        "What a PR needs next from the agent that queued it, one need at a time: `needs` is `queue`, `wait`, `threads` (work its unresolved review threads), `changes` (a required reviewer asked for changes), `draft`, `human` (it waits on one), `ejected`, `removed`, `merged` or `off` (its repo's queue does not run). `brief` says what to do, and `then` the command to run once done. Pass the need's `id` back as `after`, with a `wait`, and the call waits until there is a newer need, or answers `wait`. `exit_code` is the `mergeloop` CLI's for it.",
+        opt("after", Ty::Str, "The `id` of the need you saw last. Without it, the need as it is now."),
+        opt("wait", Ty::Int, "How many seconds to wait for a need newer than `after`, up to 50. Default 0."))),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/queue", api::queue_pull, tool!("queue_pull", Writes,
         "Queue a PR to merge: MergeLoop rebases it unless it can merge as it is with its checks passed, tests it, and merges it once its checks pass. On a queued PR, changes its priority. Queuing one PR of a stack queues the whole stack. Returns `message`, which says when the PR goes on hold whatever it is (as without a subscription) or the workspace has no model key for the agent, and the repo's status (`mergepatrol`) as `pull_status` reads it. Needs triage access to the repo.",
         opt("priority", Ty::Bool, "Put it at the front of the queue. Default false."))),
@@ -230,6 +234,9 @@ pub(crate) static ROUTES: &[Route] = &[
     route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/reviewers", review::ask_reviewers, tool!("ask_agent_review_reviewers", Writes,
         "Asks others to answer the agent's review, in place of those it asked: requests their reviews on GitHub, as you.",
         arg("reviewers", Ty::Strs, "Their GitHub logins."))),
+    route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/by-author", review::post_review, tool!("post_review", Writes,
+        "Posts the review that the agent of a PR's author ran, where the repo sets `agent.runs: local`: once `next_need` says `review`, as its brief says. MergeLoop judges each finding as it does its own agent's: back to the author as a review thread, to a human, or cleared. An `evidence` command counts as one the agent saw fail. Needs write access to the repo.",
+        arg("posted", Ty::Body, "`{ head_sha, review }`: the head the review is of, as the brief names it, and the review, the JSON object whose shape the brief gives: `summary` and `findings`."))),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/seen", api::seen_pull, tool!("mark_pull_seen", Writes,
         "Marks what was said on a PR so far as read, in your inbox. Needs a MergeLoop sign-in.")),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/snooze", api::snooze_pull, tool!("snooze_pull", Writes,

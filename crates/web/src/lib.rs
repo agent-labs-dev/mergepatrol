@@ -9,6 +9,7 @@ mod changelog;
 mod docs;
 mod gate;
 mod mcp;
+mod need;
 mod oauth;
 mod pr_reply;
 mod review;
@@ -265,6 +266,7 @@ mod tests {
                 label: "mergepatrol".into(),
                 batch_size: 8,
                 agent: mergepatrol_core::AgentSettings {
+                    runs: Default::default(),
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),
@@ -2401,6 +2403,139 @@ mod tests {
         for field in ["queue", "merged", "ejected"] {
             assert_eq!(at(4, field), serde_json::Value::Null);
         }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn next_need_says_what_the_agent_does_and_waits_for_a_newer_one(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Hold, Lane, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_has_config(1, &repo, true).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo,
+            trunk: "main".into(),
+        };
+        let lane = Lane {
+            entries: vec![Entry {
+                number: 6,
+                priority: false,
+                // Not the agent review's hold, which a review in the store would decide.
+                state: EntryState::Held(Hold::ChangesRequested),
+                summary: PrSummary::default(),
+                layers: Vec::new(),
+                heads: Vec::new(),
+                recheck: None,
+            }],
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        store
+            .record(&key, 6, "held", "a reviewer requested changes")
+            .await
+            .unwrap();
+        let next = |query: String| {
+            let router = router.clone();
+            async move {
+                let path = format!("/api/w/1/repos/o/r/pulls/6/next{query}");
+                let res = v1_get(&router, &path, &[BEARER]).await;
+                assert_eq!(res.status(), StatusCode::OK);
+                json_of(res).await
+            }
+        };
+
+        let changes = next(String::new()).await;
+        assert_eq!(changes["needs"], "changes");
+        assert_eq!(changes["exit_code"], 0);
+        assert_eq!(
+            changes["status"]["queue"]["hold"]["reason"],
+            "changes_requested"
+        );
+        let id = changes["id"].as_str().unwrap().to_owned();
+        assert_eq!(changes["then"], format!("mergeloop o/r#6 --after {id}"));
+        // Seen, and nothing newer: it waits.
+        let seen = next(format!("?after={id}")).await;
+        assert_eq!(
+            (seen["needs"].clone(), seen["id"].clone()),
+            ("wait".into(), id.clone().into())
+        );
+
+        // Ejected: the agent fixes it, and its next call queues it again.
+        store.save_lane(&key, &Lane::default()).await.unwrap();
+        store
+            .record_exit(&key, 6, "ejected", "checks failed", &PrSummary::default())
+            .await
+            .unwrap();
+        let ejected = next(format!("?after={id}")).await;
+        assert_eq!(ejected["needs"], "ejected");
+        assert_eq!(ejected["exit_code"], 11);
+        let again = next(format!("?after={}", ejected["id"].as_str().unwrap())).await;
+        assert_eq!(again["needs"], "queue");
+        // Queued, not yet in a lane: nothing newer.
+        let queued = next(format!("?after={}", again["id"].as_str().unwrap())).await;
+        assert_eq!(queued["needs"], "wait");
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn next_need_hands_the_authors_agent_the_review_its_worker_wrote(pool: PgPool) {
+        use mergepatrol_core::{Entry, EntryState, Hold, Lane, PrSummary};
+        use mergepatrol_store::LaneKey;
+        let (router, store) = v1_router(pool).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        store.set_has_config(1, &repo, true).await.unwrap();
+        let key = LaneKey {
+            installation_id: 1,
+            repo: repo.clone(),
+            trunk: "main".into(),
+        };
+        let lane = Lane {
+            entries: vec![Entry {
+                number: 6,
+                priority: false,
+                state: EntryState::Held(Hold::Reviewing),
+                summary: PrSummary::default(),
+                layers: Vec::new(),
+                heads: Vec::new(),
+                recheck: None,
+            }],
+            ..Lane::default()
+        };
+        store.save_lane(&key, &lane).await.unwrap();
+        let r = store.start_review(1, &repo, 6, "h6").await.unwrap();
+        let claim = store
+            .claim_review(std::time::Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
+        store
+            .await_author(r.id, claim, "Review #6 as follows.")
+            .await
+            .unwrap();
+
+        let res = v1_get(&router, "/api/w/1/repos/o/r/pulls/6/next", &[BEARER]).await;
+        let need = json_of(res).await;
+        assert_eq!(need["needs"], "review");
+        assert_eq!(need["status"]["queue"]["hold"]["reason"], "author_review");
+        let brief = need["brief"].as_str().unwrap();
+        assert!(brief.starts_with("Review #6 as follows."), "{brief}");
+        assert!(brief.ends_with(&format!("Then run `{}`.", need["then"].as_str().unwrap())));
+
+        // A review not in the shape the brief gives is turned away before anything else.
+        let bad = serde_json::json!({ "head_sha": "h6", "review": { "findings": "none" } });
+        let req = Request::post("/api/w/1/repos/o/r/pulls/6/agent-review/by-author")
+            .header(BEARER.0, BEARER.1)
+            .header("content-type", "application/json")
+            .body(Body::from(bad.to_string()))
+            .unwrap();
+        let res = send(&router, req).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            text_of(res)
+                .await
+                .contains("not in the shape its brief gives")
+        );
     }
 
     #[sqlx::test(migrations = false)]

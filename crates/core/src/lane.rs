@@ -115,8 +115,8 @@ impl EntryState {
         match self {
             EntryState::Waiting | EntryState::Active => Some(Stage::Lane),
             EntryState::Held(hold) => match hold.innermost() {
-                Hold::PrepRebasing => Some(Stage::Rebase),
-                Hold::PrepChecks | Hold::PrepFixing => Some(Stage::Checks),
+                Hold::PrepRebasing | Hold::AuthorRebase { .. } => Some(Stage::Rebase),
+                Hold::PrepChecks | Hold::PrepFixing | Hold::AuthorFix { .. } => Some(Stage::Checks),
                 hold if hold.of_review() => Some(Stage::Review),
                 _ => None,
             },

@@ -253,6 +253,12 @@ fn graphql(gh: &Fake, origin: &Path, body: &Value) -> Value {
     if query.contains("pullRequests(") {
         return json!({ "data": { "repository": repository_node(&s.trunk) } });
     }
+    // A file of the default branch, as a review that asks a human reads CODEOWNERS: none.
+    if query.contains("file(path: $path)") {
+        let target = json!({ "oid": s.trunk, "file": null });
+        let branch = json!({ "name": "main", "target": target });
+        return json!({ "data": { "repository": { "defaultBranchRef": branch } } });
+    }
     let pr = &s.prs[&vars["number"].as_u64().unwrap()];
     if query.contains("commits(last: 20)") {
         let log = git(
@@ -632,6 +638,12 @@ impl World {
     /// The review of PR 1's head ends with a finding the agent is `confidence` sure of: sent
     /// back to the author when it is sure enough. The review's id.
     async fn conclude(&self, confidence: u8) -> i64 {
+        let settings = self.ctx.config.repo_defaults.clone();
+        self.conclude_with(confidence, &settings).await
+    }
+
+    /// `conclude`, in a repo with these settings.
+    async fn conclude_with(&self, confidence: u8, settings: &RepoSettings) -> i64 {
         let head = self.pr(1).head_ref_oid;
         let r = self.store.start_review(1, &repo(), 1, &head).await.unwrap();
         let finding = Finding {
@@ -661,7 +673,6 @@ impl World {
             findings: vec![finding],
         };
         let (key, pr) = (self.key(), self.pr(1));
-        let settings = &self.ctx.config.repo_defaults;
         let bars = ReviewSettings::default();
         conclude(
             &self.ctx,
@@ -752,6 +763,151 @@ async fn a_failed_check_is_fixed_off_the_lane_then_merges() {
     let log = git(&world.origin, &["log", "--format=%B", "main..pr-1"]);
     assert!(log.starts_with("Fix it") && log.contains(FIXED_BY), "{log}");
     assert!(log.contains("the PR's change"), "{log}");
+}
+
+/// A repo whose PRs' authors run the agent. Its review, which needs no model key there, is off:
+/// no review worker runs here.
+const AUTHORS_AGENT: &str = "agent:\n  runs: local\nreview:\n  enabled: false\n";
+
+#[tokio::test]
+async fn with_the_authors_agent_a_pr_is_reviewed_without_a_model_key() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world
+        .gh
+        .with_mut(|s| s.config = Some("agent:\n  runs: local\n".into()));
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(Reviewing)".into())]);
+    let reviews = world.store.reviews.lock().unwrap().clone();
+    assert_eq!(
+        reviews.len(),
+        1,
+        "a review of its head, for the author's agent"
+    );
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_a_conflict_waits_for_their_push_then_merges() {
+    let world = World::one_pr("shared.txt", "shared.txt").await;
+    world.gh.with_mut(|s| s.config = Some(AUTHORS_AGENT.into()));
+    let before = world.pr(1).head_ref_oid;
+    let _drain = world.drain().await;
+    for _ in 0..3 {
+        world.tick().await;
+    }
+    let held = format!("Held(AuthorRebase {{ head: {before:?} }})");
+    assert_eq!(world.lane(), [(1, held)]);
+    assert_eq!(world.branch("pr-1"), before, "nothing pushed to it");
+
+    // The author's agent rebases it, keeping the PR's side, and pushes.
+    git(&world.origin, &["checkout", "-q", "pr-1"]);
+    git(&world.origin, &["rebase", "-q", "-X", "theirs", "main"]);
+    git(&world.origin, &["checkout", "-q", "main"]);
+    world.gh.with_mut(|s| point_at_branch(s, 1, &world.origin));
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    // Only the lane's plain rebases, which leave a conflict as it is.
+    assert!(
+        world.tasks().iter().all(|t| *t == Task::Rebase),
+        "{:?}",
+        world.tasks()
+    );
+    assert!(
+        !world.did(1, "resolved"),
+        "MergeLoop's agent resolved nothing"
+    );
+    assert!(!world.did(1, "ejected"));
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_a_failed_check_waits_for_their_fix_then_merges() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.config = Some(AUTHORS_AGENT.into());
+        checks_fail(s, 1);
+    });
+    let _drain = world.drain().await;
+    for _ in 0..3 {
+        world.tick().await;
+    }
+    let head = world.pr(1).head_ref_oid;
+    let held = format!(r#"Held(AuthorFix {{ head: {head:?}, checks: ["ci"] }})"#);
+    assert_eq!(world.lane(), [(1, held)]);
+    assert!(!world.did(1, "fixing"));
+
+    // The author's agent commits a fix on top, and pushes: its checks pass.
+    git(&world.origin, &["checkout", "-q", "pr-1"]);
+    commit(&world.origin, "feature.txt", "fixed\n", "Fix the check");
+    git(&world.origin, &["checkout", "-q", "main"]);
+    world.gh.with_mut(|s| point_at_branch(s, 1, &world.origin));
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    let fixed = |t: &Task| matches!(t, Task::FixChecks { .. });
+    assert!(!world.tasks().iter().any(fixed), "{:?}", world.tasks());
+    assert!(!world.did(1, "fixing"));
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_a_failure_the_lane_finds_goes_back_to_them_without_fixes() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        // MergeLoop's fixes are off: the author's still go on.
+        s.config = Some(format!("{AUTHORS_AGENT}fix_ci:\n  enabled: false\n"));
+        s.checks.insert("ci".into(), CheckState::Failed);
+        let passed = BTreeMap::from([("ci".to_owned(), CheckState::Passed)]);
+        s.checks_on.insert(s.head(1), passed);
+    });
+    let _drain = world.drain().await;
+    for _ in 0..3 {
+        world.tick().await;
+    }
+    // On the head the lane rebased, whose checks failed.
+    let head = world.pr(1).head_ref_oid;
+    let held = format!(r#"Held(AuthorFix {{ head: {head:?}, checks: ["ci"] }})"#);
+    assert_eq!(world.lane(), [(1, held)], "{:?}", world.kinds(1));
+    assert!(!world.did(1, "ejected"));
+}
+
+#[tokio::test]
+async fn review_a_local_fix_that_still_fails_makes_a_new_need() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.config = Some(AUTHORS_AGENT.into());
+        checks_fail(s, 1);
+    });
+    world.tick().await;
+    let hold_message = || {
+        let lanes = world.store.lanes.lock().unwrap();
+        let entry = &lanes[&world.key()].entries[0];
+        let EntryState::Held(hold) = &entry.state else {
+            panic!("expected an author hold, got {:?}", entry.state);
+        };
+        assert!(hold.of_author());
+        hold.to_string()
+    };
+    let before = (hold_message(), world.store.events.lock().unwrap().clone());
+
+    // The agent follows the fix-checks brief, but its attempted fix still fails CI.
+    // CI can finish between queue ticks, so the queue need not observe Pending.
+    git(&world.origin, &["checkout", "-q", "pr-1"]);
+    commit(
+        &world.origin,
+        "feature.txt",
+        "attempted fix\n",
+        "Try fixing CI",
+    );
+    git(&world.origin, &["checkout", "-q", "main"]);
+    world.gh.with_mut(|s| {
+        point_at_branch(s, 1, &world.origin);
+        checks_fail(s, 1);
+    });
+    world.tick().await;
+    world.tick().await;
+
+    // next_need hashes the hold and newest queue event, with no head SHA. If both
+    // stay unchanged, the agent running `then --after <id>` waits forever.
+    let after = (hold_message(), world.store.events.lock().unwrap().clone());
+    assert_ne!(
+        after, before,
+        "a new head that still fails must change next_need's inputs so the author can act again"
+    );
 }
 
 #[tokio::test]
@@ -1265,6 +1421,63 @@ async fn a_finding_the_fix_leaves_is_posted_after_it() {
     });
     let review = world.conclude(100).await;
     assert!(world.did(1, "review-unfixed"), "{:?}", world.kinds(1));
+    assert_eq!(world.posted(), [1], "one thread, for the author");
+    assert!(!world.fixing(review));
+}
+
+#[tokio::test]
+async fn an_unsubmitted_author_review_does_not_reset_completed_review_rounds() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    world.sent_back().await;
+    // Three completed reviews sent findings back. A fourth head waited for its
+    // author's agent, but another push superseded it before anything was posted.
+    {
+        let mut reviews = world.store.reviews.lock().unwrap();
+        let mut completed = reviews[0].clone();
+        reviews.clear();
+        for id in 1..=3 {
+            completed.id = id;
+            completed.head_sha = format!("completed-head-{id}");
+            reviews.push(completed.clone());
+        }
+    }
+    let abandoned = world
+        .store
+        .start_review(1, &repo(), 1, "superseded-author-head")
+        .await
+        .unwrap();
+    world
+        .store
+        .await_author(abandoned.id, abandoned.claim, "Review this head")
+        .await
+        .unwrap();
+
+    let mut settings = world.ctx.config.repo_defaults.clone();
+    settings.agent.runs = mergepatrol_core::Runs::Local;
+    let id = world.conclude_with(90, &settings).await;
+    let finished = world.store.review(id).await.unwrap().unwrap();
+    assert_eq!(
+        finished.status,
+        ReviewStatus::Asks,
+        "an unsubmitted review is not a completed round: three completed send-backs still require a human"
+    );
+}
+
+#[tokio::test]
+async fn with_the_authors_agent_its_reviews_findings_go_to_the_author_unfixed() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    let mut settings = world.ctx.config.repo_defaults.clone();
+    settings.agent.runs = mergepatrol_core::Runs::Local;
+    let review = world.conclude_with(100, &settings).await;
+    assert!(
+        world.tasks().iter().all(|t| *t == Task::Rebase),
+        "{:?}",
+        world.tasks()
+    );
     assert_eq!(world.posted(), [1], "one thread, for the author");
     assert!(!world.fixing(review));
 }

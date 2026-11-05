@@ -10,13 +10,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
     Answered, Event, Evidence, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, SentBack, review_status, review_url,
+    ReviewStatus, Runs, SentBack, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
 };
 use mergepatrol_github::{App, CodeOwners, Installation, PullRequest, ReviewThread, ThreadComment};
-use mergepatrol_resolver::withdraws;
+use mergepatrol_resolver::{ReviewRequest, Verify, author_review_brief, withdraws};
 use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
 use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
@@ -163,14 +163,24 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
         .unwrap_or_default();
     let bars = workspace.with(&settings.review);
 
+    let by_author = settings.agent.runs == Runs::Local;
     let found = match pr.is_cross_repository {
         // A fork's code is not trusted: no agent reads it, as none rebases or fixes it.
         true => Err("The agent does not review PRs from forks.".to_owned()),
+        // The author's agent reviews, and posts what it found: this only judges that.
+        false if by_author => match &r.submitted {
+            Some(review) => posted_review(review),
+            None => {
+                let brief = author_brief(ctx, &gh, &pr, &settings, &r).await?;
+                return ctx.store.await_author(r.id, r.claim, &brief).await;
+            }
+        },
         false => run_review(ctx, &gh, &key, &pr, &settings, &r).await,
     };
     let output = match found {
         Ok(output) => Ok(output),
-        Err(why) if r.attempts + 1 < ATTEMPTS && !why.starts_with(NO_KEY) => {
+        // What the author's agent posted reads the same each time.
+        Err(why) if r.attempts + 1 < ATTEMPTS && !why.starts_with(NO_KEY) && !by_author => {
             ctx.store
                 .retry_review(r.id, r.claim, &why, RETRY_AFTER)
                 .await?;
@@ -336,18 +346,60 @@ pub(crate) async fn fix_sent_back(
 
 const NO_KEY: &str = "No model API key";
 
-/// Runs the review in the sandbox. `Err` says why the agent could not review.
-async fn run_review(
+/// What the review of the author's agent asks of it: the prompt of MergeLoop's own, with what
+/// humans answered and what the last review sent back.
+async fn author_brief(
     ctx: &Ctx,
     gh: &Installation,
-    key: &LaneKey,
     pr: &PullRequest,
     settings: &RepoSettings,
     r: &ReviewRecord,
-) -> std::result::Result<ReviewOutput, String> {
-    let earlier = earlier_reviews(ctx, r)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+) -> Result<String> {
+    let (answered, sent_back) = earlier(ctx, gh, r).await?;
+    let verify = match settings.verify.is_empty() {
+        true => Verify::None,
+        false => Verify::Configured(settings.verify.clone()),
+    };
+    let base = format!("$(git merge-base origin/{} HEAD)", pr.merges_into());
+    let req = ReviewRequest {
+        workdir: std::path::Path::new("."),
+        base: &base,
+        pr_title: &pr.title,
+        pr_body: &pr.body,
+        trunk: pr.merges_into(),
+        answered: &answered,
+        sent_back: &sent_back,
+        verify: &verify,
+        queue_commits: &[],
+        transcript: std::path::Path::new("."),
+    };
+    let repo = r.repo.to_string();
+    Ok(author_review_brief(&req, &repo, r.number, &r.head_sha))
+}
+
+/// The review the author's agent posted, as MergeLoop's own job would have written it. Its
+/// evidence is the agent's word that the command failed: nothing runs it again.
+fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput, String> {
+    let mut output: ReviewOutput = serde_json::from_value(review.clone())
+        .map_err(|e| format!("The review the author's agent posted does not read: {e}."))?;
+    for (i, f) in output.findings.iter_mut().enumerate() {
+        f.id = format!("f{}", i + 1);
+        f.confidence = f.confidence.min(100);
+        if let Some(e) = &mut f.evidence {
+            e.failed = !e.command.trim().is_empty();
+        }
+    }
+    Ok(output)
+}
+
+/// What humans answered on earlier heads, and what the last review sent back, with the author's
+/// replies in its threads.
+async fn earlier(
+    ctx: &Ctx,
+    gh: &Installation,
+    r: &ReviewRecord,
+) -> Result<(Vec<Answered>, Vec<SentBack>)> {
+    let earlier = earlier_reviews(ctx, r).await?;
     let answered = answered_before(&earlier);
     let threads = threads(gh, r).await;
     let sent_back = sent_back_before(&earlier)
@@ -367,6 +419,19 @@ async fn run_review(
             }
         })
         .collect();
+    Ok((answered, sent_back))
+}
+
+/// Runs the review in the sandbox. `Err` says why the agent could not review.
+async fn run_review(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    pr: &PullRequest,
+    settings: &RepoSettings,
+    r: &ReviewRecord,
+) -> std::result::Result<ReviewOutput, String> {
+    let (answered, sent_back) = earlier(ctx, gh, r).await.map_err(|e| format!("{e:#}"))?;
     let job_id = format!(
         "{}-{}-{}-review-{}",
         r.repo.owner,
@@ -441,7 +506,10 @@ async fn earlier_reviews(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<ReviewRecord
             && e.head_sha != r.head_sha
             && !matches!(
                 e.status,
-                ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale
+                ReviewStatus::Pending
+                    | ReviewStatus::Running
+                    | ReviewStatus::Author
+                    | ReviewStatus::Stale
             )
     });
     Ok(earlier)
@@ -544,7 +612,9 @@ async fn finish(
         asked,
     };
     // Held before the review ends: the PR goes from reviewing to fixing, never by "sent back".
+    // The author's agent fixes what its own review sent back, as the author.
     let held = match status {
+        ReviewStatus::Changes if settings.agent.runs == Runs::Local => None,
         ReviewStatus::Changes => hold_for_fix(ctx, gh, key, &now)
             .await
             .unwrap_or_else(|e| {
@@ -1029,6 +1099,24 @@ mod tests {
     use super::*;
     use mergepatrol_core::{Bar, Kind, Lean};
 
+    #[test]
+    fn a_posted_review_is_numbered_and_its_evidence_counts_as_failed() {
+        let posted = serde_json::json!({
+            "summary": "s",
+            "findings": [
+                { "kind": "other", "title": "a", "confidence": 120, "lean": "change", "finding": "x",
+                  "evidence": { "command": "cargo test a" } },
+                { "kind": "other", "title": "b", "confidence": 90, "lean": "fine", "finding": "y" },
+            ],
+        });
+        let output = posted_review(&posted).unwrap();
+        let ids: Vec<&str> = output.findings.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["f1", "f2"]);
+        assert_eq!(output.findings[0].confidence, 100);
+        assert!(output.findings[0].shows_the_change());
+        assert!(posted_review(&serde_json::json!({ "findings": "no" })).is_err());
+    }
+
     fn review(id: i64, sent_back: bool, answered_by: Option<&str>) -> ReviewRecord {
         let finding = Finding {
             id: "f1".into(),
@@ -1078,6 +1166,8 @@ mod tests {
             answered_by: answered_by.map(str::to_owned),
             note: String::new(),
             questions: Vec::new(),
+            brief: None,
+            submitted: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

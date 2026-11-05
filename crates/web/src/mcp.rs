@@ -21,7 +21,7 @@ use crate::{ApiError, AppState};
 /// The newest first: the protocol versions this server speaks.
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-const INSTRUCTIONS: &str = "MergeLoop is the merge queue of the repos it is installed on. Queue a PR with `queue_pull` instead of merging it, then follow it with `pull_status`. The other tools do what the MergeLoop dashboard does. Calls act as the GitHub user or bot you connected as. A GitHub token reaches single repos: the tools for a whole workspace need a MergeLoop sign-in.";
+const INSTRUCTIONS: &str = "MergeLoop is the merge queue of the repos it is installed on. Queue a PR with `queue_pull` instead of merging it, then call `next_need` until it merges: it says what the PR needs of you next, and what to do about it. `pull_status` says where it is. The other tools do what the MergeLoop dashboard does. Calls act as the GitHub user or bot you connected as. A GitHub token reaches single repos: the tools for a whole workspace need a MergeLoop sign-in.";
 
 pub(crate) async fn post(
     State(app): State<AppState>,
