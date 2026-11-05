@@ -390,7 +390,7 @@ fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput
     let mut output: ReviewOutput = serde_json::from_value(review.clone())
         .map_err(|e| format!("The review the author's agent posted does not read: {e}."))?;
     if let Some(by) = review["by"].as_str() {
-        output.summary = format!("@{by}'s agent reviewed this. {}", output.summary);
+        output.summary = format!("`{by}`'s agent reviewed this. {}", output.summary);
     }
     for (i, f) in output.findings.iter_mut().enumerate() {
         f.id = format!("f{}", i + 1);
@@ -1125,11 +1125,11 @@ mod tests {
         assert_eq!(output.findings[0].confidence, 100);
         assert!(output.findings[0].shows_the_change());
         assert!(posted_review(&serde_json::json!({ "findings": "no" })).is_err());
-        // Whoever posted it is named, as any writer of the repo may review for its author.
+        // Whoever posted it is named, in code so GitHub pings no one, as any writer of the repo may review for its author.
         let by = serde_json::json!({ "summary": "s", "findings": [], "by": "octo" });
         assert_eq!(
             posted_review(&by).unwrap().summary,
-            "@octo's agent reviewed this. s"
+            "`octo`'s agent reviewed this. s"
         );
     }
 
