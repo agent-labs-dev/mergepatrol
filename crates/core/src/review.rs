@@ -834,11 +834,15 @@ impl Judged {
         self.outcome.get_or_insert(outcome);
     }
 
-    /// Whether it held the PR for a change, unsettled: sent back, or a change a human asked for.
+    /// Whether it held the PR for a change, unsettled: sent back, a change asked of a human who
+    /// has not called it fine, or a change a human asked for.
     fn open(&self, answers: &BTreeMap<String, Answer>) -> bool {
+        let answer = answers.get(&self.finding.id);
+        let asked_change = self.asked
+            && self.finding.lean == Lean::Change
+            && !matches!(answer, Some(Answer::Fine));
         self.outcome.is_none()
-            && (self.sent_back
-                || matches!(answers.get(&self.finding.id), Some(Answer::Change { .. })))
+            && (self.sent_back || asked_change || matches!(answer, Some(Answer::Change { .. })))
     }
 }
 
