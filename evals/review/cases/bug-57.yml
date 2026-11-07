@@ -1,0 +1,73 @@
+repo: agent-labs-dev/mergeloop
+pr: 57
+base: d54cca108036514d373a26082ab2d0c4742940a1
+head: 4ad3c305def8d286816f55d96e8f6f65349cce94
+title: "fix: a merge cut short by a restart lands as merged, not dequeued"
+body: |-
+  ## Summary
+
+  A merge through the asynchronous merge API takes about 10 s, and Mergepatrol kept it only in memory. After a restart in that window, the next sync found the merged PRs closed and took them for dequeued: their labels stayed on, they got no "Merged as" comment, and the history recorded "dequeued".
+
+  ```diff
+   tick
+     units = labeled PRs and stacks
+  +  if lane.merging                            # a restart cut a merge short
+  +    still open, labeled, same head, not held → merge again   # 409 waits for the pending one, 200 if merged
+  +    otherwise → merged_as(top, head)
+  +    merged → remove, "merged" exit, "Merged as" comment, labels off
+     lane.sync(candidates)
+   ...
+   run_job / merge_batch
+  +  lane.merging = { entry, PRs, top, head }; save lane
+     merge
+  +  rejected → clear;  finish → clear
+  ```
+
+  - `Lane.merging` is `#[serde(default)]`, so lanes saved before load as before.
+  - `merged_as` moves onto the `GitHub` trait; the merged handling moves out of `finish` into `merged`, which both use.
+
+  ## Evidence
+
+  No screens change.
+
+  - **Before** (the resume disabled): the new loop tests fail exactly as the issue describes.
+    ```
+    a_merge_that_lands_during_a_restart_is_seen_through        left: ["enqueued", "rebasing", "published", "dequeued"]
+    a_stack_that_merges_during_a_restart_is_seen_through       left: ["enqueued", "rebasing", "published", "dequeued"]
+    a_batch_merge_that_lands_during_a_restart_is_seen_through  left: ["enqueued", "batch", "dequeued"]
+    a_merge_still_pending_after_a_restart_is_waited_for        rebased twice
+    ```
+    **After:** all four pass: each PR (every layer of a stack) ends `merged`, labels off, `Merged as merge-1.` commented, lane empty; a merge still pending at the restart is asked for again, not rebased again, and merges once.
+  - The fake GitHub gained a merge that never answers (GitHub merges it meanwhile, or not), as a restart mid-wait leaves it.
+  - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` pass. No API types changed.
+
+  Reviewed with sol-loop: 1 round with gpt-6.1-sol. Sol verdict: approved
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  Rolling back ignores the saved `merging` field and returns to the in-memory wait.
+
+  **Blast Radius:** every merge
+
+  Every merge now saves the lane once more before asking GitHub. Not covered: a PR unlabeled during the restart while its merge is still pending; it leaves the queue as dequeued, and GitHub may still merge it.
+
+  Closes #52
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/57?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795862626&installation_model_id=434381&pr_number=57&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F57&signature=4db1327ccbff6a4d8a74232b7ff0b9a95eafd83e47ed02d7e2a657ad9971449a"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: crates/mergepatrol/src/queue.rs, lines: 743 }
+        - { file: crates/mergepatrol/src/queue.rs, lines: 801-806 }
+      what: "merged() records the exit before its GitHub calls; if one fails, the resumed merge records `merged` twice."
+      fixed_by: "#78"

@@ -1,0 +1,61 @@
+repo: agent-labs-dev/mergeloop
+pr: 64
+base: d858aa74534a61b0c6c98f9e06c29fe54f197af3
+head: 4d5faa697090fbe3630c6f94d0c60b64583160c2
+title: "fix: stop a crash from breaking a repo's git cache for good, and cut short a hung fetch"
+body: |-
+  ## Summary
+
+  The orchestrator keeps one bare git cache per repo. Two crashes could break one for good, and every PR of that repo was then ejected, since each job starts with a fetch into the cache:
+
+  - A git killed mid-write, as when a queue task is aborted and `kill_on_drop` kills it, left `*.lock` files behind. Every later fetch failed with `cannot lock ref`.
+  - A crash between `init --bare` and `remote add` left a cache with no `origin`. `ensure_cache` only checked for `HEAD`, so it never fixed it.
+
+  A fetch also had no time limit. One stalled connection held the repo's queue for good.
+
+  ```diff
+   ensure_cache(path, url)                  # before each use, by the repo's queue only
+  -  HEAD exists? done
+  -  init --bare; remote add origin
+  +  remove stale *.lock under refs/ and at the top (config.lock, packed-refs.lock, …)
+  +  init --bare                            # on an existing repo, fills in what is missing
+  +  origin missing → add; wrong → set-url
+
+   fetch
+  +  git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60   # a stalled transfer is dropped
+  +  20-minute cap; dropping the command kills git
+  ```
+
+  Removing locks is safe because only the repo's queue task uses its cache, one git at a time. Locks go before `init`, since a stale `config.lock` would fail `init` too.
+
+  ## Evidence
+
+  Nothing visible changes.
+
+  - `a_cache_left_without_its_remote_heals`: a bare cache with no `origin`.
+    - **Before:** the fetch fails.
+    - **After:** `ensure_cache` adds `origin` and the fetch gets `main`.
+  - `a_lock_left_by_a_killed_git_is_cleared`: `refs/remotes/origin/main.lock`, `packed-refs.lock` and `config.lock` are left behind.
+    - **Before:** the fetch fails with `cannot lock ref`.
+    - **After:** `ensure_cache` clears them, and the fetch moves the ref.
+    - With the locks removed after `init`, as in the first version, the test fails on `config.lock`.
+  - `a_fetch_that_hangs_is_cut_short`: a server that accepts the connection, then says nothing.
+    - **Before:** the fetch waits until the 60s low-speed limit ends it.
+    - **After:** it fails after the 1s cap the test sets.
+
+  `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, and `cargo test --workspace` all pass.
+
+  Reviewed with sol-loop: 2 rounds with gpt-6.1-sol. Sol verdict: approved. Round 1 found that a `config.lock` blocked `init` before the cleanup ran, which this PR fixes.
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  **Blast Radius:** queue
+
+  - If anything else ever used a repo cache at the same time as its queue task, removing its locks could corrupt a ref. Nothing does today.
+  - A fetch of a very large repo that takes more than 20 minutes now fails. The job then errors, and the PR stays in place and runs again.
+  - The fork-PR `git push` (`push_leased`, from #62) is not bounded yet. It's a follow-up.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+expected: clean

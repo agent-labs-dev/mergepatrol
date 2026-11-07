@@ -1,0 +1,45 @@
+repo: agent-labs-dev/mergeloop
+pr: 166
+base: fc415871bc9bbf25b2675dd7de76a4add59f2233
+head: a2b2e40c2eba482381ebb7c27d1dc1927d041a52
+title: "feat: rebrand to MergeLoop and redirect the old domain"
+body: |-
+  Both `mergepatrol.ai` and `mergeloop.ai` currently serve the same app. This change makes **MergeLoop** the visible product name and `https://mergeloop.ai` the canonical hosted origin. Old dashboard links receive a **302** to the same path and query on the new origin, through a Cloudflare redirect rule; existing HTTPS API, MCP and webhook endpoints continue serving requests directly.
+
+  The dashboard, public docs/blog/compare/changelog, metadata and social artwork, GitHub review copy, agent skill and macOS menu bar app use the new name. Installed config and skill paths, labels, API fields, package/binary names, stored identifiers, GCP resources, bundle/Keychain IDs and rolling download URLs retain their compatibility names. Existing review-answer markers remain unchanged in hidden comments so older deliveries and rolling revisions still recognize them.
+
+  Gateway HTTPRoutes are now reconciled by the normal deploy, after the app rolls out. The Gateway keeps serving `mergepatrol.ai` unchanged; the page redirect is a Cloudflare rule in that zone, turned on after the deploy, which also needs the zone's proxy on and SSL set to Full (strict). Details and live verification commands are in `deploy/gcp/rebrand.md`.
+
+  ### Cutover prerequisite — do not queue yet
+
+  Before deploying, an owner must add `https://mergeloop.ai/auth/callback` to the **existing** `merge-patrol` GitHub App, keeping the old callback during rollout, and rename it to MergeLoop so the rollout reads the new slug. After the deploy, update its setup URL to `https://mergeloop.ai/setup/installed` and homepage to `https://mergeloop.ai`, preserving its App ID and installations.
+
+  The GitHub App and Stripe product/receipt/portal branding also need their owner settings updated; this repository sends no outbound email itself. Keep existing Stripe IDs and subscriptions. The machine's GCP reader identity received 403 for `container.clusters.get` on project `mergepatrol`, so cluster inspection and live route application were unavailable here. The normal deployment uses its existing Cloud Build identity.
+
+  ### Validation
+
+  - Rust formatting and `cargo clippy --workspace --all-targets --locked -- -D warnings` pass.
+  - UI Biome checks, TypeScript checking and production build pass; tray formatting passes. The macOS build runs in CI.
+  - Deployment shell syntax and YAML parsing pass. Both generated social cards were inspected.
+  - Only lint/type/build checks were run locally, per repository instructions; CI runs the full suite. No tests were added for copy or constants. Existing tests cover metadata assets, MCP initialization, skill-copy parity and review-answer recognition.
+  - Baseline evidence: both origins return 200; `/auth/login` on the new origin still returns the old-domain callback. After deployment, verify 302 + path/query preservation, successful GitHub sign-in/install return, direct old API/MCP access and a signed webhook delivery.
+
+  Hold this PR out of the merge queue until the callback prerequisite is confirmed. Production redirect/sign-in verification and external branding remain outstanding.
+
+  ---
+  Assisted by [Nebula](https://nebula.gg).
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/166?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1796171547&installation_model_id=434381&pr_number=166&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F166&signature=9e5d0272638ab650b8c667360bd60552552289a92b425b989bc10e3862cdaee9"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: deploy/gcp/bootstrap.sh, lines: 13 }
+        - { file: deploy/gcp/bootstrap.sh, lines: 122-130 }
+      what: "The host moves to mergeloop.ai but certificate resources are found by a fixed name, so a re-run skips the new domain."
+      fixed_by: "#180"

@@ -1,0 +1,53 @@
+repo: agent-labs-dev/mergeloop
+pr: 71
+base: 04a7927d8d49f40a49e7f212d92f12051579d33f
+head: 1ff393d236f6400b53bd15553fc7235f108925b2
+title: "feat: API keys can no longer leak into logs, and Settings asks for a spend-limited key"
+body: |-
+  ## Summary
+
+  Two follow-ups to #68.
+
+  **Settings tells users to give Mergepatrol its own key, with a spend limit.** If the key leaks, the limit caps what it can cost. The README says the same.
+
+  **Keys can't be printed by accident, and our copies of them are wiped.**
+
+  ```diff
+  -Vault::get(...)          -> Option<String>
+  +Vault::get(...)          -> Option<SecretString>   # decrypted bytes wiped (Zeroizing)
+  -ApiProxy::grant(_, key: String, _)
+  +ApiProxy::grant(_, key: SecretString, _)           # wiped when the job's grant drops
+   SetSecret { value: String }
+  +SetSecret { value: SecretString }                  # the key the dashboard posts; TS type unchanged
+   proxy upstream request
+  -  .header("x-api-key", key)
+  +  .header("x-api-key", sensitive(key))             # as reqwest already does for bearer_auth
+  ```
+
+  `SecretString` has no `Display`, and its `Debug` prints `[REDACTED]`, so a stray `{:?}` or `tracing` field can't log a key. This doesn't touch the copies reqwest and hyper make while they send a request.
+
+  ## Evidence
+
+  | Before | After |
+  | --- | --- |
+  | ![settings before](https://github.com/agent-labs-dev/mergepatrol/blob/a58a305496ecfc385ee81c9fea0fa6ee422b9599/pr-shots/settings-before.png?raw=true) | ![settings after](https://github.com/agent-labs-dev/mergepatrol/blob/a58a305496ecfc385ee81c9fea0fa6ee422b9599/pr-shots/settings-after.png?raw=true) |
+
+  The screenshots are of the dev server against a mocked API, at 1100×560 in the light theme.
+
+  - The proxy tests `swaps_the_token_for_the_anthropic_key`, `swaps_the_token_for_the_openai_key` and `openrouter_serves_both_apis` still see the real key upstream, both as `x-api-key` and as a bearer token.
+  - New test, `a_key_that_is_not_a_header_fails_the_request`: a key that is not a valid header value gives a 502. That was already the result before, through reqwest's builder error; it's now an explicit branch.
+  - The vault tests (round trip, wrong key, rotation, scope binding) pass with `SecretString`.
+  - `cargo fmt --check`, `clippy -D warnings`, `cargo test --workspace` and `pnpm check` pass. `ui/src/api` is unchanged.
+
+  Reviewed with sol-loop: 1 round with gpt-6.1-sol. Sol verdict: approved.
+
+  ## Merge Danger
+
+  **Door:** two-way. Nothing stored changes, and neither does the API's shape.
+
+  **Blast Radius:** none
+
+  The changes are type-level, inside the orchestrator, plus one paragraph on Settings.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+expected: clean

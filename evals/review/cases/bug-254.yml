@@ -1,0 +1,35 @@
+repo: agent-labs-dev/mergeloop
+pr: 254
+base: a21f9a70e8d92c3b0c25962c2c8853d8ffeef51d
+head: 064bc3af340816bf9a92989942e00c70a79de90e
+title: "fix(review): give the author's agent its CI's checks and true rules for its evidence"
+body: |-
+  Fixes what the first two runs of `agent.runs: local` turned up, on #244 and #252.
+
+  - **The review brief contradicted itself.** It said nothing reruns the agent's `evidence`, then repeated the hosted prompt's "MergeLoop runs each command on the PR". The prompt now takes who runs the review, and the author's version says MergeLoop takes the agent's word.
+  - **No CI checks for local reviews.** With `verify: []`, the author's brief said "its CI runs nothing a checkout can run", even here, where `ci.yml` runs `cargo test`. It now reads `.github/workflows/` from GitHub at the PR's head, through a new `workflows_at`, and lists the same commands the hosted review does.
+  - **Who reviewed was invisible.** Anyone with write access may review for a PR's author (#252 was cjber's, reviewed by my agent). `post_review` now stores the poster's login, and the review's summary opens with "`login`'s agent reviewed this." The login is in code, so GitHub pings no one.
+  - **`post_review` answered "Done."** It now returns `PostedView`: how many findings it took, and what happens next.
+  - **The review JSON left `evidence` unexplained.** The prompt now says a finding with none gives `"evidence": null`. The sample command is no longer `cargo test -p core`, which is no package here.
+  - **The `mergeloop` wait line said "Run `mergeloop … --after …`"** while it kept waiting itself. It now prints what it waits on, then "waiting".
+  - README: the evidence rule and CI-derived checks now state the local exception. Changelog entry added.
+
+  `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace` pass. I checked the workflows query against this repo live: it returns all 5 workflow files.
+
+  Not changed: the brief still assumes `mergeloop` is on PATH, which is where the skill's install line puts it.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1796452495&installation_model_id=434381&pr_number=254&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergeloop&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergeloop%2Fpull%2F254&signature=4471878e6330bbeacb4a81c3c80b3a1c85a3047665b94fbef6c5244df36c250b"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup><a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergeloop/pr/254?autoLogin=true&ref=codesmith_pr_footer">Open in [code]smith</a> · Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: crates/mergepatrol/src/review.rs, lines: 393 }
+      what: "The posted review's summary @-mentions the reviewer's login, pinging them on every review."
+      fixed_by: "#255"

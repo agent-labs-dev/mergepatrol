@@ -1,0 +1,85 @@
+repo: agent-labs-dev/mergeloop
+pr: 248
+base: 606d83b7c38b6573f78fcefec1b93520e9c230da
+head: afabbc7af3cbf843fa8c4f66fd32b26899ad042c
+title: "feat(review): let the author's own agent run MergeLoop's review, with `agent.runs: local`"
+body: |-
+  ## Summary
+
+  Stacked on #246. Step 3: with `agent.runs: local`, the review that gates a queued PR runs on its author's agent too, so a local repo needs no model key and no sandbox for anything but questions about findings.
+
+  ```mermaid
+  sequenceDiagram
+      participant Tick as queue tick
+      participant W as review worker
+      participant DB as agent_reviews
+      participant A as author's agent (mergeloop)
+      Tick->>DB: start_review(head) — pending
+      W->>DB: claim → running
+      W->>DB: await_author(brief) — status author, hold AuthorReview
+      A->>DB: next_need → needs: review, brief
+      A->>A: fresh subagent, worktree of head, review
+      A->>DB: post_review {head_sha, review} — pending + submitted (first wins)
+      W->>DB: claim → judge as its own (bars, rounds)
+      W-->>A: findings → review threads (no hosted fix) → needs: threads
+  ```
+
+  ```diff
+   review(r)                        # crates/mergepatrol/src/review.rs
+     fork → not reviewed
+  +  local, nothing posted → author_brief (hosted review_prompt + where to run, how to post)
+  +                          → await_author
+  +  local, posted        → posted_review (ids, evidence counts as failed)
+     hosted               → run_review in the sandbox
+     conclude → finish
+  -    Changes → hold_for_fix (hosted fix first)
+  +    Changes, local → no hold: threads for the author
+  ```
+
+  - New `post_review` tool/route: `POST .../agent-review/by-author`, shape-checked, write access.
+  - Migration `0022`: `agent_reviews.brief`, `.submitted`. New review status `author` (claim skips it), new hold `AuthorReview`, need `review`, dashboard badge **Author's agent reviews**.
+  - A local repo's review is on without a key, and its status no longer lists review as needing one.
+  - The `threads` instructions and the skill no longer send a `local` repo's agent to `ask_agent_about_review`, which runs MergeLoop's own agent (and needs its key). There, a reply in the thread is enough: the next review reads it.
+  - Docs: README repo settings and tools, `docs/queue-flow.md`, `skill.md`, and a changelog entry.
+
+  ## Evidence
+
+  No screenshot: the change on screen is one badge label for a new hold reason.
+
+  `cargo test --workspace --locked` passes. New tests:
+
+  | Test | Shows |
+  | --- | --- |
+  | store `a_review_waits_for_the_authors_agent_then_takes_the_first_it_posts` | `author` is skipped by claims; a wrong head or a second post is refused; the first post is claimed with `submitted` |
+  | worker `a_posted_review_is_numbered_and_its_evidence_counts_as_failed` | ids `f1…`, confidence clamped, evidence counts as failed, a bad shape is an error |
+  | `getting_ready::with_the_authors_agent_its_reviews_findings_go_to_the_author_unfixed` | one thread posted, no hosted fix (fails with the local arm forced off) |
+  | `getting_ready::with_the_authors_agent_a_pr_is_reviewed_without_a_model_key` | the review starts with no key |
+  | web `next_need_hands_the_authors_agent_the_review_its_worker_wrote` | `needs: review` with the worker's brief; a malformed post is a 400 |
+  | resolver `the_authors_agent_reviews_the_head_apart_and_posts_it` | the brief wraps the hosted prompt, names the worktree and the exact `post_review` call |
+
+  Not covered end to end: the worker's local branch of `review()` itself, which reads the App's credentials. Sol read it closely.
+
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`, `pnpm check`, `tsc --noEmit`: clean.
+
+  Reviewed with sol-loop: 1 round with gpt-6.1-sol. Sol verdict: approved
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  Off unless a repo sets `agent.runs: local`. The migration only adds nullable columns. A rollback leaves any review in `author` stuck, and new code is needed to read the new hold.
+
+  **Blast Radius:** small
+
+  Local repos only:
+  - MergeLoop doesn't run evidence commands again, so it takes the agent's word on them.
+  - A review left in `author` when a repo goes back to `hosted` stays there until the next push.
+  - Questions about findings still need the workspace's model key.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+expected:
+  bugs:
+    - at:
+        - { file: crates/resolver/src/lib.rs, lines: 578-594 }
+      what: "The author's brief embeds the hosted prompt: it says nothing reruns evidence and that MergeLoop runs each command."
+      fixed_by: "#254"

@@ -1,0 +1,46 @@
+repo: agent-labs-dev/mergeloop
+pr: 163
+base: df4218cc60387c5feedff693254bb6dab0b60e18
+head: 466370d51d1bd95acb24b53a3461a41e3a710ede
+title: "feat(pulls): publish a draft PR from the dashboard, and make close red"
+body: |-
+  ## What and why
+
+  Two gaps in the dashboard's PR actions:
+
+  - **No way to publish a draft.** A draft now has a **Publish** button in the You tab's **Drafts** folder and beside **Queue** in the queue page's PR pane (also for a queued PR the queue holds as a draft). It marks the PR ready for review on GitHub as the user, via GraphQL `markPullRequestReadyForReview` (REST has no endpoint for it). A PR that is already ready is left as it is. The You tab drops it from Drafts at once, and the queue, which holds drafts, wakes to read it again instead of waiting for the webhook.
+  - **The close button didn't read as close.** It was a grey icon like the others. It is now red-tinted, with a red hover. On the queue page it moves out of the list rows and onto the PR's pane, beside **Queue**, so it is only reachable from a PR you have open; the rows keep just priority and queue/remove. In the You tab it was already in the PR's pane. Its confirm step (queue page) and five-second Undo (You tab) are unchanged.
+
+  API and MCP: new route `POST /api/w/{id}/repos/{owner}/{name}/pulls/{number}/ready` with tool `ready_pull` (listed in the README). GitHub decides who may publish: write access, or being the PR's author. A refusal comes back as a 403 the dashboard shows.
+
+  ## Screenshots
+
+  Captured from the dashboard built from `origin/main` (before) and this branch (after), with the API stubbed.
+
+  | | Before | After |
+  | --- | --- | --- |
+  | Queue page | ![before](https://raw.githubusercontent.com/agent-labs-dev/mergepatrol/pr-assets/publish-draft/pr-assets/publish-draft/queue-before.png) | ![after](https://raw.githubusercontent.com/agent-labs-dev/mergepatrol/pr-assets/publish-draft/pr-assets/publish-draft/queue-after.png) |
+  | Queue page, open PR (close in the pane, not the rows) | — | ![after](https://raw.githubusercontent.com/agent-labs-dev/mergepatrol/pr-assets/publish-draft/pr-assets/publish-draft/queue-after-open.png) |
+  | You tab, Drafts | ![before](https://raw.githubusercontent.com/agent-labs-dev/mergepatrol/pr-assets/publish-draft/pr-assets/publish-draft/you-before.png) | ![after](https://raw.githubusercontent.com/agent-labs-dev/mergepatrol/pr-assets/publish-draft/pr-assets/publish-draft/you-after.png) |
+
+  ## How you checked it
+
+  - [x] `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `(cd ui && pnpm check)` pass
+  - [x] `cargo test` for store, github, web and mergepatrol passes, including new tests: `inbox_ready` clears a draft only on an open PR; publishing marks the queue's read stale and wakes it; GraphQL `FORBIDDEN` maps to `Refused`. No API types changed.
+  - [x] The README lists `ready_pull`
+  - [x] A changelog entry in `content/changelog/`
+  - [ ] `crates/github/tests/ready_live.rs` (ignored, needs a real draft and token) was not run
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  ---
+  Assisted by [Nebula](https://nebula.gg).
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/163?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1796166201&installation_model_id=434381&pr_number=163&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F163&signature=ded816466ab4726c37b66e9fb6bbd2d9635f7a73d86addf6c6d85f1ba40cca36"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected: clean
