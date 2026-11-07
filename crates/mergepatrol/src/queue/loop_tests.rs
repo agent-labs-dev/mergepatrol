@@ -457,7 +457,9 @@ impl GitHub for Fake {
             s.outage -= 1;
             bail!("GET /pulls/{number}: 502 Bad Gateway");
         }
-        let mut pr = s.prs[&number].clone();
+        let Some(mut pr) = s.prs.get(&number).cloned() else {
+            bail!("GET /pulls/{number}: 404 Not Found");
+        };
         if let Some((old, reads)) = s.stale.get_mut(&number) {
             pr.head_ref_oid = old.clone();
             *reads -= 1;
@@ -2539,8 +2541,8 @@ async fn with_the_review_on_a_pr_keeps_its_place_until_the_agent_or_a_human_appr
         [(1, "Held(Reviewing)".into()), (2, "Held(Reviewing)".into())]
     );
     assert_eq!(run.kinds(1), ["enqueued", "held"]);
-    // No comment for a review starting: the agent's own review says what it found.
-    assert!(run.gh.with(|s| !s.comments.iter().any(|(n, _)| *n == 1)));
+    // A review starting says only that it joined: the agent's own review says what it found.
+    assert_eq!(comments_on(&run, 1), [ENQUEUED]);
 
     run.store.finish_review(2, ReviewStatus::Asks);
     run.store.finish_review(1, ReviewStatus::Asks);
@@ -3643,6 +3645,137 @@ async fn removing_the_label_cancels_the_job() {
     assert_eq!(run.kinds(1).last().unwrap(), "cancelled");
     assert_eq!(run.gh.with(|s| s.merges), 0);
     assert!(run.lane().is_empty());
+}
+
+/// The comments on PR `number`, oldest first.
+fn comments_on(run: &Run, number: PrNumber) -> Vec<String> {
+    run.gh.with(|s| {
+        s.comments
+            .iter()
+            .filter(|(n, _)| *n == number)
+            .map(|(_, c)| c.clone())
+            .collect()
+    })
+}
+
+/// PR 1 held for a required review, which its comment says.
+fn held_for_review() -> Run {
+    Run::new(Fake::new(|s| {
+        s.add_pr(1);
+        s.prs.get_mut(&1).unwrap().review_decision = Some("REVIEW_REQUIRED".into());
+    }))
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_comment_of_a_cancelled_job_says_it_left_the_queue() {
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
+        s.prs.get_mut(&1).unwrap().labels.clear();
+    });
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "cancelled");
+    let comment = last_comment(&run);
+    assert!(
+        comment.starts_with("Left the queue: the `mergepatrol` label was removed."),
+        "{comment}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_pr_whose_label_comes_off_says_it_left_the_queue() {
+    let run = held_for_review();
+    run.tick().await;
+    assert!(last_comment(&run).starts_with("On hold: waiting for a required review"));
+    run.gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().labels.clear());
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "dequeued");
+    let comment = last_comment(&run);
+    assert!(
+        comment.starts_with("Left the queue: the `mergepatrol` label was removed."),
+        "{comment}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_held_pr_merged_outside_mergeloop_says_so() {
+    let run = held_for_review();
+    run.tick().await;
+    run.gh.with_mut(|s| {
+        s.prs.get_mut(&1).unwrap().state = "MERGED".into();
+        s.merged.push(1);
+        s.merge_commits.insert(1, "abc123".into());
+    });
+    run.tick().await;
+    assert_eq!(last_comment(&run), "Merged outside MergeLoop as abc123.");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_closed_while_its_job_runs_says_it_left_the_queue() {
+    let run = Run::on_the_lane(Fake::new(|s| s.add_pr(1)));
+    run.gh.then(|s| {
+        s.checks_on
+            .insert(s.head(1), [("ci".into(), CheckState::Pending)].into());
+        s.prs.get_mut(&1).unwrap().state = "CLOSED".into();
+    });
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "dequeued");
+    assert_eq!(last_comment(&run), "Left the queue: it was closed.");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_ejected_while_the_lane_syncs_keeps_the_comment_that_says_why() {
+    let run = Run::new(Fake::new(|s| {
+        fork_pr(s);
+        s.prs.get_mut(&1).unwrap().review_decision = Some("REVIEW_REQUIRED".into());
+    }));
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(ReviewRequired)".to_owned())]);
+    run.gh.with_mut(|s| s.push(1, "untrusted"));
+    run.tick().await;
+    assert_eq!(run.kinds(1).last().unwrap(), "dequeued");
+    let comments = comments_on(&run, 1);
+    assert!(
+        comments
+            .last()
+            .unwrap()
+            .contains("Dequeued: new commits were pushed"),
+        "{comments:?} {:?}",
+        run.kinds(1)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pr_says_it_joined_the_queue_while_its_review_runs() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+    });
+    *run.store.review_settings.lock().unwrap() = Some(ReviewSettings {
+        enabled: true,
+        ..ReviewSettings::default()
+    });
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(Reviewing)".into())]);
+    assert_eq!(comments_on(&run, 1), [ENQUEUED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn getting_ready_says_so_once_however_many_steps_it_takes() {
+    let run = prep_run(|s| {
+        s.add_pr(1);
+        s.required = vec!["ci".into()];
+        s.checks.insert("ci".into(), CheckState::Pending);
+    });
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepChecks)".into())]);
+    run.gh
+        .with_mut(|s| s.checks.insert("ci".into(), CheckState::Failed));
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepFixing)".into())]);
+    assert_eq!(comments_on(&run, 1), [GETTING_READY]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -5047,3 +5180,4 @@ async fn a_stack_layer_gets_its_own_missing_check_clock() {
     assert_eq!(run.kinds(2).last().unwrap(), "ejected");
     assert!(last_comment(&run).contains("finished: sift."));
 }
+mod status_comment_regression;

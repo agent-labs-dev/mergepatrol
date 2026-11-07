@@ -1,7 +1,7 @@
 //! Drives one repo: polls GitHub, keeps the lane in sync, and runs the PR at the head of the lane
 //! through rebase, checks, fixes for failed checks, and merge.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,8 +14,8 @@ use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_billing::Billing;
 use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
-    EjectReason, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber,
-    PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
+    EjectReason, EntryState, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase,
+    PrNumber, PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
     ReviewStatus, SpendTask, Transition, body_closing_commit_issues,
 };
 use mergepatrol_executor::Executor;
@@ -1104,10 +1104,13 @@ async fn sync_lane(
     let mut started = false;
 
     let mut candidates = Vec::new();
+    // The PRs this sync took out of the queue with a comment that says why.
+    let mut dropped: HashSet<PrNumber> = HashSet::new();
     for &unit in &units {
         if unit.stacked && unit.layers.iter().any(|pr| pr.is_cross_repository) {
             let why = "Stacks with a PR from a fork are not supported yet.";
             eject(ctx, settings, gh, key, &unit.prs(), why, "fork").await?;
+            dropped.extend(unit.prs());
             continue;
         }
         let mut pin = None;
@@ -1121,6 +1124,7 @@ async fn sync_lane(
                 Pin::Wait => continue,
                 Pin::Drop { kind, why } => {
                     drop_fork(ctx, settings, gh, key, unit.number, kind, &why).await?;
+                    dropped.insert(unit.number);
                     continue;
                 }
             }
@@ -1162,6 +1166,7 @@ async fn sync_lane(
                 Some(Block::Eject(why)) => {
                     let why = format!("Ejected: {why}.");
                     eject(ctx, settings, gh, key, &unit.prs(), &why, "fork").await?;
+                    dropped.extend(unit.prs());
                     continue;
                 }
                 None => None,
@@ -1202,6 +1207,20 @@ async fn sync_lane(
     let mut prs_of: HashMap<PrNumber, Vec<PrNumber>> =
         lane.entries.iter().map(|e| (e.number, e.prs())).collect();
     prs_of.extend(units.iter().map(|u| (u.number, u.prs())));
+    let prs_of = |n: PrNumber| prs_of.get(&n).cloned().unwrap_or(vec![n]);
+    // A PR still in the queue, in another entry, has not left it.
+    let queued: HashSet<PrNumber> = candidates.iter().flat_map(|c| prs_of(c.number)).collect();
+    let getting_ready: HashSet<PrNumber> = lane
+        .entries
+        .iter()
+        .filter(|e| matches!(&e.state, EntryState::Held(h) if h.of_prep()))
+        .map(|e| e.number)
+        .collect();
+    // Each entry's PRs before the sync: a stack's layers join and leave it while it stays.
+    let before: HashMap<PrNumber, Vec<PrNumber>> =
+        lane.entries.iter().map(|e| (e.number, e.prs())).collect();
+    // Each entry's comment, the last its changes call for.
+    let mut comments: Vec<(PrNumber, String)> = Vec::new();
     for change in lane.sync(&candidates) {
         let (number, kind, message, comment) = match change {
             LaneChange::Enqueued(n) => {
@@ -1211,11 +1230,23 @@ async fn sync_lane(
                     b.queued(installation, snap.private, &authors, unix_now())
                         .await?;
                 }
-                (n, "enqueued", "added to the queue".to_owned(), None)
+                (
+                    n,
+                    "enqueued",
+                    "added to the queue".to_owned(),
+                    Some(ENQUEUED.to_owned()),
+                )
             }
             LaneChange::Dequeued { number, .. } => {
                 ctx.job_errors.clear(key, number);
-                (number, "dequeued", "left the queue".to_owned(), None)
+                let left =
+                    exit_once(ctx, key, &prs_of(number), "dequeued", "left the queue").await?;
+                let left: Vec<PrNumber> = left
+                    .into_iter()
+                    .filter(|n| !queued.contains(n) && !dropped.contains(n))
+                    .collect();
+                comment_left(gh, repo, &labels.trigger, &left).await;
+                continue;
             }
             LaneChange::Held { number, reason } => {
                 let comment = match &gate {
@@ -1227,8 +1258,10 @@ async fn sync_lane(
                     {
                         None
                     }
-                    // Getting ready shows on the dashboard, and in the commits it pushes.
-                    _ if reason.of_prep() => None,
+                    // Once as it starts: each step after shows on the dashboard.
+                    _ if reason.of_prep() => {
+                        (!getting_ready.contains(&number)).then(|| GETTING_READY.to_owned())
+                    }
                     _ => Some(on_hold(&reason)),
                 };
                 (number, "held", reason.to_string(), comment)
@@ -1240,15 +1273,42 @@ async fn sync_lane(
                 Some("No longer on hold. Waiting in its place in the queue.".to_owned()),
             ),
         };
-        let prs = prs_of.get(&number).cloned().unwrap_or(vec![number]);
-        if kind == "dequeued" {
-            exit_once(ctx, key, &prs, kind, &message).await?;
-        } else {
-            record_all(ctx, key, &prs, kind, &message).await?;
-        }
+        record_all(ctx, key, &prs_of(number), kind, &message).await?;
         if let Some(comment) = comment {
-            comment_all(gh, repo, &prs, &comment).await?;
+            comments.retain(|(n, _)| *n != number);
+            comments.push((number, comment));
         }
+    }
+    // The layers that joined or left a stack that stays, which its own changes do not cover.
+    let mut joined_comments: Vec<(Vec<PrNumber>, String)> = Vec::new();
+    for e in lane.entries.clone() {
+        let Some(old) = before.get(&e.number) else {
+            continue;
+        };
+        let now = e.prs();
+        let left: Vec<PrNumber> = old.iter().filter(|n| !now.contains(n)).copied().collect();
+        let joined: Vec<PrNumber> = now.iter().filter(|n| !old.contains(n)).copied().collect();
+        if !left.is_empty() {
+            let left = exit_once(ctx, key, &left, "dequeued", "left the queue").await?;
+            let left: Vec<PrNumber> = left
+                .into_iter()
+                .filter(|n| !queued.contains(n) && !dropped.contains(n))
+                .collect();
+            comment_left(gh, repo, &labels.trigger, &left).await;
+        }
+        if !joined.is_empty() {
+            record_all(ctx, key, &joined, "enqueued", "added to the queue").await?;
+            let covered = comments.iter().any(|(n, _)| *n == e.number);
+            if let Some(comment) = standing(&e.state, gate.as_ref()).filter(|_| !covered) {
+                joined_comments.push((joined, comment));
+            }
+        }
+    }
+    for (number, comment) in comments {
+        comment_all(gh, repo, &prs_of(number), &comment).await?;
+    }
+    for (prs, comment) in joined_comments {
+        comment_all(gh, repo, &prs, &comment).await?;
     }
     ctx.store.save_lane(key, lane).await?;
     if started {
@@ -1630,7 +1690,7 @@ async fn exit_once(
     prs: &[PrNumber],
     outcome: &str,
     detail: &str,
-) -> Result<()> {
+) -> Result<Vec<PrNumber>> {
     let mut fresh = Vec::new();
     for n in prs {
         match ctx.store.has_left(key, *n).await? {
@@ -1638,7 +1698,45 @@ async fn exit_once(
             false => fresh.push(*n),
         }
     }
-    exit_all(ctx, key, &fresh, outcome, detail, None).await
+    exit_all(ctx, key, &fresh, outcome, detail, None).await?;
+    Ok(fresh)
+}
+
+/// What the comment of PR `number`, which left the queue, says now that it did: why, as GitHub
+/// shows it. `None` for a PR still open with `label` on, as one queued again.
+async fn left_comment(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    label: &str,
+    number: PrNumber,
+) -> Result<Option<String>> {
+    let pr = gh.pull_request(repo, number).await?;
+    Ok(match pr.state.as_str() {
+        "MERGED" => Some(match gh.merged_as(repo, number, &pr.head_ref_oid).await? {
+            Some(sha) => format!("Merged outside MergeLoop as {sha}."),
+            None => "Merged outside MergeLoop.".to_owned(),
+        }),
+        "CLOSED" => Some("Left the queue: it was closed.".to_owned()),
+        _ if !pr.has_label(label) => Some(format!(
+            "Left the queue: the `{label}` label was removed. Add it again to queue it."
+        )),
+        _ => None,
+    })
+}
+
+/// Writes on each of `prs` that it left the queue, and why. The PRs left already: a comment that
+/// fails is not worth undoing that for.
+async fn comment_left(gh: &dyn GitHub, repo: &RepoName, label: &str, prs: &[PrNumber]) {
+    for n in prs {
+        let written = match left_comment(gh, repo, label, *n).await {
+            Ok(Some(comment)) => gh.sticky_comment(repo, *n, &comment).await,
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = written {
+            tracing::warn!(%repo, pr = n, error = %format!("{e:#}"), "could not say that the PR left the queue");
+        }
+    }
 }
 
 async fn comment_all(gh: &dyn GitHub, repo: &RepoName, prs: &[PrNumber], body: &str) -> Result<()> {
@@ -1745,10 +1843,12 @@ async fn finish(
         Outcome::Cancelled => {
             lane.remove(unit.number);
             exit_all(ctx, key, &prs, "cancelled", "the label was removed", None).await?;
+            comment_left(gh, repo, &settings.label, &prs).await;
         }
         Outcome::Left => {
             lane.remove(unit.number);
-            exit_once(ctx, key, &prs, "dequeued", "left the queue").await?;
+            let left = exit_once(ctx, key, &prs, "dequeued", "left the queue").await?;
+            comment_left(gh, repo, &settings.label, &left).await;
         }
         Outcome::Restarted(why) => {
             lane.stop();
@@ -1885,6 +1985,26 @@ async fn resume_merge(
     ctx.store.save_lane(key, lane).await?;
     Ok(sha.is_some())
 }
+
+/// What the comment of a PR that joins an entry in `state` says: where the entry stands.
+fn standing(state: &EntryState, gate: Option<&mergepatrol_billing::Hold>) -> Option<String> {
+    match state {
+        EntryState::Waiting => Some(ENQUEUED.to_owned()),
+        EntryState::Held(h) => Some(match gate {
+            Some(g) if g.reason == *h => g.comment.clone(),
+            _ if h.of_prep() => GETTING_READY.to_owned(),
+            _ => on_hold(h),
+        }),
+        EntryState::Active => None,
+    }
+}
+
+/// What a PR's comment says once it joins the queue.
+const ENQUEUED: &str = "Added to the queue. Waiting in its place.";
+
+/// What a PR's comment says while it gets ready off the lane, whichever step it is at: each step
+/// shows on the dashboard, and a comment for each would be noise.
+const GETTING_READY: &str = "Getting ready to merge: MergeLoop settles any conflict and sees its checks pass, fixing them if it can. It keeps its place in the queue.";
 
 fn on_hold(reason: &Hold) -> String {
     format!(
