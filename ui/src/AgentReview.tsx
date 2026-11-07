@@ -275,7 +275,7 @@ const said = { holds: "Holds", does_not_hold: "Does not hold", abstained: "No vo
 /** How many of a finding's panel said it holds, and who ran the panel. */
 function tally(v: VerificationView) {
   const holds = v.votes.filter((x) => x.verdict === "holds").length;
-  return `${holds} of ${v.votes.length} fresh agents said it holds, and ${v.needed} had to`;
+  return `${holds} of ${v.votes.length} said it holds; ${v.needed} needed`;
 }
 
 /**
@@ -289,8 +289,8 @@ function Votes({ f }: { f: FindingView }) {
     <div className="mt-2 overflow-hidden rounded-md border border-line bg-surface text-xs">
       <p className="border-b border-line bg-sunken px-3 py-1.5 text-muted">
         {v.by === "merge_loop"
-          ? "MergeLoop had fresh agents check it, each with only this finding and the code: "
-          : "The author's agent says its fresh subagents checked it; MergeLoop did not run them: "}
+          ? "Fresh agents checked it, each with only the finding and the code: "
+          : "The author's agent says its fresh subagents checked it, unchecked by MergeLoop: "}
         {tally(v)}
       </p>
       <ul className="divide-y divide-line-soft">
@@ -298,13 +298,7 @@ function Votes({ f }: { f: FindingView }) {
           // biome-ignore lint/suspicious/noArrayIndexKey: votes have no id, and never reorder
           <li key={i} className="flex gap-3 px-3 py-1.5">
             <span
-              className={`w-24 shrink-0 ${
-                x.verdict === "holds"
-                  ? "text-bad"
-                  : x.verdict === "abstained"
-                    ? "text-faint"
-                    : "text-ok"
-              }`}
+              className={`w-24 shrink-0 ${x.verdict === "abstained" ? "text-faint" : "font-medium text-fg-2"}`}
             >
               {said[x.verdict]}
             </span>
@@ -394,10 +388,10 @@ function ClearedList({
               <span className="text-ok">✓</span>
               <span className="flex-1 text-fg-2">
                 <Md>{f.title}</Md>
+                {f.verified && !f.verified.upheld && (
+                  <span className="block text-xs text-faint">{tally(f.verified)}</span>
+                )}
               </span>
-              {f.verified && !f.verified.upheld && (
-                <span className="text-xs text-faint">{tally(f.verified)}</span>
-              )}
               <span className="text-xs text-faint tabular-nums">{pct(f.confidence)}</span>
             </li>
           ))}
