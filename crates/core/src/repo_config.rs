@@ -33,10 +33,6 @@ pub struct RepoSettings {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSettings {
-    /// Where conflicts are resolved and failed checks fixed: by MergeLoop's agent, or by the
-    /// agent of the PR's author.
-    #[serde(default)]
-    pub runs: Runs,
     /// Whose model the agent runs, with the workspace's key for it.
     #[serde(default)]
     pub provider: Provider,
@@ -45,18 +41,6 @@ pub struct AgentSettings {
     /// A model for one task over the default: each task without one runs the default.
     #[serde(default, skip_serializing_if = "ModelOverrides::is_empty")]
     pub overrides: ModelOverrides,
-}
-
-/// Who resolves a PR's conflicts and fixes its failed checks while it gets ready.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Runs {
-    /// MergeLoop's agent, in its sandbox, with the workspace's model key.
-    #[default]
-    Hosted,
-    /// The agent of the PR's author, on their machine: the PR keeps its place, held, until
-    /// they push. `mergeloop` tells it what the PR needs.
-    Local,
 }
 
 /// A model for each task the agent runs, over the default. A task without one runs the default.
@@ -229,7 +213,6 @@ struct RepoConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentConfig {
-    runs: Option<Runs>,
     provider: Option<Provider>,
     model: Option<String>,
     effort: Option<String>,
@@ -304,8 +287,6 @@ struct Written<'a> {
 #[derive(Serialize)]
 struct WrittenAgent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    runs: Option<Runs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<Provider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a str>,
@@ -317,8 +298,7 @@ struct WrittenAgent<'a> {
 
 impl WrittenAgent<'_> {
     fn is_empty(&self) -> bool {
-        self.runs.is_none()
-            && self.provider.is_none()
+        self.provider.is_none()
             && self.model.is_none()
             && self.effort.is_none()
             && self.overrides.is_empty()
@@ -419,7 +399,6 @@ impl RepoSettings {
             label: config.label.unwrap_or_else(|| defaults.label.clone()),
             batch_size: config.batch_size.unwrap_or(defaults.batch_size),
             agent: AgentSettings {
-                runs: config.agent.runs.unwrap_or(defaults.agent.runs),
                 provider,
                 model,
                 effort: config
@@ -519,7 +498,6 @@ impl RepoSettings {
             label: (self.label != defaults.label).then_some(&self.label),
             batch_size: (self.batch_size != defaults.batch_size).then_some(self.batch_size),
             agent: WrittenAgent {
-                runs: (s.runs != d.runs).then_some(s.runs),
                 provider: model.then_some(s.provider),
                 model: model.then_some(&s.model),
                 effort: (s.effort != d.effort).then_some(&s.effort),
@@ -584,7 +562,6 @@ mod tests {
             label: "mergepatrol".into(),
             batch_size: 8,
             agent: AgentSettings {
-                runs: Default::default(),
                 provider: Provider::Anthropic,
                 model: "claude-opus-5-5".into(),
                 effort: "medium".into(),
@@ -694,19 +671,6 @@ agent:
     }
 
     #[test]
-    fn the_authors_agent_runs_where_the_file_says_so_and_writes_back() {
-        assert_eq!(defaults().agent.runs, Runs::Hosted);
-        let file = "version: 1\nagent:\n  runs: local\n";
-        let s = RepoSettings::from_file(Some(file), &defaults()).unwrap();
-        assert_eq!(s.agent.runs, Runs::Local);
-        let written = s.to_yaml(&defaults());
-        assert!(written.contains("agent:\n  runs: local\n"), "{written}");
-        assert_eq!(RepoSettings::from_file(Some(&written), &defaults()), Ok(s));
-        let bad = RepoSettings::from_file(Some("agent:\n  runs: laptop\n"), &defaults());
-        assert!(bad.is_err());
-    }
-
-    #[test]
     fn no_file_is_the_defaults() {
         assert_eq!(RepoSettings::from_file(None, &defaults()), Ok(defaults()));
     }
@@ -794,7 +758,6 @@ agent:
             label: "queue".into(),
             batch_size: 3,
             agent: AgentSettings {
-                runs: Default::default(),
                 provider: Provider::OpenAi,
                 model: "gpt-6.1-sol".into(),
                 effort: "high".into(),

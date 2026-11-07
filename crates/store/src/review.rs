@@ -38,10 +38,6 @@ pub struct ReviewRecord {
     pub answered_by: Option<String>,
     pub note: String,
     pub questions: Vec<Question>,
-    /// What MergeLoop asks of the author's agent, while the review waits for it.
-    pub brief: Option<String>,
-    /// The review the author's agent posted, as it posted it.
-    pub submitted: Option<serde_json::Value>,
     /// RFC 3339.
     pub created_at: String,
     pub updated_at: String,
@@ -119,19 +115,6 @@ pub trait ReviewStore: Send + Sync {
     async fn retry_review(&self, id: i64, claim: i64, error: &str, after: Duration) -> Result<()>;
     /// The PR moved on before the review finished.
     async fn stale_review(&self, id: i64, claim: i64) -> Result<()>;
-    /// A running review waits for the author's agent, which `brief` tells what to do. No worker
-    /// takes it until that agent posts its review.
-    async fn await_author(&self, id: i64, claim: i64, brief: &str) -> Result<()>;
-    /// The author's agent posted its review of `head`, for a worker to judge: false unless the
-    /// PR's review of that head waits for it, so the first posted is the one judged.
-    async fn submit_review(
-        &self,
-        installation_id: u64,
-        repo: &RepoName,
-        pr: PrNumber,
-        head: &str,
-        review: &serde_json::Value,
-    ) -> Result<bool>;
     /// Lets go of every review and question a worker took, for the next to take them now, and
     /// ends those claims: only the worker that starts with the queue lock may run them.
     async fn release_reviews(&self) -> Result<u64>;
@@ -208,7 +191,7 @@ pub trait ReviewStore: Send + Sync {
 macro_rules! columns {
     () => {
         r#"id, installation_id, repo, number, head_sha, since_head, status, claim, error, attempts,
-    summary, findings, asked, answers, answered_by, note, questions, brief, submitted,
+    summary, findings, asked, answers, answered_by, note, questions,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
     to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at"#
     };
@@ -235,8 +218,6 @@ fn record(row: &PgRow) -> Result<ReviewRecord> {
         answered_by: row.get("answered_by"),
         note: row.get("note"),
         questions: serde_json::from_value(row.get("questions"))?,
-        brief: row.get("brief"),
-        submitted: row.get("submitted"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -430,43 +411,6 @@ impl ReviewStore for PgStore {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    async fn await_author(&self, id: i64, claim: i64, brief: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE agent_reviews SET status = 'author', brief = $3, claimed_at = NULL,
-                 updated_at = now()
-             WHERE id = $1 AND status = 'running' AND claim = $2",
-        )
-        .bind(id)
-        .bind(claim)
-        .bind(brief)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn submit_review(
-        &self,
-        installation_id: u64,
-        repo: &RepoName,
-        pr: PrNumber,
-        head: &str,
-        review: &serde_json::Value,
-    ) -> Result<bool> {
-        let updated = sqlx::query(
-            "UPDATE agent_reviews SET status = 'pending', submitted = $5, updated_at = now()
-             WHERE installation_id = $1 AND repo = $2 AND number = $3 AND head_sha = $4
-               AND status = 'author'",
-        )
-        .bind(installation_id as i64)
-        .bind(repo.to_string())
-        .bind(pr as i64)
-        .bind(head)
-        .bind(review)
-        .execute(&self.pool)
-        .await?;
-        Ok(updated.rows_affected() > 0)
     }
 
     async fn carry_review(
@@ -871,38 +815,6 @@ mod tests {
         let r = store.review(r.id).await.unwrap().unwrap();
         assert_eq!(r.status, ReviewStatus::Approved);
         assert!(r.findings[..2].iter().all(|f| f.withdrawn && !f.sent_back));
-    }
-
-    #[sqlx::test(migrations = false)]
-    async fn a_review_waits_for_the_authors_agent_then_takes_the_first_it_posts(pool: PgPool) {
-        let store = PgStore::migrate(pool).await.unwrap();
-        let r = store.start_review(1, &repo(), 7, "aaa").await.unwrap();
-        let stale = Duration::from_secs(600);
-        let claimed = store.claim_review(stale).await.unwrap().unwrap();
-        store
-            .await_author(r.id, claimed.claim, "review it")
-            .await
-            .unwrap();
-        let waiting = store.review(r.id).await.unwrap().unwrap();
-        assert_eq!(waiting.status, ReviewStatus::Author);
-        assert_eq!(waiting.brief.as_deref(), Some("review it"));
-        assert_eq!(
-            store.claim_review(stale).await.unwrap(),
-            None,
-            "no worker takes it"
-        );
-
-        let posted = serde_json::json!({ "summary": "s", "findings": [] });
-        let r7 = repo();
-        let submit = |head: &'static str| store.submit_review(1, &r7, 7, head, &posted);
-        assert!(!submit("old").await.unwrap(), "not the head it waits on");
-        assert!(submit("aaa").await.unwrap());
-        assert!(
-            !submit("aaa").await.unwrap(),
-            "the first posted is the one judged"
-        );
-        let judged = store.claim_review(stale).await.unwrap().unwrap();
-        assert_eq!((judged.id, judged.submitted), (r.id, Some(posted)));
     }
 
     #[sqlx::test(migrations = false)]

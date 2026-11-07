@@ -36,12 +36,6 @@ pub enum NeedKind {
     Threads,
     /// A reviewer whose approval is required asked for changes: make them.
     Changes,
-    /// It conflicts with its base branch: rebase it, resolving the conflict.
-    Conflict,
-    /// Required checks failed: fix them.
-    FixChecks,
-    /// The queue waits for the author's agent to review it, as MergeLoop's agent would.
-    Review,
     /// It is a draft: publish it once its work is done.
     Draft,
     /// It waits on a human: nothing for the agent to do.
@@ -64,9 +58,6 @@ impl NeedKind {
             | NeedKind::Wait
             | NeedKind::Threads
             | NeedKind::Changes
-            | NeedKind::Conflict
-            | NeedKind::FixChecks
-            | NeedKind::Review
             | NeedKind::Draft => 0,
             NeedKind::Merged => 10,
             NeedKind::Ejected => 11,
@@ -142,16 +133,7 @@ async fn read(
     let exits = app.store.last_exits(id, repo, &[number]).await?;
     let exit = exits.iter().find(|e| e.pr == number);
     let newest = app.store.events(id, repo, Some(number), 1).await?;
-    let mut view = view(status, exit, newest.first(), after);
-    // What the review asks of the author's agent is on the review, which the worker wrote.
-    if view.needs == NeedKind::Review {
-        let pr = view.layer.map_or(number, u64::from);
-        let review = app.store.latest_review(id, repo, pr).await?;
-        if let Some(asked) = review.and_then(|r| r.brief) {
-            view.brief = format!("{asked}\n\nThen run `{}`.", view.then);
-        }
-    }
-    Ok(view)
+    Ok(view(status, exit, newest.first(), after))
 }
 
 /// The need of a PR, from where the queue has it, how it last left the queue, and its newest
@@ -249,9 +231,6 @@ fn need(status: &PullStateView, exit: Option<&ExitRecord>) -> Need {
     let kind = match hold.reason {
         HoldReasonView::ReviewChanges | HoldReasonView::UnresolvedThreads => NeedKind::Threads,
         HoldReasonView::ChangesRequested => NeedKind::Changes,
-        HoldReasonView::AuthorRebase => NeedKind::Conflict,
-        HoldReasonView::AuthorFix => NeedKind::FixChecks,
-        HoldReasonView::AuthorReview => NeedKind::Review,
         HoldReasonView::Draft => NeedKind::Draft,
         HoldReasonView::ReviewAsks
         | HoldReasonView::ReviewRequired
@@ -290,14 +269,9 @@ fn need_id(need: &Need, exit: Option<&ExitRecord>, newest: Option<&EventRecord>)
 /// What the agent does about the need.
 fn brief(need: &Need, status: &PullStateView, then: &str) -> String {
     let (repo, number) = (status.repo.as_str(), status.number);
-    let trunk = status.queue.as_ref().map_or("main", |q| q.trunk.as_str());
     let pr = need.layer.unwrap_or(number);
     let on = match need.layer {
         Some(layer) if layer != number => format!(" on #{layer}, a layer of its stack,"),
-        _ => String::new(),
-    };
-    let of = match need.layer {
-        Some(layer) if layer != number => format!(" (a layer of #{number}'s stack)"),
         _ => String::new(),
     };
     let detail = &need.detail;
@@ -316,16 +290,6 @@ fn brief(need: &Need, status: &PullStateView, then: &str) -> String {
             .replace("{then}", then),
         NeedKind::Changes => format!(
             "A reviewer whose approval the branch requires asked for changes{on}. Read their review (`gh pr view {pr} --repo {repo} --comments`), make the changes, fetch and rebase onto the remote branch, push once, and reply to each of their comments with what changed. The PR goes on once they approve. Then run `{then}`."
-        ),
-        NeedKind::Conflict => format!(
-            "#{pr}{of} conflicts with its base branch, `{trunk}`, and MergeLoop leaves the rebase to you. Fetch, then rebase its branch onto `origin/{trunk}` (in a stack, each layer onto the one below it, bottom first). Resolve each conflict so that both sides' changes still do what they meant to, then run the repo's tests. Push with `--force-with-lease`. Then run `{then}`."
-        ),
-        NeedKind::FixChecks => format!(
-            "On #{pr}{of}, {detail}. MergeLoop leaves the fix to you: read why each failed (`gh pr checks {pr} --repo {repo}`, then `gh run view <run> --repo {repo} --log-failed`), fix the cause in a commit on top, fetch, rebase onto the remote branch, and push. If a failure is not the PR's to fix, such as a flaky test or an outage, run the failed jobs again with `gh run rerun <run> --repo {repo} --failed` instead. Then run `{then}`."
-        ),
-        // `read` puts the review's own brief in place of this.
-        NeedKind::Review => format!(
-            "#{pr}{of} waits for your agent's review, whose brief is not written yet. Run `{then}` again in a minute."
         ),
         NeedKind::Draft => format!(
             "#{pr} is a draft{on}. If its work is done, publish it with `mergeloop call ready_pull {args}`. If not, finish it first, or tell the user it waits on them. Then run `{then}`."
@@ -352,7 +316,7 @@ const THREADS: &str = "Review threads{on} hold the PR: {detail}. Work each unres
 2. Read each thread and the code it points at. Fix it, at every place its **Also at** names, or decide it doesn't apply, for a reason the code shows: a file and line, a test, a doc. Only a call on scope, product or design, access you lack, or a change outside the repo is for a human.
 3. Commit the fixes together, as few commits as you can: each push gets a new review. Fetch and rebase onto the remote branch, then push once.
 4. Reply in each thread you worked: the fix's short SHA and one line on what changed, or the reason it doesn't apply. Then resolve it: `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: \"ID\"}) { thread { isResolved } } }'`. Resolve only after the push. A thread for a human: reply with the decision needed and who should make it, and leave it unresolved.
-5. To have MergeLoop's reviewer settle one of its findings now, rather than on the next push, reply to it with `mergeloop call ask_agent_about_review` and `{\"repo\", \"number\", \"head_sha\", \"finding\", \"question\"}`. That runs MergeLoop's own agent, so not in a repo whose config sets `agent.runs: local`: there, your reply in the thread is enough, and the next review reads it.
+5. To have MergeLoop's reviewer settle one of its findings now, rather than on the next push, reply to it with `mergeloop call ask_agent_about_review` and `{\"repo\", \"number\", \"head_sha\", \"finding\", \"question\"}`.
 
 Never answer MergeLoop's review of a PR you built with `answer_agent_review`, or approve it with `review_pull`. Then run `{then}`.";
 
@@ -433,9 +397,6 @@ mod tests {
         assert_eq!(kind(HoldReasonView::ReviewAsks), NeedKind::Human);
         assert_eq!(kind(HoldReasonView::ReviewRequired), NeedKind::Human);
         assert_eq!(kind(HoldReasonView::Reviewing), NeedKind::Wait);
-        assert_eq!(kind(HoldReasonView::AuthorRebase), NeedKind::Conflict);
-        assert_eq!(kind(HoldReasonView::AuthorFix), NeedKind::FixChecks);
-        assert_eq!(kind(HoldReasonView::AuthorReview), NeedKind::Review);
         assert_eq!(kind(HoldReasonView::PrepFixing), NeedKind::Wait);
     }
 
@@ -511,24 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn a_conflict_left_to_the_author_says_what_to_rebase_onto() {
-        let v = view(
-            status(held(HoldReasonView::AuthorRebase, Some(4))),
-            None,
-            None,
-            None,
-        );
-        assert_eq!((v.needs, v.exit_code), (NeedKind::Conflict, 0));
-        assert!(
-            v.brief
-                .starts_with("#4 (a layer of #6's stack) conflicts with its base branch, `main`"),
-            "{}",
-            v.brief
-        );
-        assert!(v.brief.contains("onto `origin/main`"));
-    }
-
-    #[test]
     fn a_layers_need_points_at_the_layer() {
         let v = view(
             status(held(HoldReasonView::UnresolvedThreads, Some(4))),
@@ -540,10 +483,5 @@ mod tests {
         assert!(v.brief.contains("on #4, a layer of its stack"));
         assert!(v.brief.contains("pullRequest(number: 4)"));
         assert!(v.brief.ends_with(&format!("Then run `{}`.", v.then)));
-        // Asking MergeLoop's agent about a finding is not for a repo where the author's runs.
-        assert!(
-            v.brief
-                .contains("not in a repo whose config sets `agent.runs: local`")
-        );
     }
 }

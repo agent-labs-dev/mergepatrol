@@ -257,8 +257,6 @@ pub(crate) async fn set_review_settings(
 pub enum AgentReviewStatusView {
     Pending,
     Running,
-    /// Waiting for the author's agent to post its review.
-    Author,
     Asks,
     Approved,
     Changes,
@@ -270,7 +268,6 @@ impl From<ReviewStatus> for AgentReviewStatusView {
         match s {
             ReviewStatus::Pending => Self::Pending,
             ReviewStatus::Running => Self::Running,
-            ReviewStatus::Author => Self::Author,
             ReviewStatus::Asks => Self::Asks,
             ReviewStatus::Approved => Self::Approved,
             ReviewStatus::Changes => Self::Changes,
@@ -379,10 +376,6 @@ pub struct EvidenceView {
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct VerificationView {
-    /// `merge_loop`: MergeLoop ran the panel in its sandbox. `author`: the agent of the PR's
-    /// author says it did, and MergeLoop took its word.
-    #[ts(type = "\"merge_loop\" | \"author\"")]
-    pub by: mergepatrol_core::Verifier,
     /// How many had to say it holds.
     pub needed: u32,
     /// Enough did: the finding shows its change.
@@ -401,7 +394,6 @@ pub struct VoteView {
 impl From<mergepatrol_core::Verification> for VerificationView {
     fn from(v: mergepatrol_core::Verification) -> Self {
         VerificationView {
-            by: v.by,
             needed: v.needed.into(),
             upheld: v.upheld(),
             votes: v
@@ -837,71 +829,6 @@ fn answers_of(
     Ok(answers)
 }
 
-/// The review the author's agent ran, as MergeLoop's own agent writes one.
-#[derive(Deserialize)]
-pub struct PostReview {
-    pub head_sha: String,
-    pub review: serde_json::Value,
-}
-
-/// What a posted review must hold for the worker to judge it.
-#[derive(Deserialize)]
-struct Posted {
-    #[expect(dead_code, reason = "only read to check its shape")]
-    summary: String,
-    findings: Vec<mergepatrol_core::Finding>,
-}
-
-/// What MergeLoop does with a review the author's agent posted.
-#[derive(Serialize, TS)]
-#[ts(export)]
-pub struct PostedView {
-    pub findings: usize,
-    pub next: String,
-}
-
-/// The author's agent posts its review of a head the queue asked it to review, in a repo whose
-/// agent runs on the author's side. The worker judges it within seconds, as it does its own.
-pub(crate) async fn post_review(
-    State(app): State<AppState>,
-    caller: Caller,
-    Path((id, owner, name, number)): Path<(u64, String, String, u64)>,
-    Json(body): Json<PostReview>,
-) -> Result<Json<PostedView>, ApiError> {
-    let repo = repo_name(owner, name)?;
-    let id = caller.repo(&app, id, &repo).await?;
-    let posted = match serde_json::from_value::<Posted>(body.review.clone()) {
-        Ok(posted) => posted,
-        Err(e) => {
-            return Err(ApiError::bad_request(&format!(
-                "The review is not in the shape its brief gives: {e}."
-            )));
-        }
-    };
-    let by = reviewer(&caller, &app, &repo).await?;
-    // Whose agent reviewed, for the review to say: anyone who may write to the repo may.
-    let mut review = body.review;
-    review["by"] = by.into();
-    let taken = app
-        .store
-        .submit_review(id, &repo, number, &body.head_sha, &review)
-        .await?;
-    if !taken {
-        return Err(ApiError::Status(
-            StatusCode::CONFLICT,
-            "No review of that head waits for your agent: the PR moved on, MergeLoop's agent reviews this repo, or a review was posted already.".into(),
-        ));
-    }
-    Ok(Json(PostedView {
-        findings: posted.findings.len(),
-        next: format!(
-            "MergeLoop judges each finding within seconds: one that must change goes back to the \
-author as a review thread, one only a human can settle goes to a human, and the rest are cleared. \
-`mergeloop {repo}#{number}` says what comes of it."
-        ),
-    }))
-}
-
 #[derive(Deserialize, TS)]
 #[ts(export)]
 pub struct AskAgent {
@@ -1091,8 +1018,6 @@ mod tests {
             answered_by: None,
             note: String::new(),
             questions: Vec::new(),
-            brief: None,
-            submitted: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -1100,7 +1025,7 @@ mod tests {
 
     #[test]
     fn a_finding_shows_its_panels_votes_and_whether_they_carried_it() {
-        use mergepatrol_core::{Panel, Verdict, Verifier, Vote};
+        use mergepatrol_core::{Panel, Verdict, Vote};
         let mut j = judged("a", 90, Lean::Change, false);
         j.finding.evidence = None;
         let vote = |verdict| Vote {
@@ -1112,13 +1037,13 @@ mod tests {
             vote(Verdict::Abstained),
             vote(Verdict::Holds),
         ];
-        j.finding.verified = Some(Panel::SECURITY.verdict(Verifier::Author, cast));
+        j.finding.verified = Some(Panel::SECURITY.verdict(cast));
         let repo = RepoName::parse("o/r").unwrap();
         let view = serde_json::to_value(FindingView::new(j, &repo, 1)).unwrap();
         assert_eq!(
             view["verified"],
             serde_json::json!({
-                "by": "author", "needed": 2, "upheld": true,
+                "needed": 2, "upheld": true,
                 "votes": [
                     { "verdict": "holds", "why": "w" },
                     { "verdict": "abstained", "why": "w" },

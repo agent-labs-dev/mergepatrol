@@ -91,7 +91,6 @@ impl Config {
             label: opt("MERGEPATROL_LABEL", "mergepatrol"),
             batch_size: opt("MERGEPATROL_BATCH_SIZE", "8").parse()?,
             agent: AgentSettings {
-                runs: Default::default(),
                 provider,
                 model,
                 effort: opt("MERGEPATROL_EFFORT", "medium"),

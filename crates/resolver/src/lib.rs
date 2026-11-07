@@ -238,19 +238,11 @@ you {after}, run what the repo's tools let you, and say what you could not check
 /// How a review learns to run the repo, to build its evidence on. The checkout has common
 /// toolchains, not the repo's dependencies: those come from its verify commands, if it has any,
 /// or from the evidence itself.
-fn checks_section(verify: &Verify, by: Reviewer) -> String {
-    let setup = match by {
-        Reviewer::Sandbox => {
-            "The checkout has git and common toolchains (Node with pnpm, Rust, Go, \
-Python, Bun) but none of the repo's dependencies. MergeLoop runs each `evidence` command again in \
-a fresh checkout, so make it install what it needs first, e.g. `pnpm install --frozen-lockfile && \
-pnpm vitest run src/retry.test.ts`."
-        }
-        Reviewer::Author => {
-            "Run them in your checkout of the PR's head, installing what they \
-need first."
-        }
-    };
+fn checks_section(verify: &Verify) -> String {
+    let setup = "The checkout has git and common toolchains (Node with pnpm, Rust, Go, Python, \
+Bun) but none of the repo's dependencies. MergeLoop runs each `evidence` command again in a fresh \
+checkout, so make it install what it needs first, e.g. `pnpm install --frozen-lockfile && pnpm \
+vitest run src/retry.test.ts`.";
     match verify {
         Verify::None => format!(
             "This repo declares no verify commands, and its CI runs nothing a checkout can run: \
@@ -408,18 +400,6 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
   ]
 }"#;
 
-/// Who runs a review, which decides who runs its evidence: MergeLoop, again, after its own
-/// agent, or no one, after the author's.
-#[derive(Clone, Copy)]
-enum Reviewer {
-    Sandbox,
-    Author,
-}
-
-pub(crate) fn review_prompt(req: &ReviewRequest<'_>) -> String {
-    prompt_for(req, Reviewer::Sandbox)
-}
-
 /// Where a finding is, as a prompt names it after its title: ` (file:line, file)`, or nothing
 /// for the whole PR.
 fn place(f: &Finding) -> String {
@@ -516,7 +496,7 @@ the PR unless one of these breaks it.\n{}\n",
     }
 }
 
-fn prompt_for(req: &ReviewRequest<'_>, by: Reviewer) -> String {
+pub(crate) fn review_prompt(req: &ReviewRequest<'_>) -> String {
     format!(
         "You are reviewing a pull request before a merge queue merges it into `{trunk}`.
 
@@ -609,41 +589,13 @@ Reply with the JSON alone, in this shape, and nothing else:
         sent_back = sent_back_section(req.sent_back),
         scope = scope_section(req.scope),
         base = req.base,
-        verify = checks_section(req.verify, by),
+        verify = checks_section(req.verify),
         seats = Panel::SECURITY.seats,
         needed = Panel::SECURITY.needed,
-        rerun = match by {
-            Reviewer::Sandbox => "After the review MergeLoop runs each command on the PR alone, \
-with only the files it names, and a command it does not see fail does not go back to the author: \
-MergeLoop shows the finding as a note that holds nothing. So name every file the command needs, \
-and keep each finding's files apart from the others'.",
-            Reviewer::Author => "MergeLoop runs none of them again: it takes your word that \
-each failed. So name only a command you ran on the PR's head and saw fail for that reason, with \
-every file it needs.",
-        },
-    )
-}
-
-/// The review as the agent of the PR's author runs it, on their machine, in place of MergeLoop's
-/// sandbox: the same prompt, with where to run it and how to post what it found.
-pub fn author_review_brief(req: &ReviewRequest<'_>, repo: &str, number: u64, head: &str) -> String {
-    format!(
-        "MergeLoop asks you for its review of #{number}, in place of its own agent. Run it as a \
-fresh agent, or in a subagent with no other context: you did not write this PR, and you hold it \
-to the code. Work in a checkout of its head of its own, not the one you work in: `git fetch origin \
-{head} && git worktree add --detach <dir> {head}`, and remove it once done. Commit and push \
-nothing.
-
-{prompt}
-
-{panel}
-
-Once you have the JSON, post it as `review`, with the head it is of: `mergeloop call post_review \
--`, given `{{\"repo\": \"{repo}\", \"number\": {number}, \"posted\": {{\"head_sha\": \"{head}\", \"review\": <the JSON>}}}}` \
-on stdin. MergeLoop judges each finding as it does its own: back to the author as a review \
-thread, to a human, or cleared.",
-        prompt = prompt_for(req, Reviewer::Author),
-        panel = vote::author_panel(req.pr_title, req.base, head),
+        rerun = "After the review MergeLoop runs each command on the PR alone, with only the files \
+it names, and a command it does not see fail does not go back to the author: MergeLoop shows the \
+finding as a note that holds nothing. So name every file the command needs, and keep each \
+finding's files apart from the others'.",
     )
 }
 
@@ -971,42 +923,6 @@ mod scope_tests {
         assert!(since.contains("git diff b4se..HEAD"));
         let whole = with(Scope::Whole);
         assert!(!whole.contains("Review only"), "{whole}");
-    }
-}
-
-#[cfg(test)]
-mod author_review_tests {
-    use std::path::Path;
-
-    use super::*;
-
-    #[test]
-    fn the_authors_agent_reviews_the_head_apart_and_posts_it() {
-        let req = ReviewRequest {
-            workdir: Path::new("."),
-            base: "abc",
-            pr_title: "t",
-            pr_body: "b",
-            trunk: "main",
-            answered: &[],
-            sent_back: &[],
-            scope: Scope::Whole,
-            verify: &Verify::None,
-            transcript: Path::new("t"),
-        };
-        let brief = author_review_brief(&req, "o/r", 5, "h1");
-        // The prompt of MergeLoop's own review, but no one reruns the author's evidence.
-        assert!(brief.contains("You are reviewing a pull request"));
-        assert!(brief.contains("MergeLoop runs none of them again"));
-        assert!(!brief.contains("MergeLoop runs each"));
-        assert!(brief.contains("in your checkout of the PR's head"));
-        assert!(brief.contains("git worktree add --detach <dir> h1"));
-        assert!(brief.contains("mergeloop call post_review -"));
-        // Its agent has fresh subagents vote on what would go back on its word alone.
-        assert!(brief.contains(&vote::author_panel("t", "abc", "h1")));
-        assert!(brief.contains(
-            r#"{"repo": "o/r", "number": 5, "posted": {"head_sha": "h1", "review": <the JSON>}}"#
-        ));
     }
 }
 

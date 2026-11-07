@@ -21,12 +21,12 @@ pub use lane::{
 };
 pub use repo_config::{
     AgentSettings, EFFORTS, FixCiSettings, LabelSpec, Labels, ModelOverrides, REPO_CONFIG_PATH,
-    RepoSettings, Runs, TaskModel, WorkspaceDefaults,
+    RepoSettings, TaskModel, WorkspaceDefaults,
 };
 pub use review::{
     Answer, Answered, Bar, CodeLine, Evidence, Finding, Judged, Kind, Lean, LineKind, Panel, Place,
     Question, Related, ReviewOverrides, ReviewSettings, ReviewStatus, Route, SentBack, Verdict,
-    Verification, Verifier, Vote, review_status, review_url,
+    Verification, Vote, review_status, review_url,
 };
 pub use spend::{Spend, SpendTask};
 pub use steps::{Step, StepTimes, current_step, step_times};
