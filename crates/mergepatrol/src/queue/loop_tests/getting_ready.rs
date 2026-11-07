@@ -20,6 +20,7 @@ use crate::job::LEFT_CONFLICT;
 use crate::review::conclude;
 use mergepatrol_executor::protocol::ReviewOutput;
 
+mod outcomes_after_intervening_review;
 mod outcomes_regression;
 
 /// How long a scenario may take to end. It ends far sooner, or it is stuck.
