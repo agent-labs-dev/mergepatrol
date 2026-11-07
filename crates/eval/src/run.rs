@@ -137,6 +137,7 @@ pub fn spec(case: &Case, agent: &Agent, api: ApiAccess) -> JobSpec {
             reviewed: None,
             depth: mergepatrol_core::Depth::Standard,
         },
+        update: Default::default(),
     }
 }
 

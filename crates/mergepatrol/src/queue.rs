@@ -18,15 +18,16 @@ use mergepatrol_core::{
     PrNumber, PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
     ReviewStatus, SpendTask, Transition, body_closing_commit_issues,
 };
-use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
     ApiAccess, BUNDLE_FILE, JobEvent, JobOutcome, JobSpec, MAX_BUNDLE_BYTES, ResolverSpec, Task,
+    Update,
 };
 use mergepatrol_executor::proxy::{Api, ApiProxy, Granted, REQUESTS_PER_JOB};
+use mergepatrol_executor::{Executor, TimedOut};
 use mergepatrol_git::{Git, cache_path};
 use mergepatrol_github::{
-    App, AppCredentials, BranchMerge, CheckState, Installation, MergeOutcome, PullRequest,
-    RateLimited, RepoSnapshot,
+    App, AppCredentials, BranchMerge, BranchMove, CheckState, Installation, MergeOutcome,
+    PullRequest, RateLimited, RepoSnapshot,
 };
 use mergepatrol_store::{AgentTask, Change, GITHUB_APP, LaneKey, PgStore, Scope, Store, Vault};
 use secrecy::ExposeSecret;
@@ -39,7 +40,7 @@ use crate::config::Config;
 use crate::credentials::ChatGpt;
 use crate::github::GitHub;
 use crate::job::{GAVE_UP, LEFT_CONFLICT, RETITLED};
-use crate::publish::{Publish, create_commits, publish};
+use crate::publish::{Publish, create_commits, create_merge, publish};
 use crate::review::REVIEW_MARK;
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
@@ -3287,6 +3288,7 @@ pub(crate) async fn job_spec(
         pr_body: pr.body.clone(),
         verify: settings.verify.clone(),
         leave_conflicts: false,
+        update: Update::Rebase,
         resolver: ResolverSpec {
             provider,
             model: model.to_owned(),
@@ -3620,6 +3622,7 @@ async fn rebase_and_publish(
     let mut rebased: Vec<String> = heads[..from].to_vec();
     let mut moved: Vec<usize> = Vec::new();
     let mut resolved: Vec<usize> = Vec::new();
+    let mut merged: Vec<usize> = Vec::new();
     let result = rebase_layers(
         ctx,
         gh,
@@ -3633,8 +3636,7 @@ async fn rebase_and_publish(
         &heads,
         &trunk,
         &mut rebased,
-        &mut moved,
-        &mut resolved,
+        (&mut moved, &mut resolved, &mut merged),
     )
     .await;
     for i in &moved {
@@ -3642,6 +3644,10 @@ async fn rebase_and_publish(
             .await?;
     }
     if let Err(e) = result {
+        // Not the PR's failure: the caller runs it again, as for any error outside the PR.
+        if TimedOut::caused(&e) {
+            return Err(e);
+        }
         if !agent && format!("{e:#}").starts_with(LEFT_CONFLICT) {
             return Ok(Event::RebaseConflict);
         }
@@ -3676,15 +3682,21 @@ async fn rebase_and_publish(
         return Ok(Event::HeadMoved);
     }
     // Every layer, so that the update also fails if an author pushed to one left as it is: a
-    // layer's update to the head it has is its lease.
-    let moves: Vec<(&str, &str, &str)> = unit
+    // layer's update to the head it has is its lease. Only a replay needs a force-push.
+    let moves: Vec<BranchMove> = unit
         .layers
         .iter()
         .zip(heads.iter().zip(&rebased))
-        .map(|(pr, (before, after))| (pr.head_ref_name.as_str(), before.as_str(), after.as_str()))
+        .enumerate()
+        .map(|(i, (pr, (before, after)))| BranchMove {
+            branch: &pr.head_ref_name,
+            before,
+            after,
+            force: moved.contains(&i) && !merged.contains(&i),
+        })
         .collect();
     if !moved.is_empty()
-        && let Err(e) = gh.force_update_branches(&snap.id, &moves).await
+        && let Err(e) = gh.update_branches(&snap.id, &moves).await
     {
         // `updateRefs` refuses when a branch moved: an author pushed while the jobs ran.
         if unit.branch_heads(gh, &key.repo).await? != heads {
@@ -3760,9 +3772,13 @@ fn restack_branch(pr: &PullRequest) -> String {
     format!("mergepatrol/restack-{}", pr.number)
 }
 
-/// Rebases each layer from `rebased.len()` up, and creates its commits on GitHub: pushes its new
-/// head to `rebased`, its index to `moved` when it changed, and to `resolved` when the agent
-/// resolved a conflict in it.
+/// Brings each layer from `rebased.len()` up to date, and creates its commits on GitHub: pushes
+/// its new head to `rebased`, its index to `moved` when it changed, to `resolved` when the agent
+/// resolved a conflict in it, and to `merged` when its base was merged into it.
+///
+/// A layer may be updated by a merge of its base, unless the repo merges PRs by rebasing them,
+/// which would replay the merge's commits, or a layer below it was rebased: a merge would then
+/// keep the commits that rebase replaced in this layer's history.
 #[allow(clippy::too_many_arguments)]
 async fn rebase_layers(
     ctx: &Ctx,
@@ -3777,10 +3793,10 @@ async fn rebase_layers(
     heads: &[String],
     trunk: &str,
     rebased: &mut Vec<String>,
-    moved: &mut Vec<usize>,
-    resolved: &mut Vec<usize>,
+    (moved, resolved, merged): (&mut Vec<usize>, &mut Vec<usize>, &mut Vec<usize>),
 ) -> Result<()> {
     let repo = &key.repo;
+    let mut may_merge = merge_method(gh, key, snap).await? != "rebase";
     for i in rebased.len()..unit.layers.len() {
         let pr = &unit.layers[i];
         let head = &heads[i];
@@ -3809,12 +3825,29 @@ async fn rebase_layers(
         let (mut spec, _granted) =
             job_spec(ctx, gh, key, pr, settings, head, &onto, below, Task::Rebase).await?;
         spec.leave_conflicts = !agent;
-        let events = run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
+        spec.update = match may_merge {
+            true => Update::Either,
+            false => Update::Rebase,
+        };
+        let ran = run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await;
+        let events = match ran {
+            // A replay of a long history can outlast the job: a merge does not replay it.
+            Err(e) if TimedOut::caused(&e) && spec.update == Update::Either => {
+                let why = format!("{e:#}: merging `{}` in instead", key.trunk);
+                record(ctx, key, pr.number, "merging-base", &why).await?;
+                spec.update = Update::Merge;
+                // The timed-out job revoked its token once it fetched.
+                spec.token = gh.read_token(&key.repo).await?;
+                let job_id = format!("{job_id}-merge");
+                run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?
+            }
+            ran => ran?,
+        };
         if agent_resolved(&events) {
             resolved.push(i);
         }
         let _cache = ctx.caches.lock(repo).await;
-        let local_head = check_job_output(
+        let updated = check_job_output(
             git,
             cache,
             &out,
@@ -3822,6 +3855,7 @@ async fn rebase_layers(
             &onto,
             head,
             upstream.as_deref(),
+            spec.update,
         )
         .await?;
         let publish = Publish {
@@ -3830,9 +3864,18 @@ async fn rebase_layers(
             branch: &pr.head_ref_name,
             expected_head: head,
             base: &onto,
-            local_head: &local_head,
+            local_head: &updated.head,
         };
-        let sha = create_commits(gh, git, cache, &publish).await?;
+        let sha = match updated.merged {
+            true => {
+                merged.push(i);
+                create_merge(gh, git, cache, &publish).await?
+            }
+            false => {
+                may_merge = false;
+                create_commits(gh, git, cache, &publish).await?
+            }
+        };
         rebased.push(sha.clone());
         moved.push(i);
         if i + 1 < unit.layers.len() {
@@ -3848,10 +3891,20 @@ async fn rebase_layers(
     Ok(())
 }
 
+/// A rebase job's result, as `check_job_output` found it.
+#[derive(Debug)]
+struct Updated {
+    head: String,
+    /// It is a merge of the base into the PR's head, not the PR's commits replayed.
+    merged: bool,
+}
+
 /// The job is untrusted, so its output is checked here, not believed. A rebase only replays
-/// the PR's changes, and a conflict can only be in a file the PR changed: the result may touch
-/// no file outside the PR's own. A stack layer's own changes start at `upstream`, the layer
-/// below as it was.
+/// the PR's changes, and a merge only adds the base's, and a conflict can only be in a file the
+/// PR changed: the result may touch no file outside the PR's own. A merge, which `update` must
+/// allow, has the PR's head and the base as its parents. A stack layer's own changes start at
+/// `upstream`, the layer below as it was.
+#[allow(clippy::too_many_arguments)]
 async fn check_job_output(
     git: &Git,
     cache: &Path,
@@ -3860,8 +3913,17 @@ async fn check_job_output(
     onto: &str,
     head: &str,
     upstream: Option<&str>,
-) -> Result<String> {
+    update: Update,
+) -> Result<Updated> {
     let local_head = import_job_output(git, cache, out, number).await?;
+    let parents = git.parents(cache, &local_head).await?;
+    let merged = parents.len() > 1;
+    if merged && update == Update::Rebase {
+        bail!("the job merged where it was to rebase");
+    }
+    if merged && parents != [head, onto] {
+        bail!("the job's merge is not of the base branch into the PR");
+    }
     if !git.is_ancestor(cache, onto, &local_head).await? {
         bail!("the job's result does not sit on the base branch");
     }
@@ -3886,7 +3948,10 @@ async fn check_job_output(
             outside.join(", ")
         );
     }
-    Ok(local_head)
+    Ok(Updated {
+        head: local_head,
+        merged,
+    })
 }
 
 /// A fix may change any file but CI's and the queue's config, and only on top of the PR head.
@@ -4123,7 +4188,9 @@ mod tests {
         Git.create_bundle(&work, &out.join(BUNDLE_FILE), &result, &trunk)
             .await
             .unwrap();
-        check_job_output(&Git, &cache, &out, 1, &trunk, &head, None).await
+        check_job_output(&Git, &cache, &out, 1, &trunk, &head, None, Update::Rebase)
+            .await
+            .map(|u| u.head)
     }
 
     /// A fix job result that changes `files` on top of the PR head.
@@ -4270,6 +4337,75 @@ mod tests {
     #[tokio::test]
     async fn job_output_outside_the_pr_files_is_rejected() {
         let err = check(&[("a.txt", "pr\n"), ("b.txt", "sneaky\n")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside the PR: b.txt"), "{err}");
+    }
+
+    /// A job result that merges the trunk, or another commit, into the PR head, which changed
+    /// `a.txt`, and then changes `files`, checked as `update` allows.
+    async fn check_merge(
+        update: Update,
+        of_trunk: bool,
+        files: &[(&str, &str)],
+    ) -> Result<Updated> {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        let base = commit(&work, &[("a.txt", "1\n"), ("b.txt", "1\n")]);
+        let head = commit(&work, &[("a.txt", "pr\n")]);
+        git(&work, &["checkout", "-q", "--detach", &base]);
+        let trunk = commit(&work, &[("c.txt", "trunk\n")]);
+        let other = commit(&work, &[("d.txt", "not the trunk\n")]);
+        git(&work, &["checkout", "-q", "--detach", &head]);
+        let into = if of_trunk { &trunk } else { &other };
+        git(&work, &["merge", "-q", "--no-ff", "-m", "merge", into]);
+        if !files.is_empty() {
+            for (f, c) in files {
+                std::fs::write(work.join(f), c).unwrap();
+                git(&work, &["add", f]);
+            }
+            git(&work, &["commit", "-q", "--amend", "--no-edit"]);
+        }
+        let result = git(&work, &["rev-parse", "HEAD"]);
+
+        let cache = tmp.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        git(&cache, &["init", "-q", "--bare"]);
+        git(
+            &cache,
+            &[
+                "fetch",
+                "-q",
+                work.to_str().unwrap(),
+                &format!("{head}:refs/pr"),
+                &format!("{trunk}:refs/trunk"),
+            ],
+        );
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        Git.create_bundle(&work, &out.join(BUNDLE_FILE), &result, &trunk)
+            .await
+            .unwrap();
+        check_job_output(&Git, &cache, &out, 1, &trunk, &head, None, update).await
+    }
+
+    #[tokio::test]
+    async fn a_merge_of_the_base_into_the_pr_passes_where_the_job_may_merge() {
+        let ok = check_merge(Update::Either, true, &[]).await.unwrap();
+        assert!(ok.merged);
+        let resolved = check_merge(Update::Merge, true, &[("a.txt", "pr, resolved\n")]).await;
+        assert!(resolved.unwrap().merged);
+
+        let err = check_merge(Update::Rebase, true, &[]).await.unwrap_err();
+        assert!(
+            err.to_string().contains("merged where it was to rebase"),
+            "{err}"
+        );
+        let err = check_merge(Update::Either, false, &[]).await.unwrap_err();
+        assert!(err.to_string().contains("not of the base branch"), "{err}");
+        let err = check_merge(Update::Either, true, &[("b.txt", "sneaky\n")])
             .await
             .unwrap_err();
         assert!(err.to_string().contains("outside the PR: b.txt"), "{err}");

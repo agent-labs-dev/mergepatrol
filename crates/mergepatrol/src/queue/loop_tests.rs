@@ -116,6 +116,9 @@ struct State {
     merge_hangs: Option<MergeHang>,
     /// Each merged PR's merge commit.
     merge_commits: HashMap<PrNumber, String>,
+    /// The branches refuse a force-push, as a protection that blocks them does: `updateRefs`
+    /// moves them only without `force`, and only forward.
+    forbids_force: bool,
     /// Heads that need a rebase onto the trunk. Every other head is on it.
     behind: Vec<String>,
     /// Heads whose workflow runs wait for a maintainer's approval.

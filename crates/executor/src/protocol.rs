@@ -47,6 +47,24 @@ pub struct JobSpec {
     pub resolver: ResolverSpec,
     #[serde(default)]
     pub task: Task,
+    /// How a `Task::Rebase` brings the branch up to date with `trunk_sha`.
+    #[serde(default)]
+    pub update: Update,
+}
+
+/// How a rebase job brings a branch up to date: replay its commits, or merge its base in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Update {
+    /// Replay the branch's commits onto the base. The default, for an orchestrator from before
+    /// merges, which publishes only replayed commits.
+    #[default]
+    Rebase,
+    /// Merge the base in when the branch already holds merges, so it keeps up by merging, or
+    /// when the merge is clean and the rebase conflicts. Rebase otherwise.
+    Either,
+    /// Merge the base in: a rebase of the branch ran out of time.
+    Merge,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

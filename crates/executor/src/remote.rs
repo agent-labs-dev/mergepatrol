@@ -250,7 +250,7 @@ impl Executor for RemoteExecutor {
         let ended = tokio::select! {
             _ = &mut done => None,
             ended = job.ended() => Some(ended),
-            _ = tokio::time::sleep(self.timeout) => bail!("the job did not finish in {:?}", self.timeout),
+            _ = tokio::time::sleep(self.timeout) => return Err(crate::TimedOut(self.timeout).into()),
         };
         drop(job);
         if let Some(ended) = ended {
@@ -321,6 +321,7 @@ mod tests {
                 settings_url: None,
             },
             task: Default::default(),
+            update: Default::default(),
         }
     }
 

@@ -50,10 +50,10 @@ flowchart TD
 
 Dashed is planned, and not built.
 
-- **Rebase** runs only on a conflict with the trunk. A batch merges PRs as they are. A PR alone is rebased in the lane, unless GitHub can merge it as it is: not a stack, no conflict, a trunk that is not strict, checks passed on its head, and not a suspect of a failed batch.
+- **Rebase** runs only on a conflict with the trunk. A PR that keeps up with the trunk by merging, or whose rebase conflicts while a merge does not, has the trunk merged into it instead, unless the repo merges by rebasing. A rebase that runs out of time merges instead, and is never the PR's failure: it runs again, as any job does on an error outside the PR. A batch merges PRs as they are. A PR alone is rebased in the lane, unless GitHub can merge it as it is: not a stack, no conflict, a trunk that is not strict, checks passed on its head, and not a suspect of a failed batch.
 - **A failed GitHub Actions job** runs again once on each head before a fix, or before the PR is ejected with no fixes left: a failure such as a dropped network request may pass. GitHub's `run_attempt` on the workflow run says whether it ran again already, so a restart runs it no second time. A check of another app, or a commit status, goes straight to the fix.
 - **Fixes** are one budget for a PR or a stack, for its checks: `fix_ci.attempts`, 3 by default. They are counted from the `Fixed-by:` commits on top of the author's last commit, so a push from the author earns new ones.
-- **A stack** rebases and publishes as one. A conflict on any layer rebases it all. A fix goes on the lowest layer that failed, and the layers above it are rebased onto the fix.
+- **A stack** rebases and publishes as one. A layer may merge only while no layer below it was rebased. A conflict on any layer rebases it all. A fix goes on the lowest layer that failed, and the layers above it are rebased onto the fix.
 - **A fork** goes straight to the lane. No agent runs on it, so there is nothing to rebase past a conflict or to fix. Waiting for its checks here would save the lane little: a fork never joins a batch, so unless it sits on the current trunk, the lane rebases it and runs its checks again.
 - **A title check** can't be fixed by a commit. The agent proposes a title, MergeLoop sets it, and an empty commit runs the checks once more.
 - **A fix or an agent's conflict resolution** needs a review of that change alone. A clean rebase keeps its approval.
