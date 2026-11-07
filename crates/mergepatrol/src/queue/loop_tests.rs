@@ -3681,7 +3681,7 @@ async fn the_comment_of_a_cancelled_job_says_it_left_the_queue() {
     assert_eq!(run.kinds(1).last().unwrap(), "cancelled");
     let comment = last_comment(&run);
     assert!(
-        comment.starts_with("Left the queue: the `mergepatrol` label was removed."),
+        comment.starts_with("Left the queue: the `mergeloop` label was removed."),
         "{comment}"
     );
 }
@@ -3697,7 +3697,7 @@ async fn a_held_pr_whose_label_comes_off_says_it_left_the_queue() {
     assert_eq!(run.kinds(1).last().unwrap(), "dequeued");
     let comment = last_comment(&run);
     assert!(
-        comment.starts_with("Left the queue: the `mergepatrol` label was removed."),
+        comment.starts_with("Left the queue: the `mergeloop` label was removed."),
         "{comment}"
     );
 }
