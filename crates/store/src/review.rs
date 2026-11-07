@@ -873,6 +873,7 @@ mod tests {
                     ..Default::default()
                 }),
                 needs_human: false,
+                verified: None,
                 code: Vec::new(),
                 related: Vec::new(),
             },
