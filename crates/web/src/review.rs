@@ -328,6 +328,8 @@ pub struct FindingView {
     pub sent_back: bool,
     /// The agent withdrew it after the author's reply.
     pub withdrawn: bool,
+    /// For a bug the PR did not bring: a link that opens an issue for it on GitHub.
+    pub issue: Option<String>,
     /// The change needs a call the author cannot make from the PR.
     pub needs_human: bool,
     /// It has a review thread on the PR, which its author resolves.
@@ -336,10 +338,21 @@ pub struct FindingView {
     pub bar: Bar,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum LeanView {
+    Fine,
+    Change,
+    /// A bug in code the PR did not bring: a note, to file as an issue.
+    PreExisting,
+}
+
+/// A human's call on a finding the agent asks about.
+#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CallView {
     Fine,
     Change,
 }
@@ -383,7 +396,7 @@ pub struct RelatedView {
 pub struct AnswerView {
     /// The finding's id.
     pub finding: String,
-    pub call: LeanView,
+    pub call: CallView,
     /// What to change. Required with `change`.
     #[serde(default)]
     pub note: String,
@@ -417,10 +430,13 @@ fn code_view(lines: Vec<CodeLine>) -> Vec<CodeLineView> {
         .collect()
 }
 
-impl From<Judged> for FindingView {
-    fn from(j: Judged) -> Self {
+impl FindingView {
+    /// A finding of the review of `repo`'s PR `number`.
+    fn new(j: Judged, repo: &RepoName, number: PrNumber) -> Self {
+        let issue = j.finding.issue_url(repo, number);
         let f = j.finding;
         FindingView {
+            issue,
             id: f.id,
             kind: f.kind.into(),
             title: f.title,
@@ -430,6 +446,7 @@ impl From<Judged> for FindingView {
             lean: match f.lean {
                 Lean::Fine => LeanView::Fine,
                 Lean::Change => LeanView::Change,
+                Lean::PreExisting => LeanView::PreExisting,
             },
             finding: f.finding,
             unsure: f.unsure,
@@ -487,7 +504,10 @@ impl From<ReviewRecord> for AgentReviewView {
             head_sha: r.head_sha,
             error: r.error,
             summary: r.summary,
-            findings: findings.into_iter().map(FindingView::from).collect(),
+            findings: findings
+                .into_iter()
+                .map(|j| FindingView::new(j, &r.repo, r.number))
+                .collect(),
             asked: r.asked,
             answers: r
                 .answers
@@ -495,12 +515,12 @@ impl From<ReviewRecord> for AgentReviewView {
                 .map(|(finding, a)| match a {
                     Answer::Fine => AnswerView {
                         finding,
-                        call: LeanView::Fine,
+                        call: CallView::Fine,
                         note: String::new(),
                     },
                     Answer::Change { note } => AnswerView {
                         finding,
-                        call: LeanView::Change,
+                        call: CallView::Change,
                         note,
                     },
                 })
@@ -736,11 +756,11 @@ fn answers_of(
             )));
         }
         let answer = match a.call {
-            LeanView::Fine => Answer::Fine,
-            LeanView::Change if a.note.trim().is_empty() => {
+            CallView::Fine => Answer::Fine,
+            CallView::Change if a.note.trim().is_empty() => {
                 return Err(ApiError::bad_request("Say what to change."));
             }
-            LeanView::Change => Answer::Change {
+            CallView::Change => Answer::Change {
                 note: a.note.trim().to_owned(),
             },
         };
@@ -1065,21 +1085,40 @@ mod tests {
         assert!(
             answers_of(
                 &r,
-                &body(vec![a("a", LeanView::Fine, ""), a("c", LeanView::Fine, "")])
+                &body(vec![a("a", CallView::Fine, ""), a("c", CallView::Fine, "")])
             )
             .is_err(),
             "not asked"
         );
         assert!(
-            answers_of(&r, &body(vec![a("a", LeanView::Change, " ")])).is_err(),
+            answers_of(&r, &body(vec![a("a", CallView::Change, " ")])).is_err(),
             "a change says what"
         );
-        let Ok(got) = answers_of(&r, &body(vec![a("a", LeanView::Change, "fix")])) else {
+        let Ok(got) = answers_of(&r, &body(vec![a("a", CallView::Change, "fix")])) else {
             panic!("a change that says what is an answer");
         };
         assert_eq!(
             got,
             BTreeMap::from([("a".into(), Answer::Change { note: "fix".into() })])
         );
+    }
+
+    #[test]
+    fn a_pre_existing_bug_shows_as_one_and_no_answer_can_call_one() {
+        let repo = RepoName::parse("o/r").unwrap();
+        let old = judged("a", 90, Lean::PreExisting, false);
+        let issue = old.finding.issue_url(&repo, 1).unwrap();
+        let view = serde_json::to_value(FindingView::new(old, &repo, 1)).unwrap();
+        assert_eq!(view["lean"], "pre_existing");
+        // A link to file it, which no other finding has.
+        assert_eq!(view["issue"], issue.as_str());
+        let change = FindingView::new(judged("b", 90, Lean::Change, false), &repo, 1);
+        assert_eq!(
+            serde_json::to_value(change).unwrap()["issue"],
+            serde_json::Value::Null
+        );
+        // A human answers only what the agent asks, and it never asks about one.
+        let answer = serde_json::json!({ "finding": "a", "call": "pre_existing", "note": "" });
+        assert!(serde_json::from_value::<AnswerView>(answer).is_err());
     }
 }

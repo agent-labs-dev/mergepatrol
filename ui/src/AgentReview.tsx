@@ -355,6 +355,39 @@ function ClearedList({
   );
 }
 
+/** Bugs the agent found in code the PR did not bring: notes to file, which hold nothing. */
+function PreExistingList({ findings }: { findings: FindingView[] }) {
+  if (findings.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-line bg-surface px-4 py-2.5 text-sm">
+      <p className="font-medium">Already there before this PR</p>
+      <p className="mt-0.5 text-muted">
+        Bugs the agent found in code this PR didn't bring. They aren't this PR's to fix, and hold
+        nothing.
+      </p>
+      <ul className="mt-1">
+        {findings.map((f) => (
+          <li key={f.id} className="flex items-center gap-3 py-1">
+            <span className="flex-1 text-fg-2">
+              <Md>{f.title}</Md>
+            </span>
+            {f.issue && (
+              <a
+                href={f.issue}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-medium text-muted hover:underline"
+              >
+                File an issue
+              </a>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** The PR whose review an entry shows: the stack's layer it is held for, else its top. */
 export const reviewedPr = (e: Gated & { number: number; layers: number[] }) =>
   e.hold?.layer ?? e.layers.at(-1) ?? e.number;
@@ -381,7 +414,7 @@ export function Gate({
   const waits = reason === "review_asks" || reason === "review_changes";
   const asks = r.findings.filter((f) => f.asked);
   const back = r.findings.filter((f) => f.sent_back || f.withdrawn);
-  const cleared = r.findings.filter((f) => !f.asked && !f.sent_back && !f.withdrawn);
+  const cleared = r.findings.filter((f) => !f.asked && !f.sent_back && !f.withdrawn && !f.issue);
   return (
     <section className="mt-5 space-y-4">
       {reason === "reviewing" && (
@@ -420,6 +453,7 @@ export function Gate({
       )}
       {waits && r.answers.length > 0 && <Answered review={r} />}
       {waits && <ClearedList findings={cleared} />}
+      <PreExistingList findings={r.findings.filter((f) => f.issue)} />
     </section>
   );
 }

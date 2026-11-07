@@ -155,13 +155,15 @@ impl ReviewSettings {
         }
     }
 
-    /// Where a finding goes. A human only for a kind that always asks, or a change the author
+    /// Where a finding goes. A bug the PR did not bring holds nothing: it is a note, whatever its
+    /// kind. A human only for a kind that always asks, or a change the author
     /// cannot make from the PR; a change the agent is sure enough of, that shows what it is
     /// about, goes back to the author; the rest it clears, a change under the bar or one that
     /// shows nothing as a note.
     pub fn route(&self, finding: &Finding) -> Route {
         let bar = self.bar(finding.kind);
         match finding.lean {
+            Lean::PreExisting => Route::Cleared,
             _ if bar == Bar::Always => Route::Human,
             Lean::Fine => Route::Cleared,
             Lean::Change if finding.needs_human => Route::Human,
@@ -207,6 +209,9 @@ pub enum Lean {
     Fine,
     /// The author should change it.
     Change,
+    /// A bug in code the PR did not bring: not the author's to fix here, so a note, to file as
+    /// an issue.
+    PreExisting,
 }
 
 /// One thing the agent looked at, with what it decided and why.
@@ -258,12 +263,57 @@ pub struct Finding {
     pub related: Vec<Related>,
 }
 
+/// The longest new-issue link a finding gives: GitHub drops much longer ones, and a review's
+/// summary holds one for each of up to 25 findings.
+pub const ISSUE_URL_CHARS: usize = 1_500;
+
 impl Finding {
+    /// A link that opens a new issue on `repo` for a bug the PR did not bring, filled in from
+    /// the finding: `None` for any other finding. It fits `ISSUE_URL_CHARS`, whatever the agent
+    /// wrote.
+    pub fn issue_url(&self, repo: &RepoName, pr: PrNumber) -> Option<String> {
+        if self.lean != Lean::PreExisting {
+            return None;
+        }
+        let link = |title: &str, body: &str| {
+            format!(
+                "https://github.com/{repo}/issues/new?title={}&body={}",
+                encode(title),
+                encode(body)
+            )
+        };
+        let found = format!("Found by MergeLoop's review of #{pr}, which did not bring it.");
+        let at = match (&self.file, self.line) {
+            (Some(file), Some(line)) => format!("`{file}:{line}`\n\n"),
+            (Some(file), None) => format!("`{file}`\n\n"),
+            _ => String::new(),
+        };
+        let full = link(&self.title, &format!("{at}{}\n\n{found}", self.finding));
+        if full.len() <= ISSUE_URL_CHARS {
+            return Some(full);
+        }
+        // 80 characters of 4 bytes, each byte `%XX`, leave room for the rest.
+        let title: String = self.title.chars().take(80).collect();
+        Some(link(&title, &found))
+    }
+
     /// Whether it shows the change is needed: MergeLoop ran its evidence on the PR's head and it
     /// failed. A `security` finding always does: the code showing the hole is enough to close it.
     pub fn shows_the_change(&self) -> bool {
         self.kind == Kind::Security || self.evidence.as_ref().is_some_and(|e| e.failed)
     }
+}
+
+/// `text` as a URL's query value.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// A command that shows a change is needed by failing, with any test the agent wrote for it. The
@@ -558,6 +608,50 @@ mod tests {
             s.route(&finding(Kind::Migrations, 100, Lean::Fine)),
             Route::Human
         );
+    }
+
+    #[test]
+    fn a_pre_existing_bug_is_a_note_that_never_holds_the_pr() {
+        let s = ReviewSettings::default();
+        // However sure, of whatever kind, and whatever else it says: the PR did not bring it.
+        for kind in Kind::ALL {
+            let mut f = finding(kind, 100, Lean::PreExisting);
+            f.needs_human = true;
+            assert_eq!(s.route(&f), Route::Cleared, "{kind:?}");
+            let judged = s.judge(vec![f]);
+            assert_eq!(
+                review_status(&judged, false),
+                ReviewStatus::Approved,
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pre_existing_bug_links_to_an_issue_filled_in_from_it() {
+        let repo = RepoName::parse("o/r").unwrap();
+        let mut f = finding(Kind::Other, 90, Lean::PreExisting);
+        f.title = "Retry & loop".into();
+        f.file = Some("src/a.rs".into());
+        f.line = Some(7);
+        f.finding = "It spins.".into();
+        assert_eq!(
+            f.issue_url(&repo, 12).as_deref(),
+            Some(
+                "https://github.com/o/r/issues/new?title=Retry%20%26%20loop&body=%60src%2Fa.rs%3A7%60%0A%0AIt%20spins.%0A%0AFound%20by%20MergeLoop%27s%20review%20of%20%2312%2C%20which%20did%20not%20bring%20it."
+            )
+        );
+        // Only a pre-existing one: the rest are the PR's to settle.
+        assert_eq!(
+            finding(Kind::Other, 90, Lean::Change).issue_url(&repo, 12),
+            None
+        );
+        // However long, and in whatever script, the agent wrote.
+        f.title = "🐛".repeat(10_000);
+        f.finding = "é".repeat(10_000);
+        let long = f.issue_url(&repo, 12).unwrap();
+        assert!(long.len() <= ISSUE_URL_CHARS, "{}", long.len());
+        assert!(long.contains("%2312"));
     }
 
     #[test]

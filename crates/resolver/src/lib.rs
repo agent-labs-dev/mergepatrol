@@ -427,7 +427,7 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "file": "path/in/the/repo, or null for the whole PR",
       "line": 93,
       "confidence": 85,
-      "lean": "fine | change",
+      "lean": "fine | change | pre_existing",
       "finding": "What you saw, in one to three sentences.",
       "unsure": "What you could not tell from the code, and why. Empty when you are sure.",
       "checked": ["What you verified, so a human need not"],
@@ -572,7 +572,10 @@ For each finding give `lean`. `change` means the author must change it before it
 the PR sets out to handle is wrong, or those who use this code will hit a real bug, a security \
 hole, data loss, a broken deploy or a breaking change, or risky code has no test. Anything else is \
 `fine`, however sure you are: style, a rare path that does little harm, a small cost, extra \
-compatibility, code the PR did not need. Give `confidence`, 50 to 100: how sure you are that your lean is right, such that a \
+compatibility, code the PR did not need. `pre_existing` means a real bug in code the PR did not \
+bring and does not make worse or newly reachable: it was there before, so it is not the author's \
+to fix here. MergeLoop shows it as a note, to file as an issue, and it holds nothing. A bug the PR \
+brings, worsens or exposes is `change`. Give `confidence`, 50 to 100: how sure you are that your lean is right, such that a \
 careful senior reviewer who knows this project would agree. Below 100 when it rests on something \
 the code does not show you: a policy, how production is set up, what the author meant. Say what \
 in `unsure`. Do not inflate it: a change you are sure enough of goes back to the author, often \
@@ -586,7 +589,7 @@ file of its own where the repo keeps its tests, named and written like them, so 
 test command runs it. \
 {rerun} If you cannot make a command fail, lean `fine` and \
 say in `unsure` what you could not show. A `security` finding needs none: the code showing the \
-hole is enough to close it. A finding with no evidence gives `\"evidence\": null`. A finding you \
+hole is enough to close it. Nor does a `pre_existing` one. A finding with no evidence gives `\"evidence\": null`. A finding you \
 report again for a fix that is still missing carries its `evidence` again, written anew.
 
 Set `needs_human` to true only for a change the author cannot make from the PR and its \
@@ -599,7 +602,7 @@ Anything the author can fix in the code, however hard, is not one.
 `public_api` (routes, exported types, CLI flags, config keys others rely on), else `other`.
 
 Give `file` and `line` for a finding about code: the line on the PR's side, which must be one \
-of the lines it changed or close to them. At most 25 findings, the ones that matter most first.
+of the lines it changed or close to them; a `pre_existing` one may name any line of the PR's head. At most 25 findings, the ones that matter most first.
 
 Reply with the JSON alone, in this shape, and nothing else:
 {REVIEW_SHAPE}",
@@ -723,6 +726,9 @@ mod prompt_tests {
         assert!(review.contains("what its description sets out to do"));
         assert!(review.contains("must change it before it merges"));
         assert!(review.contains("`fine`, however sure you are"));
+        // A bug the PR did not bring is the reviewer's to mark, and is not the author's to fix.
+        assert!(review.contains("`pre_existing` means a real bug in code the PR did not bring"));
+        assert!(REVIEW_SHAPE.contains("fine | change | pre_existing"));
         // A change of a kind other than security needs something showing it, or it is a note.
         assert!(review.contains("must carry `evidence`"));
         assert!(review.contains("see it fail"));
