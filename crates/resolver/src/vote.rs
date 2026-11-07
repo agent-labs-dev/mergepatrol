@@ -13,11 +13,7 @@ pub const DOES_NOT_HOLD: &str = "VERDICT: does not hold";
 /// asks for. Not its confidence, what it checked, what it was unsure of or what else it read:
 /// that is how the reviewer got there, and the verifier finds its own way.
 pub fn claim(f: &Finding) -> String {
-    let place = match (&f.file, f.line) {
-        (Some(file), Some(line)) => format!("{file}:{line}"),
-        (Some(file), None) => file.clone(),
-        _ => "the whole PR".into(),
-    };
+    let place = crate::where_is(f);
     format!(
         "kind: {}\ntitle: {}\nwhere: {place}\nfinding: {}\nsuggestion: {}",
         f.kind.as_str(),
@@ -94,8 +90,8 @@ carries no `evidence`. For each, run {seats} subagents at once, each fresh, with
 not yours, not the review's, and not each other's. Each works in a checkout of the head of its \
 own, as MergeLoop's own panel does: add one for each with `git worktree add --detach <dir> {head}`, \
 start the subagent in it, and remove it once the subagent is done. Give each the prompt below and nothing else, \
-with `<the claim>` replaced by the finding's lines `kind: …`, `title: …`, `where: <file>:<line>`, \
-`finding: …` and `suggestion: …`. Leave out its `confidence`, `unsure`, `checked` and `related`: \
+with `<the claim>` replaced by the finding's lines `kind: …`, `title: …`, `where: …` (its `file`:`line`, \
+then each place in its `also_at`, comma-separated), `finding: …` and `suggestion: …`. Leave out its `confidence`, `unsure`, `checked` and `related`: \
 they are how the review got there.
 
 ````
@@ -138,6 +134,7 @@ mod tests {
             verified: None,
             code: Vec::new(),
             related: Vec::new(),
+            also_at: Vec::new(),
         }
     }
 
@@ -167,6 +164,20 @@ mod tests {
         assert!(p.contains("git diff abc..HEAD"));
         assert!(p.contains("When the code cannot tell, it does not hold."));
         assert!(p.ends_with(&format!("`{HOLDS}` or `{DOES_NOT_HOLD}`.")));
+    }
+
+    #[test]
+    fn a_verifier_checks_a_recurring_finding_at_every_place() {
+        let mut f = finding();
+        f.also_at = vec![mergepatrol_core::Place {
+            file: "src/admin.rs".into(),
+            line: Some(7),
+            code: Vec::new(),
+        }];
+        assert!(claim(&f).contains("where: src/auth.rs:41, src/admin.rs:7\n"));
+        f.file = None;
+        f.also_at.clear();
+        assert!(claim(&f).contains("where: the whole PR\n"));
     }
 
     #[test]

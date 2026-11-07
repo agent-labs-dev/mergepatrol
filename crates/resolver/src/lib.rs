@@ -402,7 +402,8 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "suggestion": "The change you would ask the author for. Empty when there is none.",
       "evidence": { "command": "pnpm vitest run src/retry.test.ts", "files": ["src/retry.test.ts"] },
       "needs_human": false,
-      "related": [{ "file": "path", "line": 41, "why": "What this code told you" }]
+      "related": [{ "file": "path", "line": 41, "why": "What this code told you" }],
+      "also_at": [{ "file": "path", "line": 120 }]
     }
   ]
 }"#;
@@ -419,13 +420,20 @@ pub(crate) fn review_prompt(req: &ReviewRequest<'_>) -> String {
     prompt_for(req, Reviewer::Sandbox)
 }
 
-/// Where a finding is, as a prompt names it after its title: ` (file:line)`, ` (file)`, or
-/// nothing for the whole PR.
-fn place(file: &Option<String>, line: Option<u32>) -> String {
-    match (file, line) {
-        (Some(f), Some(l)) => format!(" ({f}:{l})"),
-        (Some(f), None) => format!(" ({f})"),
-        _ => String::new(),
+/// Where a finding is, as a prompt names it after its title: ` (file:line, file)`, or nothing
+/// for the whole PR.
+fn place(f: &Finding) -> String {
+    match f.places().as_slice() {
+        [] => String::new(),
+        places => format!(" ({})", places.join(", ")),
+    }
+}
+
+/// Where a finding is, as a prompt names it alone: `file:line, file`, or the whole PR.
+pub(crate) fn where_is(f: &Finding) -> String {
+    match f.places().as_slice() {
+        [] => "the whole PR".into(),
+        places => places.join(", "),
     }
 }
 
@@ -440,7 +448,7 @@ fn answered_section(answered: &[Answered]) -> String {
                 Answer::Fine => "fine as it is".to_owned(),
                 Answer::Change { note } => format!("needs a change: {note}"),
             };
-            let place = place(&a.finding.file, a.finding.line);
+            let place = place(&a.finding);
             format!("- {}{place}: @{} said {what}", a.finding.title, a.by)
         })
         .collect::<Vec<_>>()
@@ -460,7 +468,7 @@ fn sent_back_section(sent_back: &[SentBack]) -> String {
         .iter()
         .map(|s| {
             let f = &s.finding;
-            let place = place(&f.file, f.line);
+            let place = place(f);
             let reply = match (s.resolved, s.reply.trim()) {
                 (true, "") => " The author resolved it.".to_owned(),
                 (true, r) => format!(" The author resolved it, replying: {r}"),
@@ -481,7 +489,9 @@ each against the code now. One that was fixed, report as a `fine` finding with t
 saying how it was fixed. One the author answered instead of changing: if their reply holds up in \
 the code, report it as `fine` with the same title; if it does not, report it again with the same \
 title and say why the reply does not hold. One that was neither fixed nor answered, report again \
-with the same title, so the author can tell it is the same one, and say what is still missing.\n{items}\n"
+with the same title, so the author can tell it is the same one, and say what is still missing. One \
+fixed at some of its places, report again with the same title at only the places still unfixed, \
+in `file`, `line` and `also_at`.\n{items}\n"
     )
 }
 
@@ -569,6 +579,15 @@ given only the finding and the code, check it instead, and it goes back to the a
 does a `pre_existing` one need evidence. A finding with no evidence gives `\"evidence\": null`. A finding you \
 report again for a fix that is still missing carries its `evidence` again, written anew.
 
+A bug that recurs is one finding, not one for each place. When what you found is a pattern that \
+shows up again, look for it across the PR's changes and the code near them, and report it once: \
+`file` and `line` at its first place, and every other place the PR's changes have it in `also_at`, \
+so the author fixes them all in one push. Say in `finding` whether the code near them has more. \
+Places in code the PR did not bring are not the author's: they go in its own `pre_existing` \
+finding, with the same title, its first place in `file` and `line` and the rest in `also_at`. The \
+evidence of a finding with `also_at` covers every place, one test for each place, so its command \
+fails until each is fixed. A finding at one place gives `\"also_at\": []`.
+
 Set `needs_human` to true only for a change the author cannot make from the PR and its \
 description: a call on scope, product or design that the PR does not settle, access or \
 credentials it does not have, or a change outside this repo. A human is asked about those. \
@@ -630,11 +649,7 @@ thread, to a human, or cleared.",
 
 pub(crate) fn question_prompt(req: &QuestionRequest<'_>) -> String {
     let f = req.finding;
-    let place = match (&f.file, f.line) {
-        (Some(file), Some(line)) => format!("{file}:{line}"),
-        (Some(file), None) => file.clone(),
-        _ => "the whole PR".into(),
-    };
+    let place = where_is(f);
     if req.sent_back {
         return format!(
             "You reviewed a pull request, {title}, and sent one finding back to its author to \
@@ -752,6 +767,51 @@ mod prompt_tests {
         assert!(ci.contains("- `pnpm vitest run`"));
         assert!(review.contains("`security` finding needs none: 3 fresh agents"));
         assert!(review.contains("only when 2 of them agree it holds"));
+    }
+
+    fn request<'a>(sent_back: &'a [SentBack]) -> ReviewRequest<'a> {
+        ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back,
+            scope: Scope::Whole,
+            verify: &Verify::None,
+            transcript: Path::new("t"),
+        }
+    }
+
+    fn recurring() -> Finding {
+        serde_json::from_value(serde_json::json!({
+            "kind": "other", "title": "T", "file": "a.rs", "line": 3,
+            "confidence": 90, "lean": "change", "finding": "f", "suggestion": "fix T",
+            "also_at": [{ "file": "b.rs", "line": 9 }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_bug_that_recurs_is_one_finding_at_every_place_and_its_fix_covers_each() {
+        let review = review_prompt(&request(&[]));
+        assert!(REVIEW_SHAPE.contains(r#""also_at": [{ "file": "path", "line": 120 }]"#));
+        // Once, with every place the PR brings it, and whether nearby code has it too.
+        assert!(review.contains("report it once"));
+        assert!(review.contains("every other place the PR's changes have it in `also_at`"));
+        assert!(review.contains("its own `pre_existing` finding"));
+        // Its evidence fails until every place is fixed, so a partial fix does not pass.
+        assert!(review.contains("one test for each place"));
+        // A re-check names what it listed, and lists again only the places still unfixed.
+        let sent = [SentBack {
+            finding: recurring(),
+            reply: String::new(),
+            resolved: false,
+        }];
+        let again = review_prompt(&request(&sent));
+        assert!(again.contains("- T (a.rs:3, b.rs:9): fix T\n"), "{again}");
+        assert!(again.contains("only the places still unfixed"));
     }
 
     #[test]

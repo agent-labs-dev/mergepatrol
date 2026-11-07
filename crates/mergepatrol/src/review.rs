@@ -612,19 +612,7 @@ async fn askees(
     let author = pr.summary().author.map(|a| a.login.to_lowercase());
     let mut logins: Vec<String> = Vec::new();
     if let Some(owners) = codeowners(gh, repo).await {
-        for f in findings.iter().filter(|f| f.asked) {
-            let Some(file) = &f.finding.file else {
-                continue;
-            };
-            logins.extend(
-                owners
-                    .owners(file)
-                    .iter()
-                    // `@login`, or a team as `@org/team`; not an email address.
-                    .filter_map(|o| o.strip_prefix('@'))
-                    .map(str::to_owned),
-            );
-        }
+        logins = owners_of(&owners, findings);
     }
     if logins.is_empty() {
         logins = pr
@@ -637,6 +625,20 @@ async fn askees(
     let mut seen = std::collections::HashSet::new();
     logins.retain(|l| Some(l.to_lowercase()) != author && seen.insert(l.to_lowercase()));
     logins
+}
+
+/// The code owners of the files the asks are about, at every place: users, and teams as
+/// `org/team`.
+fn owners_of(owners: &CodeOwners, findings: &[Judged]) -> Vec<String> {
+    let files = findings
+        .iter()
+        .filter(|f| f.asked)
+        .flat_map(|f| f.finding.locations().map(|(file, _)| file));
+    files
+        .flat_map(|file| owners.owners(file))
+        // `@login`, or a team as `@org/team`; not an email address.
+        .filter_map(|o| o.strip_prefix('@').map(str::to_owned))
+        .collect()
 }
 
 async fn codeowners(gh: &Installation, repo: &RepoName) -> Option<CodeOwners> {
@@ -880,13 +882,34 @@ fn verdict(v: Verdict) -> &'static str {
     }
 }
 
+/// The other places a bug that recurs is, for its author to fix at each.
+fn also_at(f: &Judged) -> String {
+    let others = f.finding.also_at.iter().map(|p| p.to_string());
+    places("Also at", others.collect())
+}
+
+/// `places` under `label`, each in code, asking for a fix at each when there are more than one.
+fn places(label: &str, places: Vec<String>) -> String {
+    let each = match places.len() {
+        0 => return String::new(),
+        1 => "",
+        _ => " Fix it at each place.",
+    };
+    let places: Vec<String> = places.iter().map(|p| format!("`{p}`")).collect();
+    format!(
+        "**{label}:** {}.{each}\n\n",
+        clip(&places.join(", "), TEXT_CHARS)
+    )
+}
+
 /// The reply in a finding's thread when a later head's review finds it again, with the evidence
 /// that head's run showed.
 fn still_holds(f: &Judged, head: &str) -> String {
     fitted(|patch| {
         format!(
-            "Still holds on `{head}`: {}\n\n{}{}\n\n{REPLY_MARK}",
+            "Still holds on `{head}`: {}\n\n{}{}{}\n\n{REPLY_MARK}",
             clip(&f.finding.finding, TEXT_CHARS),
+            places("Still at", f.finding.places()),
             shown(f, head, patch),
             still(f)
         )
@@ -905,12 +928,13 @@ fn thread_body(f: &Judged, head: &str) -> String {
     };
     fitted(|patch| {
         format!(
-            "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}{}\n\n{MARK}{} -->",
+            "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}{}{}\n\n{MARK}{} -->",
             f.finding.id,
             f.finding.kind.as_str(),
             f.finding.confidence,
             clip(&f.finding.title, TITLE_CHARS),
             clip(&f.finding.finding, TEXT_CHARS),
+            also_at(f),
             shown(f, head, patch),
             still(f),
             norm(&f.finding.title),
@@ -1183,6 +1207,7 @@ mod tests {
             verified: None,
             code: Vec::new(),
             related: Vec::new(),
+            also_at: Vec::new(),
         };
         ReviewRecord {
             since_head: None,
@@ -1262,6 +1287,39 @@ mod tests {
             "{reply}"
         );
         assert!(reply.contains("FAILED again"), "{reply}");
+        // A bug that recurs names every other place it is, here and in each later reply.
+        f.finding.also_at = vec![
+            mergepatrol_core::Place {
+                file: "b.rs".into(),
+                line: Some(9),
+                code: Vec::new(),
+            },
+            mergepatrol_core::Place {
+                file: "c.rs".into(),
+                line: None,
+                code: Vec::new(),
+            },
+        ];
+        let thread = thread_body(&f, "def5678");
+        assert!(
+            thread.contains("**Also at:** `b.rs:9`, `c.rs`. Fix it at each place."),
+            "{thread}"
+        );
+        // A later reply names every place it still holds, its own too: the thread sits on the
+        // first place it held, which a fix there moves on from.
+        f.finding.file = Some("b.rs".into());
+        f.finding.line = Some(9);
+        f.finding.also_at.remove(0);
+        let reply = still_holds(&f, "def5678");
+        assert!(
+            reply.contains("**Still at:** `b.rs:9`, `c.rs`. Fix it at each place."),
+            "{reply}"
+        );
+        f.finding.also_at.clear();
+        let reply = still_holds(&f, "def5678");
+        assert!(reply.contains("**Still at:** `b.rs:9`.\n"), "{reply}");
+        f.finding.file = None;
+        assert!(!still_holds(&f, "def5678").contains("Still at"));
         // A comment with a test too long for it goes without the test, never with part of it.
         let e = f.finding.evidence.as_mut().unwrap();
         e.patch = format!("+{}", "x".repeat(BODY_CHARS));
@@ -1353,6 +1411,25 @@ mod tests {
 
     /// However long what the agent wrote, a comment fits GitHub without its test, and with it
     /// only whole: the thread, a reply in it, and the review's summary.
+    #[test]
+    fn a_human_is_asked_by_the_code_owners_of_every_place_a_finding_is() {
+        let owners = CodeOwners::parse("main", "/a.rs @ann\n/b.rs @org/bees\n/c.rs bo@x.io\n");
+        let mut asked = review(1, false, None).findings.remove(0);
+        asked.asked = true;
+        asked.finding.file = Some("a.rs".into());
+        asked.finding.also_at = ["b.rs", "c.rs"]
+            .map(|file| mergepatrol_core::Place {
+                file: file.into(),
+                line: None,
+                code: Vec::new(),
+            })
+            .to_vec();
+        let mut sent = asked.clone();
+        sent.asked = false;
+        sent.finding.file = Some("z.rs".into());
+        assert_eq!(owners_of(&owners, &[asked, sent]), ["ann", "org/bees"]);
+    }
+
     #[test]
     fn every_comment_fits_github_however_long_what_the_agent_wrote() {
         let huge = "y".repeat(200_000);

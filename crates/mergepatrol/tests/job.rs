@@ -612,7 +612,9 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
     let trunk = commit(&origin, "app.rs", &lines);
     git(&origin, &["checkout", "-q", "-b", "pr"]);
-    let changed = lines.replace("line 10\n", "line 10 changed\n");
+    let changed = lines
+        .replace("line 10\n", "line 10 changed\n")
+        .replace("line 19\n", "line 19 changed\n");
     let head = commit(&origin, "app.rs", &changed);
 
     let answer = serde_json::json!({
@@ -621,7 +623,8 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
             "kind": "security", "title": "Line 10 changed", "file": "app.rs", "line": 10,
             "confidence": 64, "lean": "fine", "finding": "f", "unsure": "u",
             "checked": ["c"], "would_clear": "w", "suggestion": "s",
-            "related": [{ "file": "app.rs", "line": 2, "why": "context" }]
+            "related": [{ "file": "app.rs", "line": 2, "why": "context" }],
+            "also_at": [{ "file": "app.rs", "line": 19 }]
         }]
     })
     .to_string();
@@ -664,6 +667,14 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     );
     let related: Vec<&str> = f.related[0].code.iter().map(|c| c.text.as_str()).collect();
     assert_eq!(related, ["line 1", "line 2", "line 3", "line 4", "line 5"]);
+    // Each other place the bug is shows the PR's change there.
+    let also: Vec<&str> = f.also_at[0]
+        .code
+        .iter()
+        .filter(|c| c.hot)
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(also, ["line 19 changed"]);
 
     // A question about it, answered in plain text.
     spec.task = Task::Question {

@@ -748,6 +748,7 @@ fn finding(confidence: u8) -> Finding {
         verified: None,
         code: Vec::new(),
         related: Vec::new(),
+        also_at: Vec::new(),
     }
 }
 

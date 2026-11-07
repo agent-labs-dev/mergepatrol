@@ -46,15 +46,18 @@ pub struct Scored {
     pub cost_usd: Option<f64>,
 }
 
-/// Whether a finding is about a bug: in a file it lives in, within `NEAR` lines of it there.
+/// Whether a finding is about a bug: at any of its places, in a file the bug lives in, within
+/// `NEAR` lines of it there.
 pub fn about(bug: &Bug, finding: &Finding) -> bool {
-    let (Some(file), Some(line)) = (&finding.file, finding.line) else {
-        return false;
-    };
-    let file = file.trim_start_matches("./");
-    bug.at.iter().any(|p| {
-        let near = p.lines.start().saturating_sub(NEAR)..=p.lines.end() + NEAR;
-        file == p.file && near.contains(&line)
+    finding.locations().any(|(file, line)| {
+        let Some(line) = line else {
+            return false;
+        };
+        let file = file.trim_start_matches("./");
+        bug.at.iter().any(|p| {
+            let near = p.lines.start().saturating_sub(NEAR)..=p.lines.end() + NEAR;
+            file == p.file && near.contains(&line)
+        })
     })
 }
 
@@ -290,6 +293,7 @@ mod tests {
             verified: None,
             code: Vec::new(),
             related: Vec::new(),
+            also_at: Vec::new(),
         }
     }
 
@@ -343,6 +347,19 @@ mod tests {
         assert!(about(b, &change("b.rs", 99)));
         assert!(!about(b, &change("b.rs", 10)));
         assert!(!about(b, &change("a.rs", 92)));
+    }
+
+    #[test]
+    fn a_finding_at_several_places_is_about_a_bug_near_any_of_them() {
+        let b = bug("src/a.rs", "40");
+        let mut f = change("src/b.rs", 1);
+        assert!(!about(&b, &f));
+        f.also_at = vec![mergepatrol_core::Place {
+            file: "src/a.rs".into(),
+            line: Some(41),
+            code: Vec::new(),
+        }];
+        assert!(about(&b, &f));
     }
 
     #[test]

@@ -416,6 +416,7 @@ function PreExistingList({ findings }: { findings: FindingView[] }) {
           <li key={f.id} className="flex items-center gap-3 py-1">
             <span className="flex-1 text-fg-2">
               <Md>{f.title}</Md>
+              <AlsoAt f={f} />
             </span>
             {f.issue && (
               <a
@@ -504,6 +505,27 @@ export function Gate({
   );
 }
 
+/** A place in the code, as `file:line`, or `file` without a line. */
+function placeOf(p: { file: string; line: number | null }) {
+  return p.line ? `${p.file}:${p.line}` : p.file;
+}
+
+/** The other places a bug that recurs is: the fix settles every one. */
+function AlsoAt({ f }: { f: FindingView }) {
+  if (f.also_at.length === 0) return null;
+  return (
+    <p className="mt-1 text-xs text-muted">
+      Also at{" "}
+      {f.also_at.map((p, i) => (
+        <span key={`${p.file}:${p.line}`}>
+          {i > 0 && ", "}
+          <span className="font-mono">{placeOf(p)}</span>
+        </span>
+      ))}
+    </p>
+  );
+}
+
 /** What the agent sent back to the author: still to fix, or withdrawn on their reply. */
 function SentBackList({ findings }: { findings: FindingView[] }) {
   return (
@@ -526,6 +548,11 @@ function SentBackList({ findings }: { findings: FindingView[] }) {
             <p className="mt-1 pl-5 text-muted">
               <Md>{f.suggestion}</Md>
             </p>
+          )}
+          {!f.withdrawn && (
+            <div className="pl-5">
+              <AlsoAt f={f} />
+            </div>
           )}
           {!f.withdrawn && (
             <div className="pl-5">
@@ -1021,9 +1048,15 @@ function Answering({
             </p>
             {f.file && (
               <div className="mt-4">
-                <Code lines={f.code} file={f.line ? `${f.file}:${f.line}` : f.file} />
+                <Code lines={f.code} file={placeOf({ file: f.file, line: f.line })} />
               </div>
             )}
+            {f.also_at.map((p) => (
+              <div key={`${p.file}:${p.line}`} className="mt-3">
+                <p className="mb-1 text-sm text-muted">The same bug, also at</p>
+                <Code lines={p.code} file={placeOf(p)} />
+              </div>
+            ))}
             <div className="mt-2 max-w-3xl">
               <Evidence f={f} />
               <Votes f={f} />
@@ -1044,7 +1077,7 @@ function Answering({
                         <p className="mb-1 text-sm text-muted">
                           <Md>{x.why}</Md>
                         </p>
-                        <Code lines={x.code} file={x.line ? `${x.file}:${x.line}` : x.file} />
+                        <Code lines={x.code} file={placeOf(x)} />
                       </div>
                     ))}
                   </div>

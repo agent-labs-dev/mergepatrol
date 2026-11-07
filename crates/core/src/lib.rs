@@ -24,7 +24,7 @@ pub use repo_config::{
     RepoSettings, Runs, TaskModel, WorkspaceDefaults,
 };
 pub use review::{
-    Answer, Answered, Bar, CodeLine, Evidence, Finding, Judged, Kind, Lean, LineKind, Panel,
+    Answer, Answered, Bar, CodeLine, Evidence, Finding, Judged, Kind, Lean, LineKind, Panel, Place,
     Question, Related, ReviewOverrides, ReviewSettings, ReviewStatus, Route, SentBack, Verdict,
     Verification, Verifier, Vote, review_status, review_url,
 };

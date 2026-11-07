@@ -499,11 +499,7 @@ async fn review(
         })
         .await
         .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
-    let parsed = match &run.outcome {
-        Outcome::Failed(why) => Err(anyhow!("the agent failed: {why}")),
-        Outcome::GaveUp(why) => Err(anyhow!("the agent gave up: {why}")),
-        Outcome::Resolved => parse_review(&run.text),
-    };
+    let parsed = parse_review(&run.outcome, &run.text);
     spent(
         events,
         &spec.resolver,
@@ -513,20 +509,33 @@ async fn review(
         &run,
     );
     let mut output = parsed?;
-    with_code(git, dir, &base, &spec.head_sha, &mut output.findings).await?;
-    check_evidence(&spec.head_sha, git, dir, &mut output.findings, events).await?;
     let bench = Bench {
         git,
         dir,
         head: &spec.head_sha,
     };
     let panel = (spec, resolver, base.as_str());
-    verify_findings(panel, &bench, out, &mut output.findings, events).await?;
+    check_findings(panel, &bench, out, &mut output.findings, events).await?;
     tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
     Ok(())
 }
 
-/// Numbers each finding, and gives it and what it relates to their code at `head`.
+/// Backs what the agent found with what MergeLoop saw itself: the code at each place, each
+/// change's evidence run on the head, and a panel's votes on a security change without any.
+async fn check_findings(
+    panel: (&JobSpec, &dyn Resolver, &str),
+    bench: &Bench<'_>,
+    out: &Path,
+    findings: &mut [Finding],
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let Bench { git, dir, head } = *bench;
+    with_code(git, dir, panel.2, head, findings).await?;
+    check_evidence(head, git, dir, findings, events).await?;
+    verify_findings(panel, bench, out, findings, events).await
+}
+
+/// Gives each finding, each other place it is, and what it relates to their code at `head`.
 async fn with_code(
     git: &Git,
     dir: &Path,
@@ -534,11 +543,12 @@ async fn with_code(
     head: &str,
     findings: &mut [Finding],
 ) -> Result<()> {
-    for (i, f) in findings.iter_mut().enumerate() {
-        f.id = format!("f{}", i + 1);
-        f.confidence = f.confidence.clamp(0, 100);
+    for f in findings {
         if let Some(file) = f.file.clone() {
             f.code = diff_lines(git, dir, base, head, &file, f.line).await?;
+        }
+        for p in &mut f.also_at {
+            p.code = diff_lines(git, dir, base, head, &p.file, p.line).await?;
         }
         for r in &mut f.related {
             r.code = file_lines(git, dir, head, &r.file, r.line).await?;
@@ -642,8 +652,13 @@ async fn answer(
 /// The most findings a review keeps, so its summary fits GitHub.
 pub(crate) const FINDINGS_MAX: usize = 25;
 
-/// The review in the agent's answer: its JSON, alone or in a code block.
-fn parse_review(text: &str) -> Result<ReviewOutput> {
+/// The review in the agent's answer, once it reviewed: its JSON, alone or in a code block.
+fn parse_review(outcome: &Outcome, text: &str) -> Result<ReviewOutput> {
+    match outcome {
+        Outcome::Failed(why) => bail!("the agent failed: {why}"),
+        Outcome::GaveUp(why) => bail!("the agent gave up: {why}"),
+        Outcome::Resolved => {}
+    }
     let json = match (text.find('{'), text.rfind('}')) {
         (Some(start), Some(end)) if start < end => &text[start..=end],
         _ => bail!("the agent's review is not JSON"),
@@ -652,6 +667,10 @@ fn parse_review(text: &str) -> Result<ReviewOutput> {
         serde_json::from_str(json).context("the agent's review does not parse")?;
     output.findings.retain(|f| !f.title.trim().is_empty());
     output.findings.truncate(FINDINGS_MAX);
+    for (i, f) in output.findings.iter_mut().enumerate() {
+        f.id = format!("f{}", i + 1);
+        f.confidence = f.confidence.min(100);
+    }
     Ok(output)
 }
 
@@ -1093,12 +1112,50 @@ mod tests {
     #[test]
     fn a_review_reads_from_the_agents_json_in_or_out_of_a_code_block() {
         let text = "Here it is:\n```json\n{\"summary\": \"s\", \"findings\": [{\"kind\": \"security\", \"title\": \"t\", \"file\": \"a.rs\", \"line\": 3, \"confidence\": 70, \"lean\": \"fine\", \"finding\": \"f\"}, {\"kind\": \"other\", \"title\": \" \", \"confidence\": 90, \"lean\": \"fine\", \"finding\": \"\"}]}\n```";
-        let r = parse_review(text).unwrap();
+        let r = parse_review(&Outcome::Resolved, text).unwrap();
         assert_eq!(r.summary, "s");
         assert_eq!(r.findings.len(), 1, "a finding without a title is dropped");
+        assert_eq!(r.findings[0].id, "f1");
+        let sure = text.replace("\"confidence\": 70", "\"confidence\": 150");
+        let r = parse_review(&Outcome::Resolved, &sure).unwrap();
+        assert_eq!(r.findings[0].confidence, 100, "a percent is at most 100");
         assert_eq!(r.findings[0].kind, mergepatrol_core::Kind::Security);
         assert_eq!(r.findings[0].line, Some(3));
-        assert!(parse_review("I could not review it.").is_err());
+        assert!(parse_review(&Outcome::Resolved, "I could not review it.").is_err());
+        let gave_up = Outcome::GaveUp("no access".into());
+        let why = parse_review(&gave_up, text).unwrap_err().to_string();
+        assert_eq!(why, "the agent gave up: no access");
+    }
+
+    #[tokio::test]
+    async fn the_queues_commits_since_an_approval_its_rebase_left_behind_count_from_the_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = |cmd: &str| {
+            let out = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{cmd}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        sh(
+            "git init -q && git config user.email t@t && git config user.name t \
+            && git commit -q --allow-empty -m base \
+            && git commit -q --allow-empty -m pr \
+            && git commit -q --allow-empty -m 'fix: lint' -m 'Fixed-by: mergepatrol'",
+        );
+        let (base, head) = (sh("git rev-parse HEAD~2"), sh("git rev-parse HEAD"));
+        let commits = |since| queue_commits(&Git, dir.path(), &head, &base, since);
+        assert!(commits(None).await.unwrap().is_empty());
+        // Approved at the PR's commit: only the queue's fix since.
+        let pr = sh("git rev-parse HEAD~1");
+        assert_eq!(commits(Some(&pr)).await.unwrap().len(), 1);
+        // A head the rebase left behind, not in this history: every fix since the base.
+        let gone = "0123456789abcdef0123456789abcdef01234567";
+        let all = commits(Some(gone)).await.unwrap();
+        assert_eq!(all.len(), 1, "{all:?}");
+        assert!(all[0].ends_with("fix: lint"));
     }
 
     #[test]

@@ -3,6 +3,7 @@ import type { CodeLineView } from "./CodeLineView";
 import type { EvidenceView } from "./EvidenceView";
 import type { KindView } from "./KindView";
 import type { LeanView } from "./LeanView";
+import type { PlaceView } from "./PlaceView";
 import type { RelatedView } from "./RelatedView";
 import type { VerificationView } from "./VerificationView";
 
@@ -20,6 +21,10 @@ evidence: EvidenceView | null,
  * What a panel of fresh agents voted on it, for a security change that shows no evidence.
  */
 verified: VerificationView | null, code: Array<CodeLineView>, related: Array<RelatedView>, 
+/**
+ * The other places the same bug is, past `file` and `line`: a fix settles every one.
+ */
+also_at: Array<PlaceView>, 
 /**
  * The agent asks a human about it.
  */

@@ -324,6 +324,8 @@ pub struct FindingView {
     pub verified: Option<VerificationView>,
     pub code: Vec<CodeLineView>,
     pub related: Vec<RelatedView>,
+    /// The other places the same bug is, past `file` and `line`: a fix settles every one.
+    pub also_at: Vec<PlaceView>,
     /// The agent asks a human about it.
     pub asked: bool,
     /// Sent back to the PR's author: the PR waits for a push that fixes it.
@@ -426,6 +428,14 @@ pub struct CodeLineView {
 
 #[derive(Serialize, TS)]
 #[ts(export)]
+pub struct PlaceView {
+    pub file: String,
+    pub line: Option<u32>,
+    pub code: Vec<CodeLineView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
 pub struct RelatedView {
     pub file: String,
     pub line: Option<u32>,
@@ -513,6 +523,15 @@ impl FindingView {
                     line: r.line,
                     why: r.why,
                     code: code_view(r.code),
+                })
+                .collect(),
+            also_at: f
+                .also_at
+                .into_iter()
+                .map(|p| PlaceView {
+                    file: p.file,
+                    line: p.line,
+                    code: code_view(p.code),
                 })
                 .collect(),
             asked: j.asked,
@@ -1043,6 +1062,7 @@ mod tests {
                 verified: None,
                 code: Vec::new(),
                 related: Vec::new(),
+                also_at: Vec::new(),
             },
             asked,
             sent_back: false,
@@ -1111,6 +1131,26 @@ mod tests {
             serde_json::to_value(none).unwrap()["verified"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn a_finding_shows_every_other_place_its_bug_is_with_its_code() {
+        let mut j = judged("a", 90, Lean::Change, false);
+        j.finding.also_at = vec![mergepatrol_core::Place {
+            file: "b.rs".into(),
+            line: Some(9),
+            code: vec![CodeLine {
+                number: Some(9),
+                kind: LineKind::Added,
+                text: "x".into(),
+                hot: true,
+            }],
+        }];
+        let view = FindingView::new(j, &RepoName::parse("o/r").unwrap(), 1);
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["also_at"][0]["file"], "b.rs");
+        assert_eq!(json["also_at"][0]["line"], 9);
+        assert_eq!(json["also_at"][0]["code"][0]["text"], "x");
     }
 
     #[test]

@@ -1389,6 +1389,7 @@ mod tests {
             verified: None,
             code: Vec::new(),
             related: Vec::new(),
+            also_at: Vec::new(),
         };
         let done = ReviewDone {
             status: ReviewStatus::Asks,
