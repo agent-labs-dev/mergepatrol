@@ -998,8 +998,6 @@ impl ReviewStore for Mem {
             answered_by: None,
             note: String::new(),
             questions: Vec::new(),
-            brief: None,
-            submitted: None,
             created_at: String::new(),
             updated_at: String::new(),
         };
@@ -1029,31 +1027,6 @@ impl ReviewStore for Mem {
     }
     async fn release_reviews(&self) -> Result<u64> {
         unreachable!()
-    }
-    async fn await_author(&self, id: i64, _: i64, brief: &str) -> Result<()> {
-        let mut reviews = self.reviews.lock().unwrap();
-        let r = reviews.iter_mut().find(|r| r.id == id).unwrap();
-        r.status = ReviewStatus::Author;
-        r.brief = Some(brief.to_owned());
-        Ok(())
-    }
-    async fn submit_review(
-        &self,
-        _: u64,
-        _: &RepoName,
-        pr: PrNumber,
-        head: &str,
-        review: &serde_json::Value,
-    ) -> Result<bool> {
-        let mut reviews = self.reviews.lock().unwrap();
-        let waiting = reviews
-            .iter_mut()
-            .find(|r| r.number == pr && r.head_sha == head && r.status == ReviewStatus::Author);
-        Ok(waiting.is_some_and(|r| {
-            r.status = ReviewStatus::Pending;
-            r.submitted = Some(review.clone());
-            true
-        }))
     }
     async fn review_queue_change(
         &self,
@@ -1501,7 +1474,6 @@ fn ctx(store: Arc<Mem>) -> Ctx {
                 // One PR at a time, unless a test batches.
                 batch_size: 1,
                 agent: AgentSettings {
-                    runs: Default::default(),
                     provider: Default::default(),
                     model: "m".into(),
                     effort: "medium".into(),

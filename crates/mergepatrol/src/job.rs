@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
     Answered, CheckFailure, CodeLine, FIXED_BY, Finding, Lean, LineKind, Panel, RESOLVED_BY,
-    SentBack, Spend, SpendTask, Verdict, Verifier, Vote,
+    SentBack, Spend, SpendTask, Verdict, Vote,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -949,7 +949,7 @@ async fn verify_findings(
                 vote
             }
         });
-        let verified = panel.verdict(Verifier::MergeLoop, votes.collect());
+        let verified = panel.verdict(votes.collect());
         let held = format!("{}: {} of {} hold", f.id, verified.holds(), panel.seats);
         event(events, "verified", held);
         f.verified = Some(verified);
@@ -1320,7 +1320,6 @@ mod tests {
         }
         // The reviewer's own votes count for nothing; the panel's decide.
         let v = findings[0].verified.as_ref().unwrap();
-        assert_eq!(v.by, Verifier::MergeLoop);
         assert_eq!(v.needed, 2);
         let mut cast: Vec<Verdict> = v.votes.iter().map(|v| v.verdict).collect();
         cast.sort_by_key(|v| *v as u8);

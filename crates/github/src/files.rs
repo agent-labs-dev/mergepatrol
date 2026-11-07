@@ -132,33 +132,6 @@ impl Installation {
             .map(str::to_owned))
     }
 
-    /// The files in `.github/workflows/` at `rev`, by name, in name order: what a review reads
-    /// a repo's checks from when it has no checkout of its own.
-    pub async fn workflows_at(&self, repo: &RepoName, rev: &str) -> Result<Vec<(String, String)>> {
-        let query = "query($owner: String!, $name: String!, $workflows: String!) {
-            repository(owner: $owner, name: $name) { object(expression: $workflows) {
-              ... on Tree { entries { name object { ... on Blob { text } } } } } }
-          }";
-        let data = self
-            .graphql_missing_ok(
-                "workflows",
-                query,
-                json!({ "owner": repo.owner, "name": repo.name, "workflows": format!("{rev}:.github/workflows") }),
-            )
-            .await?;
-        let mut files: Vec<(String, String)> = data["repository"]["object"]["entries"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| {
-                let text = e["object"]["text"].as_str()?;
-                Some((e["name"].as_str()?.to_owned(), text.to_owned()))
-            })
-            .collect();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(files)
-    }
-
     /// The objects at `lookups`, as (git ref, path), in one query, with the default branch's
     /// head and the open PR from `pr_branch`. `HEAD` is the default branch. A missing ref or
     /// path is `None`.

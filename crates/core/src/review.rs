@@ -367,10 +367,9 @@ impl Panel {
     };
 
     /// What the panel decided from these votes: only the first `seats` count.
-    pub fn verdict(self, by: Verifier, mut votes: Vec<Vote>) -> Verification {
+    pub fn verdict(self, mut votes: Vec<Vote>) -> Verification {
         votes.truncate(self.seats.into());
         Verification {
-            by,
             needed: self.needed,
             votes,
         }
@@ -380,21 +379,9 @@ impl Panel {
 /// What a panel decided of a finding, with each vote.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Verification {
-    /// Who ran it. One the author's agent posts is its own, whatever it says.
-    #[serde(default = "author")]
-    pub by: Verifier,
-    /// How many had to agree it holds. One posted is held to MergeLoop's panel.
-    #[serde(default = "security_needed")]
+    /// How many had to agree it holds.
     pub needed: u8,
     pub votes: Vec<Vote>,
-}
-
-fn author() -> Verifier {
-    Verifier::Author
-}
-
-fn security_needed() -> u8 {
-    Panel::SECURITY.needed
 }
 
 impl Verification {
@@ -408,17 +395,6 @@ impl Verification {
     pub fn upheld(&self) -> bool {
         self.holds() >= usize::from(self.needed)
     }
-}
-
-/// Who ran a panel.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verifier {
-    /// MergeLoop, in its sandbox, each agent in a checkout of its own.
-    MergeLoop,
-    /// The agent of the PR's author, on its machine: MergeLoop takes its votes at its word, as it
-    /// does its evidence.
-    Author,
 }
 
 /// One agent's vote, and why.
@@ -522,8 +498,6 @@ pub enum ReviewStatus {
     /// Waiting for the agent.
     Pending,
     Running,
-    /// Waiting for the agent of the PR's author to post its review (`agent.runs: local`).
-    Author,
     /// Waiting for a human's answers.
     Asks,
     Approved,
@@ -539,7 +513,6 @@ impl ReviewStatus {
         match self {
             ReviewStatus::Pending => "pending",
             ReviewStatus::Running => "running",
-            ReviewStatus::Author => "author",
             ReviewStatus::Asks => "asks",
             ReviewStatus::Approved => "approved",
             ReviewStatus::Changes => "changes",
@@ -551,7 +524,6 @@ impl ReviewStatus {
         [
             ReviewStatus::Pending,
             ReviewStatus::Running,
-            ReviewStatus::Author,
             ReviewStatus::Asks,
             ReviewStatus::Approved,
             ReviewStatus::Changes,
@@ -569,7 +541,6 @@ impl ReviewStatus {
             ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale => {
                 Some(Hold::Reviewing)
             }
-            ReviewStatus::Author => Some(Hold::AuthorReview),
             ReviewStatus::Asks => Some(Hold::ReviewAsks),
             ReviewStatus::Changes => Some(Hold::ReviewChanges),
         }
@@ -884,14 +855,11 @@ mod tests {
             (vec![Holds, Abstained, Abstained], Route::Cleared),
             (vec![Holds, Holds, Holds], Route::Author),
         ] {
-            hole.verified = Some(panel.verdict(Verifier::MergeLoop, votes(&cast)));
+            hole.verified = Some(panel.verdict(votes(&cast)));
             assert_eq!(s.route(&hole), route, "{cast:?}");
         }
         // Only the panel's seats vote: more votes posted do not outvote it.
-        let stuffed = panel.verdict(
-            Verifier::Author,
-            votes(&[DoesNotHold, DoesNotHold, Holds, Holds, Holds]),
-        );
+        let stuffed = panel.verdict(votes(&[DoesNotHold, DoesNotHold, Holds, Holds, Holds]));
         assert_eq!(stuffed.votes.len(), 3);
         assert!(!stuffed.upheld());
         // Evidence MergeLoop saw fail shows it without a vote, as for any kind.
@@ -901,7 +869,7 @@ mod tests {
         // Votes do not stand in for evidence on other kinds.
         let mut other = finding(Kind::Other, 100, Lean::Change);
         other.evidence = None;
-        other.verified = Some(panel.verdict(Verifier::MergeLoop, votes(&[Holds, Holds, Holds])));
+        other.verified = Some(panel.verdict(votes(&[Holds, Holds, Holds])));
         assert!(!other.wants_votes());
         assert_eq!(s.route(&other), Route::Cleared);
         // Nothing to vote on where the votes would not change the route.

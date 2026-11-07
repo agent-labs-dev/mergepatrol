@@ -5,11 +5,7 @@ import type { RepoReviewView } from "./RepoReviewView";
 /**
  * A repo's settings, as its config file sets them.
  */
-export type RepoSettingsView = { 
-/**
- * Who resolves conflicts and fixes failed checks: MergeLoop's agent, or the author's.
- */
-runs: "hosted" | "local", label: string, batch_size: number, provider: "anthropic" | "openai" | "openrouter", model: string, effort: string, 
+export type RepoSettingsView = { label: string, batch_size: number, provider: "anthropic" | "openai" | "openrouter", model: string, effort: string, 
 /**
  * A model for one task over the default.
  */

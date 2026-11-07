@@ -3,11 +3,6 @@ import type { VoteView } from "./VoteView";
 
 export type VerificationView = { 
 /**
- * `merge_loop`: MergeLoop ran the panel in its sandbox. `author`: the agent of the PR's
- * author says it did, and MergeLoop took its word.
- */
-by: "merge_loop" | "author", 
-/**
  * How many had to say it holds.
  */
 needed: number, 

@@ -2,7 +2,7 @@
 //! the finding claims and the code. It never sees how the reviewer got there, nor what other
 //! verifiers said. A panel of them votes on whether the finding holds.
 
-use mergepatrol_core::{Finding, Panel, Verdict, Vote};
+use mergepatrol_core::{Finding, Verdict, Vote};
 
 use crate::{VerifyRequest, last_line};
 
@@ -24,10 +24,7 @@ pub fn claim(f: &Finding) -> String {
 }
 
 pub(crate) fn verify_prompt(req: &VerifyRequest<'_>) -> String {
-    prompt_with(req.pr_title, req.base, req.claim)
-}
-
-fn prompt_with(title: &str, base: &str, claim: &str) -> String {
+    let (title, base, claim) = (req.pr_title, req.base, req.claim);
     format!(
         "You are checking one finding of a code review of a pull request, {title}, before a merge \
 queue merges it. You did not write the pull request or the review, and you do not see how the \
@@ -48,12 +45,6 @@ cannot tell, it does not hold.
 Answer in a short paragraph of plain text: what you found. Then end with one line, alone: \
 `{HOLDS}` or `{DOES_NOT_HOLD}`."
     )
-}
-
-/// The verifier's prompt for the agent of the PR's author to give its subagents, with the claim
-/// for it to fill in.
-pub(crate) fn author_verify_prompt(title: &str, base: &str) -> String {
-    prompt_with(title, base, "<the claim>")
 }
 
 /// The vote in a verifier's answer: its last line, with the rest as why. An answer with no
@@ -77,34 +68,6 @@ pub fn vote(answer: &str) -> Vote {
         verdict,
         why: why.trim().to_owned(),
     }
-}
-
-/// How the agent of the PR's author has its subagents check a review's findings, as MergeLoop's
-/// sandbox does, and what it posts of their votes.
-pub(crate) fn author_panel(title: &str, base: &str, head: &str) -> String {
-    let Panel { seats, needed } = Panel::SECURITY;
-    format!(
-        "Before you post, have fresh agents check each finding MergeLoop would otherwise take on \
-one agent's word: each with `kind` `security`, `lean` `change` and `needs_human` false that \
-carries no `evidence`. For each, run {seats} subagents at once, each fresh, with no other context: \
-not yours, not the review's, and not each other's. Each works in a checkout of the head of its \
-own, as MergeLoop's own panel does: add one for each with `git worktree add --detach <dir> {head}`, \
-start the subagent in it, and remove it once the subagent is done. Give each the prompt below and nothing else, \
-with `<the claim>` replaced by the finding's lines `kind: …`, `title: …`, `where: …` (its `file`:`line`, \
-then each place in its `also_at`, comma-separated), `finding: …` and `suggestion: …`. Leave out its `confidence`, `unsure`, `checked` and `related`: \
-they are how the review got there.
-
-````
-{prompt}
-````
-
-Add each subagent's vote to its finding, as `\"verified\": {{\"votes\": [{{\"verdict\": \"holds\" \
-| \"does_not_hold\", \"why\": \"<its paragraph>\"}}]}}`, one vote for each subagent, in the order they \
-ran. The finding goes back to the author only when {needed} of the {seats} say it holds; else it is \
-a note. MergeLoop does not run them again: it takes the votes at your word, as it does your \
-evidence, and shows them as your agent's.",
-        prompt = author_verify_prompt(title, base),
-    )
 }
 
 #[cfg(test)]
@@ -197,16 +160,5 @@ mod tests {
             vote("Reached.\n**VERDICT: holds.**").verdict,
             Verdict::Holds
         );
-    }
-
-    #[test]
-    fn the_authors_agent_runs_the_same_panel_and_posts_its_votes() {
-        let p = author_panel("t", "abc", "h1");
-        assert!(p.contains("git worktree add --detach <dir> h1"));
-        assert!(p.contains("run 3 subagents at once, each fresh"));
-        assert!(p.contains("when 2 of the 3 say it holds"));
-        assert!(p.contains(&author_verify_prompt("t", "abc")));
-        assert!(p.contains(r#""verified": {"votes": [{"verdict": "holds" | "does_not_hold""#));
-        assert!(p.contains("takes the votes at your word"));
     }
 }

@@ -10,14 +10,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
     Answered, Evidence, Finding, Judged, Lean, PrNumber, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, Runs, SentBack, Verdict, Verification, Verifier, review_status, review_url,
+    ReviewStatus, SentBack, Verdict, Verification, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
 };
 use mergepatrol_github::setup::Verdict as ReviewVerdict;
 use mergepatrol_github::{App, CodeOwners, Installation, PullRequest, ReviewThread, ThreadComment};
-use mergepatrol_resolver::{ReviewRequest, Scope, Verify, author_review_brief, withdraws};
+use mergepatrol_resolver::withdraws;
 use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
 use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
@@ -162,24 +162,14 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
         .unwrap_or_default();
     let bars = workspace.with(&settings.review);
 
-    let by_author = settings.agent.runs == Runs::Local;
     let found = match pr.is_cross_repository {
         // A fork's code is not trusted: no agent reads it, as none rebases or fixes it.
         true => Err("The agent does not review PRs from forks.".to_owned()),
-        // The author's agent reviews, and posts what it found: this only judges that.
-        false if by_author => match &r.submitted {
-            Some(review) => posted_review(review),
-            None => {
-                let brief = author_brief(ctx, &gh, &pr, &settings, &r).await?;
-                return ctx.store.await_author(r.id, r.claim, &brief).await;
-            }
-        },
         false => run_review(ctx, &gh, &key, &pr, &settings, &r).await,
     };
     let output = match found {
         Ok(output) => Ok(output),
-        // What the author's agent posted reads the same each time.
-        Err(why) if r.attempts + 1 < ATTEMPTS && !why.starts_with(NO_KEY) && !by_author => {
+        Err(why) if r.attempts + 1 < ATTEMPTS && !why.starts_with(NO_KEY) => {
             ctx.store
                 .retry_review(r.id, r.claim, &why, RETRY_AFTER)
                 .await?;
@@ -213,100 +203,6 @@ async fn as_reviewed(
 }
 
 const NO_KEY: &str = "No model API key";
-
-/// What the review of the author's agent asks of it: the prompt of MergeLoop's own, with what
-/// humans answered and what the last review sent back.
-async fn author_brief(
-    ctx: &Ctx,
-    gh: &Installation,
-    pr: &PullRequest,
-    settings: &RepoSettings,
-    r: &ReviewRecord,
-) -> Result<String> {
-    let Earlier {
-        answered,
-        sent_back,
-        reviewed,
-    } = earlier(ctx, gh, r).await?;
-    let reviewed = match reviewed.as_deref() {
-        Some(at)
-            if since_reviewed(gh, r, pr.merges_into(), at)
-                .await
-                .unwrap_or(false) =>
-        {
-            Some(at)
-        }
-        _ => None,
-    };
-    let scope = Scope::of(&[], reviewed);
-    let verify = checks(gh, settings, r).await?;
-    let base = format!("$(git merge-base origin/{} HEAD)", pr.merges_into());
-    let req = ReviewRequest {
-        workdir: std::path::Path::new("."),
-        base: &base,
-        pr_title: &pr.title,
-        pr_body: &pr.body,
-        trunk: pr.merges_into(),
-        answered: &answered,
-        sent_back: &sent_back,
-        verify: &verify,
-        scope,
-        transcript: std::path::Path::new("."),
-    };
-    let repo = r.repo.to_string();
-    Ok(author_review_brief(&req, &repo, r.number, &r.head_sha))
-}
-
-/// Whether all that lies between `at`, the head findings went back on, and the review's head is
-/// the author's: a rebase leaves `at` behind, and a merge of the trunk moves the PR's base.
-async fn since_reviewed(
-    gh: &Installation,
-    r: &ReviewRecord,
-    trunk: &str,
-    at: &str,
-) -> Result<bool> {
-    let (repo, head) = (&r.repo, r.head_sha.as_str());
-    Ok(!gh.behind(repo, at, head).await?
-        && gh.merge_base(repo, trunk, at).await? == gh.merge_base(repo, trunk, head).await?)
-}
-
-/// The checks the author's agent runs: the repo's verify commands, else its CI's.
-async fn checks(gh: &Installation, settings: &RepoSettings, r: &ReviewRecord) -> Result<Verify> {
-    Ok(match settings.verify.is_empty() {
-        true => {
-            let ci =
-                mergepatrol_core::verify_from_ci(&gh.workflows_at(&r.repo, &r.head_sha).await?);
-            match ci.is_empty() {
-                true => Verify::None,
-                false => Verify::Ci(ci),
-            }
-        }
-        false => Verify::Configured(settings.verify.clone()),
-    })
-}
-
-/// The review the author's agent posted, as MergeLoop's own job would have written it. Its
-/// evidence is the agent's word that the command failed: nothing runs it again.
-fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput, String> {
-    use mergepatrol_core::{Panel, Verifier};
-    let mut output: ReviewOutput = serde_json::from_value(review.clone())
-        .map_err(|e| format!("The review the author's agent posted does not read: {e}."))?;
-    if let Some(by) = review["by"].as_str() {
-        output.summary = format!("`{by}`'s agent reviewed this. {}", output.summary);
-    }
-    output.findings.truncate(crate::job::FINDINGS_MAX);
-    for (i, f) in output.findings.iter_mut().enumerate() {
-        f.id = format!("f{}", i + 1);
-        f.confidence = f.confidence.min(100);
-        if let Some(e) = &mut f.evidence {
-            e.failed = !e.command.trim().is_empty();
-        }
-        if let Some(v) = f.verified.take() {
-            f.verified = Some(Panel::SECURITY.verdict(Verifier::Author, v.votes));
-        }
-    }
-    Ok(output)
-}
 
 /// What a review goes on from: what humans answered on earlier heads, and what the last review
 /// sent back, with the author's replies in its threads, and the head it was of.
@@ -435,10 +331,7 @@ async fn earlier_reviews(ctx: &Ctx, r: &ReviewRecord) -> Result<Vec<ReviewRecord
             && e.head_sha != r.head_sha
             && !matches!(
                 e.status,
-                ReviewStatus::Pending
-                    | ReviewStatus::Running
-                    | ReviewStatus::Author
-                    | ReviewStatus::Stale
+                ReviewStatus::Pending | ReviewStatus::Running | ReviewStatus::Stale
             )
     });
     Ok(earlier)
@@ -846,16 +739,9 @@ fn shown(f: &Judged, head: &str, patch: bool) -> String {
     }
 }
 
-/// What a finding's panel said of it, and who ran the panel.
+/// What a finding's panel said of it.
 fn voted(v: &Verification) -> String {
     let n = v.votes.len();
-    let (who, after) = match v.by {
-        Verifier::MergeLoop => (format!("MergeLoop had {n} fresh agents"), ""),
-        Verifier::Author => (
-            format!("The author's agent says it had {n} fresh subagents"),
-            " MergeLoop did not run them.",
-        ),
-    };
     let whys: String = v
         .votes
         .iter()
@@ -868,7 +754,7 @@ fn voted(v: &Verification) -> String {
         })
         .collect();
     format!(
-        "**Checked:** {who} check it, each given only this finding and the code: {} of {n} say it holds, and {} had to.{after}\n\n<details><summary>What each said</summary>\n{whys}\n\n</details>\n\n",
+        "**Checked:** MergeLoop had {n} fresh agents check it, each given only this finding and the code: {} of {n} say it holds, and {} had to.\n\n<details><summary>What each said</summary>\n{whys}\n\n</details>\n\n",
         v.holds(),
         v.needed,
     )
@@ -1130,60 +1016,6 @@ mod tests {
     use super::*;
     use mergepatrol_core::{Bar, Kind};
 
-    #[test]
-    fn a_posted_review_is_numbered_and_its_evidence_counts_as_failed() {
-        let posted = serde_json::json!({
-            "summary": "s",
-            "findings": [
-                { "kind": "other", "title": "a", "confidence": 120, "lean": "change", "finding": "x",
-                  "evidence": { "command": "cargo test a" } },
-                { "kind": "other", "title": "b", "confidence": 90, "lean": "fine", "finding": "y" },
-            ],
-        });
-        let output = posted_review(&posted).unwrap();
-        let ids: Vec<&str> = output.findings.iter().map(|f| f.id.as_str()).collect();
-        assert_eq!(ids, ["f1", "f2"]);
-        assert_eq!(output.findings[0].confidence, 100);
-        assert!(output.findings[0].shows_the_change());
-        assert!(posted_review(&serde_json::json!({ "findings": "no" })).is_err());
-        // At most as many as MergeLoop's own agent may report, so the summary fits GitHub.
-        let many: Vec<_> = (0..30)
-            .map(|i| serde_json::json!({ "kind": "other", "title": format!("t{i}"), "confidence": 90, "lean": "pre_existing", "finding": "x" }))
-            .collect();
-        let many = serde_json::json!({ "summary": "s", "findings": many });
-        assert_eq!(posted_review(&many).unwrap().findings.len(), 25);
-        // Its votes are its agent's word, held to MergeLoop's panel, whatever it says of them.
-        let hole = |verified| {
-            let posted = serde_json::json!({ "summary": "s", "findings": [
-                { "kind": "security", "title": "a", "confidence": 90, "lean": "change",
-                  "finding": "x", "verified": verified },
-            ] });
-            posted_review(&posted).unwrap().findings.remove(0)
-        };
-        let votes = |v: &[&str]| -> Vec<serde_json::Value> {
-            v.iter()
-                .map(|v| serde_json::json!({ "verdict": v, "why": "w" }))
-                .collect()
-        };
-        let stuffed = hole(serde_json::json!({ "by": "merge_loop", "needed": 1,
-            "votes": votes(&["does_not_hold", "does_not_hold", "holds", "holds"]) }));
-        let v = stuffed.verified.as_ref().unwrap();
-        assert_eq!(
-            (v.by, v.needed, v.votes.len()),
-            (mergepatrol_core::Verifier::Author, 2, 3)
-        );
-        assert!(!stuffed.shows_the_change());
-        let agreed =
-            hole(serde_json::json!({ "votes": votes(&["holds", "holds", "does_not_hold"]) }));
-        assert!(agreed.shows_the_change());
-        // Whoever posted it is named, in code so GitHub pings no one, as any writer of the repo may review for its author.
-        let by = serde_json::json!({ "summary": "s", "findings": [], "by": "octo" });
-        assert_eq!(
-            posted_review(&by).unwrap().summary,
-            "`octo`'s agent reviewed this. s"
-        );
-    }
-
     fn review(id: i64, sent_back: bool, answered_by: Option<&str>) -> ReviewRecord {
         let finding = Finding {
             id: "f1".into(),
@@ -1234,8 +1066,6 @@ mod tests {
             answered_by: answered_by.map(str::to_owned),
             note: String::new(),
             questions: Vec::new(),
-            brief: None,
-            submitted: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -1331,8 +1161,8 @@ mod tests {
     }
 
     #[test]
-    fn a_security_findings_thread_and_note_say_what_its_panel_voted_and_who_ran_it() {
-        use mergepatrol_core::{Panel, Verdict, Verifier, Vote};
+    fn a_security_findings_thread_and_note_say_what_its_panel_voted() {
+        use mergepatrol_core::{Panel, Verdict, Vote};
         let vote = |verdict| Vote {
             verdict,
             why: "The header reaches it.".into(),
@@ -1345,27 +1175,20 @@ mod tests {
             vote(Verdict::Holds),
             vote(Verdict::DoesNotHold),
         ];
-        f.finding.verified = Some(Panel::SECURITY.verdict(Verifier::MergeLoop, cast.clone()));
+        f.finding.verified = Some(Panel::SECURITY.verdict(cast.clone()));
         let body = thread_body(&f, "abc1234");
         assert!(
             body.contains("MergeLoop had 3 fresh agents check it, each given only this finding and the code: 2 of 3 say it holds, and 2 had to."),
             "{body}"
         );
         assert!(body.contains("The header reaches it."));
-        f.finding.verified = Some(Panel::SECURITY.verdict(Verifier::Author, cast));
-        let body = thread_body(&f, "abc1234");
-        assert!(
-            body.contains("The author's agent says it had 3 fresh subagents check it"),
-            "{body}"
-        );
-        assert!(body.contains("MergeLoop did not run them"), "{body}");
         // Voted down, it is a note that says so.
         let down = vec![
             vote(Verdict::Holds),
             vote(Verdict::DoesNotHold),
             vote(Verdict::Abstained),
         ];
-        f.finding.verified = Some(Panel::SECURITY.verdict(Verifier::MergeLoop, down));
+        f.finding.verified = Some(Panel::SECURITY.verdict(down));
         f.sent_back = false;
         let done = ReviewDone {
             status: ReviewStatus::Approved,

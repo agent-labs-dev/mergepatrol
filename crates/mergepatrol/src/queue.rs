@@ -16,7 +16,7 @@ use mergepatrol_core::{
     BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
     EjectReason, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase, PrNumber,
     PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, Runs, SpendTask, Transition, body_closing_commit_issues,
+    ReviewStatus, SpendTask, Transition, body_closing_commit_issues,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -722,10 +722,8 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
     let saved = ctx.store.review_settings(installation).await?;
     let mut review = saved.clone().unwrap_or_default().with(&settings.review);
     // On by default, but a review needs the workspace's model key: without one, a workspace
-    // that never chose waits for no review, rather than for a human in its place. The author's
-    // agent needs none.
-    let hosted = settings.agent.runs == Runs::Hosted;
-    if hosted && review.enabled && saved.is_none() && settings.review.enabled.is_none() {
+    // that never chose waits for no review, rather than for a human in its place.
+    if review.enabled && saved.is_none() && settings.review.enabled.is_none() {
         review.enabled = ctx
             .chatgpt
             .credential(
@@ -739,9 +737,9 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
     // For the status to tell before a PR is queued: whether the billing gate covers the repo,
     // and which keys the agent's tasks need.
     let agent: Vec<AgentTask> = [
-        (SpendTask::Rebase, hosted),
-        (SpendTask::Fix, hosted && settings.fix_ci.allowed() > 0),
-        (SpendTask::Review, hosted && review.enabled),
+        (SpendTask::Rebase, true),
+        (SpendTask::Fix, settings.fix_ci.allowed() > 0),
+        (SpendTask::Review, review.enabled),
     ]
     .into_iter()
     .filter(|(_, runs)| *runs)
@@ -1232,7 +1230,6 @@ async fn sync_lane(
                     }
                     // Getting ready shows on the dashboard, and in the commits it pushes.
                     _ if reason.of_prep() => None,
-                    _ if reason.of_author() => Some(for_author(&reason)),
                     _ => Some(on_hold(&reason)),
                 };
                 (number, "held", reason.to_string(), comment)
@@ -1890,13 +1887,6 @@ async fn resume_merge(
     Ok(sha.is_some())
 }
 
-/// The comment of a PR that waits for its author's agent.
-fn for_author(reason: &Hold) -> String {
-    format!(
-        "On hold: {reason}, for the PR's author to settle with a push: MergeLoop's agent does not, as this repo's `agent.runs` is `local`. It keeps its place in the queue. An agent that runs `mergeloop` on this PR is told what to do."
-    )
-}
-
 fn on_hold(reason: &Hold) -> String {
     format!(
         "On hold: {reason}. It keeps its place in the queue, and goes on once GitHub would merge it."
@@ -2511,7 +2501,6 @@ async fn run_job(
     };
     // An agent in the lane would hold up every PR behind it.
     let agent = !ctx.prep.takes_agent_work(ctx, key, unit);
-    let by_author = settings.agent.runs == Runs::Local;
     let mut job = Job::start(unit.number, fix_attempts);
     if fix_attempts > 0 {
         job.fixes += unit.fixes_used(gh, repo).await?;
@@ -2647,10 +2636,7 @@ async fn run_job(
                         .is_some_and(|(head, _)| heads.contains(&head));
                     match verdict {
                         (CheckState::Passed, _) => Event::ChecksPassed,
-                        // The author's agent's fixes have no budget.
-                        (CheckState::Failed, _)
-                            if !agent && !rechecking && (job.can_fix() || by_author) =>
-                        {
+                        (CheckState::Failed, _) if !agent && !rechecking && job.can_fix() => {
                             Event::OnHold(Hold::PrepFixing)
                         }
                         (CheckState::Failed, names) => Event::ChecksFailed(names),

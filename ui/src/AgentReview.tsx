@@ -57,14 +57,8 @@ export function reviewBadge(e: Gated): [string, string] | null {
       return ["Checks", reviewTones.reviewing];
     case "prep_fixing":
       return ["Fixing", reviewTones.reviewing];
-    case "author_rebase":
-      return ["Conflict", reviewTones.sentBack];
-    case "author_fix":
-      return ["Checks failed", reviewTones.sentBack];
     case "reviewing":
       return ["Reviewing", reviewTones.reviewing];
-    case "author_review":
-      return ["Author's agent reviews", reviewTones.reviewing];
     case "review_asks":
       return ["Needs a human", reviewTones.asks];
     case "review_changes":
@@ -272,7 +266,7 @@ function Evidence({ f }: { f: FindingView }) {
 
 const said = { holds: "Holds", does_not_hold: "Does not hold", abstained: "No vote" } as const;
 
-/** How many of a finding's panel said it holds, and who ran the panel. */
+/** How many of a finding's panel said it holds. */
 function tally(v: VerificationView) {
   const holds = v.votes.filter((x) => x.verdict === "holds").length;
   return `${holds} of ${v.votes.length} said it holds; ${v.needed} needed`;
@@ -280,7 +274,7 @@ function tally(v: VerificationView) {
 
 /**
  * What a panel of fresh agents voted on a security finding with no failing command: each saw only
- * the finding and the code. One the author's agent ran is its word: MergeLoop did not run it.
+ * the finding and the code.
  */
 function Votes({ f }: { f: FindingView }) {
   const v = f.verified;
@@ -288,10 +282,7 @@ function Votes({ f }: { f: FindingView }) {
   return (
     <div className="mt-2 overflow-hidden rounded-md border border-line bg-surface text-xs">
       <p className="border-b border-line bg-sunken px-3 py-1.5 text-muted">
-        {v.by === "merge_loop"
-          ? "Fresh agents checked it, each with only the finding and the code: "
-          : "The author's agent says its fresh subagents checked it, unchecked by MergeLoop: "}
-        {tally(v)}
+        Fresh agents checked it, each with only the finding and the code: {tally(v)}
       </p>
       <ul className="divide-y divide-line-soft">
         {v.votes.map((x, i) => (
