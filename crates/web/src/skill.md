@@ -44,12 +44,15 @@ The rebase rewrites the PR branch, and a fix adds a commit to it. Before pushing
 
 ## Reading its status
 
-MergeLoop keeps one comment on each queued PR up to date. It says one of:
+MergeLoop keeps one comment on each queued PR up to date, from the moment it joins the queue. It says one of:
 
+- **Added to the queue**: it waits in its place.
+- **Getting ready to merge**: MergeLoop settles a conflict, waits for the checks and fixes failed ones. The comment does not change from one step to the next: `pull_status` over MCP says which step it is at.
 - **On hold**: the PR is a draft, waits for a required review, or has changes requested. MergeLoop comments the reason on the PR. It keeps its place, and runs once GitHub shows it ready.
 - **Under review**: with automatic review on, as it is by default, an agent reviews the PR before it takes its place in line. What it is sure should change it sends back to the PR's author, which is you if you built it, as review comments on their lines. The PR goes on once every review thread on it is resolved, with no human approval. It asks a human only about what the author can't settle: a call on scope or product, access, a change outside the repo. `get_agent_review` over MCP reads the review. If you built the PR, work the review as "After you queue" says, but never answer it.
 - **Ejected**: the rebase, the checks or the merge failed, and the comment says which. The trigger label is gone and `<label>:failed` is on. Fix the cause, push, then add `<label>` again.
 - **Merged**: done. The queue labels are removed.
+- **Left the queue**: the label was removed, the PR was closed, or it was merged outside MergeLoop. Nothing is queued.
 
 ## After you queue: work the review
 
