@@ -584,10 +584,7 @@ Reply with the JSON alone, in this shape, and nothing else:
         report = report_section(req.depth),
         evidence = evidence_section(req.depth),
         panel = panel_section(req.depth),
-        rerun = "After the review MergeLoop runs each command on the PR alone, with only the files \
-it names, and a command it does not see fail does not go back to the author: MergeLoop shows the \
-finding as a note that holds nothing. So name every file the command needs, and keep each \
-finding's files apart from the others'.",
+        rerun = rerun_section(req.depth),
     )
 }
 
@@ -621,6 +618,24 @@ command, and see it fail for that reason before you report it.";
 {ask}"
         ),
         true => format!("Give every finding you lean `change` on `evidence` if you can: {ask}"),
+    }
+}
+
+/// What MergeLoop does with a change's command after the review: one it does not see fail shows
+/// nothing, so the change is a note, or, of a kind the panel votes on, the panel's.
+fn rerun_section(depth: Depth) -> &'static str {
+    match depth.votes_on(Kind::Other) {
+        false => {
+            "After the review MergeLoop runs each command on the PR alone, with only the files \
+it names, and a command it does not see fail does not go back to the author: MergeLoop shows the \
+finding as a note that holds nothing. So name every file the command needs, and keep each \
+finding's files apart from the others'."
+        }
+        true => {
+            "After the review MergeLoop runs each command on the PR alone, with only the files \
+it names, and a change with a command it does not see fail goes to the panel below instead. So \
+name every file the command needs, and keep each finding's files apart from the others'."
+        }
     }
 }
 
@@ -970,6 +985,11 @@ mod prompt_tests {
         ));
         assert!(deep.contains("only when 2 of them agree it holds"));
         assert!(!deep.contains("except a `security` one"));
+        // Nor does its rerun say a command it did not see fail makes the change a note.
+        let note = "a command it does not see fail does not go back to the author";
+        assert!(standard.contains(note) && review_prompt(&at_depth(Depth::Quick)).contains(note));
+        assert!(!deep.contains(note));
+        assert!(deep.contains("a command it does not see fail goes to the panel below instead"));
     }
 }
 
