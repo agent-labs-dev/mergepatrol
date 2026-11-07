@@ -81,6 +81,14 @@ pub trait GitHub: Send + Sync {
     /// The PR's description as GitHub has it now, never from a cache.
     async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String>;
     async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()>;
+    /// Dismisses each request for changes on the PR whose body holds `mark`.
+    async fn dismiss_reviews_marked(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        mark: &str,
+        message: &str,
+    ) -> Result<usize>;
 }
 
 #[async_trait]
@@ -200,6 +208,15 @@ impl GitHub for Installation {
     }
     async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
         Installation::pr_body(self, repo, number).await
+    }
+    async fn dismiss_reviews_marked(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        mark: &str,
+        message: &str,
+    ) -> Result<usize> {
+        Installation::dismiss_reviews_marked(self, repo, number, mark, message).await
     }
     async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
         Installation::set_body(self, repo, number, body).await

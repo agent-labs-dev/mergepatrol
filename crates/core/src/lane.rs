@@ -41,7 +41,7 @@ pub struct PrSummary {
     /// The head commit's combined checks: `SUCCESS`, `FAILURE`, `ERROR`, `PENDING` or
     /// `EXPECTED`. `None` without checks.
     pub checks: Option<String>,
-    /// The fixes the PR has used, for its checks and its review.
+    /// The fixes the PR has used, for its checks.
     #[serde(default)]
     pub fixes: u32,
     /// The fixes it gets.

@@ -430,63 +430,7 @@ async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
 }
 
 #[tokio::test]
-async fn a_fix_of_a_review_commits_what_the_agent_changed_with_the_fix_trailer() {
-    let tmp = tempfile::tempdir().unwrap();
-    let origin = tmp.path().join("origin");
-    std::fs::create_dir(&origin).unwrap();
-    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
-
-    let seen = tmp.path().join("prompt");
-    let shell = format!(
-        "printf '%s' \"$*\" > {} && echo fixed > feature.txt",
-        seen.display()
-    );
-    let executor = with_fake_claude_running(tmp.path(), &shell, "done");
-    let mut spec = spec(&origin, &head, &trunk);
-    spec.resolver.api = Some(ApiAccess {
-        base_url: "http://127.0.0.1:9".into(),
-        token: "job-token".into(),
-    });
-    spec.task = Task::FixReview {
-        findings: vec![
-            serde_json::from_value(serde_json::json!({
-                "kind": "other", "title": "The socket leaks", "file": "feature.txt", "line": 1,
-                "confidence": 90, "lean": "change", "finding": "It stays open.",
-                "suggestion": "Close it."
-            }))
-            .unwrap(),
-        ],
-    };
-    let out = tmp.path().join("out");
-    let result = executor.run("t7", &spec, &out).await.unwrap();
-    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
-    let prompt = std::fs::read_to_string(&seen).unwrap();
-    assert!(
-        prompt.contains("The socket leaks (feature.txt:1)"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("Close it."), "{prompt}");
-
-    let check = tmp.path().join("check");
-    std::fs::create_dir(&check).unwrap();
-    git(&check, &["init", "-q"]);
-    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "pr"]);
-    git(
-        &check,
-        &[
-            "fetch",
-            "-q",
-            out.join(BUNDLE_FILE).to_str().unwrap(),
-            "refs/heads/result:refs/heads/result",
-        ],
-    );
-    let log = git(&check, &["log", "-1", "--format=%B", "result"]);
-    assert!(log.contains("Fix the review's findings"), "{log}");
-    assert!(log.contains("Fixed-by: mergepatrol"), "{log}");
-}
-
-#[tokio::test]
-async fn a_fix_of_a_review_on_a_stack_layer_goes_on_top_of_that_layer() {
+async fn a_fix_on_a_stack_layer_goes_on_top_of_that_layer() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");
     std::fs::create_dir(&origin).unwrap();
@@ -508,15 +452,11 @@ async fn a_fix_of_a_review_on_a_stack_layer_goes_on_top_of_that_layer() {
         base_url: "http://127.0.0.1:9".into(),
         token: "job-token".into(),
     });
-    spec.task = Task::FixReview {
-        findings: vec![
-            serde_json::from_value(serde_json::json!({
-                "kind": "other", "title": "Wrong", "file": "l2.txt", "line": 1,
-                "confidence": 90, "lean": "change", "finding": "It is wrong.",
-                "suggestion": "Fix it."
-            }))
-            .unwrap(),
-        ],
+    spec.task = Task::FixChecks {
+        failures: vec![CheckFailure {
+            name: "ci".into(),
+            details: "l2.txt is wrong".into(),
+        }],
     };
     let out = tmp.path().join("out");
     let result = executor.run("t-layer", &spec, &out).await.unwrap();
@@ -745,10 +685,9 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
 }
 
 /// The review's word that a command fails counts for nothing: the job runs each change's command
-/// on the head with only the files it names. The fix then starts from that test, must leave it as
-/// it is, and must make it pass.
+/// on the head with only the files it names.
 #[tokio::test]
-async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_pass() {
+async fn evidence_counts_only_once_the_job_saw_it_fail() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");
     std::fs::create_dir(&origin).unwrap();
@@ -824,70 +763,6 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
     // Each command runs on a fresh tree: no ignored file the agent or an earlier command left.
     assert!(evidence(4).failed);
     assert!(!evidence(5).failed, "{:?}", evidence(5));
-
-    // The fix: the review's test is in place, and passes once the fix is in.
-    let mut fix = |dir: &Path, shell: &str| {
-        spec.task = Task::FixReview {
-            findings: vec![review.findings[0].clone()],
-        };
-        let spec = spec.clone();
-        let dir = dir.to_owned();
-        let shell = shell.to_owned();
-        async move {
-            let out = dir.join("out");
-            let result = with_fake_claude_running(&dir, &shell, "done")
-                .run("t9", &spec, &out)
-                .await
-                .unwrap();
-            (result, out)
-        }
-    };
-    let fixed = tempfile::tempdir().unwrap();
-    let shell = "test -f check.sh && echo fixed > app.txt";
-    let (result, out) = fix(fixed.path(), shell).await;
-    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
-    let check = tmp.path().join("check");
-    std::fs::create_dir(&check).unwrap();
-    git(&check, &["init", "-q"]);
-    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "pr"]);
-    let bundle = out.join(BUNDLE_FILE);
-    let refspec = "refs/heads/result:refs/heads/result";
-    git(&check, &["fetch", "-q", bundle.to_str().unwrap(), refspec]);
-    assert_eq!(
-        git(&check, &["show", "result:check.sh"]),
-        "grep -q fixed app.txt",
-        "the review's test is committed with the fix"
-    );
-
-    let weakened = tempfile::tempdir().unwrap();
-    let (result, _) = fix(weakened.path(), "echo true > check.sh").await;
-    let JobOutcome::Failed { reason } = result.outcome else {
-        panic!("{result:?}");
-    };
-    assert!(reason.contains("changed the review's test"), "{reason}");
-
-    let missed = tempfile::tempdir().unwrap();
-    let (result, _) = fix(missed.path(), "echo other > app.txt").await;
-    let JobOutcome::Failed { reason } = result.outcome else {
-        panic!("{result:?}");
-    };
-    assert!(reason.contains("`sh check.sh` still fails"), "{reason}");
-
-    // A command may write files too: the review's test is checked once every command ran.
-    let mut rewrites = review.findings[0].clone();
-    rewrites.evidence.as_mut().unwrap().command = "sh check.sh && echo true > check.sh".into();
-    spec.task = Task::FixReview {
-        findings: vec![rewrites],
-    };
-    let rewritten = tempfile::tempdir().unwrap();
-    let result = with_fake_claude_running(rewritten.path(), "echo fixed > app.txt", "done")
-        .run("t10", &spec, &rewritten.path().join("out"))
-        .await
-        .unwrap();
-    let JobOutcome::Failed { reason } = result.outcome else {
-        panic!("{result:?}");
-    };
-    assert!(reason.contains("changed the review's test"), "{reason}");
 }
 
 #[tokio::test]

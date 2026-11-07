@@ -137,8 +137,8 @@ impl Prep {
         }
     }
 
-    /// Holds the unit `number` for a fix beside this module's jobs, until the claim drops: `None`
-    /// if a job has it.
+    /// Holds the unit `number` as a job would, until the claim drops: `None` if a job has it.
+    #[cfg(test)]
     pub(crate) fn claim(&self, key: &LaneKey, number: PrNumber) -> Option<Claim> {
         let id = (key.installation_id, key.repo.clone(), number);
         let mut running = self.running.lock().unwrap();

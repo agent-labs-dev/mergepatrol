@@ -119,7 +119,7 @@ pub struct FixCiSettings {
     pub attempts: u32,
 }
 
-/// On, with three fixes for a PR, whether for its checks or its review: most need one, and the
+/// On, with three fixes of a PR's checks: most need one, and the
 /// rest cover a first that went halfway.
 impl Default for FixCiSettings {
     fn default() -> Self {

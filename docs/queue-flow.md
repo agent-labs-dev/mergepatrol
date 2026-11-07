@@ -14,7 +14,7 @@ flowchart TD
         fixci["Fix"]
         patrols["bugpatrol / speedpatrol / sloppatrol"]:::later
         review["Code review"]
-        fixreview["Fix"]
+        author["Author fixes and pushes: keeps its place"]
         human["Human answers: keeps its place"]
 
         rebase --> ci
@@ -23,8 +23,8 @@ flowchart TD
         ci -.-> patrols
         patrols -.-> review
         ci -- "passed" --> review
-        review -- "sent back" --> fixreview
-        fixreview -- "new head: CI runs again" --> ci
+        review -- "sent back: changes requested" --> author
+        author -- "new head: CI runs again" --> ci
         review -- "asks" --> human
         human -- "resumes" --> review
     end
@@ -48,14 +48,14 @@ flowchart TD
 Dashed is planned, and not built.
 
 - **Rebase** runs only on a conflict with the trunk. A batch merges PRs as they are. A PR alone is rebased in the lane, unless GitHub can merge it as it is: not a stack, no conflict, a trunk that is not strict, checks passed on its head, and not a suspect of a failed batch.
-- **Fixes** are one budget for a PR or a stack, shared by CI and review: `fix_ci.attempts`, 3 by default. They are counted from the `Fixed-by:` commits on top of the author's last commit, so a push from the author earns new ones.
-- **A stack** rebases and publishes as one. A conflict on any layer rebases it all. A fix goes on the lowest layer that failed, or the layer the review read, and the layers above it are rebased onto the fix.
+- **Fixes** are one budget for a PR or a stack, for its checks: `fix_ci.attempts`, 3 by default. They are counted from the `Fixed-by:` commits on top of the author's last commit, so a push from the author earns new ones.
+- **A stack** rebases and publishes as one. A conflict on any layer rebases it all. A fix goes on the lowest layer that failed, and the layers above it are rebased onto the fix.
 - **A fork** goes straight to the lane. No agent runs on it, so there is nothing to rebase past a conflict or to fix. Waiting for its checks here would save the lane little: a fork never joins a batch, so unless it sits on the current trunk, the lane rebases it and runs its checks again.
-- **`agent.runs: local`** puts the author's agent in place of the **Rebase, on a conflict**, **Fix** and **Code review** boxes, and leaves out the review's **Fix**: a conflict or a failed check holds the PR, keeping its place, until the author pushes, and `mergeloop` tells their agent what to do. Nothing ejects it there, as nothing else in getting ready does.
+- **`agent.runs: local`** puts the author's agent in place of the **Rebase, on a conflict**, **Fix** and **Code review** boxes: a conflict or a failed check holds the PR, keeping its place, until the author pushes, and `mergeloop` tells their agent what to do. Nothing ejects it there, as nothing else in getting ready does.
 - **A title check** can't be fixed by a commit. The agent proposes a title, MergeLoop sets it, and an empty commit runs the checks once more.
 - **A fix or an agent's conflict resolution** needs a review of that change alone. A clean rebase keeps its approval.
-- **A review's fix** covers only what it sent back. A human keeps what the review asks about, and a PR with no fixes left waits for its author.
+- **What a review sends back** is the author's, never a fix of MergeLoop's: a review that requests changes on GitHub, with a thread per finding. Once the author resolves every thread, or a later review sends nothing back, MergeLoop dismisses that request. A human keeps what the review asks about.
 - **Getting ready never ejects.** What it cannot settle goes on to the lane, whose job ejects as it always did: a failed job, no fixes left, or a check that never finishes.
 - **The lane's job** rebases a PR that runs alone when it must, and waits for its checks. A skipped rebase means the PR merges on checks that ran before the trunk's newest commits, so nothing tested the two together. If GitHub refuses that merge, the job rebases after all. A conflict or a failed check goes back to getting ready, and the PR keeps its place while the next one goes on. Only forks and heads getting ready could not settle stay in the lane.
 
-The code is `crates/mergepatrol/src/queue/prep.rs` for getting ready, `run_job` in `crates/mergepatrol/src/queue.rs` for the lane, and `fix_sent_back` in `crates/mergepatrol/src/review.rs` for a review's fix.
+The code is `crates/mergepatrol/src/queue/prep.rs` for getting ready, `run_job` in `crates/mergepatrol/src/queue.rs` for the lane, and `crates/mergepatrol/src/review.rs` for the review.

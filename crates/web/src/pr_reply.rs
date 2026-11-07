@@ -234,7 +234,6 @@ mod tests {
             number: 5,
             head_sha: "h1".into(),
             since_head: None,
-            agent_fixed: false,
             status,
             claim: 0,
             error: None,

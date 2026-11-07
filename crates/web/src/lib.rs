@@ -1414,10 +1414,7 @@ mod tests {
             ],
             asked: vec!["mona".into()],
         };
-        store
-            .finish_review(r.id, claim, &done, false)
-            .await
-            .unwrap();
+        store.finish_review(r.id, claim, &done).await.unwrap();
         let (status, body) = json(&router, "GET", path, &cookie, None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["status"], "asks");
