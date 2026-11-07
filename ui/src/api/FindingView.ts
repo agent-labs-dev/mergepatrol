@@ -28,6 +28,10 @@ sent_back: boolean,
  */
 withdrawn: boolean, 
 /**
+ * For a bug the PR did not bring: a link that opens an issue for it on GitHub.
+ */
+issue: string | null, 
+/**
  * The change needs a call the author cannot make from the PR.
  */
 needs_human: boolean, 

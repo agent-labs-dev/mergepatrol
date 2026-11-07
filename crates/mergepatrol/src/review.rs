@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
-    Answered, Event, Evidence, Finding, Judged, PrNumber, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, Runs, SentBack, review_status, review_url,
+    Answered, Event, Evidence, Finding, Judged, Lean, PrNumber, RepoName, RepoSettings,
+    ReviewSettings, ReviewStatus, Runs, SentBack, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
@@ -966,11 +966,11 @@ fn thread_body(f: &Judged, head: &str) -> String {
 /// a thread on its line, and what it cleared.
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
     let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
-    review_body(&url, done)
+    review_body(&url, &key.repo, number, done)
 }
 
 /// The review's summary, with `url` where a human answers it: bounded, whatever the agent wrote.
-fn review_body(url: &str, done: &ReviewDone) -> String {
+fn review_body(url: &str, repo: &RepoName, number: PrNumber, done: &ReviewDone) -> String {
     let mut body = String::from("**MergeLoop's review**");
     if let Some(why) = &done.error {
         body.push_str(&format!(
@@ -984,11 +984,14 @@ fn review_body(url: &str, done: &ReviewDone) -> String {
     }
     let sent = done.findings.iter().filter(|f| f.sent_back).count();
     let asks = done.findings.iter().filter(|f| f.asked).count();
-    let cleared: Vec<&Judged> = done
-        .findings
-        .iter()
-        .filter(|f| !f.asked && !f.sent_back)
-        .collect();
+    // Of the rest, a bug the PR did not bring is one to file; the others it cleared.
+    let (mut noted, mut cleared) = (Vec::new(), Vec::new());
+    for f in done.findings.iter().filter(|f| !f.asked && !f.sent_back) {
+        match f.finding.issue_url(repo, number) {
+            Some(issue) => noted.push((f, issue)),
+            None => cleared.push(f),
+        }
+    }
     if sent > 0 {
         body.push_str(&format!(
             "\n\nIt sent {sent} back to the author, each in a thread on its line. For each, fix it and push, or reply with why it doesn't apply, then resolve the thread. Once every thread is resolved, the PR goes on to the merge queue with no human approval."
@@ -1011,11 +1014,9 @@ fn review_body(url: &str, done: &ReviewDone) -> String {
         body.push_str("\n\n<details><summary>What it cleared</summary>\n");
         for f in cleared {
             let note = match (f.finding.lean, f.finding.shows_the_change()) {
-                (mergepatrol_core::Lean::Change, false) => {
-                    ", a note: nothing showed the change was needed"
-                }
-                (mergepatrol_core::Lean::Change, true) => ", a note under the bar",
-                (mergepatrol_core::Lean::Fine, _) => "",
+                (Lean::Change, false) => ", a note: nothing showed the change was needed",
+                (Lean::Change, true) => ", a note under the bar",
+                (Lean::Fine | Lean::PreExisting, _) => "",
             };
             body.push_str(&format!(
                 "\n- {} ({}%{note})",
@@ -1024,6 +1025,16 @@ fn review_body(url: &str, done: &ReviewDone) -> String {
             ));
         }
         body.push_str("\n\n</details>");
+    }
+    if !noted.is_empty() {
+        body.push_str("\n\n**Already there before this PR**: bugs in code it did not bring. They are not this PR's to fix, and hold nothing.\n");
+        for (f, issue) in noted {
+            body.push_str(&format!(
+                "\n- {} · [file an issue]({})",
+                clip(&f.finding.title, TITLE_CHARS),
+                issue
+            ));
+        }
     }
     body
 }
@@ -1107,7 +1118,7 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mergepatrol_core::{Bar, Kind, Lean};
+    use mergepatrol_core::{Bar, Kind};
 
     #[test]
     fn a_posted_review_is_numbered_and_its_evidence_counts_as_failed() {
@@ -1248,6 +1259,32 @@ mod tests {
     /// However long what the agent wrote, a comment fits GitHub without its test, and with it
     /// only whole: the thread, a reply in it, and the review's summary.
     #[test]
+    fn a_pre_existing_bug_is_a_note_to_file_not_one_the_review_cleared() {
+        let repo = RepoName::parse("o/r").unwrap();
+        let mut old = review(1, false, None).findings.remove(0).finding;
+        old.title = "The retry never stops".into();
+        old.lean = Lean::PreExisting;
+        let findings = ReviewSettings::default().judge(vec![old.clone()]);
+        let done = ReviewDone {
+            status: review_status(&findings, false),
+            error: None,
+            summary: String::new(),
+            findings,
+            asked: Vec::new(),
+        };
+        assert_eq!(done.status, ReviewStatus::Approved);
+        let body = review_body("https://m.test", &repo, 7, &done);
+        let issue = old.issue_url(&repo, 7).unwrap();
+        assert!(
+            body.contains(&format!(
+                "- The retry never stops · [file an issue]({issue})"
+            )),
+            "{body}"
+        );
+        assert!(!body.contains("What it cleared"), "{body}");
+    }
+
+    #[test]
     fn every_comment_fits_github_however_long_what_the_agent_wrote() {
         let huge = "y".repeat(200_000);
         let mut f = review(1, true, None).findings.remove(0);
@@ -1292,12 +1329,27 @@ mod tests {
             findings: std::iter::repeat_n(cleared, 25).chain([f]).collect(),
             asked: Vec::new(),
         };
-        assert!(review_body("https://m.test", &done).chars().count() <= BODY_CHARS);
+        assert!(
+            review_body("https://m.test", &RepoName::parse("o/r").unwrap(), 7, &done)
+                .chars()
+                .count()
+                <= BODY_CHARS
+        );
         let failed = ReviewDone {
             error: Some(huge),
             ..done
         };
-        assert!(review_body("https://m.test", &failed).chars().count() <= BODY_CHARS);
+        assert!(
+            review_body(
+                "https://m.test",
+                &RepoName::parse("o/r").unwrap(),
+                7,
+                &failed
+            )
+            .chars()
+            .count()
+                <= BODY_CHARS
+        );
     }
 
     #[test]
