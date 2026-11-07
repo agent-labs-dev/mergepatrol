@@ -228,8 +228,7 @@ pub(crate) async fn conclude(
 }
 
 /// Posts what the fix left the author, on the PR as it is now. A PR that moved while the fix ran
-/// gets nothing: a pushed or retargeted head gets its own review, and one no longer queued gets
-/// none.
+/// gets nothing.
 async fn left_to_author(
     ctx: &Ctx,
     gh: &Installation,
@@ -238,15 +237,33 @@ async fn left_to_author(
     settings: &RepoSettings,
     done: &ReviewDone,
 ) -> Result<()> {
+    let Some(now) = as_reviewed(ctx, gh, key, r, settings).await? else {
+        return ctx.store.stale_review(r.id, r.claim).await;
+    };
+    publish(ctx, gh, key, &now, r, done).await?;
+    ctx.store.settle_review(r.id, r.claim).await
+}
+
+/// The PR as GitHub has it now, if it is still the one the review is of: the head it reviewed,
+/// into the same trunk, told to merge. A pushed or retargeted head gets its own review, and one
+/// no longer queued gets none.
+async fn as_reviewed(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    r: &ReviewRecord,
+    settings: &RepoSettings,
+) -> Result<Option<PullRequest>> {
     let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
-    if (!now.is_cross_repository && now.head_ref_oid != r.head_sha)
+    // A fork PR's head is its pull ref's, which its GraphQL lags behind.
+    let moved = !now.is_cross_repository && now.head_ref_oid != r.head_sha;
+    if moved
         || now.merges_into() != key.trunk
         || !merge_requested(ctx.store.as_ref(), gh, &r.repo, &now, &settings.label).await?
     {
-        return ctx.store.stale_review(r.id, r.claim).await;
+        return Ok(None);
     }
-    publish(ctx, gh, key, &now, r, done).await?;
-    ctx.store.settle_review(r.id, r.claim).await
+    Ok(Some(now))
 }
 
 /// What the agent's fix can take on from a review: what it sent back to the author, not what a
@@ -588,14 +605,63 @@ async fn finish(
     bars: &ReviewSettings,
     output: std::result::Result<ReviewOutput, String>,
 ) -> Result<Option<(HeldForFix, ReviewDone)>> {
-    // The merge request may have gone while the agent ran: then the review posts nothing and the
-    // PR ends no hold. It is dropped, for a review of a later head to take its place. `pr` is from
-    // before the run, so the gate reads the PR anew.
-    let now = GitHub::pull_request(gh, &r.repo, r.number).await?;
-    if !merge_requested(ctx.store.as_ref(), gh, &r.repo, &now, &settings.label).await? {
+    // The PR may have moved while the agent ran: then the review posts nothing and the PR ends no
+    // hold. It is dropped, for a review of a later head to take its place.
+    let Some(now) = as_reviewed(ctx, gh, key, r, settings).await? else {
         ctx.store.stale_review(r.id, r.claim).await?;
         return Ok(None);
+    };
+    let done = judge(ctx, gh, pr, r, bars, output).await?;
+    // Held before the review ends: the PR goes from reviewing to fixing, never by "sent back".
+    let held = held_for_fix(ctx, gh, key, &now, r, settings, done.status).await;
+    if !ctx
+        .store
+        .finish_review(r.id, r.claim, &done, held.is_some())
+        .await?
+    {
+        return Ok(None);
     }
+    let (kind, message) = ended(&done);
+    record(ctx, key, r.number, kind, &message).await?;
+    match held {
+        Some(held) => Ok(Some((held, done))),
+        None => {
+            publish(ctx, gh, key, &now, r, &done).await?;
+            Ok(None)
+        }
+    }
+}
+
+/// The PR held for the agent's fix of what the review sent back, if it fixes it. The author's
+/// agent fixes what its own review sent back, as the author.
+async fn held_for_fix(
+    ctx: &Ctx,
+    gh: &Installation,
+    key: &LaneKey,
+    now: &PullRequest,
+    r: &ReviewRecord,
+    settings: &RepoSettings,
+    status: ReviewStatus,
+) -> Option<HeldForFix> {
+    if status != ReviewStatus::Changes || settings.agent.runs == Runs::Local {
+        return None;
+    }
+    hold_for_fix(ctx, gh, key, now).await.unwrap_or_else(|e| {
+        tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not hold the PR for a fix");
+        None
+    })
+}
+
+/// What the review holds the PR for, and who it asks: what the agent found, judged by the
+/// workspace's bars, or why it could not review.
+async fn judge(
+    ctx: &Ctx,
+    gh: &Installation,
+    pr: &PullRequest,
+    r: &ReviewRecord,
+    bars: &ReviewSettings,
+    output: std::result::Result<ReviewOutput, String>,
+) -> Result<ReviewDone> {
     let (summary, mut findings, error) = match output {
         Ok(o) => (o.summary, bars.judge(o.findings), None),
         Err(why) => (String::new(), Vec::new(), Some(why)),
@@ -607,67 +673,40 @@ async fn finish(
             f.asked = true;
         }
     }
-    let asks = findings.iter().filter(|f| f.asked).count();
-    let sent = findings.iter().filter(|f| f.sent_back).count();
     let status = review_status(&findings, error.is_some());
     let asked = match status {
         ReviewStatus::Asks => askees(gh, &r.repo, pr, &findings).await,
         _ => Vec::new(),
     };
-    let done = ReviewDone {
+    Ok(ReviewDone {
         status,
-        error: error.clone(),
+        error,
         summary,
         findings,
         asked,
-    };
-    // Held before the review ends: the PR goes from reviewing to fixing, never by "sent back".
-    // The author's agent fixes what its own review sent back, as the author.
-    let held = match status {
-        ReviewStatus::Changes if settings.agent.runs == Runs::Local => None,
-        ReviewStatus::Changes => hold_for_fix(ctx, gh, key, &now)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not hold the PR for a fix");
-                None
-            }),
-        _ => None,
-    };
-    if !ctx
-        .store
-        .finish_review(r.id, r.claim, &done, held.is_some())
-        .await?
-    {
-        return Ok(None);
-    }
-    let (kind, message) = match (&error, status) {
+    })
+}
+
+/// How the review ended, as the PR's activity says it.
+fn ended(done: &ReviewDone) -> (&'static str, String) {
+    let all = done.findings.len();
+    let count = |of: fn(&Judged) -> bool| done.findings.iter().filter(|f| of(f)).count();
+    match (&done.error, done.status) {
         (Some(why), _) => ("review-failed", why.clone()),
-        (None, ReviewStatus::Approved) => (
-            "review-approved",
-            format!("cleared {} things alone", done.findings.len()),
-        ),
+        (None, ReviewStatus::Approved) => {
+            ("review-approved", format!("cleared {all} things alone"))
+        }
         (None, ReviewStatus::Changes) => (
             "review-sent-back",
             format!(
-                "sent {sent} of {} things back to the author",
-                done.findings.len()
+                "sent {} of {all} things back to the author",
+                count(|f| f.sent_back)
             ),
         ),
         (None, _) => (
             "review-asks",
-            format!(
-                "asks a human about {asks} of {} things",
-                done.findings.len()
-            ),
+            format!("asks a human about {} of {all} things", count(|f| f.asked)),
         ),
-    };
-    record(ctx, key, r.number, kind, &message).await?;
-    match held {
-        Some(held) => Ok(Some((held, done))),
-        None => {
-            publish(ctx, gh, key, pr, r, &done).await?;
-            Ok(None)
-        }
     }
 }
 

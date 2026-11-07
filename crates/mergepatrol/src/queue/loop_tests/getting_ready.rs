@@ -651,6 +651,16 @@ impl World {
     async fn conclude_with(&self, confidence: u8, settings: &RepoSettings) -> i64 {
         let head = self.pr(1).head_ref_oid;
         let r = self.store.start_review(1, &repo(), 1, &head).await.unwrap();
+        self.conclude_review(r, confidence, settings).await
+    }
+
+    /// `conclude_with`, for a review already started: of a head PR 1 may have left since.
+    async fn conclude_review(
+        &self,
+        r: mergepatrol_store::ReviewRecord,
+        confidence: u8,
+        settings: &RepoSettings,
+    ) -> i64 {
         let finding = Finding {
             id: "f1".into(),
             kind: Kind::Other,
@@ -1510,6 +1520,36 @@ async fn a_pr_pushed_to_during_the_fix_gets_no_out_of_date_review() {
     });
     let review = world.conclude(100).await;
     assert_eq!(world.posted(), Vec::<usize>::new());
+    let r = world.store.review(review).await.unwrap().unwrap();
+    assert_eq!(
+        r.status,
+        ReviewStatus::Stale,
+        "the new head gets its own review"
+    );
+}
+
+#[tokio::test]
+async fn a_review_that_asks_a_human_posts_nothing_once_the_pr_was_pushed_to() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    // The author's agent reviews, so no fix runs: what it found goes straight to GitHub.
+    let mut settings = world.ctx.config.repo_defaults.clone();
+    settings.agent.runs = mergepatrol_core::Runs::Local;
+    let head = world.pr(1).head_ref_oid;
+    let r = world
+        .store
+        .start_review(1, &repo(), 1, &head)
+        .await
+        .unwrap();
+    // The author pushes a fix while the review runs.
+    world.gh.with_mut(|s| s.push(1, "fixed"));
+    let review = world.conclude_review(r, 100, &settings).await;
+    assert_eq!(
+        world.posted(),
+        Vec::<usize>::new(),
+        "nothing about the old head"
+    );
     let r = world.store.review(review).await.unwrap().unwrap();
     assert_eq!(
         r.status,
