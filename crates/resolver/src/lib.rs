@@ -452,80 +452,86 @@ pub(crate) fn review_prompt(req: &ReviewRequest<'_>) -> String {
     prompt_for(req, Reviewer::Sandbox)
 }
 
-fn prompt_for(req: &ReviewRequest<'_>, by: Reviewer) -> String {
-    let answered = if req.answered.is_empty() {
-        String::new()
-    } else {
-        let items = req
-            .answered
-            .iter()
-            .map(|a| {
-                let what = match &a.answer {
-                    Answer::Fine => "fine as it is".to_owned(),
-                    Answer::Change { note } => format!("needs a change: {note}"),
-                };
-                let place = match (&a.finding.file, a.finding.line) {
-                    (Some(f), Some(l)) => format!(" ({f}:{l})"),
-                    (Some(f), None) => format!(" ({f})"),
-                    _ => String::new(),
-                };
-                format!("- {}{place}: @{} said {what}", a.finding.title, a.by)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "\nHumans already answered these findings on an earlier version of this PR. Do not \
+/// Where a finding is, as a prompt names it after its title: ` (file:line)`, ` (file)`, or
+/// nothing for the whole PR.
+fn place(file: &Option<String>, line: Option<u32>) -> String {
+    match (file, line) {
+        (Some(f), Some(l)) => format!(" ({f}:{l})"),
+        (Some(f), None) => format!(" ({f})"),
+        _ => String::new(),
+    }
+}
+
+fn answered_section(answered: &[Answered]) -> String {
+    if answered.is_empty() {
+        return String::new();
+    }
+    let items = answered
+        .iter()
+        .map(|a| {
+            let what = match &a.answer {
+                Answer::Fine => "fine as it is".to_owned(),
+                Answer::Change { note } => format!("needs a change: {note}"),
+            };
+            let place = place(&a.finding.file, a.finding.line);
+            format!("- {}{place}: @{} said {what}", a.finding.title, a.by)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\nHumans already answered these findings on an earlier version of this PR. Do not \
 raise them again unless the lines they are about changed since; if a change was asked for, \
 check whether it was made.\n{items}\n"
-        )
-    };
-    let sent_back = if req.sent_back.is_empty() {
-        String::new()
-    } else {
-        let items = req
-            .sent_back
-            .iter()
-            .map(|s| {
-                let f = &s.finding;
-                let place = match (&f.file, f.line) {
-                    (Some(file), Some(l)) => format!(" ({file}:{l})"),
-                    (Some(file), None) => format!(" ({file})"),
-                    _ => String::new(),
-                };
-                let reply = match (s.resolved, s.reply.trim()) {
-                    (true, "") => " The author resolved it.".to_owned(),
-                    (true, r) => format!(" The author resolved it, replying: {r}"),
-                    (false, "") => String::new(),
-                    (false, r) => format!(" The author replied: {r}"),
-                };
-                let shown = match &f.evidence {
-                    Some(e) if e.failed => format!(" `{}` failed on it.", e.command),
-                    _ => String::new(),
-                };
-                format!("- {}{place}: {}{shown}{reply}", f.title, f.suggestion)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!(
-            "\nYou sent these findings back to the author on the last version of this PR. Check \
+    )
+}
+
+fn sent_back_section(sent_back: &[SentBack]) -> String {
+    if sent_back.is_empty() {
+        return String::new();
+    }
+    let items = sent_back
+        .iter()
+        .map(|s| {
+            let f = &s.finding;
+            let place = place(&f.file, f.line);
+            let reply = match (s.resolved, s.reply.trim()) {
+                (true, "") => " The author resolved it.".to_owned(),
+                (true, r) => format!(" The author resolved it, replying: {r}"),
+                (false, "") => String::new(),
+                (false, r) => format!(" The author replied: {r}"),
+            };
+            let shown = match &f.evidence {
+                Some(e) if e.failed => format!(" `{}` failed on it.", e.command),
+                _ => String::new(),
+            };
+            format!("- {}{place}: {}{shown}{reply}", f.title, f.suggestion)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "\nYou sent these findings back to the author on the last version of this PR. Check \
 each against the code now. One that was fixed, report as a `fine` finding with the same title, \
 saying how it was fixed. One the author answered instead of changing: if their reply holds up in \
 the code, report it as `fine` with the same title; if it does not, report it again with the same \
 title and say why the reply does not hold. One that was neither fixed nor answered, report again \
 with the same title, so the author can tell it is the same one, and say what is still missing.\n{items}\n"
-        )
-    };
-    let queue_commits = if req.queue_commits.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
+    )
+}
+
+fn queue_commits_section(queue_commits: &[String]) -> String {
+    if queue_commits.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
 changed it, to fix failed checks or resolve a conflict in a rebase. Review only these commits, \
 with `git show`, and read the rest of the PR only to judge them. Report nothing about the rest of \
 the PR unless one of these breaks it.\n{}\n",
-            req.queue_commits.join("\n")
-        )
-    };
+        queue_commits.join("\n")
+    )
+}
+
+fn prompt_for(req: &ReviewRequest<'_>, by: Reviewer) -> String {
     format!(
         "You are reviewing a pull request before a merge queue merges it into `{trunk}`.
 
@@ -600,6 +606,9 @@ Reply with the JSON alone, in this shape, and nothing else:
         trunk = req.trunk,
         title = req.pr_title,
         body = req.pr_body,
+        answered = answered_section(req.answered),
+        sent_back = sent_back_section(req.sent_back),
+        queue_commits = queue_commits_section(req.queue_commits),
         base = req.base,
         verify = checks_section(req.verify, by),
         rerun = match by {
@@ -781,6 +790,92 @@ mod prompt_tests {
         // Two kinds of finding they add: code that breaks one, and a line the PR makes untrue.
         assert!(review.contains("breaks a convention"));
         assert!(review.contains("out of date"));
+    }
+
+    #[test]
+    fn a_re_review_lists_what_was_answered_sent_back_and_changed_by_the_queue() {
+        let finding = |title: &str, file: Option<&str>, line: Option<u32>| -> Finding {
+            serde_json::from_value(serde_json::json!({
+                "kind": "other", "title": title, "file": file, "line": line,
+                "confidence": 90, "lean": "change", "finding": "f",
+                "suggestion": format!("fix {title}"),
+            }))
+            .unwrap()
+        };
+        let answered = [
+            Answered {
+                finding: finding("A", Some("a.rs"), Some(3)),
+                answer: Answer::Fine,
+                by: "ann".into(),
+            },
+            Answered {
+                finding: finding("B", Some("b.rs"), None),
+                answer: Answer::Change {
+                    note: "rename it".into(),
+                },
+                by: "bo".into(),
+            },
+        ];
+        let mut failed = finding("D", None, None);
+        failed.evidence = Some(mergepatrol_core::Evidence {
+            command: "cargo test d".into(),
+            failed: true,
+            ..Default::default()
+        });
+        let sent = |finding, reply: &str, resolved| SentBack {
+            finding,
+            reply: reply.into(),
+            resolved,
+        };
+        let sent_back = [
+            sent(finding("C", Some("c.rs"), Some(7)), "", true),
+            sent(failed, "it is fine", true),
+            sent(finding("E", Some("e.rs"), None), "", false),
+            sent(finding("G", None, None), "later", false),
+        ];
+        let commits = ["abc123 fix(ci): the lint".to_owned()];
+        let review = review_prompt(&ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &answered,
+            sent_back: &sent_back,
+            queue_commits: &commits,
+            verify: &Verify::None,
+            transcript: Path::new("t"),
+        });
+        for line in [
+            "- A (a.rs:3): @ann said fine as it is",
+            "- B (b.rs): @bo said needs a change: rename it",
+            "- C (c.rs:7): fix C The author resolved it.",
+            "- D: fix D `cargo test d` failed on it. The author resolved it, replying: it is fine",
+            "- E (e.rs): fix E\n",
+            "- G: fix G The author replied: later",
+            "abc123 fix(ci): the lint",
+        ] {
+            assert!(review.contains(line), "{line}");
+        }
+        assert!(review.contains("Humans already answered these findings"));
+        assert!(review.contains("You sent these findings back"));
+        assert!(review.contains("Review only these commits"));
+        // A first review has none of it.
+        let first = review_prompt(&ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            queue_commits: &[],
+            verify: &Verify::None,
+            transcript: Path::new("t"),
+        });
+        assert!(!first.contains("Humans already answered"));
+        assert!(!first.contains("You sent these findings back"));
+        assert!(!first.contains("Review only these commits"));
     }
 }
 
