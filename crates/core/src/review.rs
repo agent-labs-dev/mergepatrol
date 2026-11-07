@@ -155,13 +155,15 @@ impl ReviewSettings {
         }
     }
 
-    /// Where a finding goes. A human only for a kind that always asks, or a change the author
+    /// Where a finding goes. A bug the PR did not bring holds nothing: it is a note, whatever its
+    /// kind. A human only for a kind that always asks, or a change the author
     /// cannot make from the PR; a change the agent is sure enough of, that shows what it is
     /// about, goes back to the author; the rest it clears, a change under the bar or one that
     /// shows nothing as a note.
     pub fn route(&self, finding: &Finding) -> Route {
         let bar = self.bar(finding.kind);
         match finding.lean {
+            Lean::PreExisting => Route::Cleared,
             _ if bar == Bar::Always => Route::Human,
             Lean::Fine => Route::Cleared,
             Lean::Change if finding.needs_human => Route::Human,
@@ -207,6 +209,9 @@ pub enum Lean {
     Fine,
     /// The author should change it.
     Change,
+    /// A bug in code the PR did not bring: not the author's to fix here, so a note, to file as
+    /// an issue.
+    PreExisting,
 }
 
 /// One thing the agent looked at, with what it decided and why.
@@ -558,6 +563,19 @@ mod tests {
             s.route(&finding(Kind::Migrations, 100, Lean::Fine)),
             Route::Human
         );
+    }
+
+    #[test]
+    fn a_pre_existing_bug_is_a_note_that_never_holds_the_pr() {
+        let s = ReviewSettings::default();
+        // However sure, of whatever kind, and whatever else it says: the PR did not bring it.
+        for kind in Kind::ALL {
+            let mut f = finding(kind, 100, Lean::PreExisting);
+            f.needs_human = true;
+            assert_eq!(s.route(&f), Route::Cleared, "{kind:?}");
+            let judged = s.judge(vec![f]);
+            assert_eq!(review_status(&judged, false), ReviewStatus::Approved, "{kind:?}");
+        }
     }
 
     #[test]
