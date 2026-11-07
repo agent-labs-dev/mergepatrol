@@ -17,7 +17,7 @@ use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
 };
 use mergepatrol_github::{App, CodeOwners, Installation, PullRequest, ReviewThread, ThreadComment};
-use mergepatrol_resolver::{ReviewRequest, Verify, author_review_brief, withdraws};
+use mergepatrol_resolver::{ReviewRequest, Scope, Verify, author_review_brief, withdraws};
 use mergepatrol_store::{LaneKey, ReviewDone, ReviewRecord};
 use mergepatrol_web::merge_requested;
 use tokio::task::JoinSet;
@@ -373,18 +373,18 @@ async fn author_brief(
     settings: &RepoSettings,
     r: &ReviewRecord,
 ) -> Result<String> {
-    let (answered, sent_back) = earlier(ctx, gh, r).await?;
-    let verify = match settings.verify.is_empty() {
-        true => {
-            let ci =
-                mergepatrol_core::verify_from_ci(&gh.workflows_at(&r.repo, &r.head_sha).await?);
-            match ci.is_empty() {
-                true => Verify::None,
-                false => Verify::Ci(ci),
-            }
-        }
-        false => Verify::Configured(settings.verify.clone()),
+    let Earlier {
+        answered,
+        sent_back,
+        reviewed,
+    } = earlier(ctx, gh, r).await?;
+    // A rebase leaves the reviewed head behind, as does a head GitHub cannot compare.
+    let reviewed = match reviewed.as_deref() {
+        Some(at) if !gh.behind(&r.repo, at, &r.head_sha).await.unwrap_or(true) => Some(at),
+        _ => None,
     };
+    let scope = Scope::of(&[], reviewed);
+    let verify = checks(gh, settings, r).await?;
     let base = format!("$(git merge-base origin/{} HEAD)", pr.merges_into());
     let req = ReviewRequest {
         workdir: std::path::Path::new("."),
@@ -395,11 +395,26 @@ async fn author_brief(
         answered: &answered,
         sent_back: &sent_back,
         verify: &verify,
-        queue_commits: &[],
+        scope,
         transcript: std::path::Path::new("."),
     };
     let repo = r.repo.to_string();
     Ok(author_review_brief(&req, &repo, r.number, &r.head_sha))
+}
+
+/// The checks the author's agent runs: the repo's verify commands, else its CI's.
+async fn checks(gh: &Installation, settings: &RepoSettings, r: &ReviewRecord) -> Result<Verify> {
+    Ok(match settings.verify.is_empty() {
+        true => {
+            let ci =
+                mergepatrol_core::verify_from_ci(&gh.workflows_at(&r.repo, &r.head_sha).await?);
+            match ci.is_empty() {
+                true => Verify::None,
+                false => Verify::Ci(ci),
+            }
+        }
+        false => Verify::Configured(settings.verify.clone()),
+    })
 }
 
 /// The review the author's agent posted, as MergeLoop's own job would have written it. Its
@@ -425,17 +440,21 @@ fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput
     Ok(output)
 }
 
-/// What humans answered on earlier heads, and what the last review sent back, with the author's
-/// replies in its threads.
-async fn earlier(
-    ctx: &Ctx,
-    gh: &Installation,
-    r: &ReviewRecord,
-) -> Result<(Vec<Answered>, Vec<SentBack>)> {
+/// What a review goes on from: what humans answered on earlier heads, and what the last review
+/// sent back, with the author's replies in its threads, and the head it was of.
+struct Earlier {
+    answered: Vec<Answered>,
+    sent_back: Vec<SentBack>,
+    reviewed: Option<String>,
+}
+
+async fn earlier(ctx: &Ctx, gh: &Installation, r: &ReviewRecord) -> Result<Earlier> {
     let earlier = earlier_reviews(ctx, r).await?;
     let answered = answered_before(&earlier);
     let threads = threads(gh, r).await;
-    let sent_back = sent_back_before(&earlier)
+    let (reviewed, findings) = sent_back_before(&earlier).unzip();
+    let sent_back = findings
+        .unwrap_or_default()
         .into_iter()
         .map(|finding| {
             let thread = threads
@@ -452,7 +471,11 @@ async fn earlier(
             }
         })
         .collect();
-    Ok((answered, sent_back))
+    Ok(Earlier {
+        answered,
+        sent_back,
+        reviewed: reviewed.map(str::to_owned),
+    })
 }
 
 /// Runs the review in the sandbox. `Err` says why the agent could not review.
@@ -464,7 +487,11 @@ async fn run_review(
     settings: &RepoSettings,
     r: &ReviewRecord,
 ) -> std::result::Result<ReviewOutput, String> {
-    let (answered, sent_back) = earlier(ctx, gh, r).await.map_err(|e| format!("{e:#}"))?;
+    let Earlier {
+        answered,
+        sent_back,
+        reviewed,
+    } = earlier(ctx, gh, r).await.map_err(|e| format!("{e:#}"))?;
     let job_id = format!(
         "{}-{}-{}-review-{}",
         r.repo.owner,
@@ -478,6 +505,7 @@ async fn run_review(
             answered,
             sent_back,
             since: r.since_head.clone(),
+            reviewed,
         };
         let (spec, granted) =
             job_spec(ctx, gh, key, pr, settings, &r.head_sha, &trunk, None, task).await?;
@@ -567,19 +595,17 @@ fn answered_before(earlier: &[ReviewRecord]) -> Vec<Answered> {
         .collect()
 }
 
-/// What the last review sent back to the author and still held the PR for: the next checks
-/// the fix.
-fn sent_back_before(earlier: &[ReviewRecord]) -> Vec<Finding> {
-    earlier
-        .first()
-        .map(|last| {
-            last.findings
-                .iter()
-                .filter(|j| j.sent_back)
-                .map(|j| j.finding.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+/// What the last review sent back to the author and still held the PR for, and the head it was
+/// of: the next checks the fix, and reads only what changed since.
+fn sent_back_before(earlier: &[ReviewRecord]) -> Option<(&str, Vec<Finding>)> {
+    let last = earlier.first()?;
+    let findings: Vec<_> = last
+        .findings
+        .iter()
+        .filter(|j| j.sent_back)
+        .map(|j| j.finding.clone())
+        .collect();
+    (!findings.is_empty()).then_some((last.head_sha.as_str(), findings))
 }
 
 /// Whether the author has had their rounds: the last `ROUNDS` reviews each sent findings back to
@@ -1588,7 +1614,11 @@ mod tests {
             fixed(2),
             back(1)
         ]));
-        assert_eq!(sent_back_before(&[back(3)]).len(), 1);
-        assert!(sent_back_before(&[]).is_empty());
+        // The next review checks the fix, and reads only what changed since the head it was of.
+        let earlier = [back(3), back(2)];
+        let (head, findings) = sent_back_before(&earlier).unwrap();
+        assert_eq!((head, findings.len()), ("head3", 1));
+        assert!(sent_back_before(&[review(3, false, None), back(2)]).is_none());
+        assert!(sent_back_before(&[]).is_none());
     }
 }

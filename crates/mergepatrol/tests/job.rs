@@ -569,6 +569,7 @@ async fn a_review_since_an_approval_names_only_the_queues_commits() {
         answered: Vec::new(),
         sent_back: Vec::new(),
         since: Some(approved),
+        reviewed: None,
     };
     let result = executor
         .run("t6", &spec, &tmp.path().join("out"))
@@ -578,6 +579,72 @@ async fn a_review_since_an_approval_names_only_the_queues_commits() {
     let prompt = std::fs::read_to_string(&seen).unwrap();
     assert!(prompt.contains("Review only these commits"), "{prompt}");
     assert!(prompt.contains("Fix ci"), "{prompt}");
+}
+
+/// The prompt a review job gives its agent, of `head` in `origin`, after a review of `reviewed`.
+async fn review_prompt_after(
+    tmp: &Path,
+    origin: &Path,
+    trunk: &str,
+    head: &str,
+    reviewed: &str,
+) -> String {
+    let seen = tmp.join("prompt");
+    let keep = format!("printf '%s' \"$*\" > {}", seen.display());
+    let answer = r#"{"summary":"s","findings":[]}"#;
+    let executor = with_fake_claude_running(tmp, &keep, answer);
+    let mut spec = spec(origin, head, trunk);
+    spec.resolver.api = Some(mergepatrol_executor::protocol::ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "t".into(),
+    });
+    spec.task = Task::Review {
+        answered: Vec::new(),
+        sent_back: Vec::new(),
+        since: None,
+        reviewed: Some(reviewed.into()),
+    };
+    let result = executor.run("t7", &spec, &tmp.join("out")).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+    std::fs::read_to_string(&seen).unwrap()
+}
+
+/// A remote whose `pr` branch was reviewed at its one commit: the trunk's head and that commit.
+fn reviewed_pr(origin: &Path) -> (String, String) {
+    std::fs::create_dir(origin).unwrap();
+    git(origin, &["init", "-q", "-b", "main"]);
+    let trunk = commit(origin, "app.rs", "one\n");
+    git(origin, &["checkout", "-q", "-b", "pr"]);
+    (trunk, commit(origin, "app.rs", "two\n"))
+}
+
+#[tokio::test]
+async fn a_review_after_findings_went_back_reads_only_what_changed_since() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    let (trunk, reviewed) = reviewed_pr(&origin);
+    let head = commit(&origin, "app.rs", "three\n");
+
+    let prompt = review_prompt_after(tmp.path(), &origin, &trunk, &head, &reviewed).await;
+    assert!(
+        prompt.contains(&format!("Review only `git diff {reviewed}..HEAD`")),
+        "{prompt}"
+    );
+}
+
+#[tokio::test]
+async fn a_review_after_a_rebase_reads_the_whole_pr_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    let (_, reviewed) = reviewed_pr(&origin);
+    git(&origin, &["checkout", "-q", "main"]);
+    let trunk = commit(&origin, "other.rs", "moved on\n");
+    git(&origin, &["checkout", "-q", "pr"]);
+    git(&origin, &["rebase", "-q", "main"]);
+    let head = commit(&origin, "app.rs", "three\n");
+
+    let prompt = review_prompt_after(tmp.path(), &origin, &trunk, &head, &reviewed).await;
+    assert!(!prompt.contains("Review only"), "{prompt}");
 }
 
 #[tokio::test]
@@ -611,6 +678,7 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
         answered: Vec::new(),
         sent_back: Vec::new(),
         since: None,
+        reviewed: None,
     };
     let out = tmp.path().join("out");
     // The fake CLI echoes its answer, so one line: `echo` would break a `\n`.
@@ -678,6 +746,7 @@ async fn evidence_counts_only_once_the_job_saw_it_fail_and_the_fix_must_make_it_
         answered: Vec::new(),
         sent_back: Vec::new(),
         since: None,
+        reviewed: None,
     };
     let change = |title: &str, evidence: serde_json::Value| {
         serde_json::json!({
@@ -820,6 +889,7 @@ async fn a_review_the_agent_cannot_give_fails_and_says_why() {
         answered: Vec::new(),
         sent_back: Vec::new(),
         since: None,
+        reviewed: None,
     };
     let out = tmp.path().join("out");
     let result = with_fake_claude(tmp.path(), "Looks good to me!")

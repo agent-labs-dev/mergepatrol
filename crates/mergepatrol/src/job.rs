@@ -23,7 +23,7 @@ use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
     ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
-    ResolveRequest, Resolver, ReviewRequest, Verify, VerifyRequest, claim, new_title, vote,
+    ResolveRequest, Resolver, ReviewRequest, Scope, Verify, VerifyRequest, claim, new_title, vote,
 };
 use tokio::io::AsyncReadExt;
 
@@ -239,9 +239,14 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             answered,
             sent_back,
             since,
+            reviewed,
         } => {
-            let earlier = (answered.as_slice(), sent_back.as_slice(), since.as_deref());
-            return review(spec, &git, resolver, &checks, earlier, dir, out, events).await;
+            let earlier = (answered.as_slice(), sent_back.as_slice());
+            let since = (since.as_deref(), reviewed.as_deref());
+            return review(
+                spec, &git, resolver, &checks, earlier, since, dir, out, events,
+            )
+            .await;
         }
         Task::Question {
             finding,
@@ -482,23 +487,16 @@ async fn review(
     git: &Git,
     resolver: &dyn Resolver,
     checks: &Verify,
-    (answered, sent_back, since): (&[Answered], &[SentBack], Option<&str>),
+    (answered, sent_back): (&[Answered], &[SentBack]),
+    (since, reviewed): (Option<&str>, Option<&str>),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
-    let queue_commits = match since {
-        Some(since) => {
-            // A rebase replays the PR, and leaves the head it went on from behind.
-            let on_it = git.is_ancestor(dir, since, &spec.head_sha).await;
-            let from = if on_it.unwrap_or(false) { since } else { &base };
-            let trailers = [FIXED_BY, RESOLVED_BY];
-            git.commits_with(dir, from, &spec.head_sha, &trailers)
-                .await?
-        }
-        None => Vec::new(),
-    };
+    let queue_commits = queue_commits(git, dir, &spec.head_sha, &base, since).await?;
+    let reviewed = on_head(git, dir, &spec.head_sha, reviewed).await?;
+    let scope = Scope::of(&queue_commits, reviewed);
     event(
         events,
         "reviewing",
@@ -516,7 +514,7 @@ async fn review(
             trunk: &spec.trunk,
             answered,
             sent_back,
-            queue_commits: &queue_commits,
+            scope,
             verify: checks,
             transcript: &transcript,
         })
@@ -536,16 +534,7 @@ async fn review(
         &run,
     );
     let mut output = parsed?;
-    for (i, f) in output.findings.iter_mut().enumerate() {
-        f.id = format!("f{}", i + 1);
-        f.confidence = f.confidence.clamp(0, 100);
-        if let Some(file) = f.file.clone() {
-            f.code = diff_lines(git, dir, &base, &spec.head_sha, &file, f.line).await?;
-        }
-        for r in &mut f.related {
-            r.code = file_lines(git, dir, &spec.head_sha, &r.file, r.line).await?;
-        }
-    }
+    with_code(git, dir, &base, &spec.head_sha, &mut output.findings).await?;
     check_evidence(&spec.head_sha, git, dir, &mut output.findings, events).await?;
     let bench = Bench {
         git,
@@ -556,6 +545,57 @@ async fn review(
     verify_findings(panel, &bench, out, &mut output.findings, events).await?;
     tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
     Ok(())
+}
+
+/// Numbers each finding, and gives it and what it relates to their code at `head`.
+async fn with_code(
+    git: &Git,
+    dir: &Path,
+    base: &str,
+    head: &str,
+    findings: &mut [Finding],
+) -> Result<()> {
+    for (i, f) in findings.iter_mut().enumerate() {
+        f.id = format!("f{}", i + 1);
+        f.confidence = f.confidence.clamp(0, 100);
+        if let Some(file) = f.file.clone() {
+            f.code = diff_lines(git, dir, base, head, &file, f.line).await?;
+        }
+        for r in &mut f.related {
+            r.code = file_lines(git, dir, head, &r.file, r.line).await?;
+        }
+    }
+    Ok(())
+}
+
+/// What the queue's agent committed since the approved head `since`: since the PR's `base` when
+/// a rebase replayed the PR and left that head behind.
+async fn queue_commits(
+    git: &Git,
+    dir: &Path,
+    head: &str,
+    base: &str,
+    since: Option<&str>,
+) -> Result<Vec<String>> {
+    let Some(since) = since else {
+        return Ok(Vec::new());
+    };
+    let from = on_head(git, dir, head, Some(since)).await?.unwrap_or(base);
+    git.commits_with(dir, from, head, &[FIXED_BY, RESOLVED_BY])
+        .await
+}
+
+/// `at`, while `head` descends from it: a rebase replays the PR, and leaves it behind.
+async fn on_head<'a>(
+    git: &Git,
+    dir: &Path,
+    head: &str,
+    at: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    let Some(at) = at else {
+        return Ok(None);
+    };
+    Ok(git.is_ancestor(dir, at, head).await?.then_some(at))
 }
 
 /// Has the agent answer a human's question about a finding, and writes the answer.
