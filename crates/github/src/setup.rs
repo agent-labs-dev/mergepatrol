@@ -82,8 +82,9 @@ pub fn manifest(public_url: &str, owner: &str) -> Value {
             "issues": "write",
             "checks": "read",
             "statuses": "read",
-            // The logs of failed GitHub Actions jobs, for the agent that fixes them.
-            "actions": "read",
+            // The logs of failed GitHub Actions jobs, for the agent that fixes them, and running
+            // those jobs again once before a fix.
+            "actions": "write",
             "metadata": "read",
             // Who is on which team, for the reviews asked of a team.
             "members": "read",

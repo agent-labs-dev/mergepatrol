@@ -5,7 +5,7 @@
 //! the layer that failed. A fork goes straight to the lane: no agent runs on it, and as it never
 //! joins a batch, the lane rebases it and runs its checks again whatever they said here.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +18,7 @@ use mergepatrol_store::LaneKey;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use super::{Ctx, JobSandbox, Unit, rebase_and_publish, record_all, still_queued};
+use super::{Ctx, JobSandbox, Unit, rebase_and_publish, record_all, rerun_failed, still_queued};
 use crate::github::GitHub;
 
 /// A job's hold on a PR, which ends with the job, also if it panics or is aborted, and which
@@ -48,6 +48,13 @@ type Running = Arc<Mutex<HashMap<PrId, (u64, Hold)>>>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Work {
     Rebase,
+    /// GitHub Actions runs the failed jobs of the workflow runs `runs` again, once, for the
+    /// checks `failed` on the layer `layer`.
+    Rerun {
+        layer: usize,
+        failed: Vec<String>,
+        runs: Vec<u64>,
+    },
     /// `layer`: the index in the unit of the lowest layer that failed.
     Fix {
         layer: usize,
@@ -79,6 +86,8 @@ pub struct Prep {
     conflicts: Mutex<HashMap<PrId, String>>,
     /// Each PR's head that its checks hold, and since when.
     since: Mutex<HashMap<PrId, (String, Instant)>>,
+    /// The commits of each PR whose failed jobs GitHub would not run again.
+    refused_reruns: Mutex<HashMap<PrId, BTreeSet<String>>>,
 }
 
 impl Prep {
@@ -95,6 +104,21 @@ impl Prep {
     pub(super) fn takes_agent_work(&self, ctx: &Ctx, key: &LaneKey, unit: &Unit) -> bool {
         let id = (key.installation_id, key.repo.clone(), unit.number);
         ctx.config.prep && !unit.fork() && !self.left_to_lane(&id, &unit.top().head_ref_oid)
+    }
+
+    /// GitHub would not run the failed jobs of the commit `sha` of PR `number` again: its
+    /// checks' failure stands.
+    pub(super) fn note_refused_rerun(&self, key: &LaneKey, number: PrNumber, sha: &str) {
+        let id = (key.installation_id, key.repo.clone(), number);
+        let mut refused = self.refused_reruns.lock().unwrap();
+        refused.entry(id).or_default().insert(sha.to_owned());
+    }
+
+    /// Whether GitHub would not run the failed jobs of `sha` again.
+    pub(super) fn rerun_refused(&self, key: &LaneKey, number: PrNumber, sha: &str) -> bool {
+        let id = (key.installation_id, key.repo.clone(), number);
+        let refused = self.refused_reruns.lock().unwrap();
+        refused.get(&id).is_some_and(|shas| shas.contains(sha))
     }
 
     /// The lane found a conflict on the PR's `head`.
@@ -271,6 +295,20 @@ pub(super) async fn hold(
         match state {
             CheckState::Passed => {}
             CheckState::Failed => {
+                let runs: BTreeSet<u64> = names
+                    .iter()
+                    .filter_map(|n| checks.reruns.get(n).copied())
+                    .collect();
+                if !runs.is_empty() && !ctx.prep.rerun_refused(key, unit.number, sha) {
+                    let runs = runs.into_iter().collect();
+                    let failed = names;
+                    let wanted = want(Work::Rerun {
+                        layer,
+                        failed,
+                        runs,
+                    });
+                    return Ok(Some(ctx.prep.want(id, Hold::PrepChecks, wanted)));
+                }
                 let used = unit.fixes_used(gh, &key.repo).await?;
                 return Ok((used < settings.fix_ci.allowed()).then(|| {
                     let failed = names;
@@ -327,6 +365,16 @@ async fn run(ctx: &Ctx, gh: &Installation, w: Wanted, claim: Claim) {
         }
         // The author pushed: the next tick reads the new head.
         Ok(Event::HeadMoved) => None,
+        // The next tick reads how the checks ran again.
+        Ok(Event::ChecksRerun) => None,
+        Ok(Event::RerunFailed(why)) => {
+            if let Work::Rerun { layer, .. } = &w.work {
+                let sha = &w.unit.layers[*layer].head_ref_oid;
+                ctx.prep.note_refused_rerun(key, w.unit.number, sha);
+            }
+            ok(record_all(ctx, key, &prs, "rerun-failed", &why).await);
+            None
+        }
         Ok(Event::RebaseFailed(why) | Event::FixFailed(why) | Event::FixGaveUp(why)) => Some(why),
         // A check reads the new title only on a new run: the lane's recheck, which it guards.
         Ok(Event::Retitled) => Some("the agent set a new title, for the lane to recheck".into()),
@@ -361,6 +409,15 @@ async fn job(ctx: &Ctx, gh: &Installation, w: &Wanted) -> Result<Event> {
     }
     let sandbox = JobSandbox { ctx, gh };
     let event = match &w.work {
+        Work::Rerun {
+            layer,
+            failed,
+            runs,
+        } => {
+            record_all(ctx, key, &prs, "rerunning", &failed.join(", ")).await?;
+            let sha = &unit.layers[*layer].head_ref_oid;
+            return rerun_failed(gh, &key.repo, sha, runs).await;
+        }
         Work::Rebase => {
             let onto = format!("onto {}", key.trunk);
             record_all(ctx, key, &prs, "rebasing", &onto).await?;

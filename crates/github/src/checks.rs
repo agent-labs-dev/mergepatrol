@@ -29,6 +29,11 @@ pub struct Checks {
     /// `Installation::workflows_running` reads them.
     #[serde(default)]
     pub workflows_running: Option<bool>,
+    /// The failed checks that GitHub Actions can run again, each with its workflow run, which is
+    /// on its first attempt. What failed again on a later attempt, or is no Actions job, stays
+    /// failed.
+    #[serde(default)]
+    pub reruns: BTreeMap<String, u64>,
 }
 
 impl Checks {
@@ -200,16 +205,30 @@ impl Installation {
     pub async fn checks(&self, repo: &RepoName, sha: &str) -> Result<Checks> {
         let mut checks = Checks::default();
 
-        let (runs, workflows_running) = self.check_runs(repo, sha).await?;
-        checks.workflows_running = workflows_running;
+        let (runs, workflow_runs) = self.check_runs(repo, sha).await?;
+        checks.workflows_running = workflow_runs.as_ref().map(|w| w.iter().any(unfinished));
         for run in &runs {
+            let workflow_run = workflow_runs.iter().flatten().find(|w| {
+                !w["check_suite_id"].is_null() && w["check_suite_id"] == run["check_suite"]["id"]
+            });
             let state = match (run["status"].as_str(), run["conclusion"].as_str()) {
                 (Some("completed"), Some("success" | "neutral" | "skipped")) => CheckState::Passed,
+                // A failed job of a workflow run that still runs may yet run again, and a job
+                // run again shows its first attempt's failure until it starts.
+                (Some("completed"), _) if workflow_run.is_some_and(unfinished) => {
+                    CheckState::Pending
+                }
                 (Some("completed"), _) => CheckState::Failed,
                 _ => CheckState::Pending,
             };
             if let Some(name) = run["name"].as_str() {
                 checks.by_name.insert(name.to_owned(), state);
+                let first = workflow_run.filter(|w| w["run_attempt"] == 1);
+                if let (CheckState::Failed, Some(id)) =
+                    (state, first.and_then(|w| w["id"].as_u64()))
+                {
+                    checks.reruns.insert(name.to_owned(), id);
+                }
                 if matches!(run["conclusion"].as_str(), Some("neutral" | "skipped")) {
                     checks.skipped.insert(name.to_owned());
                 }
@@ -237,9 +256,13 @@ impl Installation {
 impl Installation {
     /// The check runs on `sha`, without those of a workflow run that a later run of the same
     /// workflow replaced: a push that triggers a workflow twice cancels the first run, and its
-    /// gate jobs still fail. And whether a workflow run on `sha` has yet to finish, read only
-    /// when a GitHub Actions check run is on it.
-    async fn check_runs(&self, repo: &RepoName, sha: &str) -> Result<(Vec<Value>, Option<bool>)> {
+    /// gate jobs still fail. And the workflow runs on `sha`, read only when a GitHub Actions
+    /// check run is on it.
+    async fn check_runs(
+        &self,
+        repo: &RepoName,
+        sha: &str,
+    ) -> Result<(Vec<Value>, Option<Vec<Value>>)> {
         let runs = self
             .all_pages(
                 &format!("/repos/{repo}/commits/{sha}/check-runs?filter=latest"),
@@ -256,7 +279,6 @@ impl Installation {
             )
             .await?;
         let replaced = replaced_suites(&workflow_runs);
-        let running = workflow_runs.iter().any(unfinished);
         let runs = runs
             .into_iter()
             .filter(|r| {
@@ -265,7 +287,21 @@ impl Installation {
                     .is_none_or(|id| !replaced.contains(&id))
             })
             .collect();
-        Ok((runs, Some(running)))
+        Ok((runs, Some(workflow_runs)))
+    }
+
+    /// Runs the failed jobs of the workflow run `run_id` again. GitHub needs the App's
+    /// `actions: write` permission for it.
+    pub async fn rerun_failed_jobs(&self, repo: &RepoName, run_id: u64) -> Result<()> {
+        let path = format!("/repos/{repo}/actions/runs/{run_id}/rerun-failed-jobs");
+        let res = self.request(Method::POST, &path, None).await?;
+        match res.status {
+            s if s.is_success() => Ok(()),
+            StatusCode::FORBIDDEN => bail!(
+                "GitHub refused to run the failed jobs again: the GitHub App needs the `actions: write` permission, which the account's owner accepts on GitHub"
+            ),
+            s => bail!("POST {path}: {s} {}", res.body),
+        }
     }
 
     /// Whether a workflow run on `sha` has yet to finish: queued, waiting for an approval, or
@@ -535,6 +571,7 @@ mod tests {
             by_name: list.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect(),
             skipped: Default::default(),
             workflows_running: None,
+            reruns: Default::default(),
         }
     }
 
@@ -800,6 +837,50 @@ mod tests {
         assert_eq!(
             checks.verdict(&["Lint".into()]),
             (CheckState::Failed, vec!["Lint".to_owned()])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_failed_on_its_first_attempt_may_run_again_once() {
+        // `test` failed on the first attempt of run 1, and `lint` on the second of run 2. Run 3
+        // runs `e2e` again: its first attempt's failure is not its verdict.
+        let runs = r#"{"total_count":4,"check_runs":[
+            {"name":"test","status":"completed","conclusion":"failure","check_suite":{"id":10},"app":{"slug":"github-actions"}},
+            {"name":"lint","status":"completed","conclusion":"failure","check_suite":{"id":20},"app":{"slug":"github-actions"}},
+            {"name":"e2e","status":"completed","conclusion":"failure","check_suite":{"id":30},"app":{"slug":"github-actions"}},
+            {"name":"build","status":"completed","conclusion":"success","check_suite":{"id":30},"app":{"slug":"github-actions"}}]}"#;
+        let workflow_runs = r#"{"total_count":3,"workflow_runs":[
+            {"id":1,"workflow_id":7,"check_suite_id":10,"run_attempt":1,"status":"completed"},
+            {"id":2,"workflow_id":8,"check_suite_id":20,"run_attempt":2,"status":"completed"},
+            {"id":3,"workflow_id":9,"check_suite_id":30,"run_attempt":2,"status":"queued"}]}"#;
+        let (gh, requests) = crate::app::fake::serve(vec![
+            (200, "", runs),
+            (200, "", workflow_runs),
+            (200, "", r#"{"total_count":0,"statuses":[]}"#),
+            (201, "", "{}"),
+            (
+                403,
+                "",
+                r#"{"message":"Resource not accessible by integration"}"#,
+            ),
+        ])
+        .await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let checks = gh.checks(&repo, "abc").await.unwrap();
+        assert_eq!(checks.reruns, BTreeMap::from([("test".to_owned(), 1)]));
+        assert_eq!(checks.by_name["lint"], CheckState::Failed);
+        assert_eq!(checks.by_name["e2e"], CheckState::Pending);
+        assert_eq!(checks.by_name["build"], CheckState::Passed);
+
+        gh.rerun_failed_jobs(&repo, 1).await.unwrap();
+        assert_eq!(
+            requests.lock().unwrap()[3],
+            "POST /repos/o/r/actions/runs/1/rerun-failed-jobs HTTP/1.1"
+        );
+        let refused = gh.rerun_failed_jobs(&repo, 1).await.unwrap_err();
+        assert!(
+            refused.to_string().contains("`actions: write`"),
+            "{refused}"
         );
     }
 

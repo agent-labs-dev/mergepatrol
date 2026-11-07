@@ -49,7 +49,9 @@ impl Step {
             "enqueued" | "released" | "batch-stopped" | "batch-failed" => Step::Waiting,
             "held" => Step::Held,
             "rebasing" => Step::Rebasing,
-            "published" | "rebase-skipped" | "batch" | "batch-resumed" => Step::Checks,
+            "published" | "rebase-skipped" | "rerunning" | "batch" | "batch-resumed" => {
+                Step::Checks
+            }
             "fixing" => Step::Fixing,
             _ => return None,
         })

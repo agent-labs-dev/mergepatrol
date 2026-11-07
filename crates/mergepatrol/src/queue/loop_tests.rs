@@ -122,6 +122,17 @@ struct State {
     awaiting_approval: Vec<String>,
     /// PRs that change workflow files.
     change_workflows: Vec<PrNumber>,
+    /// The checks are GitHub Actions jobs, in one workflow run per commit, which may run its
+    /// failed jobs again once.
+    actions: bool,
+    /// The commits of those workflow runs, by run id from 1.
+    workflow_runs: Vec<String>,
+    /// The commits whose failed jobs ran again.
+    reran: Vec<String>,
+    /// A failed job run again passes.
+    flaky: bool,
+    /// Why GitHub refuses to run failed jobs again, if it does.
+    rerun_refused: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -237,6 +248,53 @@ impl State {
 
     fn head(&self, number: PrNumber) -> String {
         self.branches[&self.prs[&number].head_ref_name].clone()
+    }
+
+    /// The workflow run of the commit `sha`.
+    fn workflow_run(&mut self, sha: &str) -> u64 {
+        let i = match self.workflow_runs.iter().position(|w| w == sha) {
+            Some(i) => i,
+            None => {
+                self.workflow_runs.push(sha.to_owned());
+                self.workflow_runs.len() - 1
+            }
+        };
+        i as u64 + 1
+    }
+
+    /// The failed checks on `sha` that may run again, by their workflow run.
+    fn reruns(&mut self, sha: &str) -> BTreeMap<String, u64> {
+        if !self.actions || self.reran.iter().any(|r| r == sha) {
+            return BTreeMap::new();
+        }
+        let failed: Vec<String> = self
+            .checks_of(sha)
+            .into_iter()
+            .filter(|(_, state)| *state == CheckState::Failed)
+            .map(|(name, _)| name)
+            .collect();
+        let run = self.workflow_run(sha);
+        failed.into_iter().map(|name| (name, run)).collect()
+    }
+
+    /// GitHub Actions runs the failed jobs of `run` again: a flaky one passes now.
+    fn rerun(&mut self, run: u64) -> Result<()> {
+        if let Some(why) = &self.rerun_refused {
+            bail!("{why}");
+        }
+        let sha = self.workflow_runs[run as usize - 1].clone();
+        assert!(!self.reran.contains(&sha), "{sha} ran again twice");
+        self.reran.push(sha.clone());
+        if self.flaky {
+            let mut checks = self.checks_of(&sha);
+            for state in checks.values_mut() {
+                if *state == CheckState::Failed {
+                    *state = CheckState::Passed;
+                }
+            }
+            self.checks_on.insert(sha, checks);
+        }
+        Ok(())
     }
 
     fn checks_of(&self, sha: &str) -> BTreeMap<String, CheckState> {
@@ -469,6 +527,7 @@ impl GitHub for Fake {
             by_name: s.checks_of(sha),
             skipped: s.skipped.iter().cloned().collect(),
             workflows_running: None,
+            reruns: s.reruns(sha),
         })
     }
 
@@ -513,6 +572,9 @@ impl GitHub for Fake {
                 details: "it broke".into(),
             })
             .collect())
+    }
+    async fn rerun_failed_jobs(&self, _: &RepoName, _: &str, run: u64) -> Result<()> {
+        self.state.lock().unwrap().rerun(run)
     }
 
     async fn merge(
@@ -855,6 +917,7 @@ struct Mem {
     review_reads_fail: Mutex<bool>,
     review_settings: Mutex<Option<ReviewSettings>>,
     repo_defaults: Mutex<Option<WorkspaceDefaults>>,
+    secrets: Mutex<Vec<(Scope, String, SecretRecord)>>,
 }
 
 impl Mem {
@@ -1381,15 +1444,25 @@ impl Store for Mem {
     async fn merged_by_day(&self, _: u64, _: Slice<'_>, _: u32) -> Result<Vec<u64>> {
         unreachable!()
     }
-    async fn put_secret(&self, _: Scope, _: &str, _: SecretRecord) -> Result<()> {
-        unreachable!()
+    async fn put_secret(&self, scope: Scope, name: &str, record: SecretRecord) -> Result<()> {
+        let mut secrets = self.secrets.lock().unwrap();
+        secrets.retain(|(s, n, _)| (*s, n.as_str()) != (scope, name));
+        secrets.push((scope, name.to_owned(), record));
+        Ok(())
     }
-    /// None: no self-hosted App, so no webhooks unless a test sets the hosted one.
-    async fn secret(&self, _: Scope, _: &str) -> Result<Option<SecretRecord>> {
-        Ok(None)
+    /// Only what a test put: no self-hosted App, so no webhooks unless a test sets the hosted
+    /// one.
+    async fn secret(&self, scope: Scope, name: &str) -> Result<Option<SecretRecord>> {
+        let secrets = self.secrets.lock().unwrap();
+        Ok(secrets
+            .iter()
+            .find(|(s, n, _)| (*s, n.as_str()) == (scope, name))
+            .map(|(_, _, record)| record.clone()))
     }
-    async fn delete_secret(&self, _: Scope, _: &str) -> Result<()> {
-        unreachable!()
+    async fn delete_secret(&self, scope: Scope, name: &str) -> Result<()> {
+        let mut secrets = self.secrets.lock().unwrap();
+        secrets.retain(|(s, n, _)| (*s, n.as_str()) != (scope, name));
+        Ok(())
     }
     async fn secret_names(&self) -> Result<Vec<(Scope, String)>> {
         unreachable!()
@@ -3035,6 +3108,129 @@ fn failing_ci(s: &mut State) {
     s.add_pr(1);
     s.required = vec!["ci".into()];
     s.checks.insert("ci".into(), CheckState::Failed);
+}
+
+/// `ci` fails on every commit, as a GitHub Actions job that may run again.
+fn failing_job(s: &mut State) {
+    failing_ci(s);
+    s.actions = true;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_job_runs_again_once_and_a_flaky_one_merges_with_no_fix() {
+    let run = Run::on_the_lane(Fake::new(|s| {
+        failing_job(s);
+        s.flaky = true;
+    }));
+    run.tick().await;
+    assert!(run.rebase.fixed().is_empty(), "{:?}", run.rebase.fixed());
+    assert_eq!(run.gh.with(|s| s.reran.clone()), ["pr-1-r1"]);
+    assert_eq!(
+        run.kinds(1),
+        ["enqueued", "rebasing", "published", "rerunning", "merged"]
+    );
+    let comments = run.gh.with(|s| s.comments.clone());
+    assert!(
+        comments
+            .iter()
+            .any(|(_, c)| c.contains("Running the failed jobs again once")),
+        "{comments:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_job_that_fails_again_is_fixed_and_the_fix_runs_again_on_its_own_head() {
+    let run = Run::on_the_lane(Fake::new(failing_job));
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]]);
+    // The fix's head passes: only the rebased head ran again, once.
+    assert_eq!(run.gh.with(|s| s.reran.clone()), ["pr-1-r1"]);
+    let kinds = run.kinds(1);
+    assert_eq!(
+        kinds[3..],
+        ["rerunning", "fixing", "published", "merged"],
+        "{kinds:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_no_fixes_a_failed_job_runs_again_before_the_pr_is_ejected() {
+    let run = Run::on_the_lane(Fake::new(|s| {
+        failing_job(s);
+        s.fixes_used.insert(1, 3);
+    }));
+    run.tick().await;
+    assert!(run.rebase.fixed().is_empty());
+    assert_eq!(run.gh.with(|s| s.reran.len()), 1);
+    assert_eq!(run.labels(1), [FAILED]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rerun_github_refuses_goes_on_to_the_fix() {
+    let run = Run::on_the_lane(Fake::new(|s| {
+        failing_job(s);
+        s.rerun_refused = Some("the App needs `actions: write`".into());
+    }));
+    run.tick().await;
+    assert_eq!(run.rebase.fixed(), [["ci"]]);
+    let kinds = run.kinds(1);
+    assert!(kinds.iter().any(|k| k == "rerun-failed"), "{kinds:?}");
+    assert_eq!(run.merged(), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_job_runs_again_off_the_lane_before_a_fix() {
+    let run = prep_run(failing_job);
+    run.tick().await;
+    assert_eq!(run.lane(), [(1, "Held(PrepChecks)".into())]);
+    let rerun = prep::Work::Rerun {
+        layer: 0,
+        failed: vec!["ci".into()],
+        runs: vec![1],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(1, rerun)]);
+    run.ctx.prep.take(&repo());
+    run.ctx.prep.end_job(&(1, repo(), 1));
+
+    // Once it ran again, its failure is the fix's.
+    run.gh.with_mut(|s| s.reran.push(s.head(1)));
+    run.tick().await;
+    let fix = prep::Work::Fix {
+        layer: 0,
+        failed: vec!["ci".into()],
+    };
+    assert_eq!(run.ctx.prep.asked(), [(1, fix)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn with_no_fixes_left_a_failed_job_still_runs_again_off_the_lane() {
+    let run = prep_run(|s| {
+        failing_job(s);
+        s.fixes_used.insert(1, 3);
+    });
+    run.tick().await;
+    assert!(matches!(
+        run.ctx.prep.asked()[..],
+        [(1, prep::Work::Rerun { .. })]
+    ));
+    assert_eq!(run.labels(1), [TRIGGER], "it stays queued");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rerun_github_refused_off_the_lane_is_not_asked_again_on_that_head() {
+    let run = prep_run(failing_job);
+    let key = LaneKey {
+        installation_id: 1,
+        repo: repo(),
+        trunk: "main".into(),
+    };
+    let head = run.gh.with(|s| s.head(1));
+    run.ctx.prep.note_refused_rerun(&key, 1, &head);
+    run.tick().await;
+    assert!(matches!(
+        run.ctx.prep.asked()[..],
+        [(1, prep::Work::Fix { .. })]
+    ));
 }
 
 #[tokio::test(start_paused = true)]

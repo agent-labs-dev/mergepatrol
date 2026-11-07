@@ -355,6 +355,11 @@ impl GitHub for Cached<'_> {
     ) -> Result<Vec<CheckFailure>> {
         GitHub::check_failures(self.gh, repo, sha, names).await
     }
+    async fn rerun_failed_jobs(&self, repo: &RepoName, sha: &str, run_id: u64) -> Result<()> {
+        let rerun = GitHub::rerun_failed_jobs(self.gh, repo, sha, run_id).await;
+        self.marking(repo, vec![key(format!("checks:{sha}"))], rerun)
+            .await
+    }
     async fn merge(
         &self,
         repo: &RepoName,
