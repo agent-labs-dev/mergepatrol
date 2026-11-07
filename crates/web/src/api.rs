@@ -1119,7 +1119,7 @@ pub(crate) struct HistoryQuery {
 }
 
 impl HistoryQuery {
-    fn repo(&self) -> Result<Option<RepoName>, ApiError> {
+    pub(crate) fn repo(&self) -> Result<Option<RepoName>, ApiError> {
         self.repo
             .as_deref()
             .map(|r| RepoName::parse(r).ok_or(ApiError::bad_request("repo must be owner/name")))
@@ -1135,7 +1135,7 @@ impl HistoryQuery {
         }
     }
 
-    fn days(&self) -> Result<u32, ApiError> {
+    pub(crate) fn days(&self) -> Result<u32, ApiError> {
         match self.days {
             1..=365 => Ok(self.days),
             _ => Err(ApiError::bad_request("days must be from 1 to 365")),
