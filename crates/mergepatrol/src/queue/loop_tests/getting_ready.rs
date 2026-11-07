@@ -20,6 +20,8 @@ use crate::job::LEFT_CONFLICT;
 use crate::review::conclude;
 use mergepatrol_executor::protocol::ReviewOutput;
 
+mod outcomes_regression;
+
 /// How long a scenario may take to end. It ends far sooner, or it is stuck.
 const SETTLES_WITHIN: Duration = Duration::from_secs(60);
 
