@@ -648,6 +648,22 @@ async fn a_review_after_a_rebase_reads_the_whole_pr_again() {
 }
 
 #[tokio::test]
+async fn a_review_after_the_trunk_was_merged_in_reads_the_whole_pr_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    let (_, reviewed) = reviewed_pr(&origin);
+    git(&origin, &["checkout", "-q", "main"]);
+    let trunk = commit(&origin, "other.rs", "moved on\n");
+    git(&origin, &["checkout", "-q", "pr"]);
+    // As GitHub's "Update branch" does: the head still descends from the reviewed one.
+    git(&origin, &["merge", "-q", "--no-edit", "main"]);
+    let head = commit(&origin, "app.rs", "three\n");
+
+    let prompt = review_prompt_after(tmp.path(), &origin, &trunk, &head, &reviewed).await;
+    assert!(!prompt.contains("Review only"), "{prompt}");
+}
+
+#[tokio::test]
 async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
     let tmp = tempfile::tempdir().unwrap();
     let origin = tmp.path().join("origin");

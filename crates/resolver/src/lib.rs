@@ -569,8 +569,9 @@ fn scope_section(scope: Scope<'_>) -> String {
         Scope::Since(reviewed) => format!(
             "\nYou reviewed this PR at `{reviewed}`, and sent findings back to its author. Review \
 only `git diff {reviewed}..HEAD`, what changed since, with `git log` and `git show`, and read the \
-rest of the PR only to judge it. Report nothing about the rest of the PR unless what changed \
-since breaks it: what you did not find on the first pass is not the author's to fix now.\n"
+rest of the PR only to judge it. Check the findings you sent back wherever they are, but report \
+nothing else about the rest of the PR unless what changed since breaks it: what you did not find \
+on the first pass is not the author's to fix now.\n"
         ),
         Scope::QueueCommits(commits) => format!(
             "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
@@ -980,7 +981,9 @@ mod scope_tests {
             since.contains("Review only `git diff 0ld..HEAD`"),
             "{since}"
         );
-        assert!(since.contains("Report nothing about the rest of the PR unless"));
+        // What went back is checked wherever it is; nothing else outside the new commits is.
+        assert!(since.contains("Check the findings you sent back wherever they are"));
+        assert!(since.contains("nothing else about the rest of the PR unless"));
         // The rest of the PR is still there to judge the new commits by.
         assert!(since.contains("git diff b4se..HEAD"));
         let whole = with(Scope::Whole);

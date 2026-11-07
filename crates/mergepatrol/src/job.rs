@@ -495,7 +495,7 @@ async fn review(
 ) -> Result<()> {
     let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
     let queue_commits = queue_commits(git, dir, &spec.head_sha, &base, since).await?;
-    let reviewed = on_head(git, dir, &spec.head_sha, reviewed).await?;
+    let reviewed = since_reviewed(git, dir, spec, &base, reviewed).await?;
     let scope = Scope::of(&queue_commits, reviewed);
     event(
         events,
@@ -583,6 +583,22 @@ async fn queue_commits(
     let from = on_head(git, dir, head, Some(since)).await?.unwrap_or(base);
     git.commits_with(dir, from, head, &[FIXED_BY, RESOLVED_BY])
         .await
+}
+
+/// `at`, the head findings went back on, while all that lies between it and the PR's head is the
+/// author's: a rebase leaves it behind, and a merge of the trunk moves the PR's `base`.
+async fn since_reviewed<'a>(
+    git: &Git,
+    dir: &Path,
+    spec: &JobSpec,
+    base: &str,
+    at: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    let Some(at) = on_head(git, dir, &spec.head_sha, at).await? else {
+        return Ok(None);
+    };
+    let same_base = git.merge_base(dir, &spec.trunk_sha, at).await? == base;
+    Ok(same_base.then_some(at))
 }
 
 /// `at`, while `head` descends from it: a rebase replays the PR, and leaves it behind.

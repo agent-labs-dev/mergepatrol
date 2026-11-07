@@ -378,9 +378,14 @@ async fn author_brief(
         sent_back,
         reviewed,
     } = earlier(ctx, gh, r).await?;
-    // A rebase leaves the reviewed head behind, as does a head GitHub cannot compare.
     let reviewed = match reviewed.as_deref() {
-        Some(at) if !gh.behind(&r.repo, at, &r.head_sha).await.unwrap_or(true) => Some(at),
+        Some(at)
+            if since_reviewed(gh, r, pr.merges_into(), at)
+                .await
+                .unwrap_or(false) =>
+        {
+            Some(at)
+        }
         _ => None,
     };
     let scope = Scope::of(&[], reviewed);
@@ -400,6 +405,19 @@ async fn author_brief(
     };
     let repo = r.repo.to_string();
     Ok(author_review_brief(&req, &repo, r.number, &r.head_sha))
+}
+
+/// Whether all that lies between `at`, the head findings went back on, and the review's head is
+/// the author's: a rebase leaves `at` behind, and a merge of the trunk moves the PR's base.
+async fn since_reviewed(
+    gh: &Installation,
+    r: &ReviewRecord,
+    trunk: &str,
+    at: &str,
+) -> Result<bool> {
+    let (repo, head) = (&r.repo, r.head_sha.as_str());
+    Ok(!gh.behind(repo, at, head).await?
+        && gh.merge_base(repo, trunk, at).await? == gh.merge_base(repo, trunk, head).await?)
 }
 
 /// The checks the author's agent runs: the repo's verify commands, else its CI's.

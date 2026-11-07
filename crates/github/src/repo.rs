@@ -866,6 +866,21 @@ impl Installation {
         Ok(r["object"]["sha"].as_str().context("ref sha")?.to_owned())
     }
 
+    /// Where `a` and `b` last met.
+    pub async fn merge_base(&self, repo: &RepoName, a: &str, b: &str) -> Result<String> {
+        let r: Value = self
+            .rest(
+                Method::GET,
+                &format!("/repos/{repo}/compare/{a}...{b}"),
+                None,
+            )
+            .await?;
+        Ok(r["merge_base_commit"]["sha"]
+            .as_str()
+            .context("merge_base_commit")?
+            .to_owned())
+    }
+
     /// Whether `head` lacks commits of `base`: it needs a rebase onto it.
     pub async fn behind(&self, repo: &RepoName, base: &str, head: &str) -> Result<bool> {
         let r: Value = self
