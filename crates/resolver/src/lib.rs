@@ -1073,6 +1073,53 @@ mod withdraw_tests {
     use mergepatrol_core::Outcome;
 
     #[test]
+    fn a_reply_to_a_finding_sent_back_is_asked_for_a_verdict_that_says_why() {
+        let finding = Finding {
+            id: "f1".into(),
+            kind: mergepatrol_core::Kind::Other,
+            title: "Retry never stops".into(),
+            file: Some("src/retry.rs".into()),
+            line: Some(9),
+            confidence: 90,
+            lean: mergepatrol_core::Lean::Change,
+            finding: "It loops.".into(),
+            unsure: String::new(),
+            checked: Vec::new(),
+            would_clear: String::new(),
+            suggestion: "Cap it.".into(),
+            evidence: None,
+            needs_human: false,
+            verified: None,
+            settled: None,
+            also_at: Vec::new(),
+            code: Vec::new(),
+            related: Vec::new(),
+        };
+        let req = QuestionRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "Retry",
+            finding: &finding,
+            question: "It retries forever by design.",
+            sent_back: true,
+            transcript: Path::new("t"),
+        };
+        let prompt = question_prompt(&req);
+        for verdict in [WITHDRAWN, INTENDED, STANDS] {
+            assert!(prompt.contains(verdict), "{verdict}");
+        }
+        assert!(prompt.contains("src/retry.rs:9") && prompt.contains("by design"));
+        let human = question_prompt(&QuestionRequest {
+            sent_back: false,
+            ..req
+        });
+        assert!(
+            !human.contains(INTENDED),
+            "a human's question gets no verdict"
+        );
+    }
+
+    #[test]
     fn only_a_last_line_that_withdraws_withdraws_and_says_why() {
         assert_eq!(
             withdraws("The caller holds the lock.\n\nVERDICT: withdrawn\n"),

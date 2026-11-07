@@ -919,8 +919,12 @@ mod tests {
             .withdraw_finding(id, "f1", Outcome::Intended)
             .await
             .unwrap();
+        store.mark_threaded(id, &["f2".to_owned()]).await.unwrap();
         assert!(store.approve_resolved(id).await.unwrap());
+        assert!(!store.approve_resolved(id).await.unwrap(), "approved once");
         let r = store.review(id).await.unwrap().unwrap();
+        let threaded: Vec<bool> = r.findings.iter().map(|f| f.threaded).collect();
+        assert_eq!(threaded, [false, true]);
         assert_eq!(
             outcomes(&r),
             [Some(Outcome::Intended), Some(Outcome::Dismissed)]

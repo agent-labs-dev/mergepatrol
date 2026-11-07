@@ -7,8 +7,8 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    Answer, Bar, CodeLine, Depth, Judged, Kind, Lean, LineKind, PrNumber, Question, Related,
-    RepoName, ReviewOverrides, ReviewSettings, ReviewStatus,
+    Answer, Bar, CodeLine, Depth, Judged, Kind, Lean, LineKind, Outcome, PrNumber, Question,
+    Related, RepoName, ReviewOverrides, ReviewSettings, ReviewStatus,
 };
 use mergepatrol_github::setup::{self, LineComment, Verdict};
 use mergepatrol_store::{ReviewAnswers, ReviewRecord};
@@ -359,6 +359,9 @@ pub struct FindingView {
     pub threaded: bool,
     #[ts(type = "number | \"always_ask\"")]
     pub bar: Bar,
+    /// What became of a change it asked for, once known.
+    #[ts(type = "\"fixed\" | \"wrong\" | \"intended\" | \"dismissed\" | null")]
+    pub outcome: Option<Outcome>,
 }
 
 #[derive(Clone, Copy, Serialize, TS)]
@@ -553,6 +556,7 @@ impl FindingView {
             withdrawn: j.withdrawn,
             threaded: j.threaded,
             bar: j.bar,
+            outcome: j.outcome,
         }
     }
 }
