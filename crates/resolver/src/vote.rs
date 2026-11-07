@@ -90,8 +90,8 @@ carries no `evidence`. For each, run {seats} subagents at once, each fresh, with
 not yours, not the review's, and not each other's. Each works in a checkout of the head of its \
 own, as MergeLoop's own panel does: add one for each with `git worktree add --detach <dir> {head}`, \
 start the subagent in it, and remove it once the subagent is done. Give each the prompt below and nothing else, \
-with `<the claim>` replaced by the finding's lines `kind: …`, `title: …`, `where: <file>:<line>`, \
-`finding: …` and `suggestion: …`. Leave out its `confidence`, `unsure`, `checked` and `related`: \
+with `<the claim>` replaced by the finding's lines `kind: …`, `title: …`, `where: …` (its `file`:`line`, \
+then each place in its `also_at`, comma-separated), `finding: …` and `suggestion: …`. Leave out its `confidence`, `unsure`, `checked` and `related`: \
 they are how the review got there.
 
 ````
