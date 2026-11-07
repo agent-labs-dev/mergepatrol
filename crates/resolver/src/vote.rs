@@ -85,13 +85,15 @@ pub fn vote(answer: &str) -> Vote {
 
 /// How the agent of the PR's author has its subagents check a review's findings, as MergeLoop's
 /// sandbox does, and what it posts of their votes.
-pub(crate) fn author_panel(title: &str, base: &str) -> String {
+pub(crate) fn author_panel(title: &str, base: &str, head: &str) -> String {
     let Panel { seats, needed } = Panel::SECURITY;
     format!(
         "Before you post, have fresh agents check each finding MergeLoop would otherwise take on \
 one agent's word: each with `kind` `security`, `lean` `change` and `needs_human` false that \
 carries no `evidence`. For each, run {seats} subagents at once, each fresh, with no other context: \
-not yours, not the review's, and not each other's. Give each the prompt below and nothing else, \
+not yours, not the review's, and not each other's. Each works in a checkout of the head of its \
+own, as MergeLoop's own panel does: add one for each with `git worktree add --detach <dir> {head}`, \
+start the subagent in it, and remove it once the subagent is done. Give each the prompt below and nothing else, \
 with `<the claim>` replaced by the finding's lines `kind: …`, `title: …`, `where: <file>:<line>`, \
 `finding: …` and `suggestion: …`. Leave out its `confidence`, `unsure`, `checked` and `related`: \
 they are how the review got there.
@@ -179,11 +181,17 @@ mod tests {
         assert_eq!(v.verdict, Verdict::Abstained);
         assert!(v.why.contains("second look"));
         assert_eq!(vote("").verdict, Verdict::Abstained);
+        // However the agent dresses the line.
+        assert_eq!(
+            vote("Reached.\n**VERDICT: holds.**").verdict,
+            Verdict::Holds
+        );
     }
 
     #[test]
     fn the_authors_agent_runs_the_same_panel_and_posts_its_votes() {
-        let p = author_panel("t", "abc");
+        let p = author_panel("t", "abc", "h1");
+        assert!(p.contains("git worktree add --detach <dir> h1"));
         assert!(p.contains("run 3 subagents at once, each fresh"));
         assert!(p.contains("when 2 of the 3 say it holds"));
         assert!(p.contains(&author_verify_prompt("t", "abc")));

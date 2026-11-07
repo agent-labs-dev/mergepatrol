@@ -433,7 +433,7 @@ pub(crate) fn last_line(answer: &str) -> Option<&str> {
     answer
         .lines()
         .rev()
-        .map(|l| l.trim().trim_matches('`'))
+        .map(|l| l.trim().trim_matches(['`', '*', '.', ' ']))
         .find(|l| !l.is_empty())
 }
 
@@ -669,7 +669,7 @@ Once you have the JSON, post it as `review`, with the head it is of: `mergeloop 
 on stdin. MergeLoop judges each finding as it does its own: back to the author as a review \
 thread, to a human, or cleared.",
         prompt = prompt_for(req, Reviewer::Author),
-        panel = vote::author_panel(req.pr_title, req.base),
+        panel = vote::author_panel(req.pr_title, req.base, head),
     )
 }
 
@@ -942,7 +942,7 @@ mod author_review_tests {
         assert!(brief.contains("git worktree add --detach <dir> h1"));
         assert!(brief.contains("mergeloop call post_review -"));
         // Its agent has fresh subagents vote on what would go back on its word alone.
-        assert!(brief.contains(&vote::author_panel("t", "abc")));
+        assert!(brief.contains(&vote::author_panel("t", "abc", "h1")));
         assert!(brief.contains(
             r#"{"repo": "o/r", "number": 5, "posted": {"head_sha": "h1", "review": <the JSON>}}"#
         ));
