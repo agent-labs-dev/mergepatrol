@@ -17,7 +17,11 @@ bars: Array<BarView>,
 /**
  * Whether the gate waits for every review thread on a PR to be resolved.
  */
-require_resolved: boolean, defaults: Array<BarView>, 
+require_resolved: boolean, 
+/**
+ * How hard the review looks, unless a repo's config file says otherwise.
+ */
+depth: "quick" | "standard" | "deep", defaults: Array<BarView>, 
 /**
  * Each kind's findings over `days`, by confidence.
  */

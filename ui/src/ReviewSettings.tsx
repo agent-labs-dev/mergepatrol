@@ -27,6 +27,19 @@ const kindHelp: Record<KindView, string> = {
   other: "",
 };
 
+type Depth = ReviewSettingsView["depth"];
+
+const DEPTHS: [Depth, string, string][] = [
+  ["quick", "Quick", "One reviewer, reporting only what could be wrong."],
+  ["standard", "Standard", "One reviewer, which also notes what it checked and found sound."],
+  [
+    "deep",
+    "Deep",
+    "Three reviewers at once, and a panel of three votes on each change no failing test shows. Spends several times Standard: for code where a missed bug costs more.",
+  ],
+];
+const depthName = (d: Depth) => DEPTHS.find(([v]) => v === d)?.[1] ?? d;
+
 const barText = (b: Bar) => (b === "always_ask" ? "Always ask" : `${b}%`);
 const barOf = (bars: BarView[], kind: KindView): Bar | undefined =>
   bars.find((b) => b.kind === kind)?.bar;
@@ -44,6 +57,7 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
   const client = useQueryClient();
   const [enabled, setEnabled] = useState(saved.enabled);
   const [resolved, setResolved] = useState(saved.require_resolved);
+  const [depth, setDepth] = useState(saved.depth);
   const [bars, setBars] = useState<Record<KindView, Bar>>(
     () => Object.fromEntries(saved.bars.map((b) => [b.kind, b.bar])) as Record<KindView, Bar>,
   );
@@ -57,15 +71,17 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
         enabled,
         bars: KINDS.map((k) => ({ kind: k, bar: bars[k] })),
         require_resolved: resolved,
+        depth,
       }),
     onSuccess: (data) => {
-      capture("review settings saved", { enabled: data.enabled });
+      capture("review settings saved", { enabled: data.enabled, depth: data.depth });
       client.setQueryData(["review-settings", workspace], data);
     },
   });
   const dirty =
     enabled !== saved.enabled ||
     resolved !== saved.require_resolved ||
+    depth !== saved.depth ||
     KINDS.some((k) => bars[k] !== barOf(saved.bars, k));
 
   return (
@@ -84,6 +100,26 @@ function WorkspaceBars({ workspace, saved }: { workspace: number; saved: ReviewS
             </span>
           </span>
           <Toggle on={resolved} onChange={setResolved} label="Require resolved threads" />
+        </div>
+        <div className="flex items-center justify-between gap-4 border-b border-line-soft p-4">
+          <span>
+            <span className="font-medium">Review depth</span>
+            <span className="block text-xs text-muted">
+              {DEPTHS.find(([v]) => v === depth)?.[2]}
+            </span>
+          </span>
+          <select
+            aria-label="Review depth"
+            value={depth}
+            onChange={(e) => setDepth(e.target.value as Depth)}
+            className="h-8 shrink-0 rounded-md border border-line-strong bg-transparent pl-2 text-sm"
+          >
+            {DEPTHS.map(([v, name]) => (
+              <option key={v} value={v}>
+                {name}
+              </option>
+            ))}
+          </select>
         </div>
         <p className="px-4 pt-3 text-xs text-muted">
           <span className="font-medium text-fg-2">How sure the agent must be</span> to send a
@@ -243,6 +279,7 @@ export function reviewOverrides(r: RepoReviewView): string[] {
     ...(r.require_resolved === undefined
       ? []
       : [`Resolved threads ${r.require_resolved ? "on" : "off"}`]),
+    ...(r.depth === undefined ? [] : [`${depthName(r.depth)} review`]),
     ...KINDS.flatMap((k) => {
       const own = barOf(r.bars, k);
       return own === undefined ? [] : [`${kindNames[k]} ${barText(own)}`];
@@ -299,6 +336,17 @@ export function RepoReview({
         onChange={(v) => {
           const { require_resolved: _, ...rest } = review;
           onChange(v === "inherit" ? rest : { ...rest, require_resolved: v === "on" });
+        }}
+      />
+      <RepoChoice
+        label="Depth"
+        value={review.depth ?? "inherit"}
+        inherit={depthName(ws.depth)}
+        changed={review.depth !== saved.depth}
+        choices={DEPTHS.map(([v, name]) => [v, name])}
+        onChange={(v) => {
+          const { depth: _, ...rest } = review;
+          onChange(v === "inherit" ? rest : { ...rest, depth: v as Depth });
         }}
       />
       {KINDS.map((k) => {
