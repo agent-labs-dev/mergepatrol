@@ -1,6 +1,7 @@
 ---
 title: See how the agent's review is doing
 kind: new
+pr: 271
 image: /changelog/review-numbers/review.png
 ---
 
