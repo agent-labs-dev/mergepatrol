@@ -1453,11 +1453,14 @@ impl Installation {
         };
         let all = with_comments(body, comments);
         let mut tries = vec![(verdict, json!(lines), body)];
+        if !comments.is_empty() {
+            tries.push((verdict, json!([]), all.as_str()));
+        }
         if verdict != Verdict::Comment {
             tries.push((Verdict::Comment, json!(lines), body));
-        }
-        if !comments.is_empty() {
-            tries.push((Verdict::Comment, json!([]), all.as_str()));
+            if !comments.is_empty() {
+                tries.push((Verdict::Comment, json!([]), all.as_str()));
+            }
         }
         let mut last = None;
         for (v, lines, body) in tries {
@@ -2149,6 +2152,28 @@ mod tests {
                 "GET /repos/o/r/pulls/7/reviews?per_page=100&page=1 HTTP/1.1",
                 "PUT /repos/o/r/pulls/7/reviews/1/dismissals HTTP/1.1",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_github_turns_down_goes_in_the_body_of_a_request_for_changes() {
+        let (gh, requests) = fake::serve_whole(vec![(422, "", "{}"), (200, "", "{}")]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let line = ThreadComment {
+            path: "a.rs".into(),
+            line: Some(9),
+            body: "the finding".into(),
+        };
+        let lines = [line];
+        let posted = gh.review_lines(&repo, 7, "abc", Verdict::RequestChanges, "body", &lines);
+        posted.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let last = &requests[1];
+        assert!(last.contains(r#""event":"REQUEST_CHANGES""#), "{last}");
+        assert!(
+            last.contains(r#""comments":[]"#) && last.contains("the finding"),
+            "{last}"
         );
     }
 
