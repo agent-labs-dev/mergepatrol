@@ -166,6 +166,22 @@ pub struct Comparison {
     pub verdict: Verdict,
 }
 
+/// `(case, bug index)` that `to` caught and `from` missed.
+fn flips(from: &[Scored], to: &[Scored]) -> Vec<(String, usize)> {
+    let mut flipped = Vec::new();
+    for f in from {
+        let Some(t) = to.iter().find(|t| t.id == f.id) else {
+            continue;
+        };
+        for (i, (was, is)) in f.caught.iter().zip(&t.caught).enumerate() {
+            if !was && *is {
+                flipped.push((f.id.clone(), i));
+            }
+        }
+    }
+    flipped
+}
+
 pub fn compare(a: &[Scored], b: &[Scored]) -> Comparison {
     let in_both = |s: &&Scored, other: &[Scored]| other.iter().any(|o| o.id == s.id);
     let left_out = a
@@ -178,17 +194,7 @@ pub fn compare(a: &[Scored], b: &[Scored]) -> Comparison {
         run.iter().filter(|s| in_both(s, other)).cloned().collect()
     };
     let (a, b) = (both(a, b), both(b, a));
-    let (mut gained, mut lost) = (Vec::new(), Vec::new());
-    for sa in &a {
-        let sb = b.iter().find(|s| s.id == sa.id).expect("in both");
-        for (i, (ca, cb)) in sa.caught.iter().zip(&sb.caught).enumerate() {
-            match (ca, cb) {
-                (false, true) => gained.push((sa.id.clone(), i)),
-                (true, false) => lost.push((sa.id.clone(), i)),
-                _ => {}
-            }
-        }
-    }
+    let (gained, lost) = (flips(&a, &b), flips(&b, &a));
     let (a, b) = (Totals::of(&a), Totals::of(&b));
     let fp = (a.false_positives, b.false_positives);
     let better = (b.caught > a.caught && fp.1 <= fp.0) || (b.caught == a.caught && fp.1 < fp.0);

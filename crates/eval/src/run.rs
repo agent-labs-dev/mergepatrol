@@ -305,3 +305,97 @@ mod tests {
         assert_eq!(reason(Err(anyhow::anyhow!("crashed"))), "crashed");
     }
 }
+
+/// A stand-in for the `mergepatrol` binary, for tests.
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    /// Stands in for `mergepatrol job --out <dir>`: keeps the spec it was given, then reviews
+    /// PR 1 and crashes on any other.
+    const FAKE_JOB: &str = r#"#!/bin/sh
+out="$3"
+mkdir -p "$out"
+cat > "$out/spec.json"
+if grep -q '"head_ref":"refs/pull/1/head"' "$out/spec.json"; then
+  echo '{"summary":"S","findings":[]}' > "$out/review.json"
+  echo '{"outcome":{"type":"done"},"events":[{"kind":"reviewed","message":"3 turns, $0.25, by m at medium effort"}]}' > "$out/result.json"
+else
+  echo boom >&2
+  exit 3
+fi
+"#;
+
+    /// Writes it into `dir`, and returns its path.
+    pub(crate) fn job(dir: &Path) -> PathBuf {
+        let bin = dir.join("mergepatrol");
+        std::fs::write(&bin, FAKE_JOB).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+
+    fn case(pr: u64) -> Case {
+        Case::parse(
+            &format!("pr-{pr}"),
+            &format!(
+                "repo: o/r\npr: {pr}\nbase: {}\nhead: {}\ntitle: T\nexpected: clean\n",
+                "a".repeat(40),
+                "b".repeat(40)
+            ),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn each_case_runs_as_a_review_job_through_the_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let job_bin = fake::job(dir.path());
+        let work = dir.path().join("work");
+        let runner = Runner {
+            job_bin,
+            agent: Agent {
+                provider: Provider::Anthropic,
+                model: "m".into(),
+                effort: "medium".into(),
+            },
+            key: "k".into(),
+            jobs: 2,
+            work: work.clone(),
+        };
+        let runs = runner.run(&[case(1), case(2)]).await.unwrap();
+
+        assert_eq!(runs[0].id, "pr-1");
+        assert_eq!(
+            runs[0].reviewed,
+            Reviewed::Done {
+                summary: "S".into(),
+                findings: Vec::new()
+            }
+        );
+        assert_eq!(runs[0].cost_usd, Some(0.25));
+        let Reviewed::Failed { reason } = &runs[1].reviewed else {
+            panic!("{:?}", runs[1]);
+        };
+        assert!(reason.contains("boom"), "{reason}");
+
+        let spec: JobSpec =
+            serde_json::from_slice(&std::fs::read(work.join("pr-1/spec.json")).unwrap()).unwrap();
+        let api = spec.resolver.api.unwrap();
+        assert!(
+            api.base_url.starts_with("http://127.0.0.1:"),
+            "{}",
+            api.base_url
+        );
+        assert!(api.base_url.ends_with("/anthropic"), "{}", api.base_url);
+        assert_ne!(
+            api.token, "k",
+            "the job gets a token for the proxy, never the key"
+        );
+    }
+}

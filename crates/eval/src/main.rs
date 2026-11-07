@@ -7,6 +7,7 @@ mod run;
 mod score;
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{Provider, ReviewSettings};
@@ -24,15 +25,7 @@ const CASES: &str = "evals/review/cases";
 
 #[derive(Debug, PartialEq)]
 enum Command {
-    Run {
-        label: String,
-        agent: Agent,
-        only: Vec<String>,
-        jobs: usize,
-        job_bin: Option<PathBuf>,
-        out: Option<PathBuf>,
-        cases: PathBuf,
-    },
+    Run(RunArgs),
     Report {
         run: PathBuf,
         cases: PathBuf,
@@ -44,73 +37,114 @@ enum Command {
     },
 }
 
-fn parse(args: &[String]) -> Result<Command> {
-    let (mut flags, mut paths) = (Vec::new(), Vec::new());
-    let mut it = args.iter().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.strip_prefix("--") {
-            Some(name) => {
-                let value = it
-                    .next()
-                    .with_context(|| format!("--{name} takes a value"))?;
-                flags.push((name, value.clone()));
+#[derive(Debug, PartialEq)]
+struct RunArgs {
+    label: String,
+    agent: Agent,
+    /// The cases to run, by id: all of them when empty.
+    only: Vec<String>,
+    jobs: usize,
+    /// The `mergepatrol` next to this binary, unless `--job-bin` names one.
+    job_bin: PathBuf,
+    /// `target/review-eval/<label>.json`, unless `--out` names a file.
+    out: PathBuf,
+    cases: PathBuf,
+}
+
+/// The `--name value` flags of a command line, and the rest.
+struct Flags {
+    flags: Vec<(String, String)>,
+    paths: Vec<PathBuf>,
+}
+
+impl Flags {
+    fn read(args: &[String], known: &[&str]) -> Result<Flags> {
+        let (mut flags, mut paths) = (Vec::new(), Vec::new());
+        let mut it = args.iter();
+        while let Some(arg) = it.next() {
+            let Some(name) = arg.strip_prefix("--") else {
+                paths.push(PathBuf::from(arg));
+                continue;
+            };
+            if !known.contains(&name) {
+                bail!("unknown flag --{name}\n{USAGE}");
             }
-            None => paths.push(PathBuf::from(arg)),
+            let value = it
+                .next()
+                .with_context(|| format!("--{name} takes a value"))?;
+            flags.push((name.to_owned(), value.clone()));
         }
+        Ok(Flags { flags, paths })
     }
-    let flag = |name: &str| {
-        flags
+
+    /// Every value of a flag, in order.
+    fn all(&self, name: &str) -> Vec<String> {
+        self.flags
             .iter()
-            .rev()
-            .find(|(n, _)| *n == name)
-            .map(|f| f.1.clone())
-    };
-    let cases = flag("cases").map_or(PathBuf::from(CASES), PathBuf::from);
-    let known: &[&str] = match args.first().map(String::as_str) {
-        Some("run") => &[
-            "label", "model", "provider", "effort", "case", "jobs", "job-bin", "out", "cases",
-        ],
-        _ => &["cases"],
-    };
-    if let Some((name, _)) = flags.iter().find(|(n, _)| !known.contains(n)) {
-        bail!("unknown flag --{name}\n{USAGE}");
+            .filter(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .collect()
     }
-    let command = match (args.first().map(String::as_str), paths.as_slice()) {
-        (Some("run"), []) => {
-            let provider = flag("provider").unwrap_or_else(|| "anthropic".into());
-            Command::Run {
-                label: flag("label").context("run takes --label")?,
-                agent: Agent {
-                    provider: Provider::parse(&provider)
-                        .with_context(|| format!("{provider:?} is not a provider"))?,
-                    model: flag("model").context("run takes --model")?,
-                    effort: flag("effort").unwrap_or_else(|| "medium".into()),
-                },
-                only: flags
-                    .iter()
-                    .filter(|(n, _)| *n == "case")
-                    .map(|f| f.1.clone())
-                    .collect(),
-                jobs: flag("jobs")
-                    .map_or(Ok(2), |j| j.parse())
-                    .context("--jobs")?,
-                job_bin: flag("job-bin").map(PathBuf::from),
-                out: flag("out").map(PathBuf::from),
-                cases,
-            }
-        }
-        (Some("report"), [run]) => Command::Report {
+
+    /// A flag's last value.
+    fn get(&self, name: &str) -> Option<String> {
+        self.all(name).pop()
+    }
+
+    fn cases(&self) -> PathBuf {
+        self.get("cases")
+            .map_or(PathBuf::from(CASES), PathBuf::from)
+    }
+}
+
+const RUN_FLAGS: &[&str] = &[
+    "label", "model", "provider", "effort", "case", "jobs", "job-bin", "out", "cases",
+];
+
+fn parse(args: &[String]) -> Result<Command> {
+    let (name, rest) = args.split_first().context(USAGE)?;
+    let known = if name == "run" { RUN_FLAGS } else { &["cases"] };
+    let f = Flags::read(rest, known)?;
+    match (name.as_str(), f.paths.as_slice()) {
+        ("run", []) => Ok(Command::Run(run_args(&f)?)),
+        ("report", [run]) => Ok(Command::Report {
             run: run.clone(),
-            cases,
-        },
-        (Some("compare"), [a, b]) => Command::Compare {
+            cases: f.cases(),
+        }),
+        ("compare", [a, b]) => Ok(Command::Compare {
             a: a.clone(),
             b: b.clone(),
-            cases,
-        },
+            cases: f.cases(),
+        }),
         _ => bail!("{USAGE}"),
-    };
-    Ok(command)
+    }
+}
+
+fn run_args(f: &Flags) -> Result<RunArgs> {
+    let provider = f.get("provider").unwrap_or_else(|| "anthropic".into());
+    let jobs = f.get("jobs").unwrap_or_else(|| "2".into());
+    let label = f.get("label").context("run takes --label")?;
+    Ok(RunArgs {
+        agent: Agent {
+            provider: Provider::parse(&provider)
+                .with_context(|| format!("{provider:?} is not a provider"))?,
+            model: f.get("model").context("run takes --model")?,
+            effort: f.get("effort").unwrap_or_else(|| "medium".into()),
+        },
+        only: f.all("case"),
+        jobs: jobs.parse().with_context(|| format!("--jobs {jobs:?}"))?,
+        // `cargo build -p mergepatrol` puts it next to this binary.
+        job_bin: match f.get("job-bin") {
+            Some(bin) => bin.into(),
+            None => std::env::current_exe()?.with_file_name("mergepatrol"),
+        },
+        out: f.get("out").map_or_else(
+            || Path::new("target/review-eval").join(format!("{label}.json")),
+            PathBuf::from,
+        ),
+        cases: f.cases(),
+        label,
+    })
 }
 
 /// The environment variable that holds a provider's API key.
@@ -136,59 +170,82 @@ fn scores(cases: &Path, run: &RunFile) -> Result<Vec<score::Scored>> {
     ))
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match parse(&args)? {
-        Command::Run {
-            label,
-            agent,
-            only,
-            jobs,
-            job_bin,
-            out,
-            cases,
-        } => {
-            let mut all = case::load(&cases)?;
-            if !only.is_empty() {
-                all.retain(|c| only.contains(&c.id));
-            }
-            let var = key_var(agent.provider);
-            let key = std::env::var(var).with_context(|| format!("set {var}"))?;
-            let job_bin = match job_bin {
-                Some(b) => b,
-                // `cargo build -p mergepatrol` puts it next to this binary.
-                None => std::env::current_exe()?.with_file_name("mergepatrol"),
-            };
-            let work = Path::new("target/review-eval").join(&label);
-            let out = out.unwrap_or_else(|| work.with_extension("json"));
-            let runner = Runner {
-                job_bin,
-                agent: agent.clone(),
-                key,
-                jobs,
-                work,
-            };
-            let file = RunFile {
-                label,
-                agent,
-                cases: runner.run(&all).await?,
-            };
-            std::fs::write(&out, serde_json::to_vec_pretty(&file)?)?;
-            print!("{}", report::run(&file.label, &scores(&cases, &file)?));
-            eprintln!("wrote {}", out.display());
+/// Runs a command, and returns what it prints. `key` reads an environment variable.
+async fn execute(command: Command, key: impl Fn(&str) -> Option<String>) -> Result<String> {
+    match command {
+        Command::Run(args) => {
+            let var = key_var(args.agent.provider);
+            let key = key(var).with_context(|| format!("set {var}"))?;
+            run(args, key).await
         }
-        Command::Report { run, cases } => {
-            let file = read_run(&run)?;
-            print!("{}", report::run(&file.label, &scores(&cases, &file)?));
-        }
-        Command::Compare { a, b, cases } => {
-            let (a, b) = (read_run(&a)?, read_run(&b)?);
-            let c = score::compare(&scores(&cases, &a)?, &scores(&cases, &b)?);
-            print!("{}", report::comparison(&a.label, &b.label, &c));
-        }
+        Command::Report { run, cases } => report_run(&run, &cases),
+        Command::Compare { a, b, cases } => compare_runs(&a, &b, &cases),
     }
-    Ok(())
+}
+
+fn report_run(run: &Path, cases: &Path) -> Result<String> {
+    let file = read_run(run)?;
+    Ok(report::run(&file.label, &scores(cases, &file)?))
+}
+
+fn compare_runs(a: &Path, b: &Path, cases: &Path) -> Result<String> {
+    let (a, b) = (read_run(a)?, read_run(b)?);
+    let c = score::compare(&scores(cases, &a)?, &scores(cases, &b)?);
+    Ok(report::comparison(&a.label, &b.label, &c))
+}
+
+/// Reviews the cases, writes the run, and scores it.
+async fn run(args: RunArgs, key: String) -> Result<String> {
+    let mut cases = case::load(&args.cases)?;
+    cases.retain(|c| args.only.is_empty() || args.only.contains(&c.id));
+    let out = &args.out;
+    let runner = Runner {
+        job_bin: args.job_bin.clone(),
+        agent: args.agent.clone(),
+        key,
+        jobs: args.jobs,
+        // Each case's job output, next to the run.
+        work: out.with_extension(""),
+    };
+    let file = RunFile {
+        label: args.label,
+        agent: args.agent,
+        cases: runner.run(&cases).await?,
+    };
+    std::fs::write(out, serde_json::to_vec_pretty(&file)?)
+        .with_context(|| format!("write {}", out.display()))?;
+    eprintln!("wrote {}", out.display());
+    Ok(report::run(&file.label, &scores(&args.cases, &file)?))
+}
+
+/// The command line's command, run.
+async fn cli(args: &[String], key: impl Fn(&str) -> Option<String>) -> Result<String> {
+    execute(parse(args)?, key).await
+}
+
+/// Prints what a command printed, or why it failed, and exits to match.
+fn finish(
+    ran: Result<String>,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> ExitCode {
+    let (text, sink, code) = match ran {
+        Ok(text) => (text, out as &mut dyn std::io::Write, ExitCode::SUCCESS),
+        Err(e) => (
+            format!("{e:#}\n"),
+            err as &mut dyn std::io::Write,
+            ExitCode::FAILURE,
+        ),
+    };
+    let _ = sink.write_all(text.as_bytes());
+    code
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let ran = cli(&args, |var| std::env::var(var).ok()).await;
+    finish(ran, &mut std::io::stdout(), &mut std::io::stderr())
 }
 
 #[cfg(test)]
@@ -207,7 +264,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             c,
-            Command::Run {
+            Command::Run(RunArgs {
                 label: "try".into(),
                 agent: Agent {
                     provider: Provider::OpenAi,
@@ -216,11 +273,23 @@ mod tests {
                 },
                 only: vec!["a".into(), "b".into()],
                 jobs: 4,
-                job_bin: None,
-                out: Some("o.json".into()),
+                job_bin: std::env::current_exe()
+                    .unwrap()
+                    .with_file_name("mergepatrol"),
+                out: "o.json".into(),
                 cases: CASES.into(),
-            }
+            })
         );
+    }
+
+    #[test]
+    fn a_run_is_written_under_target_by_its_label() {
+        let Command::Run(a) = parse(&args("run --label base --model m")).unwrap() else {
+            panic!("not a run");
+        };
+        assert_eq!(a.out, Path::new("target/review-eval/base.json"));
+        assert_eq!((a.jobs, a.agent.provider), (2, Provider::Anthropic));
+        assert!(a.only.is_empty());
     }
 
     #[test]
@@ -269,6 +338,87 @@ mod tests {
         assert_eq!(
             vars,
             ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]
+        );
+    }
+
+    fn write_case(dir: &Path, pr: u64, expected: &str) {
+        let yaml = format!(
+            "repo: o/r\npr: {pr}\nbase: {}\nhead: {}\ntitle: T\nexpected:\n{expected}",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        std::fs::write(dir.join(format!("pr-{pr}.yml")), yaml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_reviews_the_cases_writes_the_run_and_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = dir.path().join("cases");
+        std::fs::create_dir(&cases).unwrap();
+        write_case(&cases, 1, "  clean\n");
+        write_case(&cases, 2, "  clean\n");
+        let out = dir.path().join("run.json");
+        let command = |only: &str| {
+            parse(&args(&format!(
+                "run --label L --model m --case {only} --out {} --cases {} --job-bin {}",
+                out.display(),
+                cases.display(),
+                run::fake::job(dir.path()).display()
+            )))
+            .unwrap()
+        };
+        let key = |var: &str| (var == "ANTHROPIC_API_KEY").then(|| "k".to_owned());
+        let text = execute(command("pr-1"), key).await.unwrap();
+        assert!(text.starts_with("L\n"), "{text}");
+        assert!(text.contains("pr-1") && !text.contains("pr-2"), "{text}");
+        assert!(text.contains("$0.25 over 1 cases"), "{text}");
+        assert_eq!(read_run(&out).unwrap().cases.len(), 1);
+        assert!(dir.path().join("run/pr-1/result.json").exists());
+
+        let no_key = execute(command("pr-1"), |_| None).await.unwrap_err();
+        assert_eq!(no_key.to_string(), "set ANTHROPIC_API_KEY");
+
+        let report = format!("report {} --cases {}", out.display(), cases.display());
+        assert_eq!(cli(&args(&report), key).await.unwrap(), text);
+
+        let compare = format!(
+            "compare {} {} --cases {}",
+            out.display(),
+            out.display(),
+            cases.display()
+        );
+        let text = cli(&args(&compare), key).await.unwrap();
+        assert!(
+            text.starts_with("A L: ") && text.ends_with("verdict: drop B\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_file_that_is_missing_or_not_a_run_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "{}").unwrap();
+        for path in [bad, dir.path().join("gone.json")] {
+            let c = parse(&args(&format!("report {}", path.display()))).unwrap();
+            assert!(execute(c, |_| None).await.is_err());
+        }
+    }
+
+    #[test]
+    fn a_command_prints_what_it_ran_or_why_it_failed() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        assert_eq!(
+            finish(Ok("done\n".into()), &mut out, &mut err),
+            ExitCode::SUCCESS
+        );
+        assert_eq!((out.as_slice(), err.as_slice()), (&b"done\n"[..], &b""[..]));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let failed = finish(Err(anyhow::anyhow!("no key")), &mut out, &mut err);
+        assert_eq!(failed, ExitCode::FAILURE);
+        assert_eq!(
+            (out.as_slice(), err.as_slice()),
+            (&b""[..], &b"no key\n"[..])
         );
     }
 }

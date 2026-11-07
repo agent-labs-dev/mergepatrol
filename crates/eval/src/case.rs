@@ -317,6 +317,24 @@ mod tests {
     }
 
     #[test]
+    fn a_dir_loads_its_cases_by_id_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b.yml"), yaml("  clean\n")).unwrap();
+        std::fs::write(dir.path().join("a.yml"), yaml("  clean\n")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "not a case").unwrap();
+        let ids: Vec<_> = load(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(ids, ["a", "b"]);
+
+        std::fs::write(dir.path().join("c.yml"), "repo: x").unwrap();
+        assert!(load(dir.path()).is_err());
+        assert!(load(&dir.path().join("gone")).is_err());
+    }
+
+    #[test]
     fn every_case_in_the_repo_loads() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/review/cases");
         let cases = load(&dir).unwrap();
