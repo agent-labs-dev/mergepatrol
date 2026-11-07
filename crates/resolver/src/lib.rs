@@ -429,6 +429,14 @@ fn place(f: &Finding) -> String {
     }
 }
 
+/// Where a finding is, as a prompt names it alone: `file:line, file`, or the whole PR.
+pub(crate) fn where_is(f: &Finding) -> String {
+    match f.places().as_slice() {
+        [] => "the whole PR".into(),
+        places => places.join(", "),
+    }
+}
+
 fn answered_section(answered: &[Answered]) -> String {
     if answered.is_empty() {
         return String::new();
@@ -641,10 +649,7 @@ thread, to a human, or cleared.",
 
 pub(crate) fn question_prompt(req: &QuestionRequest<'_>) -> String {
     let f = req.finding;
-    let place = match f.places().as_slice() {
-        [] => "the whole PR".into(),
-        places => places.join(", "),
-    };
+    let place = where_is(f);
     if req.sent_back {
         return format!(
             "You reviewed a pull request, {title}, and sent one finding back to its author to \
