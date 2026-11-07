@@ -998,45 +998,64 @@ fn review_body(url: &str, repo: &RepoName, number: PrNumber, done: &ReviewDone) 
         ));
     }
     if asks > 0 {
-        let who = match done.asked.as_slice() {
-            [] => "Anyone who may approve this PR".to_owned(),
-            logins => logins
-                .iter()
-                .map(|l| format!("@{l}"))
-                .collect::<Vec<_>>()
-                .join(", "),
+        body.push_str(&asks_section(asks, &done.asked, url));
+    }
+    body.push_str(&cleared_section(&cleared));
+    body.push_str(&noted_section(&noted));
+    body
+}
+
+/// Who it asks about how many findings, and where they answer.
+fn asks_section(asks: usize, asked: &[String], url: &str) -> String {
+    let who = match asked {
+        [] => "Anyone who may approve this PR".to_owned(),
+        logins => logins
+            .iter()
+            .map(|l| format!("@{l}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!(
+        "\n\nIt asks a human about {asks}, each in a thread on its line. {who}: [answer them in MergeLoop]({url}), or approve the PR here on GitHub if they are all fine as they are. The PR keeps its place in the queue meanwhile."
+    )
+}
+
+/// What it cleared, folded away, each with why when it leaned to a change. Nothing when none.
+fn cleared_section(cleared: &[&Judged]) -> String {
+    if cleared.is_empty() {
+        return String::new();
+    }
+    let mut section = String::from("\n\n<details><summary>What it cleared</summary>\n");
+    for f in cleared {
+        let note = match (f.finding.lean, f.finding.shows_the_change()) {
+            (Lean::Change, false) => ", a note: nothing showed the change was needed",
+            (Lean::Change, true) => ", a note under the bar",
+            (Lean::Fine | Lean::PreExisting, _) => "",
         };
-        body.push_str(&format!(
-            "\n\nIt asks a human about {asks}, each in a thread on its line. {who}: [answer them in MergeLoop]({url}), or approve the PR here on GitHub if they are all fine as they are. The PR keeps its place in the queue meanwhile."
+        section.push_str(&format!(
+            "\n- {} ({}%{note})",
+            clip(&f.finding.title, TITLE_CHARS),
+            f.finding.confidence
         ));
     }
-    if !cleared.is_empty() {
-        body.push_str("\n\n<details><summary>What it cleared</summary>\n");
-        for f in cleared {
-            let note = match (f.finding.lean, f.finding.shows_the_change()) {
-                (Lean::Change, false) => ", a note: nothing showed the change was needed",
-                (Lean::Change, true) => ", a note under the bar",
-                (Lean::Fine | Lean::PreExisting, _) => "",
-            };
-            body.push_str(&format!(
-                "\n- {} ({}%{note})",
-                clip(&f.finding.title, TITLE_CHARS),
-                f.finding.confidence
-            ));
-        }
-        body.push_str("\n\n</details>");
+    section + "\n\n</details>"
+}
+
+/// The bugs it found that the PR did not bring, each with its link to file it. Nothing when none.
+fn noted_section(noted: &[(&Judged, String)]) -> String {
+    if noted.is_empty() {
+        return String::new();
     }
-    if !noted.is_empty() {
-        body.push_str("\n\n**Already there before this PR**: bugs in code it did not bring. They are not this PR's to fix, and hold nothing.\n");
-        for (f, issue) in noted {
-            body.push_str(&format!(
-                "\n- {} · [file an issue]({})",
-                clip(&f.finding.title, TITLE_CHARS),
-                issue
-            ));
-        }
+    let mut section = String::from(
+        "\n\n**Already there before this PR**: bugs in code it did not bring. They are not this PR's to fix, and hold nothing.\n",
+    );
+    for (f, issue) in noted {
+        section.push_str(&format!(
+            "\n- {} · [file an issue]({issue})",
+            clip(&f.finding.title, TITLE_CHARS)
+        ));
     }
-    body
+    section
 }
 
 async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> Result<()> {
