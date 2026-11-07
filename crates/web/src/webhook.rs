@@ -229,6 +229,14 @@ fn changed(event: Option<&str>, payload: &Value) -> Vec<Change> {
             changes
         }
         Some("workflow_run") => vec![value("approval", &payload["workflow_run"]["head_sha"])],
+        // The repo's settings, as which merge methods it allows, and whether it is private.
+        Some("repository") => vec![
+            matches!(
+                payload["action"].as_str(),
+                Some("edited" | "privatized" | "publicized")
+            )
+            .then_some(Change::Repo),
+        ],
         // The checks a branch requires, and the reviews.
         Some("branch_protection_rule" | "repository_ruleset") => vec![
             Some(Change::ValuesUnder(BRANCH_RULES.into())),
@@ -327,5 +335,15 @@ mod tests {
             let changes = changed(Some(event), &json!({}));
             assert!(changes.contains(&Change::ValuesUnder(BRANCH_RULES.into())));
         }
+    }
+
+    #[test]
+    fn a_change_to_the_repos_settings_reads_the_repo_again() {
+        let edited = changed(Some("repository"), &json!({ "action": "edited" }));
+        assert_eq!(edited, [Change::Repo]);
+        let private = changed(Some("repository"), &json!({ "action": "privatized" }));
+        assert_eq!(private, [Change::Repo]);
+        let renamed = changed(Some("repository"), &json!({ "action": "renamed" }));
+        assert!(renamed.is_empty(), "{renamed:?}");
     }
 }

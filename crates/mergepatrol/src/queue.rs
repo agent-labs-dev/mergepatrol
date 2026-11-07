@@ -920,9 +920,8 @@ async fn tick_lane(
     };
     let mut lane = read.lane(trunk);
     if let Some(merge) = lane.merging.clone() {
-        let method = merge_method(gh, &key, &snap).await?;
         let number = merge.number;
-        if resume_merge(ctx, &settings, gh, &key, &mut lane, &units, merge, &method).await? {
+        if resume_merge(ctx, &settings, gh, &key, &snap, &mut lane, &units, merge).await? {
             units.retain(|u| u.number != number);
         }
     }
@@ -1859,10 +1858,10 @@ async fn resume_merge(
     settings: &RepoSettings,
     gh: &dyn GitHub,
     key: &LaneKey,
+    snap: &RepoSnapshot,
     lane: &mut Lane,
     units: &[Unit],
     merge: PendingMerge,
-    method: &str,
 ) -> Result<bool> {
     let repo = &key.repo;
     let open = units.iter().any(|u| {
@@ -1872,7 +1871,7 @@ async fn resume_merge(
             && u.hold_reason().is_none()
     });
     let sha = if open {
-        match gh.merge(repo, merge.top, &merge.head, method).await? {
+        match merge_allowed(gh, settings, key, snap, merge.top, &merge.head, 0).await? {
             MergeOutcome::Merged { sha } => Some(sha),
             MergeOutcome::Rejected(_) => None,
         }
@@ -2242,10 +2241,10 @@ async fn merge_batch(
             return finish(ctx, settings, gh, key, lane, tested, Outcome::Held(reason)).await;
         }
         let top = tested.top();
-        let method = merge_method(gh, key, snap).await?;
         carry_closing_issues(gh, key, snap, &now, &head_shas(tested)).await;
         start_merge(ctx, key, lane, &now, &top.head_ref_oid).await?;
-        match merge_retrying(gh, repo, top.number, &top.head_ref_oid, &method).await? {
+        let (number, head) = (top.number, &top.head_ref_oid);
+        match merge_allowed(gh, settings, key, snap, number, head, MERGE_RETRIES).await? {
             MergeOutcome::Merged { sha } => {
                 let tree = gh.commit_tree(repo, &sha).await?;
                 let merged = Outcome::Merged(sha.clone());
@@ -2366,19 +2365,55 @@ impl Unreported {
     }
 }
 
+/// Merges the PR with a method the trunk allows. One that the repo's settings turned off since
+/// `snap` was read, GitHub refuses: then the method is chosen again from the settings as they
+/// are now, and the merge tried once more with it.
+async fn merge_allowed(
+    gh: &dyn GitHub,
+    settings: &RepoSettings,
+    key: &LaneKey,
+    snap: &RepoSnapshot,
+    number: PrNumber,
+    head: &str,
+    retries: u32,
+) -> Result<MergeOutcome> {
+    let method = merge_method(gh, key, snap).await?;
+    let outcome = merge_retrying(gh, &key.repo, number, head, &method, retries).await?;
+    let MergeOutcome::Rejected(r) = &outcome else {
+        return Ok(outcome);
+    };
+    if !refuses_method(r) {
+        return Ok(outcome);
+    }
+    // The merge marked the repo changed, so this reads its settings again.
+    let now = gh.snapshot(&key.repo, &settings.labels()).await?;
+    match merge_method(gh, key, &now).await? {
+        again if again == method => Ok(outcome),
+        again => merge_retrying(gh, &key.repo, number, head, &again, retries).await,
+    }
+}
+
+/// Whether GitHub refused the merge for its method: "Merge commits are not allowed on this
+/// repository".
+fn refuses_method(rejection: &str) -> bool {
+    rejection.ends_with("not allowed on this repository")
+}
+
 /// GitHub rejects a merge right after the one before it, until it has worked out the PR's
 /// mergeability against the new trunk ("Base branch was modified"). It accepts it moments later.
+/// A method it refuses, it refuses each time.
 async fn merge_retrying(
     gh: &dyn GitHub,
     repo: &RepoName,
     number: PrNumber,
     head: &str,
     method: &str,
+    retries: u32,
 ) -> Result<MergeOutcome> {
     let mut tries = 0;
     loop {
         match gh.merge(repo, number, head, method).await? {
-            MergeOutcome::Rejected(_) if tries < MERGE_RETRIES => {
+            MergeOutcome::Rejected(r) if tries < retries && !refuses_method(&r) => {
                 tries += 1;
                 tokio::time::sleep(MERGE_RETRY_AFTER).await;
             }
@@ -2738,10 +2773,9 @@ async fn run_job(
                     Event::OnHold(reason)
                 } else {
                     let top = now.top().number;
-                    let method = merge_method(gh, key, snap).await?;
                     carry_closing_issues(gh, key, snap, &now, &heads).await;
                     start_merge(ctx, key, lane, &now, head).await?;
-                    match gh.merge(repo, top, head, &method).await? {
+                    match merge_allowed(gh, settings, key, snap, top, head, 0).await? {
                         MergeOutcome::Merged { sha } => return Ok(Outcome::Merged(sha)),
                         MergeOutcome::Rejected(r) => {
                             lane.merging = None;
