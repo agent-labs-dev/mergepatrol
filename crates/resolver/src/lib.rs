@@ -359,14 +359,20 @@ pull request means. Then stop and reply with one line: `{GIVE_UP} <the reason>`.
     )
 }
 
-/// How an answer to the author's reply to a finding sent back ends: the agent withdraws it, or
-/// it stands.
+/// How an answer to the author's reply to a finding sent back ends: the agent withdraws it, as
+/// wrong or as what the author meant, or it stands.
 pub const WITHDRAWN: &str = "VERDICT: withdrawn";
+pub const INTENDED: &str = "VERDICT: intended";
 pub const STANDS: &str = "VERDICT: stands";
 
-/// Whether an answer to the author's reply withdraws the finding: its last line says so.
-pub fn withdraws(answer: &str) -> bool {
-    last_line(answer).is_some_and(|l| l.eq_ignore_ascii_case(WITHDRAWN))
+/// Whether an answer to the author's reply withdraws the finding, and why: its last line says.
+pub fn withdraws(answer: &str) -> Option<mergepatrol_core::Outcome> {
+    use mergepatrol_core::Outcome;
+    let last = last_line(answer)?;
+    [(WITHDRAWN, Outcome::Wrong), (INTENDED, Outcome::Intended)]
+        .into_iter()
+        .find(|(verdict, _)| last.eq_ignore_ascii_case(verdict))
+        .map(|(_, outcome)| outcome)
 }
 
 /// An answer's last line that says anything, as a verdict ends one.
@@ -396,6 +402,7 @@ pub(crate) const REVIEW_SHAPE: &str = r#"{
       "suggestion": "The change you would ask the author for. Empty when there is none.",
       "evidence": { "command": "pnpm vitest run src/retry.test.ts", "files": ["src/retry.test.ts"] },
       "needs_human": false,
+      "settled": "fixed | wrong | intended, only on a `fine` finding that reports again one you sent back or a human asked to change, else null",
       "related": [{ "file": "path", "line": 41, "why": "What this code told you" }],
       "also_at": [{ "file": "path", "line": 120 }]
     }
@@ -438,7 +445,8 @@ fn answered_section(answered: &[Answered]) -> String {
     format!(
         "\nHumans already answered these findings on an earlier version of this PR. Do not \
 raise them again unless the lines they are about changed since; if a change was asked for, \
-check whether it was made.\n{items}\n"
+check whether it was made: report one that was as a `fine` finding with the same title and \
+`\"settled\": \"fixed\"`, and one that was not again with the same title.\n{items}\n"
     )
 }
 
@@ -467,13 +475,15 @@ fn sent_back_section(sent_back: &[SentBack]) -> String {
         .join("\n");
     format!(
         "\nYou sent these findings back to the author on the last version of this PR. Check \
-each against the code now. One that was fixed, report as a `fine` finding with the same title, \
-saying how it was fixed. One the author answered instead of changing: if their reply holds up in \
-the code, report it as `fine` with the same title; if it does not, report it again with the same \
-title and say why the reply does not hold. One that was neither fixed nor answered, report again \
-with the same title, so the author can tell it is the same one, and say what is still missing. One \
-fixed at some of its places, report again with the same title at only the places still unfixed, \
-in `file`, `line` and `also_at`.\n{items}\n"
+each against the code now. One that was fixed, report as a `fine` finding with the same title \
+and `\"settled\": \"fixed\"`, saying how it was fixed. One the author answered instead of \
+changing: if their reply holds up in the code, report it as `fine` with the same title and \
+`\"settled\": \"wrong\"` if it shows the finding was wrong or does not apply, or \
+`\"settled\": \"intended\"` if it shows the code does what its author means it to; if it does \
+not, report it again with the same title and say why the reply does not hold. One that was \
+neither fixed nor answered, report again with the same title, so the author can tell it is the \
+same one, and say what is still missing. One fixed at some of its places, report again with the \
+same title at only the places still unfixed, in `file`, `line` and `also_at`.\n{items}\n"
     )
 }
 
@@ -678,8 +688,9 @@ The PR's changes are `git diff {base}..HEAD`. Read whatever code helps you judge
 
 Stay adversarial: the reply wants the finding gone, and you hold it to the code, not to how \
 sure it sounds. Answer in a short paragraph of plain text: what you found. Then end with one \
-line, alone: `{WITHDRAWN}` if the reply shows the finding was wrong or does not apply, so it \
-no longer holds the PR, else `{STANDS}`.",
+line, alone: `{WITHDRAWN}` if the reply shows the finding was wrong or does not apply, \
+`{INTENDED}` if it shows the code does what its author means it to and that does no harm, so \
+either way it no longer holds the PR, else `{STANDS}`.",
             title = req.pr_title,
             ftitle = f.title,
             finding = f.finding,
@@ -1059,17 +1070,74 @@ mod retitle_tests {
 #[cfg(test)]
 mod withdraw_tests {
     use super::*;
+    use mergepatrol_core::Outcome;
 
     #[test]
-    fn only_a_last_line_that_withdraws_withdraws() {
-        assert!(withdraws(
-            "The caller holds the lock.\n\nVERDICT: withdrawn\n"
-        ));
-        assert!(withdraws("Fine.\n`verdict: withdrawn`"));
-        assert!(!withdraws("It still races.\nVERDICT: stands"));
-        assert!(!withdraws(
-            "VERDICT: withdrawn\nBut on second look it races."
-        ));
-        assert!(!withdraws(""));
+    fn a_reply_to_a_finding_sent_back_is_asked_for_a_verdict_that_says_why() {
+        let finding = Finding {
+            id: "f1".into(),
+            kind: mergepatrol_core::Kind::Other,
+            title: "Retry never stops".into(),
+            file: Some("src/retry.rs".into()),
+            line: Some(9),
+            confidence: 90,
+            lean: mergepatrol_core::Lean::Change,
+            finding: "It loops.".into(),
+            unsure: String::new(),
+            checked: Vec::new(),
+            would_clear: String::new(),
+            suggestion: "Cap it.".into(),
+            evidence: None,
+            needs_human: false,
+            verified: None,
+            settled: None,
+            also_at: Vec::new(),
+            code: Vec::new(),
+            related: Vec::new(),
+        };
+        let req = QuestionRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "Retry",
+            finding: &finding,
+            question: "It retries forever by design.",
+            sent_back: true,
+            transcript: Path::new("t"),
+        };
+        let prompt = question_prompt(&req);
+        for verdict in [WITHDRAWN, INTENDED, STANDS] {
+            assert!(prompt.contains(verdict), "{verdict}");
+        }
+        assert!(prompt.contains("src/retry.rs:9") && prompt.contains("by design"));
+        let human = question_prompt(&QuestionRequest {
+            sent_back: false,
+            ..req
+        });
+        assert!(
+            !human.contains(INTENDED),
+            "a human's question gets no verdict"
+        );
+    }
+
+    #[test]
+    fn only_a_last_line_that_withdraws_withdraws_and_says_why() {
+        assert_eq!(
+            withdraws("The caller holds the lock.\n\nVERDICT: withdrawn\n"),
+            Some(Outcome::Wrong)
+        );
+        assert_eq!(
+            withdraws("Fine.\n`verdict: withdrawn`"),
+            Some(Outcome::Wrong)
+        );
+        assert_eq!(
+            withdraws("It retries forever by design.\nVERDICT: intended"),
+            Some(Outcome::Intended)
+        );
+        assert_eq!(withdraws("It still races.\nVERDICT: stands"), None);
+        assert_eq!(
+            withdraws("VERDICT: withdrawn\nBut on second look it races."),
+            None
+        );
+        assert_eq!(withdraws(""), None);
     }
 }

@@ -11,6 +11,7 @@ import type { StatsView } from "./api/StatsView";
 import type { StepStatsView } from "./api/StepStatsView";
 import type { StepTimeView } from "./api/StepTimeView";
 import type { StepView } from "./api/StepView";
+import { ReviewStats } from "./ReviewStats";
 import { Avatar, duration, llmName, RepoIcon, secondary, timeAgo, usd } from "./ui";
 
 export const WINDOWS = [7, 30, 90] as const;
@@ -178,6 +179,7 @@ export function History({ workspace }: { workspace: number }) {
             days={days}
           />
           <Steps steps={steps} />
+          {!author && <ReviewStats workspace={workspace} repo={repo} days={days} />}
           {byRepo ? (
             <Breakdown
               title={repo ? "Developers in this repo" : "Developers"}

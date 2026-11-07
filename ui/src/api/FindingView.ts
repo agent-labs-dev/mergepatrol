@@ -48,4 +48,8 @@ needs_human: boolean,
 /**
  * It has a review thread on the PR, which its author resolves.
  */
-threaded: boolean, bar: number | "always_ask", };
+threaded: boolean, bar: number | "always_ask", 
+/**
+ * What became of a change it asked for, once known.
+ */
+outcome: "fixed" | "wrong" | "intended" | "dismissed" | null, };

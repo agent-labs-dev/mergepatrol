@@ -13,7 +13,9 @@ use axum::http::Method;
 use axum::routing::{MethodFilter, MethodRouter, on};
 use serde_json::{Map, Value, json};
 
-use crate::{AppState, api, auth, billing, changelog, mcp, need, oauth, review, v1, webhook};
+use crate::{
+    AppState, api, auth, billing, changelog, mcp, need, oauth, review, review_stats, v1, webhook,
+};
 
 pub(crate) struct Route {
     pub method: Method,
@@ -187,6 +189,10 @@ pub(crate) static ROUTES: &[Route] = &[
         arg("days", Ty::Int, "How many days back, from 1 to 365."),
         opt("repo", Ty::Str, "Only this repo's, as `owner/name`."),
         opt("author", Ty::Str, "Only this GitHub login's."))),
+    route!(GET "/api/w/{id}/history/review", review_stats::review_stats_view, tool!("get_review_stats", Reads,
+        "How the agent's review did on the PRs it first reviewed in the window, in the repos you can read, each with its whole history. `changes` sorts each change it asked for, sent back to the author or asked of a human, by what became of it: `fixed` in a later push, `wrong` or `intended` on a reply that held up, `dismissed` when the author resolved its thread with no push or a human called it fine, else `open`. Each PR counts its reviews up to its first approval, so a carried approval or a later re-review adds nothing. `rounds` counts the reviews each PR took to pass: on the first, within two (one round of fixing), five or more, and the mean. `humans` counts the PRs whose review asked a person, the reviews one answered, and the median wait for that answer. Needs a MergeLoop sign-in.",
+        arg("days", Ty::Int, "How many days back, from 1 to 365."),
+        opt("repo", Ty::Str, "Only this repo's, as `owner/name`."))),
     route!(GET "/api/w/{id}/repos", api::repos, tool!("list_repos", Reads,
         "The repos the workspace's installation reaches that you can read, and whether each queues: by its config file, or turned on or off. Needs a MergeLoop sign-in.")),
     route!(PUT "/api/w/{id}/repos/{owner}/{name}", api::set_repo, tool!("set_repo", Writes,
@@ -222,12 +228,12 @@ pub(crate) static ROUTES: &[Route] = &[
         arg("body", Ty::Str, "The review's text. May be empty for an approval."),
         arg("queue", Ty::Bool, "Queue the PR after the review."))),
     route!(GET "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review", review::agent_review, tool!("get_agent_review", Reads,
-        "The agent's review of a queued PR, the queue's first gate: its newest, of whatever head, or null before its first. Each finding says what the agent saw, how sure it was, and where it went: back to the PR's author (`sent_back`), to a human (`asked`, for a call the author cannot make from the PR, `needs_human`), withdrawn on the author's reply (`withdrawn`), or cleared. A finding that holds the PR has a review thread on its line (`threaded`): the author fixes it or replies why not, then resolves the thread. A bug that recurs is one finding: `also_at` lists each other place it is, with its code, and a fix settles every one. A finding's `evidence` is the command MergeLoop ran on the PR's head, what it printed, and the whole test the agent wrote for it as a patch, also when GitHub's comment had no room for it: `failed` says MergeLoop saw it fail, the only evidence that sends a change back. `status` is `changes` while it waits for the author, `asks` while it waits for a human's answers, and `approved` once the author resolved every thread, or nothing held the PR.")),
+        "The agent's review of a queued PR, the queue's first gate: its newest, of whatever head, or null before its first. Each finding says what the agent saw, how sure it was, and where it went: back to the PR's author (`sent_back`), to a human (`asked`, for a call the author cannot make from the PR, `needs_human`), withdrawn on the author's reply (`withdrawn`), or cleared. A change it asked for carries its `outcome` once known: `fixed`, `wrong`, `intended` or `dismissed`, as `get_review_stats` counts them. A finding that holds the PR has a review thread on its line (`threaded`): the author fixes it or replies why not, then resolves the thread. A bug that recurs is one finding: `also_at` lists each other place it is, with its code, and a fix settles every one. A finding's `evidence` is the command MergeLoop ran on the PR's head, what it printed, and the whole test the agent wrote for it as a patch, also when GitHub's comment had no room for it: `failed` says MergeLoop saw it fail, the only evidence that sends a change back. `status` is `changes` while it waits for the author, `asks` while it waits for a human's answers, and `approved` once the author resolved every thread, or nothing held the PR.")),
     route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/answers", review::answer_agent_review, tool!("answer_agent_review", Writes,
         "Answers what the agent's review asks: posts your review of the PR on GitHub, with each change you ask for on its line. All fine approves it, and it takes its place in the queue (the PR's author's approval goes as a comment; where GitHub requires an approval to merge, the PR waits in the queue for a reviewer's); a change holds it for the author's next push (asked by the author, it goes as a comment, as GitHub takes no request for changes from them). Needs write access to the repo, as a user: a workflow's token names none.",
         arg("answers", Ty::Body, "`{ head_sha, answers, note, request_changes }`: the head the review is of, as `get_agent_review` returns it; one answer per finding it asks about, `{ finding, call: \"fine\" | \"change\", note }`, with what to change in `note`; optionally a note for the author; and `request_changes: true` to ask for changes to a PR the agent could not review, which asks about no finding."))),
     route!(POST "/api/w/{id}/repos/{owner}/{name}/pulls/{number}/agent-review/questions", review::ask_agent, tool!("ask_agent_about_review", Writes,
-        "Asks the agent a question about one finding of its review, while the review asks a human; or, for a finding sent back to the PR's author (`sent_back`), replies to it, as when the author thinks it is wrong. The agent reads the code again to answer: the answer shows in `get_agent_review`'s `questions` in a minute or two. On a reply it ends `VERDICT: withdrawn` or `VERDICT: stands`; a withdrawn finding no longer holds the PR. Needs write access to the repo.",
+        "Asks the agent a question about one finding of its review, while the review asks a human; or, for a finding sent back to the PR's author (`sent_back`), replies to it, as when the author thinks it is wrong. The agent reads the code again to answer: the answer shows in `get_agent_review`'s `questions` in a minute or two. On a reply it ends `VERDICT: withdrawn` (the finding was wrong), `VERDICT: intended` (the code does what its author meant) or `VERDICT: stands`; a withdrawn finding no longer holds the PR. Needs write access to the repo.",
         arg("head_sha", Ty::Str, "The head the review is of."),
         arg("finding", Ty::Str, "The finding's id."),
         arg("question", Ty::Str, "What to ask."))),

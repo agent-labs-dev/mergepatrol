@@ -94,6 +94,7 @@ mod tests {
             suggestion: "Compare in constant time.".into(),
             evidence: None,
             needs_human: false,
+            settled: None,
             verified: None,
             code: Vec::new(),
             related: Vec::new(),

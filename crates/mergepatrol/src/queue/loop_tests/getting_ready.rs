@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::process::{Command, Stdio};
 
 use base64::Engine;
-use mergepatrol_core::FIXED_BY;
+use mergepatrol_core::{FIXED_BY, Outcome, Settled};
 use mergepatrol_executor::protocol::JobResult;
 use mergepatrol_git::cache_path;
 use serde_json::{Value, json};
@@ -19,6 +19,9 @@ use super::*;
 use crate::job::LEFT_CONFLICT;
 use crate::review::conclude;
 use mergepatrol_executor::protocol::ReviewOutput;
+
+mod outcomes_after_intervening_review;
+mod outcomes_regression;
 
 /// How long a scenario may take to end. It ends far sooner, or it is stuck.
 const SETTLES_WITHIN: Duration = Duration::from_secs(60);
@@ -732,6 +735,7 @@ fn finding(confidence: u8) -> Finding {
         }),
         needs_human: false,
         verified: None,
+        settled: None,
         code: Vec::new(),
         related: Vec::new(),
         also_at: Vec::new(),
@@ -1230,6 +1234,32 @@ async fn a_pr_pushed_to_during_the_review_gets_no_out_of_date_review() {
         ReviewStatus::Stale,
         "the new head gets its own review"
     );
+}
+
+#[tokio::test]
+async fn the_next_review_says_what_became_of_what_the_last_sent_back() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.review_on();
+    world.tick().await;
+    let first = world.conclude(100).await;
+
+    // The author pushes a fix, and the next review reports it fine, as fixed.
+    world.gh.with_mut(|s| s.push(1, "fixed"));
+    let fixed = Finding {
+        lean: Lean::Fine,
+        settled: Some(Settled::Fixed),
+        ..finding(100)
+    };
+    let settings = world.ctx.config.repo_defaults.clone();
+    let head = world.pr(1).head_ref_oid;
+    let r = world
+        .store
+        .start_review(1, &repo(), 1, &head)
+        .await
+        .unwrap();
+    world.conclude_review(&r, fixed, &settings).await;
+    let r = world.store.review(first).await.unwrap().unwrap();
+    assert_eq!(r.findings[0].outcome, Some(Outcome::Fixed));
 }
 
 #[tokio::test]

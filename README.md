@@ -322,6 +322,7 @@ A GitHub token reaches only the repos GitHub lets it read: MergeLoop cannot tell
 | `get_fix` | The diff of a commit the fix agent pushed | |
 | `list_history` | The PRs that left the queue: merged, ejected, or removed | Yes |
 | `get_history_stats` | The queue's numbers over a window | Yes |
+| `get_review_stats` | How the agent's review did over a window: what became of each change it asked for, reviews to pass, time asked of people | Yes |
 | `list_repos` | The workspace's repos, and whether each queues | Yes |
 | `set_repo` | Turns a repo's queue on or off, or back to following its config file | Or a token with admin on the repo |
 | `list_open_pulls` | A repo's open PRs that are not queued | |

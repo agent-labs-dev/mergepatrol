@@ -13,6 +13,7 @@ mod need;
 mod oauth;
 mod pr_reply;
 mod review;
+mod review_stats;
 mod routes;
 mod ui;
 mod v1;
@@ -1220,6 +1221,7 @@ mod tests {
                 .record_exit(&key, number + 10, "merged", "abc", &summary)
                 .await
                 .unwrap();
+            store.start_review(1, &key.repo, number, "h").await.unwrap();
         }
         let read = |path: &'static str| {
             let (router, cookie) = (router.clone(), cookie.clone());
@@ -1240,6 +1242,12 @@ mod tests {
         assert_eq!(history["exits"], serde_json::json!([]));
         let (_, stats) = read("/api/w/1/history/stats?days=30").await;
         assert_eq!(repos_in(&stats["current"], "repo"), ["o/r"]);
+        let (status, review) = read("/api/w/1/history/review?days=30").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(review["prs"], 1, "o/secret's review is not counted");
+        assert_eq!(review["rounds"]["not_passed"], 1);
+        let (_, review) = read("/api/w/1/history/review?days=30&repo=o/secret").await;
+        assert_eq!(review["prs"], 0);
 
         for (path, of_a) in [
             ("/api/w/1/lanes?repo=o/secret", "/api/w/1/lanes?repo=o/r"),
@@ -1386,6 +1394,7 @@ mod tests {
             evidence: None,
             needs_human: false,
             verified: None,
+            settled: None,
             code: Vec::new(),
             related: Vec::new(),
             also_at: Vec::new(),
@@ -1402,6 +1411,7 @@ mod tests {
                     withdrawn: false,
                     threaded: false,
                     bar: Bar::From(90),
+                    outcome: None,
                 },
                 Judged {
                     finding: finding("f2", 52),
@@ -1410,6 +1420,7 @@ mod tests {
                     withdrawn: false,
                     threaded: false,
                     bar: Bar::From(90),
+                    outcome: None,
                 },
             ],
             asked: vec!["mona".into()],

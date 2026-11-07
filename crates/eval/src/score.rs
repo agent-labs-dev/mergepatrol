@@ -291,6 +291,7 @@ mod tests {
             }),
             needs_human: false,
             verified: None,
+            settled: None,
             code: Vec::new(),
             related: Vec::new(),
             also_at: Vec::new(),

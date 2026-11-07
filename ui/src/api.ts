@@ -28,6 +28,7 @@ import type { RepoUpdateView } from "./api/RepoUpdateView";
 import type { RepoView } from "./api/RepoView";
 import type { ReviewPull } from "./api/ReviewPull";
 import type { ReviewSettingsView } from "./api/ReviewSettingsView";
+import type { ReviewStatsView } from "./api/ReviewStatsView";
 import type { SessionView } from "./api/SessionView";
 import type { SetRepo } from "./api/SetRepo";
 import type { SetReviewSettings } from "./api/SetReviewSettings";
@@ -114,6 +115,9 @@ export const fetchHistoryStats = (
   id: number,
   q: { repo?: string; author?: string; days: number },
 ) => get<HistoryStatsView>(w(id, `/history/stats?${query(q)}`));
+
+export const fetchReviewStats = (id: number, q: { repo?: string; days: number }) =>
+  get<ReviewStatsView>(w(id, `/history/review?${query(q)}`));
 
 export const fetchRepos = (id: number) => get<RepoView[]>(w(id, "/repos"));
 

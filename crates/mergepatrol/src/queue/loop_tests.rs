@@ -906,6 +906,7 @@ impl Mem {
                     }),
                     needs_human: false,
                     verified: None,
+                    settled: None,
                     code: Vec::new(),
                     related: Vec::new(),
                     also_at: Vec::new(),
@@ -915,6 +916,7 @@ impl Mem {
                 withdrawn: false,
                 threaded: false,
                 bar: Bar::From(80),
+                outcome: None,
             });
         }
         f(&mut r.findings[0]);
@@ -998,6 +1000,7 @@ impl ReviewStore for Mem {
             answered_by: None,
             note: String::new(),
             questions: Vec::new(),
+            waited_secs: None,
             created_at: String::new(),
             updated_at: String::new(),
         };
@@ -1113,8 +1116,37 @@ impl ReviewStore for Mem {
     ) -> Result<bool> {
         unreachable!()
     }
-    async fn withdraw_finding(&self, _: i64, _: &str) -> Result<Option<ReviewStatus>> {
+    async fn withdraw_finding(
+        &self,
+        _: i64,
+        _: &str,
+        _: mergepatrol_core::Outcome,
+    ) -> Result<Option<ReviewStatus>> {
         unreachable!()
+    }
+    async fn settle_findings(
+        &self,
+        id: i64,
+        outcomes: &[(String, mergepatrol_core::Outcome)],
+    ) -> Result<()> {
+        let mut reviews = self.reviews.lock().unwrap();
+        let r = reviews.iter_mut().find(|r| r.id == id).unwrap();
+        let before = r.findings.clone();
+        for (finding, outcome) in outcomes {
+            if let Some(f) = r.findings.iter_mut().find(|f| &f.finding.id == finding) {
+                f.settle(*outcome);
+            }
+        }
+        // As the store does: the PR's earlier reviews that raised it are settled with it.
+        let settled = mergepatrol_core::newly_settled(&before, &r.findings);
+        let pr = (r.repo.clone(), r.number);
+        for e in reviews
+            .iter_mut()
+            .filter(|e| e.id < id && (e.repo.clone(), e.number) == pr)
+        {
+            mergepatrol_core::carry_back(&mut e.findings, &e.answers, &settled);
+        }
+        Ok(())
     }
     async fn mark_threaded(&self, _: i64, _: &[String]) -> Result<()> {
         Ok(())
@@ -1129,6 +1161,9 @@ impl ReviewStore for Mem {
         Ok(held)
     }
     async fn reviews_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
+        unreachable!()
+    }
+    async fn reviews_of_prs_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
         unreachable!()
     }
     async fn review_settings(&self, _: u64) -> Result<Option<ReviewSettings>> {
