@@ -22,7 +22,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{Answer, Answered, CheckFailure, Finding, Panel, SentBack};
+use mergepatrol_core::{Answer, Answered, CheckFailure, Depth, Finding, Kind, Panel, SentBack};
 
 /// The checks a job's agent runs: the repo's verify commands, or, for a repo that sets none, the
 /// commands its own CI runs for a pull request. `None` when the repo has neither.
@@ -105,6 +105,8 @@ pub struct ReviewRequest<'a> {
     pub verify: &'a Verify,
     /// What of the PR needs reading.
     pub scope: Scope<'a>,
+    /// How hard the review looks: what it reports, and which changes a panel checks.
+    pub depth: Depth,
     pub transcript: &'a Path,
 }
 
@@ -524,11 +526,7 @@ breaks neither.
 
 {verify}
 
-Report what a careful senior reviewer would look at, each as a finding:
-- What could be wrong: bugs, security holes, data loss, broken deploys, breaking changes to what \
-others use, missing tests for risky code.
-- What you checked and found sound, which a reviewer would otherwise check themselves. Keep these \
-short.
+{report}
 
 Judge the PR against what its description sets out to do. Note code, tests or guards it does not \
 need.
@@ -546,17 +544,10 @@ the code does not show you: a policy, how production is set up, what the author 
 in `unsure`. Do not inflate it: a change you are sure enough of goes back to the author, often \
 the agent that wrote the PR, who must fix it before the PR can merge.
 
-Every finding you lean `change` on, except a `security` one, must carry `evidence`: a command, \
-run from the repo's root, that fails on this PR because of what the finding says, and the files \
-you wrote for it, most often one focused test. Write the test, run the command, and see it fail \
-for that reason before you report it. The fix keeps that test as a regression test, so write it in a new \
+{evidence} The fix keeps that test as a regression test, so write it in a new \
 file of its own where the repo keeps its tests, named and written like them, so the repo's own \
 test command runs it. \
-{rerun} If you cannot make a command fail, lean `fine` and \
-say in `unsure` what you could not show. A `security` finding needs none: {seats} fresh agents, \
-given only the finding and the code, check it instead, and it goes back to the author only when \
-{needed} of them agree it holds. So say in `finding` where the hole is and how it is reached. Nor \
-does a `pre_existing` one need evidence. A finding with no evidence gives `\"evidence\": null`. A finding you \
+{rerun} {panel} Nor does a `pre_existing` one need evidence. A finding with no evidence gives `\"evidence\": null`. A finding you \
 report again for a fix that is still missing carries its `evidence` again, written anew.
 
 A bug that recurs is one finding, not one for each place. When what you found is a pattern that \
@@ -590,13 +581,67 @@ Reply with the JSON alone, in this shape, and nothing else:
         scope = scope_section(req.scope),
         base = req.base,
         verify = checks_section(req.verify),
-        seats = Panel::SECURITY.seats,
-        needed = Panel::SECURITY.needed,
+        report = report_section(req.depth),
+        evidence = evidence_section(req.depth),
+        panel = panel_section(req.depth),
         rerun = "After the review MergeLoop runs each command on the PR alone, with only the files \
 it names, and a command it does not see fail does not go back to the author: MergeLoop shows the \
 finding as a note that holds nothing. So name every file the command needs, and keep each \
 finding's files apart from the others'.",
     )
+}
+
+/// What a review reports: at quick depth, only what could be wrong.
+fn report_section(depth: Depth) -> &'static str {
+    match depth {
+        Depth::Quick => {
+            "Report only what could be wrong, each as a finding: bugs, security holes, data \
+loss, broken deploys, breaking changes to what others use, missing tests for risky code. Leave out \
+what you checked and found sound."
+        }
+        Depth::Standard | Depth::Deep => {
+            "Report what a careful senior reviewer would look at, each as \
+a finding:
+- What could be wrong: bugs, security holes, data loss, broken deploys, breaking changes to what \
+others use, missing tests for risky code.
+- What you checked and found sound, which a reviewer would otherwise check themselves. Keep these \
+short."
+        }
+    }
+}
+
+/// What a `change` must carry: a command that fails, or, of a kind the panel votes on, nothing.
+fn evidence_section(depth: Depth) -> String {
+    let ask = "a command, run from the repo's root, that fails on this PR because of what the \
+finding says, and the files you wrote for it, most often one focused test. Write the test, run the \
+command, and see it fail for that reason before you report it.";
+    match depth.votes_on(Kind::Other) {
+        false => format!(
+            "Every finding you lean `change` on, except a `security` one, must carry `evidence`: \
+{ask}"
+        ),
+        true => format!("Give every finding you lean `change` on `evidence` if you can: {ask}"),
+    }
+}
+
+/// Which changes a panel checks in place of evidence, and what it takes.
+fn panel_section(depth: Depth) -> String {
+    let Panel { seats, needed } = Panel::FINDING;
+    let checks = format!(
+        "{seats} fresh agents, given only the finding and the code, check it instead, and it goes \
+back to the author only when {needed} of them agree it holds."
+    );
+    match depth.votes_on(Kind::Other) {
+        false => format!(
+            "If you cannot make a command fail, lean `fine` and say in `unsure` what you could not \
+show. A `security` finding needs none: {checks} So say in `finding` where the hole is and how it \
+is reached."
+        ),
+        true => format!(
+            "If you cannot make a command fail, report it as `change` all the same, with no \
+`evidence`: {checks} So say in `finding` where the bug is and how it is reached."
+        ),
+    }
 }
 
 pub(crate) fn question_prompt(req: &QuestionRequest<'_>) -> String {
@@ -669,6 +714,7 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             scope: Scope::Whole,
+            depth: Depth::Standard,
             verify: &Verify::Configured(vec!["cargo test".into()]),
             transcript: Path::new("t"),
         });
@@ -695,6 +741,7 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             scope: Scope::Whole,
+            depth: Depth::Standard,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
@@ -711,6 +758,7 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             scope: Scope::Whole,
+            depth: Depth::Standard,
             verify: &Verify::Ci(vec!["pnpm vitest run".into()]),
             transcript: Path::new("t"),
         });
@@ -731,6 +779,7 @@ mod prompt_tests {
             answered: &[],
             sent_back,
             scope: Scope::Whole,
+            depth: mergepatrol_core::Depth::Standard,
             verify: &Verify::None,
             transcript: Path::new("t"),
         }
@@ -777,6 +826,7 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             scope: Scope::Whole,
+            depth: Depth::Standard,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
@@ -844,6 +894,7 @@ mod prompt_tests {
             answered: &answered,
             sent_back: &sent_back,
             scope: Scope::QueueCommits(&commits),
+            depth: Depth::Standard,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
@@ -871,12 +922,54 @@ mod prompt_tests {
             answered: &[],
             sent_back: &[],
             scope: Scope::Whole,
+            depth: Depth::Standard,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
         assert!(!first.contains("Humans already answered"));
         assert!(!first.contains("You sent these findings back"));
         assert!(!first.contains("Review only these commits"));
+    }
+
+    fn at_depth(depth: Depth) -> ReviewRequest<'static> {
+        ReviewRequest {
+            workdir: Path::new("."),
+            base: "abc",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            scope: Scope::Whole,
+            depth,
+            verify: &Verify::None,
+            transcript: Path::new("t"),
+        }
+    }
+
+    #[test]
+    fn a_quick_review_reports_only_what_could_be_wrong() {
+        let sound = "What you checked and found sound";
+        assert!(review_prompt(&at_depth(Depth::Standard)).contains(sound));
+        let quick = review_prompt(&at_depth(Depth::Quick));
+        assert!(!quick.contains(sound));
+        assert!(quick.contains("Report only what could be wrong"));
+        // It holds a change to the same bar.
+        assert!(quick.contains("must carry `evidence`"));
+    }
+
+    #[test]
+    fn a_deep_review_has_a_panel_check_any_change_it_cannot_make_fail() {
+        let standard = review_prompt(&at_depth(Depth::Standard));
+        assert!(standard.contains("If you cannot make a command fail, lean `fine`"));
+        let deep = review_prompt(&at_depth(Depth::Deep));
+        assert!(!deep.contains("lean `fine` and say in `unsure` what you could not show"));
+        assert!(deep.contains(
+            "If you cannot make a command fail, report it as `change` all the same, with no \
+`evidence`: 3 fresh agents"
+        ));
+        assert!(deep.contains("only when 2 of them agree it holds"));
+        assert!(!deep.contains("except a `security` one"));
     }
 }
 
@@ -896,6 +989,7 @@ mod scope_tests {
             answered: &[],
             sent_back: &[],
             scope,
+            depth: Depth::Standard,
             verify: &Verify::None,
             transcript: Path::new("t"),
         })
