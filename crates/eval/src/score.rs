@@ -155,6 +155,7 @@ pub enum Verdict {
 /// Run B against run A, case by case.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Comparison {
+    /// Each run's totals on the cases both reviewed, and neither failed.
     pub a: Totals,
     pub b: Totals,
     /// `(case, bug index)` that B caught and A missed.
@@ -163,6 +164,11 @@ pub struct Comparison {
     pub lost: Vec<(String, usize)>,
     /// Cases only one run scored, left out of both totals.
     pub left_out: Vec<String>,
+    /// Cases a review failed on in either run, left out of both totals: a failure hides what
+    /// that review would have caught or sent back wrongly.
+    pub unreviewed: Vec<String>,
+    /// How many of the cases both scored each run failed on.
+    pub failed: (usize, usize),
     pub verdict: Verdict,
 }
 
@@ -194,12 +200,28 @@ pub fn compare(a: &[Scored], b: &[Scored]) -> Comparison {
         run.iter().filter(|s| in_both(s, other)).cloned().collect()
     };
     let (a, b) = (both(a, b), both(b, a));
+    let failed = |run: &[Scored]| run.iter().filter(|s| s.failed).count();
+    let failed = (failed(&a), failed(&b));
+    let failed_in = |run: &[Scored], id: &str| run.iter().any(|s| s.id == id && s.failed);
+    let unreviewed: Vec<String> = a
+        .iter()
+        .filter(|s| s.failed || failed_in(&b, &s.id))
+        .map(|s| s.id.clone())
+        .collect();
+    let reviewed = |run: Vec<Scored>| -> Vec<Scored> {
+        run.into_iter()
+            .filter(|s| !unreviewed.contains(&s.id))
+            .collect()
+    };
+    let (a, b) = (reviewed(a), reviewed(b));
     let (gained, lost) = (flips(&a, &b), flips(&b, &a));
     let (a, b) = (Totals::of(&a), Totals::of(&b));
     let fp = (a.false_positives, b.false_positives);
     let better = (b.caught > a.caught && fp.1 <= fp.0) || (b.caught == a.caught && fp.1 < fp.0);
-    let better = better && b.failed <= a.failed;
+    let better = better && failed.1 <= failed.0;
     Comparison {
+        unreviewed,
+        failed,
         verdict: if better { Verdict::Keep } else { Verdict::Drop },
         a,
         b,
@@ -487,6 +509,32 @@ mod tests {
         assert_eq!(t.lost, [("x".to_owned(), 0)]);
         let noisier = [scored("x", &[true, true], 0), scored("y", &[], 1)];
         assert_eq!(compare(&a, &noisier).verdict, Verdict::Drop);
+    }
+
+    #[test]
+    fn a_comparison_leaves_out_what_either_run_failed_to_review() {
+        let mut failed_a = scored("x", &[false], 0);
+        failed_a.failed = true;
+        let mut failed_b = scored("y", &[], 0);
+        failed_b.failed = true;
+        let a = [failed_a, scored("y", &[], 1), scored("z", &[true], 0)];
+        let b = [scored("z", &[true], 0), failed_b, scored("x", &[true], 0)];
+        let c = compare(&a, &b);
+        assert_eq!(c.unreviewed, ["x", "y"]);
+        assert_eq!(c.failed, (1, 1));
+        assert_eq!((c.a.cases, c.b.cases, c.a.false_positives), (1, 1, 0));
+        assert!(c.gained.is_empty() && c.lost.is_empty());
+        assert_eq!(c.verdict, Verdict::Drop);
+
+        let more_failures = compare(&[scored("z", &[false], 0)], &[failed_a_again()]);
+        assert_eq!(more_failures.failed, (0, 1));
+        assert_eq!(more_failures.verdict, Verdict::Drop);
+    }
+
+    fn failed_a_again() -> Scored {
+        let mut s = scored("z", &[false], 0);
+        s.failed = true;
+        s
     }
 
     #[test]

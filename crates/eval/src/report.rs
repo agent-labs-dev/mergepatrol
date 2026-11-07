@@ -51,6 +51,15 @@ pub fn comparison(a: &str, b: &str, c: &Comparison) -> String {
     for (id, i) in &c.lost {
         let _ = writeln!(out, "  - {id} bug {}", i + 1);
     }
+    if !c.unreviewed.is_empty() {
+        let _ = writeln!(
+            out,
+            "left out, a review failed (A {}, B {}): {}",
+            c.failed.0,
+            c.failed.1,
+            c.unreviewed.join(", ")
+        );
+    }
     if !c.left_out.is_empty() {
         let _ = writeln!(out, "left out, in one run only: {}", c.left_out.join(", "));
     }
@@ -123,6 +132,12 @@ back, 1 failed, $1.00 over 4 cases"
                 "left out, in one run only: y, z",
                 "verdict: drop B"
             ]
+        );
+        let failed = [scored("x", &[false, false], &[], true)];
+        let text = comparison("a", "b", &compare(&a[..1], &failed));
+        assert!(
+            text.contains("left out, a review failed (A 0, B 1): x\n"),
+            "{text}"
         );
         let keep = [scored("x", &[true, true], &[], false)];
         assert!(comparison("a", "b", &compare(&a[..1], &keep)).ends_with("verdict: keep B\n"));

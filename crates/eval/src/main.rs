@@ -7,6 +7,8 @@ mod failed_review_tests;
 mod report;
 mod run;
 mod score;
+#[cfg(test)]
+mod swapped_failure_tests;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -209,8 +211,8 @@ async fn run(args: RunArgs, key: String) -> Result<String> {
         agent: args.agent.clone(),
         key,
         jobs: args.jobs,
-        // Each case's job output, next to the run.
-        work: out.with_extension(""),
+        // Each case's job output, next to the run and never at its path.
+        work: out.with_extension("jobs"),
     };
     let file = RunFile {
         label: args.label,
@@ -377,9 +379,9 @@ mod tests {
         assert!(text.contains("pr-1") && !text.contains("pr-2"), "{text}");
         assert!(text.contains("$0.25 over 1 cases"), "{text}");
         assert_eq!(read_run(&out).unwrap().cases.len(), 1);
-        assert!(dir.path().join("run/pr-1/result.json").exists());
+        assert!(dir.path().join("run.jobs/pr-1/result.json").exists());
 
-        let env = std::fs::read_to_string(dir.path().join("run/pr-1/env")).unwrap();
+        let env = std::fs::read_to_string(dir.path().join("run.jobs/pr-1/env")).unwrap();
         assert!(
             env.contains("PATH=") && !env.contains(SECRET),
             "the job sees the key"

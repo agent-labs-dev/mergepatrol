@@ -40,7 +40,8 @@ security find-generic-password -s <key-name> -w |
   target/release/review-eval run --label main --model claude-opus-5-5 --effort medium
 ```
 
-It prints each case and the totals, and writes the run to `target/review-eval/<label>.json`.
+It prints each case and the totals, and writes the run to `target/review-eval/<label>.json`, with each case's job output in
+`<label>.jobs/`.
 The provider's API key comes in on stdin, never in the environment: the job runs the evidence's
 commands, which must see only the token MergeLoop's proxy gives the job, as in production.
 `--case <id>` runs only some cases, `--jobs` how many at once (2), and `--provider` picks
@@ -58,9 +59,11 @@ target/release/review-eval compare target/review-eval/main.json target/review-ev
 ```
 
 For a model change, run the same binary with another `--model`. `compare` scores both runs on the
-cases both reviewed, lists each bug one caught and the other missed, and says `keep B` only when
-B catches more bugs with no more false positives, or as many with fewer. `report <run.json>`
-scores one run again, against the cases as they are now.
+cases both reviewed, leaving out any case a review failed on in either run, since a failure hides
+what that review would have caught or sent back wrongly. It lists each bug one caught and the other
+missed, and says `keep B` only when B fails no more reviews than A and catches more bugs with no
+more false positives, or as many with fewer. `report <run.json>` scores one run again, against
+the cases as they are now.
 
 A run costs real money: the totals say how much. An agent is not deterministic, so one bug won or
 lost may be noise; run both sides twice before you trust a close call.
