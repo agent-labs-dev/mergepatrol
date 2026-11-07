@@ -1,5 +1,5 @@
 ---
-name: mergepatrol
+name: mergeloop
 description: This repo merges pull requests through MergeLoop, a label-driven merge queue. Use when merging, landing or shipping a PR, queueing or dequeueing one, reading a MergeLoop comment or label on a PR, or working the review comments on a queued PR.
 ---
 
@@ -7,11 +7,9 @@ description: This repo merges pull requests through MergeLoop, a label-driven me
 
 Pull requests in this repo land through MergeLoop's merge queue. Queue a PR with a label and let MergeLoop merge it; merging by hand or pushing to the default branch races the queue.
 
-The installed skill keeps its `mergepatrol` name and paths so existing repos still find it.
-
 ## The labels
 
-The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default branch, `mergepatrol` when the file leaves it out. Below, `<label>` stands for it.
+The trigger label is `label` in `.mergeloop/mergeloop.yml` on the default branch, `mergeloop` when the file leaves it out. A repo set up before MergeLoop was renamed may still have its file at `.mergepatrol/mergepatrol.yml`, where the label left out is `mergepatrol`. Below, `<label>` stands for it, and "the config file" for the file.
 
 - `<label>` queues the PR: `gh pr edit <number> --add-label <label>`. Removing it leaves the queue, and cancels the PR's run.
 - `<label>:priority`, beside `<label>`, puts the PR at the front of the queue.
@@ -19,7 +17,7 @@ The trigger label is `label` in `.mergepatrol/mergepatrol.yml` on the default br
 
 ## Over MCP
 
-When the `mergeloop` MCP server (or its existing `mergepatrol` connection) is connected, use its tools instead of the labels: `queue_pull` (with `priority` for the front of the queue), `dequeue_pull`, `pull_status` and `list_queue`. They change the same labels, as the GitHub user or bot the server was connected as, so everything below still holds. `pull_status` reads where a PR is without parsing MergeLoop's comment. The server's other tools do what the MergeLoop dashboard does, such as reviewing a PR or reading why the queue ejected one.
+When the `mergeloop` MCP server is connected (an older connection may be named `mergepatrol`), use its tools instead of the labels: `queue_pull` (with `priority` for the front of the queue), `dequeue_pull`, `pull_status` and `list_queue`. They change the same labels, as the GitHub user or bot the server was connected as, so everything below still holds. `pull_status` reads where a PR is without parsing MergeLoop's comment. The server's other tools do what the MergeLoop dashboard does, such as reviewing a PR or reading why the queue ejected one.
 
 ## With the `mergeloop` command
 
@@ -34,7 +32,7 @@ Call it as `~/.local/bin/mergeloop` when that is not on the PATH. It acts as `gh
 
 ## What the queue does
 
-MergeLoop rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, MergeLoop runs its failed GitHub Actions jobs again once, then an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in `.mergepatrol/mergepatrol.yml`: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
+MergeLoop rebases the PR onto its base branch, and may test it in a batch with other queued PRs. It resolves conflicts with an agent, runs the repo's `verify` commands, waits for the required checks, then merges with the repo's default merge method. When a required check fails, MergeLoop runs its failed GitHub Actions jobs again once, then an agent commits a fix to the PR branch and the checks run again, a few times at most, unless `fix_ci` turns it off. The default branch has a queue, and so does each branch listed under `branches` in the config file: a PR, or a stack of PRs (from `gh stack`), joins the queue of the branch it merges into. A PR into any other branch, such as one stacked by hand on another PR's branch, is held. Retargeting a queued PR moves it to the back of the other branch's queue.
 
 A PR from a fork merges only as it was when the label went on: a push to it after that takes it out of the queue, until a maintainer adds `<label>` again. It never joins a batch, gets no agent, and is ejected on a conflict or a failed check. MergeLoop can push its rebase only while the author allows edits by maintainers.
 
@@ -101,10 +99,10 @@ A PR with no unresolved thread and nothing asked of a human goes on to the queue
 
 ### The ledger
 
-Keep one comment on the PR that lists every comment and its state, and edit it each round rather than posting a new one. It is the only top-level comment you post about the review: the replies go in the threads. Start it with `<!-- mergepatrol-review-ledger -->` so you find it again, and keep each comment's row across rounds, with the heads whose reviews raised it:
+Keep one comment on the PR that lists every comment and its state, and edit it each round rather than posting a new one. It is the only top-level comment you post about the review: the replies go in the threads. Start it with `<!-- mergeloop-review-ledger -->` so you find it again, and keep each comment's row across rounds, with the heads whose reviews raised it:
 
 ```markdown
-<!-- mergepatrol-review-ledger -->
+<!-- mergeloop-review-ledger -->
 **Review ledger** (head `def5678`)
 
 | Comment | Raised on | State | Note |
@@ -128,4 +126,4 @@ When you stop, tell the user where the PR stands: merged, ejected and why, or wh
 
 ## Settings
 
-`.mergepatrol/mergepatrol.yml` sets the label, the batch size, the agent's default model and its per-task overrides, the `verify` commands, `fix_ci`, and `review`. MergeLoop reads it from the default branch, so a change takes effect once its PR merges.
+The config file sets the label, the batch size, the agent's default model and its per-task overrides, the `verify` commands, `fix_ci`, and `review`. MergeLoop reads it from the default branch, so a change takes effect once its PR merges.

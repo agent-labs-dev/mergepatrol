@@ -4,13 +4,13 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    AgentSettings, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane, ModelOverrides, Person,
-    PrSummary, Provider, REPO_CONFIG_PATH, RepoName, RepoSettings, Spend, SpendTask, Stage, Step,
-    TaskModel, WorkspaceDefaults, current_step,
+    AgentSettings, ConfigPath, ConfigText, EFFORTS, Entry, EntryState, FixCiSettings, Labels, Lane,
+    ModelOverrides, Person, PrSummary, Provider, RepoName, RepoSettings, Spend, SpendTask, Stage,
+    Step, TaskModel, WorkspaceDefaults, current_step,
 };
 use mergepatrol_github::{
-    App, AsUser, BranchFile, CheckRunState, DiffOf, GitObject, InboxPull, Installation, Proposal,
-    PullDetail, PullRef, PullRequest, SYMLINK_MODE, TimelineEvent, setup,
+    App, AsUser, BranchFile, CheckRunState, ConfigFile, DiffOf, GitObject, InboxPull, Installation,
+    Proposal, PullDetail, PullRef, PullRequest, SYMLINK_MODE, TimelineEvent, setup,
 };
 use mergepatrol_resolver::{DeviceLogin, KeyCheck, check_api_key};
 use mergepatrol_store::{
@@ -641,7 +641,7 @@ pub struct RepoView {
     pub on: bool,
     /// Set in the dashboard. `None` follows the config file.
     pub enabled: Option<bool>,
-    /// The default branch has `.mergepatrol/mergepatrol.yml`, as of the last look.
+    /// The default branch has the config file, as of the last look.
     pub has_config: bool,
     /// Why the queue is paused: the config file does not parse.
     pub config_error: Option<String>,
@@ -1361,11 +1361,11 @@ pub(crate) async fn open_pulls(
                 .map(serde_json::from_value)
                 .collect::<Result<Vec<PullRequest>, _>>()
                 .map_err(anyhow::Error::from)?;
-            (pulls, labels_in(&app, id, config.as_deref()).await?)
+            (pulls, labels_in(&app, id, &config).await?)
         }
         None => {
             let gh = AsUser::new(caller.github_token(&app)?)?;
-            let file = as_user(gh.default_branch_file(&repo, REPO_CONFIG_PATH).await, &repo)?;
+            let file = as_user(gh.config_file(&repo).await, &repo)?;
             let (labels, trunk) = labels_of(&app, id, file).await?;
             let pulls = as_user(
                 gh.open_pull_requests(&repo, &trunk, OPEN_PULLS).await,
@@ -1724,7 +1724,7 @@ pub struct QueuedView {
     /// "Queued.", or that it goes on hold, or what the agent cannot do for it, and why.
     pub message: String,
     /// As `GET /api/v1` says it.
-    pub mergepatrol: RepoStatusView,
+    pub mergeloop: RepoStatusView,
 }
 
 impl QueuedView {
@@ -1747,7 +1747,7 @@ impl QueuedView {
         }
         QueuedView {
             message,
-            mergepatrol: status,
+            mergeloop: status,
         }
     }
 }
@@ -2219,7 +2219,7 @@ async fn repo_labels(
     gh: &Installation,
     repo: &RepoName,
 ) -> Result<(Labels, String), ApiError> {
-    let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
+    let file = gh.config_file(repo).await?;
     labels_of(app, gh.id, file).await
 }
 
@@ -2227,15 +2227,20 @@ async fn repo_labels(
 async fn labels_of(
     app: &AppState,
     id: u64,
-    file: BranchFile,
+    file: ConfigFile,
 ) -> Result<(Labels, String), ApiError> {
-    Ok((labels_in(app, id, file.text.as_deref()).await?, file.branch))
+    let config = ConfigText {
+        at: file.at,
+        text: file.file.text,
+    };
+    Ok((labels_in(app, id, &config).await?, file.file.branch))
 }
 
 /// The labels a config file sets: the workspace's where it says nothing, or there is none.
-async fn labels_in(app: &AppState, id: u64, config: Option<&str>) -> Result<Labels, ApiError> {
+async fn labels_in(app: &AppState, id: u64, config: &ConfigText) -> Result<Labels, ApiError> {
     let defaults = inherited(app, id).await?;
-    let settings = RepoSettings::from_file(config, &defaults)
+    let settings = config
+        .settings(&defaults)
         .map_err(|e| ApiError::Status(StatusCode::CONFLICT, e))?;
     Ok(settings.labels())
 }
@@ -2276,10 +2281,14 @@ pub(crate) fn repo_name(owner: String, name: String) -> Result<RepoName, ApiErro
 }
 
 /// MergeLoop's branch for the PR that changes a repo's config file.
-const CONFIG_BRANCH: &str = "mergepatrol/config";
+const CONFIG_BRANCH: &str = "mergeloop/config";
 
 /// The skill that tells a repo's agents how its queue works. The setup PR adds it.
 const SKILL: &str = include_str!("skill.md");
+/// The skill's dir in a skills dir.
+const SKILL_NAME: &str = "mergeloop";
+/// Its dir from before the rename, which an update of the skill moves to `SKILL_NAME`.
+const LEGACY_SKILL_NAME: &str = "mergepatrol";
 /// Where agents look for repo skills: `.agents` for most, `.claude` for Claude Code.
 const SKILL_DIRS: [&str; 2] = [".agents/skills", ".claude/skills"];
 
@@ -2292,20 +2301,17 @@ pub(crate) async fn repo_config(
     let repo = repo_name(owner, name)?;
     let id = caller.repo(&app, id, &repo).await?;
     let gh = installation(&app, id).await?;
-    let file = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
-    let defaults = &inherited(&app, id).await?;
-    let error = RepoSettings::from_file(file.text.as_deref(), defaults).err();
+    let ConfigFile { at, file } = gh.config_file(&repo).await?;
+    let defaults = &at.inherit(&inherited(&app, id).await?);
+    let error = RepoSettings::from_file_at(at, file.text.as_deref(), defaults).err();
     let pull_request = gh.open_pr_from(&repo, CONFIG_BRANCH).await?;
     // Edits start from the open PR, so updating it keeps the changes already in it.
     let text = match pull_request {
-        Some(_) => {
-            gh.branch_file(&repo, CONFIG_BRANCH, REPO_CONFIG_PATH)
-                .await?
-        }
+        Some(_) => gh.branch_file(&repo, CONFIG_BRANCH, at.path()).await?,
         None => file.text.clone(),
     };
-    let settings =
-        RepoSettings::from_file(text.as_deref(), defaults).unwrap_or_else(|_| defaults.clone());
+    let settings = RepoSettings::from_file_at(at, text.as_deref(), defaults)
+        .unwrap_or_else(|_| defaults.clone());
     let follows = text
         .as_deref()
         .is_none_or(|t| settings.written_in(t, defaults));
@@ -2315,7 +2321,7 @@ pub(crate) async fn repo_config(
         defaults: defaults.clone().into(),
         efforts: EFFORTS.map(str::to_owned).into(),
         providers: Provider::SUPPORTED.map(ProviderView::from).into(),
-        path: REPO_CONFIG_PATH.into(),
+        path: at.path().into(),
         has_file: file.text.is_some(),
         default_branch: file.branch,
         error,
@@ -2339,10 +2345,10 @@ pub(crate) async fn propose_repo_config(
     settings
         .check()
         .map_err(|e| ApiError::Status(StatusCode::UNPROCESSABLE_ENTITY, e))?;
-    let defaults = inherited(&app, id).await?;
-    let content = settings.to_yaml(&defaults);
     let gh = installation(&app, id).await?;
-    let base = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
+    let ConfigFile { at, file: base } = gh.config_file(&repo).await?;
+    let defaults = at.inherit(&inherited(&app, id).await?);
+    let content = settings.to_yaml(&defaults);
     if base.text.as_deref() == Some(content.as_str()) {
         return Err(ApiError::Status(
             StatusCode::CONFLICT,
@@ -2355,10 +2361,7 @@ pub(crate) async fn propose_repo_config(
     };
     let open = gh.open_pr_from(&repo, CONFIG_BRANCH).await?;
     let on_branch = match open {
-        Some(_) => {
-            gh.branch_file(&repo, CONFIG_BRANCH, REPO_CONFIG_PATH)
-                .await?
-        }
+        Some(_) => gh.branch_file(&repo, CONFIG_BRANCH, at.path()).await?,
         None => None,
     };
     let loses_comments = [base.text.as_deref(), on_branch.as_deref()]
@@ -2371,8 +2374,8 @@ pub(crate) async fn propose_repo_config(
     {
         dequeue(&app, &gh, &token, &repo, pr.number).await?;
     }
-    let (title, body) = config_pr(&settings, base.text.is_some(), &base.branch, &skills);
-    let mut files = vec![(REPO_CONFIG_PATH, content.as_str())];
+    let (title, body) = config_pr(&settings, at, base.text.is_some(), &base.branch, &skills);
+    let mut files = vec![(at.path(), content.as_str())];
     files.extend(skills.iter().map(|p| (p.as_str(), SKILL)));
     let pr = gh
         .propose_file(
@@ -2380,6 +2383,7 @@ pub(crate) async fn propose_repo_config(
             Proposal {
                 base: &base,
                 files: &files,
+                removed: &[],
                 branch: CONFIG_BRANCH,
                 title,
                 body: &body,
@@ -2512,7 +2516,7 @@ pub(crate) async fn set_repo_defaults(
 }
 
 /// MergeLoop's branch for the PR that updates a repo's skill.
-const SKILL_BRANCH: &str = "mergepatrol/skill";
+const SKILL_BRANCH: &str = "mergeloop/skill";
 
 /// Where a repo's copy of the skill is against the one MergeLoop ships.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
@@ -2527,13 +2531,15 @@ pub enum SkillStateView {
     Missing,
 }
 
-/// A repo's `mergepatrol` skill on its default branch.
+/// A repo's `mergeloop` skill on its default branch.
 #[derive(Serialize, TS)]
 #[ts(export)]
 pub struct SkillView {
     pub state: SkillStateView,
     /// The copies an update writes.
     pub paths: Vec<String>,
+    /// The copies under the skill's name from before the rename, which an update deletes.
+    pub legacy: Vec<String>,
     pub default_branch: String,
     /// MergeLoop's open PR that updates it.
     pub pull_request: Option<PullRequestRef>,
@@ -2542,16 +2548,20 @@ pub struct SkillView {
     pub pull_request_current: bool,
 }
 
-/// The state of the skill's copies, by path, and the paths an update writes.
-fn skill_plan(copies: &[(String, Option<String>)]) -> (SkillStateView, Vec<String>) {
+/// The state of the skill's copies, by path, with the `legacy` copies there are, and the paths
+/// an update writes.
+fn skill_plan(
+    copies: &[(String, Option<String>)],
+    legacy: &[String],
+) -> (SkillStateView, Vec<String>) {
     let stale: Vec<String> = copies
         .iter()
         .filter(|(_, text)| text.as_deref() != Some(SKILL))
         .map(|(path, _)| path.clone())
         .collect();
-    let state = if stale.is_empty() {
+    let state = if stale.is_empty() && legacy.is_empty() {
         SkillStateView::Current
-    } else if copies.iter().all(|(_, text)| text.is_none()) {
+    } else if copies.iter().all(|(_, text)| text.is_none()) && legacy.is_empty() {
         SkillStateView::Missing
     } else {
         SkillStateView::Outdated
@@ -2559,27 +2569,45 @@ fn skill_plan(copies: &[(String, Option<String>)]) -> (SkillStateView, Vec<Strin
     (state, stale)
 }
 
+/// The skill's file in skills dir `dir`, under the skill's `name`.
+fn skill_file(dir: &str, name: &str) -> String {
+    format!("{dir}/{name}/SKILL.md")
+}
+
 /// What a lookup of the skill reads for each skills dir: each step of its path, which must be
-/// a dir and not a link, the skill on the default branch, and the skill on the update's branch.
-fn skill_lookups(dir: &str) -> [(String, String); 5] {
+/// a dir and not a link, the skill on the default branch, the skill on the update's branch, and
+/// the copy under its old name on the default branch.
+fn skill_lookups(dir: &str) -> [(String, String); SKILL_LOOKUPS] {
     let top = dir.split('/').next().unwrap_or(dir);
-    let skill = format!("{dir}/mergepatrol");
-    let file = format!("{skill}/SKILL.md");
+    let file = skill_file(dir, SKILL_NAME);
     [
         ("HEAD".into(), top.into()),
         ("HEAD".into(), dir.into()),
-        ("HEAD".into(), skill),
+        ("HEAD".into(), format!("{dir}/{SKILL_NAME}")),
         ("HEAD".into(), file.clone()),
         (format!("refs/heads/{SKILL_BRANCH}"), file),
+        ("HEAD".into(), skill_file(dir, LEGACY_SKILL_NAME)),
     ]
+}
+
+const SKILL_LOOKUPS: usize = 6;
+
+/// One skills dir's copy, as `skill_copy` reads it.
+#[derive(Debug, PartialEq, Eq)]
+struct SkillCopy {
+    /// On the default branch.
+    text: Option<String>,
+    /// On the update's branch.
+    on_branch: Option<String>,
+    /// Whether the default branch has the copy under the skill's old name.
+    legacy: bool,
 }
 
 /// One skills dir's copy, from its `skill_lookups`: `None` when a step of its path is a link
 /// to elsewhere, as `.claude/skills` to `.agents/skills`, since a commit cannot write through
-/// it and the link shows the skill there already. Else its text on the default branch, and on
-/// the update's branch.
-fn skill_copy(objects: &[Option<GitObject>]) -> Option<(Option<String>, Option<String>)> {
-    let [top, dir, skill, file, branch] = objects else {
+/// it and the link shows the skill there already.
+fn skill_copy(objects: &[Option<GitObject>]) -> Option<SkillCopy> {
+    let [top, dir, skill, file, branch, legacy] = objects else {
         return None;
     };
     let link = |o: &Option<GitObject>| matches!(o, Some(GitObject::Blob(_)));
@@ -2592,7 +2620,11 @@ fn skill_copy(objects: &[Option<GitObject>]) -> Option<(Option<String>, Option<S
         Some(GitObject::Blob(t)) => Some(t.clone()),
         _ => None,
     };
-    Some((text(file), text(branch)))
+    Some(SkillCopy {
+        text: text(file),
+        on_branch: text(branch),
+        legacy: matches!(legacy, Some(GitObject::Blob(_))),
+    })
 }
 
 /// The skill as the repo has it, in one read: its state, the paths an update writes, whether
@@ -2609,14 +2641,18 @@ async fn repo_skill(
     let found = gh.objects_at(repo, &refs, SKILL_BRANCH).await?;
     let mut copies = Vec::new();
     let mut on_branch = Vec::new();
-    for (dir, objects) in SKILL_DIRS.iter().zip(found.objects.chunks(5)) {
-        if let Some((text, branch)) = skill_copy(objects) {
-            let path = format!("{dir}/mergepatrol/SKILL.md");
-            on_branch.push((path.clone(), branch));
-            copies.push((path, text));
+    let mut legacy = Vec::new();
+    for (dir, objects) in SKILL_DIRS.iter().zip(found.objects.chunks(SKILL_LOOKUPS)) {
+        if let Some(copy) = skill_copy(objects) {
+            let path = skill_file(dir, SKILL_NAME);
+            on_branch.push((path.clone(), copy.on_branch));
+            copies.push((path, copy.text));
+            if copy.legacy {
+                legacy.push(skill_file(dir, LEGACY_SKILL_NAME));
+            }
         }
     }
-    let (state, paths) = skill_plan(&copies);
+    let (state, paths) = skill_plan(&copies, &legacy);
     let pull_request_current = found.pull_request.is_some()
         && on_branch
             .iter()
@@ -2625,6 +2661,7 @@ async fn repo_skill(
     let view = SkillView {
         state,
         paths,
+        legacy,
         default_branch: found.head.branch.clone(),
         pull_request: found.pull_request.map(PullRequestRef::from),
         pull_request_current,
@@ -2632,7 +2669,7 @@ async fn repo_skill(
     Ok((view, found.head))
 }
 
-/// Whether the repo's copy of the `mergepatrol` skill is the one MergeLoop ships now.
+/// Whether the repo's copy of the `mergeloop` skill is the one MergeLoop ships now.
 pub(crate) async fn repo_skill_view(
     State(app): State<AppState>,
     caller: Caller,
@@ -2656,14 +2693,14 @@ pub(crate) async fn update_repo_skill(
     let id = caller.repo(&app, id, &repo).await?;
     let token = caller.github_token(&app)?;
     let gh = installation(&app, id).await?;
-    let (SkillView { state, paths, .. }, base) = repo_skill(&gh, &repo).await?;
-    if state == SkillStateView::Current || paths.is_empty() {
+    let (skill, base) = repo_skill(&gh, &repo).await?;
+    if skill.state == SkillStateView::Current {
         return Err(ApiError::Status(
             StatusCode::CONFLICT,
             format!("`{}` already has the current skill.", base.branch),
         ));
     }
-    let pr = propose_skill(&gh, &repo, &paths, &base).await?;
+    let pr = propose_skill(&gh, &repo, &skill, &base).await?;
     tracing::info!(installation = id, %repo, pr = pr.number, "proposed the current skill");
     let file = UpdatedFileView::Skill;
     Ok(Json(if repo_queues(&app, id, &repo).await? {
@@ -2673,27 +2710,44 @@ pub(crate) async fn update_repo_skill(
     }))
 }
 
-/// Opens a PR that writes the current skill to `paths`, or updates the one open.
+/// Opens a PR that writes the current skill to the copies `skill` lists, and deletes its copies
+/// under the old name, or updates the one open.
 async fn propose_skill(
     gh: &Installation,
     repo: &RepoName,
-    paths: &[String],
+    skill: &SkillView,
     base: &BranchFile,
 ) -> anyhow::Result<PullRef> {
-    let files: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), SKILL)).collect();
-    let list: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
-    let body = format!(
-        "This PR writes the current MergeLoop agent skill to {}, so coding agents in this repo follow how MergeLoop works now: they queue their PRs, then work every review comment to resolved. Once it merges into `{}`, agents read the new skill.
-
-It replaces the copy that is there, so a change made to the skill in this repo is lost: carry it over in this PR if you want to keep it.",
-        list.join(" and "),
-        base.branch
-    );
+    let files: Vec<(&str, &str)> = skill.paths.iter().map(|p| (p.as_str(), SKILL)).collect();
+    let removed: Vec<&str> = skill.legacy.iter().map(String::as_str).collect();
+    let listed = |paths: &[String]| {
+        let list: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
+        list.join(" and ")
+    };
+    let mut body = String::new();
+    if !skill.paths.is_empty() {
+        body.push_str(&format!(
+            "This PR writes the current MergeLoop agent skill to {}, so coding agents in this repo follow how MergeLoop works now: they queue their PRs, then work every review comment to resolved. Once it merges into `{}`, agents read the new skill.\n\nIt replaces the copy that is there, so a change made to the skill in this repo is lost: carry it over in this PR if you want to keep it.",
+            listed(&skill.paths),
+            base.branch
+        ));
+    }
+    if !skill.legacy.is_empty() {
+        let it = match body.is_empty() {
+            true => "This PR",
+            false => "\n\nIt also",
+        };
+        body.push_str(&format!(
+            "{it} deletes {}, the skill under its name from before Mergepatrol became MergeLoop, so agents read only the `mergeloop` skill.",
+            listed(&skill.legacy)
+        ));
+    }
     gh.propose_file(
         repo,
         Proposal {
             base,
             files: &files,
+            removed: &removed,
             branch: SKILL_BRANCH,
             title: "Update the MergeLoop skill",
             body: &body,
@@ -2847,12 +2901,12 @@ pub(crate) async fn update_repo(
         return skip("MergeLoop is off on this repo.".into());
     }
     let gh = installation(&app, id).await?;
-    let file = gh.default_branch_file(&repo, REPO_CONFIG_PATH).await?;
+    let ConfigFile { at, file } = gh.config_file(&repo).await?;
     let Some(text) = file.text.as_deref() else {
         return skip(format!("{} has no config file.", file.branch));
     };
-    let defaults = &inherited(&app, id).await?;
-    let settings = match RepoSettings::from_file(Some(text), defaults) {
+    let defaults = &at.inherit(&inherited(&app, id).await?);
+    let settings = match RepoSettings::from_file_at(at, Some(text), defaults) {
         Ok(settings) => settings,
         Err(e) => return skip(e),
     };
@@ -2860,10 +2914,7 @@ pub(crate) async fn update_repo(
     let mut pulls = Vec::new();
     let open = gh.open_pr_from(&repo, CONFIG_BRANCH).await?;
     let on_branch = match open {
-        Some(_) => Some(
-            gh.branch_file(&repo, CONFIG_BRANCH, REPO_CONFIG_PATH)
-                .await?,
-        ),
+        Some(_) => Some(gh.branch_file(&repo, CONFIG_BRANCH, at.path()).await?),
         None => None,
     };
     let update = config_update(
@@ -2876,7 +2927,7 @@ pub(crate) async fn update_repo(
         ConfigUpdate::Current => None,
         ConfigUpdate::Queue | ConfigUpdate::Leave | ConfigUpdate::KeepComments => open,
         ConfigUpdate::Propose => Some(
-            propose_rewrite(&gh, &repo, &settings, defaults, &file, text)
+            propose_rewrite(&gh, &repo, &settings, defaults, at, &file, text)
                 .await
                 .map_err(github_failed)?,
         ),
@@ -2926,7 +2977,7 @@ async fn update_skill(
     }
     let pr = match skill.pull_request {
         Some(pr) if skill.pull_request_current => pr,
-        _ => propose_skill(gh, repo, &skill.paths, &base)
+        _ => propose_skill(gh, repo, &skill, &base)
             .await
             .map_err(github_failed)?
             .into(),
@@ -2950,9 +3001,11 @@ async fn propose_rewrite(
     repo: &RepoName,
     settings: &RepoSettings,
     defaults: &RepoSettings,
+    at: ConfigPath,
     base: &BranchFile,
     text: &str,
 ) -> anyhow::Result<PullRef> {
+    let path = at.path();
     let content = settings.to_yaml(defaults);
     let comments = if settings.loses_comments_of(text, defaults) {
         "\n\nIt replaces the file, so the file's comments are lost: carry them over in this PR if you want to keep them."
@@ -2960,14 +3013,15 @@ async fn propose_rewrite(
         ""
     };
     let body = format!(
-        "This PR writes `{REPO_CONFIG_PATH}` the way MergeLoop writes it now: it renames old settings and keeps only those that differ from the workspace, so the rest follow it from now on. The queue runs as it did, with these settings.\n\n{}{comments}",
+        "This PR writes `{path}` the way MergeLoop writes it now: it renames old settings and keeps only those that differ from the workspace, so the rest follow it from now on. The queue runs as it did, with these settings.\n\n{}{comments}",
         settings_list(settings)
     );
     gh.propose_file(
         repo,
         Proposal {
             base,
-            files: &[(REPO_CONFIG_PATH, content.as_str())],
+            files: &[(path, content.as_str())],
+            removed: &[],
             branch: CONFIG_BRANCH,
             title: "Update the MergeLoop settings",
             body: &body,
@@ -3004,7 +3058,7 @@ async fn skill_paths(gh: &Installation, repo: &RepoName) -> Result<Vec<String>, 
     for dir in SKILL_DIRS {
         // A symlink is a blob, so it has text. A dir has none.
         if gh.default_branch_file(repo, dir).await?.text.is_none() {
-            paths.push(format!("{dir}/mergepatrol/SKILL.md"));
+            paths.push(skill_file(dir, SKILL_NAME));
         }
     }
     Ok(paths)
@@ -3059,10 +3113,12 @@ fn settings_list(settings: &RepoSettings) -> String {
 
 fn config_pr(
     settings: &RepoSettings,
+    at: ConfigPath,
     update: bool,
     branch: &str,
     skills: &[String],
 ) -> (&'static str, String) {
+    let path = at.path();
     let list = settings_list(settings);
     let skills = if skills.is_empty() {
         String::new()
@@ -3077,14 +3133,14 @@ fn config_pr(
         (
             "Update the MergeLoop settings",
             format!(
-                "This PR changes `{REPO_CONFIG_PATH}`, as edited in the MergeLoop dashboard. The queue uses the new settings once this PR merges into `{branch}`.\n\n{list}"
+                "This PR changes `{path}`, as edited in the MergeLoop dashboard. The queue uses the new settings once this PR merges into `{branch}`.\n\n{list}"
             ),
         )
     } else {
         (
             "Set up MergeLoop",
             format!(
-                "This PR adds `{REPO_CONFIG_PATH}` with the settings below. Once it merges into `{branch}`, MergeLoop runs a merge queue on this repo: add the `{}` label to a PR to queue it.\n\n{list}{skills}\n\nTo change the settings later, edit the file, or use the MergeLoop dashboard, which opens a PR like this one.",
+                "This PR adds `{path}` with the settings below. Once it merges into `{branch}`, MergeLoop runs a merge queue on this repo: add the `{}` label to a PR to queue it.\n\n{list}{skills}\n\nTo change the settings later, edit the file, or use the MergeLoop dashboard, which opens a PR like this one.",
                 settings.label
             ),
         )
@@ -3352,7 +3408,7 @@ mod tests {
     }
 
     /// The settings form's PUT body, as the browser sent it.
-    const FORM: &str = r#"{"label":"mergepatrol","batch_size":8,"provider":"anthropic","model":"claude-sonnet-5-5","effort":"medium","overrides":{"rebase":{"provider":"openai","model":"gpt-6-luna"},"fix":null,"review":{"provider":"anthropic","model":"claude-fable-5-1"}},"verify":["cargo check"],"fix_ci":true,"fix_ci_attempts":2,"branches":["release"],"review":{"enabled":null,"bars":[]}}"#;
+    const FORM: &str = r#"{"label":"mergeloop","batch_size":8,"provider":"anthropic","model":"claude-sonnet-5-5","effort":"medium","overrides":{"rebase":{"provider":"openai","model":"gpt-6-luna"},"fix":null,"review":{"provider":"anthropic","model":"claude-fable-5-1"}},"verify":["cargo check"],"fix_ci":true,"fix_ci_attempts":2,"branches":["release"],"review":{"enabled":null,"bars":[]}}"#;
     const FORM_OVERRIDES: &str = r#""overrides":{"rebase":{"provider":"openai","model":"gpt-6-luna"},"fix":null,"review":{"provider":"anthropic","model":"claude-fable-5-1"}},"#;
 
     /// An open PR by `@ada` that GitHub won't merge before someone approves it.
@@ -3497,28 +3553,39 @@ mod tests {
     #[test]
     fn a_skill_update_writes_each_copy_that_is_not_the_current_skill() {
         let (a, c) = (
-            ".agents/skills/mergepatrol/SKILL.md",
-            ".claude/skills/mergepatrol/SKILL.md",
+            ".agents/skills/mergeloop/SKILL.md",
+            ".claude/skills/mergeloop/SKILL.md",
         );
         let copy = |p: &str, t: Option<&str>| (p.to_owned(), t.map(str::to_owned));
         assert_eq!(
-            skill_plan(&[copy(a, Some(SKILL)), copy(c, Some(SKILL))]),
+            skill_plan(&[copy(a, Some(SKILL)), copy(c, Some(SKILL))], &[]),
             (SkillStateView::Current, vec![])
         );
         assert_eq!(
-            skill_plan(&[copy(a, Some("old")), copy(c, Some(SKILL))]),
+            skill_plan(&[copy(a, Some("old")), copy(c, Some(SKILL))], &[]),
             (SkillStateView::Outdated, vec![a.to_owned()])
         );
         assert_eq!(
-            skill_plan(&[copy(a, Some(SKILL)), copy(c, None)]),
+            skill_plan(&[copy(a, Some(SKILL)), copy(c, None)], &[]),
             (SkillStateView::Outdated, vec![c.to_owned()])
         );
         assert_eq!(
-            skill_plan(&[copy(a, None), copy(c, None)]),
+            skill_plan(&[copy(a, None), copy(c, None)], &[]),
             (SkillStateView::Missing, vec![a.to_owned(), c.to_owned()])
         );
         // Both dirs link elsewhere: nothing to write.
-        assert_eq!(skill_plan(&[]), (SkillStateView::Current, vec![]));
+        assert_eq!(skill_plan(&[], &[]), (SkillStateView::Current, vec![]));
+
+        // A copy under the old name is out of date, though it is the current skill.
+        let legacy = [".agents/skills/mergepatrol/SKILL.md".to_owned()];
+        assert_eq!(
+            skill_plan(&[copy(a, None), copy(c, None)], &legacy),
+            (SkillStateView::Outdated, vec![a.to_owned(), c.to_owned()])
+        );
+        assert_eq!(
+            skill_plan(&[copy(a, Some(SKILL)), copy(c, Some(SKILL))], &legacy),
+            (SkillStateView::Outdated, vec![])
+        );
     }
 
     #[test]
@@ -3526,26 +3593,48 @@ mod tests {
         let dir = || Some(GitObject::Tree(Vec::new()));
         let link = || Some(GitObject::Blob("../.agents/skills".into()));
         let text = |t: &str| Some(GitObject::Blob(t.into()));
+        let copy = |text: Option<&str>, on_branch: Option<&str>, legacy| {
+            Some(SkillCopy {
+                text: text.map(str::to_owned),
+                on_branch: on_branch.map(str::to_owned),
+                legacy,
+            })
+        };
         // A real copy, and the update's branch with the current skill.
         assert_eq!(
-            skill_copy(&[dir(), dir(), dir(), text("old"), text(SKILL)]),
-            Some((Some("old".into()), Some(SKILL.into())))
+            skill_copy(&[dir(), dir(), dir(), text("old"), text(SKILL), None]),
+            copy(Some("old"), Some(SKILL), false)
         );
         // No copy yet.
         assert_eq!(
-            skill_copy(&[dir(), None, None, None, None]),
-            Some((None, None))
+            skill_copy(&[dir(), None, None, None, None, None]),
+            copy(None, None, false)
         );
-        // A link at the top, at `skills`, at `mergepatrol`, or the file itself.
-        assert_eq!(skill_copy(&[link(), None, None, None, None]), None);
-        assert_eq!(skill_copy(&[dir(), link(), None, None, None]), None);
-        assert_eq!(skill_copy(&[dir(), dir(), link(), None, None]), None);
+        // Only the copy under the old name.
+        assert_eq!(
+            skill_copy(&[dir(), dir(), None, None, None, text(SKILL)]),
+            copy(None, None, true)
+        );
+        // A link at the top, at `skills`, at `mergeloop`, or the file itself.
+        assert_eq!(skill_copy(&[link(), None, None, None, None, None]), None);
+        assert_eq!(skill_copy(&[dir(), link(), None, None, None, None]), None);
+        assert_eq!(skill_copy(&[dir(), dir(), link(), None, None, None]), None);
         let file_link = Some(GitObject::Tree(vec![("SKILL.md".into(), SYMLINK_MODE)]));
         assert_eq!(
-            skill_copy(&[dir(), dir(), file_link, text("../../x/SKILL.md"), None]),
+            skill_copy(&[
+                dir(),
+                dir(),
+                file_link,
+                text("../../x/SKILL.md"),
+                None,
+                None
+            ]),
             None
         );
-        assert_eq!(skill_lookups(".claude/skills")[0].1, ".claude");
+        let lookups = skill_lookups(".claude/skills");
+        assert_eq!(lookups[0].1, ".claude");
+        assert_eq!(lookups[3].1, ".claude/skills/mergeloop/SKILL.md");
+        assert_eq!(lookups[5].1, ".claude/skills/mergepatrol/SKILL.md");
     }
 
     #[test]
@@ -3581,11 +3670,11 @@ mod tests {
     #[test]
     fn this_repo_has_the_skill_every_repo_gets() {
         assert_eq!(
-            include_str!("../../../.agents/skills/mergepatrol/SKILL.md"),
+            include_str!("../../../.agents/skills/mergeloop/SKILL.md"),
             SKILL
         );
         assert_eq!(
-            include_str!("../../../.claude/skills/mergepatrol/SKILL.md"),
+            include_str!("../../../.claude/skills/mergeloop/SKILL.md"),
             SKILL
         );
     }

@@ -802,7 +802,7 @@ mod tests {
         let pr = json!({
             "reviewThreads": { "totalCount": 120, "nodes": [
                 { "isResolved": false, "path": "src/a.rs", "line": 7, "comments": { "totalCount": 2, "nodes": [
-                    { "author": { "login": "merge-patrol" }, "url": "u1",
+                    { "author": { "login": "mergeloop" }, "url": "u1",
                       "bodyText": "Sent back to the author · f1 · other · 60% sure\n\nThe retry loop has no cap\n\nIt spins." } ] } },
                 { "isResolved": true, "path": "src/b.rs", "line": null, "comments": { "totalCount": 1, "nodes": [
                     { "author": null, "url": "u2", "bodyText": "\n  Rename this  \nplease" } ] } },
@@ -817,7 +817,7 @@ mod tests {
                     resolved: false,
                     path: "src/a.rs".into(),
                     line: Some(7),
-                    author: Some("merge-patrol".into()),
+                    author: Some("mergeloop".into()),
                     title: "The retry loop has no cap".into(),
                     url: "u1".into(),
                     comments: 2,

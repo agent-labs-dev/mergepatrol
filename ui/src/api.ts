@@ -131,7 +131,7 @@ export const fetchRepoConfig = (id: number, repo: string) =>
 export const proposeRepoConfig = (id: number, repo: string, body: RepoSettingsView) =>
   send<UpdatePullView>("PUT", w(id, `/repos/${repo}/config`), body);
 
-/** Whether the repo has the current `mergepatrol` agent skill. */
+/** Whether the repo has the current `mergeloop` agent skill. */
 export const fetchRepoSkill = (id: number, repo: string) =>
   get<SkillView>(w(id, `/repos/${repo}/skill`));
 
@@ -212,7 +212,7 @@ export const queuePull = (id: number, repo: string, pr: number, priority: boolea
 
 /** What a PR just queued will run into, whatever the PR: a hold, or no model key for the agent. */
 export const queuedWarning = (q: QueuedView): string | undefined =>
-  q.mergepatrol.hold || q.mergepatrol.missing_key ? q.message : undefined;
+  q.mergeloop.hold || q.mergeloop.missing_key ? q.message : undefined;
 
 /** Takes the PR, and its stack, out of the queue, as the user. */
 export const dequeuePull = (id: number, repo: string, pr: number) =>

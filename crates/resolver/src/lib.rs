@@ -353,7 +353,7 @@ in the form that the failure and the repo's docs ask for.
 Rules:
 - Make the smallest change that fixes the failure, in the spirit of the pull request.
 - Do not delete, skip or weaken tests or checks to make them pass.
-- Do not edit `.github/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
+- Do not edit `.github/`, `.mergeloop/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
 - Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
 - Do not refactor or improve unrelated code.
 

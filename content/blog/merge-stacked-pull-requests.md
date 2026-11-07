@@ -27,7 +27,7 @@ Two things make it worse with a merge queue that does not know about stacks:
 
 MergeLoop treats a stack made with `gh stack` as one item in the queue:
 
-- **One label queues the whole stack.** Put `mergepatrol` on any of its pull requests. The stack
+- **One label queues the whole stack.** Put `mergeloop` on any of its pull requests. The stack
   joins the queue of the branch the whole stack merges into.
 - **It waits for every layer.** While any layer is a draft or waits for a review, the stack waits,
   and keeps its place.
@@ -49,12 +49,12 @@ held: the queue cannot tell it is part of a stack.
 1. Make the stack with [`gh stack`](https://github.com/github/gh-stack): `gh stack add` per layer,
    then `gh stack submit`.
 2. [Install MergeLoop](https://mergeloop.ai) on the repository and merge its setup pull
-   request, which adds `.mergepatrol/mergepatrol.yml`.
+   request, which adds `.mergeloop/mergeloop.yml`.
 3. Get the layers reviewed as your branch requires.
-4. Label any layer `mergepatrol`, or from a script:
+4. Label any layer `mergeloop`, or from a script:
 
    ```sh
-   gh pr edit <number> --add-label mergepatrol
+   gh pr edit <number> --add-label mergeloop
    ```
 
    A coding agent connected to MergeLoop's [MCP server](/docs/mcp-and-api) can call `queue_pull`

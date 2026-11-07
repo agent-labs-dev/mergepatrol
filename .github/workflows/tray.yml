@@ -57,7 +57,7 @@ jobs:
           workspaces: apps/tray
       - run: ./package.sh
       # ditto keeps the bundle's signature, which zip does not.
-      - run: ditto -c -k --keepParent dist/MergeLoop.app dist/Mergepatrol.zip
+      - run: ditto -c -k --keepParent dist/MergeLoop.app dist/MergeLoop.zip
       # One rolling prerelease, so the download URL never changes and a v* release stays Latest.
       - run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
@@ -67,4 +67,4 @@ jobs:
               --title "Menu bar app (latest)" \
               --notes "The menu bar app, built from main. Apple silicon, macOS 13 or later. Ad-hoc signed for now: after the first launch is blocked, open System Settings › Privacy & Security and click Open Anyway."
           fi
-          gh release upload "$TAG" dist/Mergepatrol.zip --clobber
+          gh release upload "$TAG" dist/MergeLoop.zip --clobber

@@ -34,7 +34,7 @@ async fn commits_with_a_trailer_are_listed_from_a_base() {
     let wt = tmp.path();
     sh(wt, &["init", "-q", "-b", "main"]);
     let root = commit(wt, "a.txt", "one\n", "root");
-    commit(wt, "a.txt", "two\n", "first\n\nFixed-by: mergepatrol, a");
+    commit(wt, "a.txt", "two\n", "first\n\nFixed-by: mergeloop, a");
     let approved = commit(wt, "a.txt", "three\n", "the author's");
     commit(
         wt,
@@ -44,7 +44,7 @@ async fn commits_with_a_trailer_are_listed_from_a_base() {
     );
 
     let listed = |base| async move {
-        let trailers = ["Fixed-by: mergepatrol", "Resolved-by: mergepatrol"];
+        let trailers = ["Fixed-by: mergeloop", "Resolved-by: mergepatrol"];
         let commits = Git.commits_with(wt, base, "HEAD", &trailers).await.unwrap();
         commits
             .iter()
@@ -75,7 +75,7 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     // What the resolver does.
     std::fs::write(wt.join("a.txt"), "trunk\npr\n").unwrap();
     assert_eq!(
-        git.continue_resolution(wt, "Resolved-by: mergepatrol (test)")
+        git.continue_resolution(wt, "Resolved-by: mergeloop (test)")
             .await
             .unwrap(),
         RebaseStep::Done
@@ -86,7 +86,7 @@ async fn conflict_is_resolved_committed_and_listed_with_its_trailer() {
     assert!(
         commits[0]
             .message
-            .ends_with("Resolved-by: mergepatrol (test)"),
+            .ends_with("Resolved-by: mergeloop (test)"),
         "{}",
         commits[0].message
     );
@@ -113,7 +113,7 @@ async fn resolution_leaves_untracked_files_out() {
     std::fs::write(wt.join("a.txt"), "trunk\npr\n").unwrap();
     std::fs::write(wt.join("\u{1}\u{b0}@@0D@8"), "").unwrap();
     assert_eq!(
-        git.continue_resolution(wt, "Resolved-by: mergepatrol (test)")
+        git.continue_resolution(wt, "Resolved-by: mergeloop (test)")
             .await
             .unwrap(),
         RebaseStep::Done
@@ -190,7 +190,7 @@ async fn resolution_that_keeps_the_trunk_drops_the_commit() {
 
     std::fs::write(wt.join("a.txt"), "pr\nsquashed\n").unwrap();
     assert_eq!(
-        git.continue_resolution(wt, "Resolved-by: mergepatrol (test)")
+        git.continue_resolution(wt, "Resolved-by: mergeloop (test)")
             .await
             .unwrap(),
         RebaseStep::Done

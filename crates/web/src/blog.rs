@@ -247,7 +247,7 @@ impl Collection {
             "datePublished": a.date,
             "dateModified": a.last_modified(),
             "url": url,
-            "image": format!("{public_url}/og/mergepatrol-og-1200x630.png"),
+            "image": format!("{public_url}/og/mergeloop-og-1200x630.png"),
             "mainEntityOfPage": url,
             "author": publisher.clone(),
             "publisher": publisher,
@@ -313,7 +313,7 @@ pub(crate) fn page(
     analytics: Analytics,
 ) -> String {
     let (title, description) = (escape(&format!("{title} | MergeLoop")), escape(description));
-    let image = format!("{public_url}/og/mergepatrol-og-1200x630.png");
+    let image = format!("{public_url}/og/mergeloop-og-1200x630.png");
     let tracking = analytics.map(tracking).unwrap_or_default();
     format!(
         r#"<!doctype html>

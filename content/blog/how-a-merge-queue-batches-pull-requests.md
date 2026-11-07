@@ -17,7 +17,7 @@ MergeLoop's answer is batching. When several queued PRs have each passed their o
 tests them as one:
 
 1. It merges them, in queue order, onto a fresh branch at the base branch, named
-   `mergepatrol/batch-<PRs>`.
+   `mergeloop/batch-<PRs>`.
 2. It opens a draft PR from that branch, so your existing `pull_request` CI runs on the
    combination. Nothing about your CI changes.
 3. When the required checks pass, it merges each PR as it is: no rebase, and no second CI run.
@@ -55,4 +55,4 @@ pushed, and the result must change no file the PR did not already change.
 ## Try it
 
 MergeLoop is free for public repos. [Sign in with GitHub](/auth/login), install the App, and
-add the `mergepatrol` label to a pull request.
+add the `mergeloop` label to a pull request.

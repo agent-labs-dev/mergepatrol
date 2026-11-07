@@ -3,13 +3,17 @@ import type { PullRequestRef } from "./PullRequestRef";
 import type { SkillStateView } from "./SkillStateView";
 
 /**
- * A repo's `mergepatrol` skill on its default branch.
+ * A repo's `mergeloop` skill on its default branch.
  */
 export type SkillView = { state: SkillStateView, 
 /**
  * The copies an update writes.
  */
-paths: Array<string>, default_branch: string, 
+paths: Array<string>, 
+/**
+ * The copies under the skill's name from before the rename, which an update deletes.
+ */
+legacy: Array<string>, default_branch: string, 
 /**
  * MergeLoop's open PR that updates it.
  */

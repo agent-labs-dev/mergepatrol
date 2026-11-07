@@ -694,7 +694,7 @@ async fn user_write(token: &str, req: reqwest::RequestBuilder) -> Result<reqwest
 
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("mergeloop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .build()?)
 }

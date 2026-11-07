@@ -9,8 +9,8 @@ const steps: [string, ReactNode][] = [
   [
     "Label it",
     <>
-      Add the <Code>mergepatrol</Code> label to a pull request. <Code>mergepatrol:priority</Code>{" "}
-      jumps the queue.
+      Add the <Code>mergeloop</Code> label to a pull request. <Code>mergeloop:priority</Code> jumps
+      the queue.
     </>,
   ],
   [
@@ -39,8 +39,8 @@ const features: [string, ReactNode][] = [
   [
     "Config in the repo",
     <>
-      Each repo sets its queue in <Code>.mergepatrol/mergepatrol.yml</Code> on its default branch,
-      so a PR cannot change its own settings.
+      Each repo sets its queue in <Code>.mergeloop/mergeloop.yml</Code> on its default branch, so a
+      PR cannot change its own settings.
     </>,
   ],
 ];

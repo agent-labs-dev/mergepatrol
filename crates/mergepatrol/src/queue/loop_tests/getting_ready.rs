@@ -925,7 +925,7 @@ async fn a_review_s_findings_go_back_to_the_author_and_are_never_fixed() {
     assert!(world.did(1, "review-sent-back"), "{:?}", world.kinds(1));
     assert_eq!(world.posted(), [1], "one thread, for the author");
     assert_eq!(world.review_states(), ["CHANGES_REQUESTED"]);
-    assert!(world.gh.with(|s| s.reviews[0].1.contains(REVIEW_MARK)));
+    assert!(world.gh.with(|s| s.reviews[0].1.contains(REVIEW_MARKS[0])));
 
     world.tick().await;
     assert!(world.tasks().is_empty());
@@ -1279,7 +1279,7 @@ async fn only_the_layer_whose_conflict_the_agent_resolved_loses_its_approval() {
     assert!(
         world
             .gh
-            .with(|s| !s.branches.contains_key("mergepatrol/restack-1"))
+            .with(|s| !s.branches.contains_key("mergeloop/restack-1"))
     );
 }
 

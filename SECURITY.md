@@ -1,6 +1,6 @@
 # Security
 
-Please report vulnerabilities privately, through [GitHub's private vulnerability reporting](https://github.com/agent-labs-dev/mergepatrol/security/advisories/new), not in a public issue or PR.
+Please report vulnerabilities privately, through [GitHub's private vulnerability reporting](https://github.com/agent-labs-dev/mergeloop/security/advisories/new), not in a public issue or PR.
 
 Include what an attacker can do, and the steps to reproduce it. We will reply within a few days.
 

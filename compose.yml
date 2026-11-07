@@ -1,6 +1,6 @@
 # Self-hosting. Jobs run in their own containers on this machine's Docker.
 services:
-  mergepatrol:
+  mergeloop:
     build: { context: ., target: orchestrator }
     # The dashboard has its own sign-in, but this is a spike: keep it on this machine.
     ports:

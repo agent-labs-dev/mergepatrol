@@ -264,7 +264,7 @@ mod tests {
             setup_token: None,
             wake,
             repo_defaults: RepoSettings {
-                label: "mergepatrol".into(),
+                label: mergepatrol_core::DEFAULT_LABEL.into(),
                 batch_size: 8,
                 agent: mergepatrol_core::AgentSettings {
                     provider: Default::default(),
@@ -1598,7 +1598,7 @@ mod tests {
             assert!(page.contains(r#"<link rel="canonical" href="http://localhost:8080/""#));
             assert!(!page.contains("__PUBLIC_URL__"));
             // A link preview fetches og:image by its absolute URL; a 404 there is a blank card.
-            let card = "/og/mergepatrol-og-1200x630.png";
+            let card = "/og/mergeloop-og-1200x630.png";
             assert!(page.contains(&format!(r#"content="http://localhost:8080{card}""#)));
             assert_eq!(get(&router, card, None).await, StatusCode::OK);
             // An entry's picture sits under its page's path, and is the dashboard's asset.
@@ -1873,7 +1873,7 @@ mod tests {
 
     #[sqlx::test(migrations = false)]
     async fn the_open_prs_come_from_the_inbox_without_reading_github(pool: PgPool) {
-        use mergepatrol_core::{Entry, EntryState, Lane};
+        use mergepatrol_core::{ConfigPath, ConfigText, Entry, EntryState, Lane};
         use mergepatrol_store::{InboxRead, InboxWrite, LaneKey};
         // The session's GitHub token is fake: a read of GitHub would fail the request.
         let (router, cookie) = signed_in(pool.clone()).await;
@@ -1896,12 +1896,13 @@ mod tests {
         let nodes = [
             draft,
             pr(2, "2026-10-07T00:00:00Z", &[]),
-            pr(3, "2026-10-06T00:00:00Z", &["mergepatrol"]),
+            pr(3, "2026-10-06T00:00:00Z", &["mergeloop"]),
             // Queued, and a layer of its stack.
             pr(4, "2026-10-05T00:00:00Z", &[]),
             pr(5, "2026-10-04T00:00:00Z", &[]),
             elsewhere,
             pr(7, "2026-10-03T00:00:00Z", &["ship"]),
+            pr(8, "2026-10-02T00:00:00Z", &["mergepatrol"]),
         ];
         let writes: Vec<InboxWrite> = nodes
             .into_iter()
@@ -1953,16 +1954,26 @@ mod tests {
         assert_ne!(status, StatusCode::OK);
         // Read, and there is none: the workspace's label.
         store.github_reads(1, &repo).await.unwrap();
-        store.save_config_read(1, &repo, 0, None).await.unwrap();
+        let none = ConfigText::none();
+        store.save_config_read(1, &repo, 0, &none).await.unwrap();
         let listed = open(router.clone(), cookie.clone()).await;
-        assert_eq!(listed, [(1, true), (2, false), (7, false)]);
+        assert_eq!(listed, [(1, true), (2, false), (7, false), (8, false)]);
+        // One still at the path from before the rename, which keeps the label from then.
+        let legacy = ConfigText {
+            at: ConfigPath::Legacy,
+            text: Some("version: 1\n".into()),
+        };
+        store.save_config_read(1, &repo, 0, &legacy).await.unwrap();
+        let listed = open(router.clone(), cookie.clone()).await;
+        assert_eq!(listed, [(1, true), (2, false), (3, false), (7, false)]);
         // One that names another label.
-        store
-            .save_config_read(1, &repo, 0, Some("version: 1\nlabel: ship\n"))
-            .await
-            .unwrap();
+        let ship = ConfigText {
+            at: ConfigPath::Current,
+            text: Some("version: 1\nlabel: ship\n".into()),
+        };
+        store.save_config_read(1, &repo, 0, &ship).await.unwrap();
         let listed = open(router, cookie).await;
-        assert_eq!(listed, [(1, true), (2, false), (3, false)]);
+        assert_eq!(listed, [(1, true), (2, false), (3, false), (8, false)]);
     }
 
     #[sqlx::test(migrations = false)]
@@ -2111,8 +2122,8 @@ mod tests {
                 .map(|s| s.on())
                 .collect()
         };
-        let added = r#"{"added":[".mergepatrol/mergepatrol.yml"],"removed":[],"modified":[]}"#;
-        let removed = r#"{"added":[],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        let added = r#"{"added":[".mergeloop/mergeloop.yml"],"removed":[],"modified":[]}"#;
+        let removed = r#"{"added":[],"removed":[".mergeloop/mergeloop.yml"],"modified":[]}"#;
         let other = r#"{"added":["a.txt"],"removed":[],"modified":[]}"#;
 
         // Another branch, or another file, changes nothing.
@@ -2126,9 +2137,31 @@ mod tests {
         )
         .await;
         assert_eq!(on().await, [true]);
+        // The file moved from the old path to the new, in one commit or two.
+        let legacy = r#"{"added":[],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        let moved = r#"{"added":[".mergeloop/mergeloop.yml"],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        deliver_push(&router, &push("refs/heads/main", moved)).await;
+        assert_eq!(on().await, [true]);
+        deliver_push(&router, &push("refs/heads/main", removed)).await;
+        deliver_push(
+            &router,
+            &push("refs/heads/main", &format!("{added},{legacy}")),
+        )
+        .await;
+        assert_eq!(on().await, [true]);
+        // Removing one path says nothing of the other.
+        deliver_push(&router, &push("refs/heads/main", legacy)).await;
+        assert_eq!(on().await, [true]);
         deliver_push(
             &router,
             &push("refs/heads/main", &format!("{added},{removed}")),
+        )
+        .await;
+        assert_eq!(on().await, [true]);
+        // Removing both does.
+        deliver_push(
+            &router,
+            &push("refs/heads/main", &format!("{removed},{legacy}")),
         )
         .await;
         assert_eq!(on().await, [false]);
@@ -2368,7 +2401,7 @@ mod tests {
                 "repo": "o/r",
                 "number": 6,
                 "url": "http://localhost:8080/o/r/pull/6",
-                "mergepatrol": {
+                "mergeloop": {
                     "state": "on",
                     "installed": true,
                     "has_config": true,
@@ -2505,13 +2538,13 @@ mod tests {
     }
 
     #[sqlx::test(migrations = false)]
-    async fn v1_says_whether_a_repo_uses_mergepatrol(pool: PgPool) {
+    async fn v1_says_whether_a_repo_uses_mergeloop(pool: PgPool) {
         let (router, store) = v1_router(pool).await;
         let repo = RepoName::parse("o/r").unwrap();
         let status = |router: Router, path: &'static str| async move {
             let res = v1_get(&router, path, &[BEARER]).await;
             assert_eq!(res.status(), StatusCode::OK);
-            json_of(res).await["mergepatrol"].clone()
+            json_of(res).await["mergeloop"].clone()
         };
         let off = status(router.clone(), "/api/v1/repos/o/off/pulls/1").await;
         assert_eq!(off["state"], "off");
@@ -2554,7 +2587,7 @@ mod tests {
         let status = || async {
             let res = v1_get(&router, "/api/v1/repos/o/r/pulls/1", &[BEARER]).await;
             assert_eq!(res.status(), StatusCode::OK);
-            json_of(res).await["mergepatrol"].clone()
+            json_of(res).await["mergeloop"].clone()
         };
         store.set_has_config(1, &repo, true).await.unwrap();
         // Before the queue first read the repo, nothing is known to hold it.
@@ -2630,7 +2663,7 @@ mod tests {
             .await
             .unwrap();
         let res = v1_get(&router, "/api/v1/repos/o/r/pulls/1", &[BEARER]).await;
-        let status = json_of(res).await["mergepatrol"].clone();
+        let status = json_of(res).await["mergeloop"].clone();
         // Self-hosted, a private repo queues; the workspace still needs its own key.
         assert_eq!(status["hold"], null());
         assert_eq!(status["missing_key"]["tasks"][0]["task"], "rebase");

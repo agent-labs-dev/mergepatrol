@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{PrNumber, RepoName};
+use mergepatrol_core::{ConfigPath, ConfigText, PrNumber, RepoName};
 use serde_json::Value;
 use sqlx::Row;
 
@@ -34,8 +34,7 @@ pub struct RepoReads {
     pub changes: i64,
     /// How long ago the repo last changed. `None`: never.
     pub changed: Option<Duration>,
-    /// The config file: `None` in it for none.
-    pub config: Option<Read<Option<String>>>,
+    pub config: Option<Read<ConfigText>>,
     /// The labels it was read for, and the repository, without its PRs.
     pub repository: Option<Read<(Value, Value)>>,
     /// The queued PRs, and those changed since they were read.
@@ -104,18 +103,18 @@ pub trait ReadCache: Send + Sync {
     /// Starts keeping track of the repo's changes, if it did not yet.
     async fn github_reads(&self, installation_id: u64, repo: &RepoName) -> Result<RepoReads>;
     /// The config file as the queue last read it, without keeping track of the repo: `None`
-    /// never read, `Some(None)` none.
+    /// never read.
     async fn config_read(
         &self,
         installation_id: u64,
         repo: &RepoName,
-    ) -> Result<Option<Option<String>>>;
+    ) -> Result<Option<ConfigText>>;
     async fn save_config_read(
         &self,
         installation_id: u64,
         repo: &RepoName,
         changes: i64,
-        config: Option<&str>,
+        config: &ConfigText,
     ) -> Result<()>;
     async fn save_repository_read(
         &self,
@@ -231,7 +230,7 @@ impl ReadCache for PgStore {
             .map(|changes| Read {
                 changes,
                 age: age("config_age"),
-                value: row.get("config"),
+                value: config_text(&row),
             });
         let repository = row
             .get::<Option<i64>, _>("repository_read")
@@ -271,16 +270,16 @@ impl ReadCache for PgStore {
         &self,
         installation_id: u64,
         repo: &RepoName,
-    ) -> Result<Option<Option<String>>> {
+    ) -> Result<Option<ConfigText>> {
         let row = sqlx::query(
-            "SELECT config FROM github_repos
+            "SELECT config, config_path FROM github_repos
              WHERE installation_id = $1 AND repo = $2 AND config_read IS NOT NULL",
         )
         .bind(installation_id as i64)
         .bind(repo.to_string())
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get("config")))
+        Ok(row.map(|r| config_text(&r)))
     }
 
     async fn save_config_read(
@@ -288,16 +287,18 @@ impl ReadCache for PgStore {
         installation_id: u64,
         repo: &RepoName,
         changes: i64,
-        config: Option<&str>,
+        config: &ConfigText,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE github_repos SET config_read = $3, config_read_at = now(), config = $4
+            "UPDATE github_repos SET config_read = $3, config_read_at = now(), config = $4,
+                 config_path = $5
              WHERE installation_id = $1 AND repo = $2",
         )
         .bind(installation_id as i64)
         .bind(repo.to_string())
         .bind(changes)
-        .bind(config)
+        .bind(config.text.as_deref())
+        .bind(config.at.path())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -481,6 +482,18 @@ async fn lock_repo(
     Ok(())
 }
 
+/// The config file a row of `github_repos` read. A file read before the path was kept was at the
+/// legacy path, the only one then.
+fn config_text(row: &sqlx::postgres::PgRow) -> ConfigText {
+    let text: Option<String> = row.get("config");
+    let at = match row.get::<Option<String>, _>("config_path") {
+        Some(path) => ConfigPath::of(&path).unwrap_or(ConfigPath::Current),
+        None if text.is_some() => ConfigPath::Legacy,
+        None => ConfigPath::Current,
+    };
+    ConfigText { at, text }
+}
+
 /// Seconds ago, as Postgres counts them.
 fn since(secs: Option<f64>) -> Option<Duration> {
     secs.map(|s| Duration::from_secs_f64(s.max(0.0)))
@@ -495,6 +508,32 @@ mod tests {
 
     fn repo() -> RepoName {
         RepoName::parse("o/r").unwrap()
+    }
+
+    fn yml() -> ConfigText {
+        ConfigText {
+            at: ConfigPath::Legacy,
+            text: Some("yml".into()),
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_config_read_from_before_its_path_was_kept_is_of_the_legacy_path(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        store.github_reads(1, &repo()).await.unwrap();
+        sqlx::query("UPDATE github_repos SET config_read = 0, config = 'yml'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(store.config_read(1, &repo()).await.unwrap(), Some(yml()));
+        sqlx::query("UPDATE github_repos SET config = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.config_read(1, &repo()).await.unwrap(),
+            Some(ConfigText::none())
+        );
     }
 
     fn write(number: PrNumber, changes: i64, node: Option<Value>) -> PrWrite {
@@ -515,20 +554,20 @@ mod tests {
             .await
             .unwrap();
         store
-            .save_config_read(1, &repo(), start.changes, Some("yml"))
+            .save_config_read(1, &repo(), start.changes, &yml())
             .await
             .unwrap();
         let reads = store.github_reads(1, &repo()).await.unwrap();
         let config = reads.config.unwrap();
-        assert_eq!(config.value.as_deref(), Some("yml"));
+        assert_eq!(config.value, yml());
         assert!(!config.fresh(reads.changes, Duration::from_secs(60)));
         store
-            .save_config_read(1, &repo(), reads.changes, None)
+            .save_config_read(1, &repo(), reads.changes, &ConfigText::none())
             .await
             .unwrap();
         let reads = store.github_reads(1, &repo()).await.unwrap();
         let config = reads.config.unwrap();
-        assert_eq!(config.value, None);
+        assert_eq!(config.value, ConfigText::none());
         assert!(config.fresh(reads.changes, Duration::from_secs(60)));
         assert!(!config.fresh(reads.changes, Duration::ZERO));
     }
@@ -727,9 +766,15 @@ mod tests {
         let store = PgStore::migrate(pool.clone()).await.unwrap();
         let other = RepoName::parse("o/other").unwrap();
         store.github_reads(1, &repo()).await.unwrap();
-        store.save_config_read(1, &repo(), 0, None).await.unwrap();
+        store
+            .save_config_read(1, &repo(), 0, &ConfigText::none())
+            .await
+            .unwrap();
         store.github_reads(1, &other).await.unwrap();
-        store.save_config_read(1, &other, 0, None).await.unwrap();
+        store
+            .save_config_read(1, &other, 0, &ConfigText::none())
+            .await
+            .unwrap();
         for key in ["checks:old", "checks:new"] {
             store.github_value(1, &repo(), key).await.unwrap();
             store

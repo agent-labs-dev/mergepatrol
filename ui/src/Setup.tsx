@@ -53,7 +53,7 @@ export function UnlockSetup() {
         Enter the setup token. MergeLoop prints it in its logs when it starts without a GitHub App:
       </Body>
       <pre className="mt-3 overflow-x-auto rounded-md bg-sunken px-3 py-2 font-mono text-xs">
-        docker compose logs mergepatrol | grep setup_token
+        docker compose logs mergeloop | grep setup_token
       </pre>
       <form onSubmit={submit} className="mt-5 space-y-3">
         <input

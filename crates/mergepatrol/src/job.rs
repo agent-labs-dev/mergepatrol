@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, Depth, FIXED_BY, Finding, Lean, LineKind, Panel, RESOLVED_BY,
-    SentBack, Spend, SpendTask, Verdict, Vote, merge_reviews, most_first,
+    AGENT_TRAILERS, Answered, CheckFailure, CodeLine, Depth, FIXED_BY, Finding, Lean, LineKind,
+    Panel, RESOLVED_BY, SentBack, Spend, SpendTask, Verdict, Vote, merge_reviews, most_first,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -641,8 +641,7 @@ async fn queue_commits(
         return Ok(Vec::new());
     };
     let from = on_head(git, dir, head, Some(since)).await?.unwrap_or(base);
-    git.commits_with(dir, from, head, &[FIXED_BY, RESOLVED_BY])
-        .await
+    git.commits_with(dir, from, head, &AGENT_TRAILERS).await
 }
 
 /// `at`, the head findings went back on, while all that lies between it and the PR's head is the
@@ -1082,6 +1081,7 @@ fn unsafe_file(files: &[String]) -> Option<&str> {
                 || p.components()
                     .any(|c| !matches!(c, std::path::Component::Normal(_)))
                 || p.starts_with(".github")
+                || p.starts_with(".mergeloop")
                 || p.starts_with(".mergepatrol")
         })
         .map(String::as_str)
@@ -1242,7 +1242,7 @@ mod tests {
             "git init -q && git config user.email t@t && git config user.name t \
             && git commit -q --allow-empty -m base \
             && git commit -q --allow-empty -m pr \
-            && git commit -q --allow-empty -m 'fix: lint' -m 'Fixed-by: mergepatrol'",
+            && git commit -q --allow-empty -m 'fix: lint' -m 'Fixed-by: mergeloop'",
         );
         let (base, head) = (sh("git rev-parse HEAD~2"), sh("git rev-parse HEAD"));
         let commits = |since| queue_commits(&Git, dir.path(), &head, &base, since);

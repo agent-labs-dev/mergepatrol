@@ -11,11 +11,11 @@ export const danger = `${outlined} text-bad`;
 export const field =
   "h-9 rounded-md border border-line-strong bg-surface px-3 text-sm shadow-xs outline-none placeholder:text-faint focus:border-fg focus:ring-2 focus:ring-fg/10";
 
-const repo = "agent-labs-dev/mergepatrol";
+const repo = "agent-labs-dev/mergeloop";
 export const repoUrl = `https://github.com/${repo}`;
 export const feedbackUrl = `${repoUrl}/issues/new?template=feedback.yml`;
 /** The menu bar app, rebuilt from main by tray.yml. */
-export const trayDownloadUrl = `${repoUrl}/releases/download/tray-latest/Mergepatrol.zip`;
+export const trayDownloadUrl = `${repoUrl}/releases/download/tray-latest/MergeLoop.zip`;
 
 export function GitHubIcon({ className = "size-4" }: { className?: string }) {
   return (
@@ -72,7 +72,7 @@ export function Avatar({ src, alt, size = "size-5" }: { src: string; alt: string
 }
 
 /** A repo's stand-in for an avatar: its initials on a tile, tinted by its name so each repo
- * keeps its color. "merge-patrol" and "mergePatrol" are "MP", "api" is "AP". */
+ * keeps its color. "merge-loop" and "mergeLoop" are "ML", "api" is "AP". */
 export function RepoIcon({ repo, size = "size-5" }: { repo: string; size?: string }) {
   const name = repo.split("/").at(-1) ?? repo;
   const words = name

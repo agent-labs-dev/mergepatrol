@@ -12,4 +12,4 @@ message: string,
 /**
  * As `GET /api/v1` says it.
  */
-mergepatrol: RepoStatusView, };
+mergeloop: RepoStatusView, };

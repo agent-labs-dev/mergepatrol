@@ -53,10 +53,10 @@ a pull request does not go through cleanly. Checked against GitHub's docs on 31 
 MergeLoop and GitHub's queue should not both run on one branch: they would race for merges.
 
 1. [Install MergeLoop](/docs/getting-started) and merge the setup PR that adds
-   `.mergepatrol/mergepatrol.yml` ([reference](/docs/configuration)).
+   `.mergeloop/mergeloop.yml` ([reference](/docs/configuration)).
 2. Turn off "Require merge queue" on the branch's ruleset or branch protection.
 3. Keep your required checks. MergeLoop waits for the same ones.
-4. Label pull requests `mergepatrol` instead of pressing "Merge when ready".
+4. Label pull requests `mergeloop` instead of pressing "Merge when ready".
 
 You can leave the `merge_group` trigger in your workflows; nothing calls it.
 

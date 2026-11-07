@@ -52,7 +52,7 @@ pub struct App {
 impl App {
     pub fn new(app_id: u64, private_key_pem: &[u8]) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mergeloop/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
             .build()?;
         Ok(Self {
@@ -471,7 +471,7 @@ pub struct AsUser {
 impl AsUser {
     pub fn new(token: String) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("mergeloop/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(60))
             .build()?;
         Ok(Self {
@@ -748,7 +748,7 @@ pub async fn revoke_token(token: &str) -> Result<()> {
 
 async fn revoke_token_at(api: &str, token: &str) -> Result<()> {
     let http = reqwest::Client::builder()
-        .user_agent(concat!("mergepatrol/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("mergeloop/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(60))
         .build()?;
     let build = || async {

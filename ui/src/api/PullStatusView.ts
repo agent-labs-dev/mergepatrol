@@ -26,7 +26,7 @@ url: string,
 /**
  * Whether the repo uses MergeLoop.
  */
-mergepatrol: RepoStatusView, 
+mergeloop: RepoStatusView, 
 /**
  * Its place in the queue. Null when it is not queued.
  */

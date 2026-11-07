@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use mergepatrol_core::{
-    FIXED_BY, Hold, LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review,
+    Hold, LabelSpec, Labels, Person, PrNumber, PrSummary, RepoName, Review, fixed_by_agent,
 };
 
 use crate::Installation;
@@ -14,7 +14,9 @@ use crate::codeowners::{self, CodeOwners};
 use crate::setup::Verdict;
 
 /// Marks the one comment per PR that MergeLoop keeps up to date.
-const STICKY_MARKER: &str = "<!-- mergepatrol:status -->";
+const STICKY_MARKER: &str = "<!-- mergeloop:status -->";
+/// The mark of the comment MergeLoop kept as Mergepatrol, which it edits on and on.
+const LEGACY_STICKY_MARKER: &str = "<!-- mergepatrol:status -->";
 
 #[derive(Debug, Clone)]
 pub struct RepoSnapshot {
@@ -1235,7 +1237,7 @@ impl Installation {
             anyhow::bail!("get commit {sha}: {} {}", res.status, res.body);
         }
         let message = res.body["message"].as_str().context("commit message")?;
-        if !message.lines().any(|l| l.starts_with(FIXED_BY)) {
+        if !fixed_by_agent(message) {
             return Ok(None);
         }
         let path = format!("/repos/{repo}/commits/{sha}");
@@ -1476,13 +1478,13 @@ impl Installation {
         anyhow::bail!("{}", last.unwrap_or_default())
     }
 
-    /// Dismisses each request for changes on the PR whose body holds `mark`: MergeLoop's own,
-    /// once what it sent back no longer holds. How many it dismissed.
+    /// Dismisses each request for changes on the PR whose body holds one of `marks`: MergeLoop's
+    /// own, once what it sent back no longer holds. How many it dismissed.
     pub async fn dismiss_reviews_marked(
         &self,
         repo: &RepoName,
         number: PrNumber,
-        mark: &str,
+        marks: &[&str],
         message: &str,
     ) -> Result<usize> {
         #[derive(Deserialize)]
@@ -1501,10 +1503,9 @@ impl Installation {
                     None,
                 )
                 .await?;
-            for r in reviews
-                .iter()
-                .filter(|r| r.state == "CHANGES_REQUESTED" && r.body.contains(mark))
-            {
+            for r in reviews.iter().filter(|r| {
+                r.state == "CHANGES_REQUESTED" && marks.iter().any(|m| r.body.contains(m))
+            }) {
                 let _: Value = self
                     .rest(
                         Method::PUT,
@@ -1521,13 +1522,13 @@ impl Installation {
         Ok(dismissed)
     }
 
-    /// The PR's review threads that start with a comment holding `mark`, up to 100: MergeLoop's
-    /// own, as its reviews post them.
+    /// The PR's review threads that start with a comment holding one of `marks`, up to 100:
+    /// MergeLoop's own, as its reviews post them.
     pub async fn threads_marked(
         &self,
         repo: &RepoName,
         number: PrNumber,
-        mark: &str,
+        marks: &[&str],
     ) -> Result<Vec<ReviewThread>> {
         #[derive(Deserialize)]
         struct Data {
@@ -1583,7 +1584,7 @@ impl Installation {
             .into_iter()
             .filter_map(|t| {
                 let first = t.first.nodes.into_iter().next()?;
-                if !first.body.contains(mark) {
+                if !marks.iter().any(|m| first.body.contains(m)) {
                     return None;
                 }
                 let last = t.last.nodes.into_iter().next();
@@ -1713,9 +1714,9 @@ impl Installation {
                 .iter()
                 .find(|c| {
                     c["user"]["type"] == "Bot"
-                        && c["body"]
-                            .as_str()
-                            .is_some_and(|b| b.starts_with(STICKY_MARKER))
+                        && c["body"].as_str().is_some_and(|b| {
+                            b.starts_with(STICKY_MARKER) || b.starts_with(LEGACY_STICKY_MARKER)
+                        })
                 })
                 .and_then(|c| c["id"].as_u64());
             if mine.is_some() || comments.len() < 100 {
@@ -1963,8 +1964,9 @@ mod tests {
         let others: Vec<String> = (0..100)
             .map(|i| format!(r#"{{"id":{i},"user":{{"type":"User"}},"body":"lgtm"}}"#))
             .collect();
-        let mine =
-            format!(r#"[{{"id":4242,"user":{{"type":"Bot"}},"body":"{STICKY_MARKER}\nold"}}]"#);
+        let mine = format!(
+            r#"[{{"id":4242,"user":{{"type":"Bot"}},"body":"{LEGACY_STICKY_MARKER}\nold"}}]"#
+        );
         let (gh, requests) = fake::serve(vec![
             (200, "", leak(format!("[{}]", others.join(",")))),
             (200, "", leak(mine)),
@@ -2176,7 +2178,7 @@ mod tests {
         ]"#;
         let (gh, requests) = fake::serve(vec![(200, "", reviews), (200, "", "{}")]).await;
         let repo = RepoName::parse("o/r").unwrap();
-        let dismissed = gh.dismiss_reviews_marked(&repo, 7, "<!-- mark -->", "cleared");
+        let dismissed = gh.dismiss_reviews_marked(&repo, 7, &["<!-- mark -->"], "cleared");
         assert_eq!(dismissed.await.unwrap(), 1);
         assert_eq!(
             *requests.lock().unwrap(),
@@ -2244,11 +2246,11 @@ mod tests {
         let pr: PullRequest = serde_json::from_value(json!({
             "number": 7, "state": "OPEN", "title": "Fix it", "body": "", "isDraft": false,
             "isCrossRepository": false, "reviewDecision": "APPROVED", "baseRefName": "main",
-            "headRefName": "fix", "headRefOid": "abc", "labels": { "nodes": [{ "name": "mergepatrol" }] },
+            "headRefName": "fix", "headRefOid": "abc", "labels": { "nodes": [{ "name": "mergeloop" }] },
             "files": { "nodes": [{ "path": "src/a.rs" }] },
             "url": "https://github.com/o/r/pull/7", "createdAt": "2026-10-01T00:00:00Z",
             "additions": 3, "deletions": 1, "changedFiles": 2,
-            "author": { "__typename": "Bot", "login": "merge-patrol", "avatarUrl": "m" },
+            "author": { "__typename": "Bot", "login": "mergeloop", "avatarUrl": "m" },
             "latestOpinionatedReviews": { "nodes": [
                 { "state": "APPROVED", "author": { "login": "ann", "avatarUrl": "a" } },
                 { "state": "CHANGES_REQUESTED", "author": null },
@@ -2260,7 +2262,7 @@ mod tests {
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": { "state": "PENDING" } } }] },
             "fixCommits": { "nodes": [
                 { "commit": { "message": "the author's" } },
-                { "commit": { "message": "Fix ci\n\nFixed-by: mergepatrol, a" } },
+                { "commit": { "message": "Fix ci\n\nFixed-by: mergeloop, a" } },
             ] },
         }))
         .unwrap();
@@ -2290,7 +2292,7 @@ mod tests {
         assert_eq!(s.fixes, 1);
     }
 
-    const FIX_COMMIT: &str = r#"{"message":"Fix test\n\nFixed-by: mergepatrol, claude (claude-opus-5-5)\nCo-authored-by: mergepatrol <m@x>"}"#;
+    const FIX_COMMIT: &str = r#"{"message":"Fix test\n\nFixed-by: mergepatrol, claude (claude-opus-5-5)\nCo-authored-by: mergeloop <m@x>"}"#;
     const FIX_DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
 
     #[tokio::test]

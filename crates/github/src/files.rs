@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
-use mergepatrol_core::RepoName;
+use mergepatrol_core::{ConfigPath, RepoName};
 
 use crate::Installation;
 use crate::app::AsUser;
@@ -34,6 +34,8 @@ pub struct Proposal<'a> {
     pub base: &'a BranchFile,
     /// Paths and their text.
     pub files: &'a [(&'a str, &'a str)],
+    /// Paths the change deletes.
+    pub removed: &'a [&'a str],
     pub branch: &'a str,
     pub title: &'a str,
     pub body: &'a str,
@@ -46,6 +48,57 @@ const DEFAULT_BRANCH_FILE: &str = "query($owner: String!, $name: String!, $path:
       } } }
     }
   }";
+
+/// A repo's config file on its default branch, wherever [`ConfigPath`] finds it.
+#[derive(Debug, Clone)]
+pub struct ConfigFile {
+    /// Where the file is, or where one would go when there is none.
+    pub at: ConfigPath,
+    pub file: BranchFile,
+}
+
+/// The default branch's file at each of [`ConfigPath::ALL`], as `c0`, `c1`.
+fn config_file_query() -> String {
+    let files: Vec<String> = ConfigPath::ALL
+        .iter()
+        .enumerate()
+        .map(|(i, at)| {
+            format!(
+                "c{i}: file(path: {}) {{ object {{ ... on Blob {{ text }} }} }}",
+                json!(at.path())
+            )
+        })
+        .collect();
+    format!(
+        "query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{
+          defaultBranchRef {{ name target {{ oid ... on Commit {{ {} }} }} }} }} }}",
+        files.join(" ")
+    )
+}
+
+/// The first config file there is, from a `config_file_query` answer.
+fn config_file(data: &Value) -> Result<ConfigFile> {
+    let r = &data["repository"]["defaultBranchRef"];
+    let texts: Vec<Option<String>> = (0..ConfigPath::ALL.len())
+        .map(|i| {
+            r["target"][format!("c{i}")]["object"]["text"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect();
+    let found = texts.iter().position(Option::is_some).unwrap_or(0);
+    Ok(ConfigFile {
+        at: ConfigPath::ALL[found],
+        file: BranchFile {
+            branch: r["name"]
+                .as_str()
+                .context("the repo has no default branch")?
+                .to_owned(),
+            sha: r["target"]["oid"].as_str().context("trunk sha")?.to_owned(),
+            text: texts[found].clone(),
+        },
+    })
+}
 
 /// What [`Installation::objects_at`] found.
 #[derive(Debug, Clone)]
@@ -95,6 +148,17 @@ impl AsUser {
             .await?;
         branch_file(&data)
     }
+
+    pub async fn config_file(&self, repo: &RepoName) -> Result<ConfigFile> {
+        let data = self
+            .graphql_missing_ok(
+                "config file",
+                &config_file_query(),
+                json!({ "owner": repo.owner, "name": repo.name }),
+            )
+            .await?;
+        config_file(&data)
+    }
 }
 
 impl Installation {
@@ -107,6 +171,19 @@ impl Installation {
             )
             .await?;
         branch_file(&data)
+    }
+
+    /// The repo's config file on its default branch, at the first of [`ConfigPath::ALL`] that
+    /// has one.
+    pub async fn config_file(&self, repo: &RepoName) -> Result<ConfigFile> {
+        let data = self
+            .graphql_missing_ok(
+                "config file",
+                &config_file_query(),
+                json!({ "owner": repo.owner, "name": repo.name }),
+            )
+            .await?;
+        config_file(&data)
     }
 
     /// `path` on `branch`, or `None` when either is missing.
@@ -264,7 +341,7 @@ impl Installation {
     /// Commits the files on `branch`, from the default branch's head, and opens a PR from it, or
     /// updates the one open. The branch is MergeLoop's: whatever was on it is replaced.
     pub async fn propose_file(&self, repo: &RepoName, p: Proposal<'_>) -> Result<PullRef> {
-        let mut entries = Vec::with_capacity(p.files.len());
+        let mut entries = Vec::with_capacity(p.files.len() + p.removed.len());
         for (path, text) in p.files {
             entries.push(TreeEntry {
                 path: (*path).to_owned(),
@@ -273,6 +350,12 @@ impl Installation {
                 sha: Some(self.create_blob(repo, text.as_bytes()).await?),
             });
         }
+        entries.extend(p.removed.iter().map(|path| TreeEntry {
+            path: (*path).to_owned(),
+            mode: "100644".into(),
+            kind: "blob",
+            sha: None,
+        }));
         let base_tree = self.commit_tree(repo, &p.base.sha).await?;
         let tree = self.create_tree(repo, &base_tree, &entries).await?;
         let commit = self
@@ -322,4 +405,34 @@ fn pull_ref(pr: &Value) -> Option<PullRef> {
         number: pr["number"].as_u64()?,
         url: pr["html_url"].as_str()?.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answer(current: Option<&str>, legacy: Option<&str>) -> Value {
+        let file = |t: Option<&str>| t.map(|t| json!({ "object": { "text": t } }));
+        json!({ "repository": { "defaultBranchRef": { "name": "main", "target": {
+            "oid": "abc", "c0": file(current), "c1": file(legacy),
+        } } } })
+    }
+
+    #[test]
+    fn the_config_file_is_at_the_new_path_before_the_old() {
+        let found = |c, l| {
+            let f = config_file(&answer(c, l)).unwrap();
+            (f.at, f.file.text)
+        };
+        assert_eq!(found(None, None), (ConfigPath::Current, None));
+        assert_eq!(
+            found(None, Some("old")),
+            (ConfigPath::Legacy, Some("old".into()))
+        );
+        assert_eq!(
+            found(Some("new"), Some("old")),
+            (ConfigPath::Current, Some("new".into()))
+        );
+        assert!(config_file_query().contains(r#"c1: file(path: ".mergepatrol/mergepatrol.yml")"#));
+    }
 }

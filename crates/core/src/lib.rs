@@ -20,8 +20,8 @@ pub use lane::{
     PendingMerge, Person, PrSummary, Review, Stage,
 };
 pub use repo_config::{
-    AgentSettings, EFFORTS, FixCiSettings, LabelSpec, Labels, ModelOverrides, REPO_CONFIG_PATH,
-    RepoSettings, TaskModel, WorkspaceDefaults,
+    AgentSettings, ConfigPath, ConfigText, DEFAULT_LABEL, EFFORTS, FixCiSettings, LabelSpec,
+    Labels, ModelOverrides, REPO_CONFIG_PATH, RepoSettings, TaskModel, WorkspaceDefaults,
 };
 pub use review::{
     Answer, Answered, Bar, CodeLine, Depth, Evidence, Finding, Judged, Kind, Lean, LineKind,
@@ -37,9 +37,24 @@ use serde::{Deserialize, Serialize};
 pub type PrNumber = u64;
 
 /// The trailer on every commit the fix agent makes, before the agent's name.
-pub const FIXED_BY: &str = "Fixed-by: mergepatrol";
+pub const FIXED_BY: &str = "Fixed-by: mergeloop";
 /// The trailer of a commit whose conflict the agent resolved in a rebase.
-pub const RESOLVED_BY: &str = "Resolved-by: mergepatrol";
+pub const RESOLVED_BY: &str = "Resolved-by: mergeloop";
+/// Every trailer of the agent's commits, with those it wrote as Mergepatrol, which a PR's older
+/// commits still carry.
+pub const AGENT_TRAILERS: [&str; 4] = [
+    FIXED_BY,
+    RESOLVED_BY,
+    "Fixed-by: mergepatrol",
+    "Resolved-by: mergepatrol",
+];
+
+/// Whether `message` is of a commit the fix agent made.
+pub fn fixed_by_agent(message: &str) -> bool {
+    message
+        .lines()
+        .any(|l| l.starts_with(FIXED_BY) || l.starts_with("Fixed-by: mergepatrol"))
+}
 /// The empty commit that runs a PR's checks again.
 pub const RECHECK_MESSAGE: &str =
     "Run the checks again\n\nThe agent found nothing to fix in the code.";
@@ -50,7 +65,7 @@ pub const RECHECK_MESSAGE: &str =
 pub fn fixes_used<'a>(messages: impl IntoIterator<Item = &'a str>) -> u32 {
     let mut used = 0;
     for message in messages {
-        if message.lines().any(|l| l.starts_with(FIXED_BY)) {
+        if fixed_by_agent(message) {
             used += 1;
         // A rebase's rewrite adds trailers after it.
         } else if !message.starts_with(RECHECK_MESSAGE) {
@@ -192,8 +207,12 @@ mod tests {
 
     #[test]
     fn the_budget_counts_the_agents_fixes_on_top_of_the_authors_last_commit() {
-        let fix = "Fix ci\n\nFixed-by: mergepatrol, claude";
-        assert_eq!(fixes_used([fix, RECHECK_MESSAGE, fix, "the author's"]), 2);
+        let fix = "Fix ci\n\nFixed-by: mergeloop, claude";
+        let legacy = "Fix ci\n\nFixed-by: mergepatrol, claude";
+        assert_eq!(
+            fixes_used([fix, RECHECK_MESSAGE, legacy, "the author's"]),
+            2
+        );
         assert_eq!(fixes_used(["the author's", fix, fix]), 0);
         let rewritten = format!("{RECHECK_MESSAGE}\n\nCo-authored-by: a <a@example.com>");
         assert_eq!(fixes_used([rewritten.as_str(), fix]), 1);

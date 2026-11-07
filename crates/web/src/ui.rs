@@ -118,7 +118,7 @@ fn llms(public_url: &str) -> String {
         .map(|c| c.llms_section(public_url))
         .collect();
     format!(
-        "{}{}{pages}\n## More\n\n- [Changelog]({public_url}/changelog): what changed, newest first\n- [Source](https://github.com/agent-labs-dev/mergepatrol): Apache-2.0, on GitHub\n",
+        "{}{}{pages}\n## More\n\n- [Changelog]({public_url}/changelog): what changed, newest first\n- [Source](https://github.com/agent-labs-dev/mergeloop): Apache-2.0, on GitHub\n",
         LLMS_INTRO.replace("{public_url}", public_url),
         crate::docs::llms_section(public_url)
     )

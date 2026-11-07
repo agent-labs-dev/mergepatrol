@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{CheckFailure, LabelSpec, Labels, PrNumber, RepoName};
+use mergepatrol_core::{CheckFailure, ConfigText, LabelSpec, Labels, PrNumber, RepoName};
 use mergepatrol_github::{
     BranchMerge, BranchRules, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot,
     SnapshotParts, queued,
@@ -29,14 +29,14 @@ const PULL_REF_SETTLE: Duration = Duration::from_secs(30);
 /// What the cache reads from GitHub. `Installation` in production; a fake in the tests.
 #[async_trait]
 pub trait Reads: Send + Sync {
-    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>>;
+    async fn config_file(&self, repo: &RepoName) -> Result<ConfigText>;
     async fn snapshot_parts(&self, repo: &RepoName, labels: &Labels) -> Result<SnapshotParts>;
     async fn pull_request_node(&self, repo: &RepoName, number: PrNumber) -> Result<Value>;
 }
 
 #[async_trait]
 impl Reads for Installation {
-    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>> {
+    async fn config_file(&self, repo: &RepoName) -> Result<ConfigText> {
         GitHub::config_file(self, repo).await
     }
     async fn snapshot_parts(&self, repo: &RepoName, labels: &Labels) -> Result<SnapshotParts> {
@@ -60,7 +60,7 @@ pub struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    pub async fn config_file(&self, repo: &RepoName) -> Result<Option<String>> {
+    pub async fn config_file(&self, repo: &RepoName) -> Result<ConfigText> {
         let reads = self.store.github_reads(self.installation, repo).await?;
         if let Some(read) = reads.config
             && read.fresh(reads.changes, READ_ALL_EVERY)
@@ -70,7 +70,7 @@ impl Reader<'_> {
         let config = self.reads.config_file(repo).await?;
         if settled(reads.changed, SETTLE) {
             self.store
-                .save_config_read(self.installation, repo, reads.changes, config.as_deref())
+                .save_config_read(self.installation, repo, reads.changes, &config)
                 .await?;
         }
         Ok(config)
@@ -277,7 +277,7 @@ impl GitHub for Cached<'_> {
     fn installation_id(&self) -> u64 {
         self.gh.id
     }
-    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>> {
+    async fn config_file(&self, repo: &RepoName) -> Result<ConfigText> {
         self.reader.config_file(repo).await
     }
     async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
@@ -443,10 +443,10 @@ impl GitHub for Cached<'_> {
         &self,
         repo: &RepoName,
         number: PrNumber,
-        mark: &str,
+        marks: &[&str],
         message: &str,
     ) -> Result<usize> {
-        GitHub::dismiss_reviews_marked(self.gh, repo, number, mark, message).await
+        GitHub::dismiss_reviews_marked(self.gh, repo, number, marks, message).await
     }
     async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
         GitHub::set_body(self.gh, repo, number, body).await
@@ -458,6 +458,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    use mergepatrol_core::ConfigPath;
     use mergepatrol_store::{PgStore, ReadCache};
     use sqlx::PgPool;
 
@@ -509,9 +510,12 @@ mod tests {
 
     #[async_trait]
     impl Reads for Fake {
-        async fn config_file(&self, _: &RepoName) -> Result<Option<String>> {
+        async fn config_file(&self, _: &RepoName) -> Result<ConfigText> {
             self.calls.lock().unwrap().push("config".into());
-            Ok(Some("label: mp".into()))
+            Ok(ConfigText {
+                at: ConfigPath::Current,
+                text: Some("label: mp".into()),
+            })
         }
         async fn snapshot_parts(&self, _: &RepoName, labels: &Labels) -> Result<SnapshotParts> {
             self.calls.lock().unwrap().push("snapshot".into());
@@ -568,7 +572,7 @@ mod tests {
         };
         for _ in 0..3 {
             assert_eq!(
-                reader.config_file(&repo()).await.unwrap().as_deref(),
+                reader.config_file(&repo()).await.unwrap().text.as_deref(),
                 Some("label: mp")
             );
             assert_eq!(numbers(&reader, "mp").await, [1]);
