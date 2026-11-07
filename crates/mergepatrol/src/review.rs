@@ -10,7 +10,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
     Answered, Event, Evidence, Finding, Judged, Lean, PrNumber, RepoName, RepoSettings,
-    ReviewSettings, ReviewStatus, Runs, SentBack, review_status, review_url,
+    ReviewSettings, ReviewStatus, Runs, SentBack, Verdict, Verification, Verifier, review_status,
+    review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
@@ -404,6 +405,7 @@ async fn author_brief(
 /// The review the author's agent posted, as MergeLoop's own job would have written it. Its
 /// evidence is the agent's word that the command failed: nothing runs it again.
 fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput, String> {
+    use mergepatrol_core::{Panel, Verifier};
     let mut output: ReviewOutput = serde_json::from_value(review.clone())
         .map_err(|e| format!("The review the author's agent posted does not read: {e}."))?;
     if let Some(by) = review["by"].as_str() {
@@ -415,6 +417,9 @@ fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput
         f.confidence = f.confidence.min(100);
         if let Some(e) = &mut f.evidence {
             e.failed = !e.command.trim().is_empty();
+        }
+        if let Some(v) = f.verified.take() {
+            f.verified = Some(Panel::SECURITY.verdict(Verifier::Author, v.votes));
         }
     }
     Ok(output)
@@ -956,11 +961,49 @@ fn shows_it(e: &Evidence, head: &str, patch: bool) -> String {
     text
 }
 
-/// What a finding's evidence showed on `head`, if MergeLoop saw it fail.
+/// What showed a finding's change is needed on `head`: its evidence, if MergeLoop saw it fail,
+/// else its panel's votes.
 fn shown(f: &Judged, head: &str, patch: bool) -> String {
-    match &f.finding.evidence {
-        Some(e) if e.failed => shows_it(e, head, patch),
+    match (&f.finding.evidence, &f.finding.verified) {
+        (Some(e), _) if e.failed => shows_it(e, head, patch),
+        (_, Some(v)) => voted(v),
         _ => String::new(),
+    }
+}
+
+/// What a finding's panel said of it, and who ran the panel.
+fn voted(v: &Verification) -> String {
+    let n = v.votes.len();
+    let (who, after) = match v.by {
+        Verifier::MergeLoop => (format!("MergeLoop had {n} fresh agents"), ""),
+        Verifier::Author => (
+            format!("The author's agent says it had {n} fresh subagents"),
+            " MergeLoop did not run them.",
+        ),
+    };
+    let whys: String = v
+        .votes
+        .iter()
+        .map(|v| {
+            format!(
+                "\n- {}: {}",
+                verdict(v.verdict),
+                clip(v.why.trim(), TEXT_CHARS)
+            )
+        })
+        .collect();
+    format!(
+        "**Checked:** {who} check it, each given only this finding and the code: {} of {n} say it holds, and {} had to.{after}\n\n<details><summary>What each said</summary>\n{whys}\n\n</details>\n\n",
+        v.holds(),
+        v.needed,
+    )
+}
+
+fn verdict(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Holds => "holds",
+        Verdict::DoesNotHold => "does not hold",
+        Verdict::Abstained => "no vote",
     }
 }
 
@@ -1007,6 +1050,21 @@ fn thread_body(f: &Judged, head: &str) -> String {
 fn github_body(ctx: &Ctx, key: &LaneKey, number: PrNumber, done: &ReviewDone) -> String {
     let url = review_url(&ctx.config.public_url, &key.repo, &key.trunk, number);
     review_body(&url, &key.repo, number, done)
+}
+
+/// Why a change the review cleared is only a note. Empty for one it found fine.
+fn cleared_note(f: &Finding) -> String {
+    match (f.lean, f.shows_the_change(), &f.verified) {
+        (Lean::Fine | Lean::PreExisting, ..) => String::new(),
+        (Lean::Change, true, _) => ", a note under the bar".into(),
+        (Lean::Change, false, Some(v)) => format!(
+            ", a note: {} of {} fresh agents said it holds, and {} had to",
+            v.holds(),
+            v.votes.len(),
+            v.needed
+        ),
+        (Lean::Change, false, None) => ", a note: nothing showed the change was needed".into(),
+    }
 }
 
 /// The review's summary, with `url` where a human answers it: bounded, whatever the agent wrote.
@@ -1067,11 +1125,7 @@ fn cleared_section(cleared: &[&Judged]) -> String {
     }
     let mut section = String::from("\n\n<details><summary>What it cleared</summary>\n");
     for f in cleared {
-        let note = match (f.finding.lean, f.finding.shows_the_change()) {
-            (Lean::Change, false) => ", a note: nothing showed the change was needed",
-            (Lean::Change, true) => ", a note under the bar",
-            (Lean::Fine | Lean::PreExisting, _) => "",
-        };
+        let note = cleared_note(&f.finding);
         section.push_str(&format!(
             "\n- {} ({}%{note})",
             clip(&f.finding.title, TITLE_CHARS),
@@ -1201,6 +1255,30 @@ mod tests {
             .collect();
         let many = serde_json::json!({ "summary": "s", "findings": many });
         assert_eq!(posted_review(&many).unwrap().findings.len(), 25);
+        // Its votes are its agent's word, held to MergeLoop's panel, whatever it says of them.
+        let hole = |verified| {
+            let posted = serde_json::json!({ "summary": "s", "findings": [
+                { "kind": "security", "title": "a", "confidence": 90, "lean": "change",
+                  "finding": "x", "verified": verified },
+            ] });
+            posted_review(&posted).unwrap().findings.remove(0)
+        };
+        let votes = |v: &[&str]| -> Vec<serde_json::Value> {
+            v.iter()
+                .map(|v| serde_json::json!({ "verdict": v, "why": "w" }))
+                .collect()
+        };
+        let stuffed = hole(serde_json::json!({ "by": "merge_loop", "needed": 1,
+            "votes": votes(&["does_not_hold", "does_not_hold", "holds", "holds"]) }));
+        let v = stuffed.verified.as_ref().unwrap();
+        assert_eq!(
+            (v.by, v.needed, v.votes.len()),
+            (mergepatrol_core::Verifier::Author, 2, 3)
+        );
+        assert!(!stuffed.shows_the_change());
+        let agreed =
+            hole(serde_json::json!({ "votes": votes(&["holds", "holds", "does_not_hold"]) }));
+        assert!(agreed.shows_the_change());
         // Whoever posted it is named, in code so GitHub pings no one, as any writer of the repo may review for its author.
         let by = serde_json::json!({ "summary": "s", "findings": [], "by": "octo" });
         assert_eq!(
@@ -1322,6 +1400,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_security_findings_thread_and_note_say_what_its_panel_voted_and_who_ran_it() {
+        use mergepatrol_core::{Panel, Verdict, Verifier, Vote};
+        let vote = |verdict| Vote {
+            verdict,
+            why: "The header reaches it.".into(),
+        };
+        let mut f = review(1, true, None).findings.remove(0);
+        f.finding.kind = Kind::Security;
+        f.finding.evidence = None;
+        let cast = vec![
+            vote(Verdict::Holds),
+            vote(Verdict::Holds),
+            vote(Verdict::DoesNotHold),
+        ];
+        f.finding.verified = Some(Panel::SECURITY.verdict(Verifier::MergeLoop, cast.clone()));
+        let body = thread_body(&f, "abc1234");
+        assert!(
+            body.contains("MergeLoop had 3 fresh agents check it, each given only this finding and the code: 2 of 3 say it holds, and 2 had to."),
+            "{body}"
+        );
+        assert!(body.contains("The header reaches it."));
+        f.finding.verified = Some(Panel::SECURITY.verdict(Verifier::Author, cast));
+        let body = thread_body(&f, "abc1234");
+        assert!(
+            body.contains("The author's agent says it had 3 fresh subagents check it"),
+            "{body}"
+        );
+        assert!(body.contains("MergeLoop did not run them"), "{body}");
+        // Voted down, it is a note that says so.
+        let down = vec![
+            vote(Verdict::Holds),
+            vote(Verdict::DoesNotHold),
+            vote(Verdict::Abstained),
+        ];
+        f.finding.verified = Some(Panel::SECURITY.verdict(Verifier::MergeLoop, down));
+        f.sent_back = false;
+        let done = ReviewDone {
+            status: ReviewStatus::Approved,
+            error: None,
+            summary: String::new(),
+            findings: vec![f],
+            asked: Vec::new(),
+        };
+        let body = review_body("https://m.test", &RepoName::parse("o/r").unwrap(), 7, &done);
+        assert!(
+            body.contains("a note: 1 of 3 fresh agents said it holds, and 2 had to"),
+            "{body}"
+        );
+    }
+
+    /// However long what the agent wrote, a comment fits GitHub without its test, and with it
+    /// only whole: the thread, a reply in it, and the review's summary.
     #[test]
     fn a_pre_existing_bug_is_a_note_to_file_not_one_the_review_cleared() {
         let repo = RepoName::parse("o/r").unwrap();
