@@ -880,13 +880,28 @@ fn verdict(v: Verdict) -> &'static str {
     }
 }
 
+/// The other places a bug that recurs is, for its author to fix at each.
+fn also_at(f: &Judged) -> String {
+    match f.finding.also_at.as_slice() {
+        [] => String::new(),
+        places => {
+            let places: Vec<String> = places.iter().map(|p| format!("`{p}`")).collect();
+            format!(
+                "**Also at:** {}. Fix it at each place.\n\n",
+                clip(&places.join(", "), TEXT_CHARS)
+            )
+        }
+    }
+}
+
 /// The reply in a finding's thread when a later head's review finds it again, with the evidence
 /// that head's run showed.
 fn still_holds(f: &Judged, head: &str) -> String {
     fitted(|patch| {
         format!(
-            "Still holds on `{head}`: {}\n\n{}{}\n\n{REPLY_MARK}",
+            "Still holds on `{head}`: {}\n\n{}{}{}\n\n{REPLY_MARK}",
             clip(&f.finding.finding, TEXT_CHARS),
+            also_at(f),
             shown(f, head, patch),
             still(f)
         )
@@ -905,12 +920,13 @@ fn thread_body(f: &Judged, head: &str) -> String {
     };
     fitted(|patch| {
         format!(
-            "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}{}\n\n{MARK}{} -->",
+            "**{to}** · `{}` · {} · {}% sure{whole}\n\n**{}**\n\n{}\n\n{}{}{}\n\n{MARK}{} -->",
             f.finding.id,
             f.finding.kind.as_str(),
             f.finding.confidence,
             clip(&f.finding.title, TITLE_CHARS),
             clip(&f.finding.finding, TEXT_CHARS),
+            also_at(f),
             shown(f, head, patch),
             still(f),
             norm(&f.finding.title),
@@ -1183,6 +1199,7 @@ mod tests {
             verified: None,
             code: Vec::new(),
             related: Vec::new(),
+            also_at: Vec::new(),
         };
         ReviewRecord {
             since_head: None,
@@ -1262,6 +1279,26 @@ mod tests {
             "{reply}"
         );
         assert!(reply.contains("FAILED again"), "{reply}");
+        // A bug that recurs names every other place it is, here and in each later reply.
+        f.finding.also_at = vec![
+            mergepatrol_core::Place {
+                file: "b.rs".into(),
+                line: Some(9),
+                code: Vec::new(),
+            },
+            mergepatrol_core::Place {
+                file: "c.rs".into(),
+                line: None,
+                code: Vec::new(),
+            },
+        ];
+        for body in [thread_body(&f, "def5678"), still_holds(&f, "def5678")] {
+            assert!(
+                body.contains("**Also at:** `b.rs:9`, `c.rs`. Fix it at each place."),
+                "{body}"
+            );
+        }
+        f.finding.also_at.clear();
         // A comment with a test too long for it goes without the test, never with part of it.
         let e = f.finding.evidence.as_mut().unwrap();
         e.patch = format!("+{}", "x".repeat(BODY_CHARS));

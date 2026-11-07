@@ -526,7 +526,8 @@ async fn review(
     Ok(())
 }
 
-/// Numbers each finding, and gives it and what it relates to their code at `head`.
+/// Numbers each finding, and gives it, each other place it is, and what it relates to their
+/// code at `head`.
 async fn with_code(
     git: &Git,
     dir: &Path,
@@ -539,6 +540,9 @@ async fn with_code(
         f.confidence = f.confidence.clamp(0, 100);
         if let Some(file) = f.file.clone() {
             f.code = diff_lines(git, dir, base, head, &file, f.line).await?;
+        }
+        for p in &mut f.also_at {
+            p.code = diff_lines(git, dir, base, head, &p.file, p.line).await?;
         }
         for r in &mut f.related {
             r.code = file_lines(git, dir, head, &r.file, r.line).await?;
