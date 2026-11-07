@@ -200,7 +200,7 @@ pub trait Resolver: Send + Sync {
 
 pub(crate) const GIVE_UP: &str = "MERGEPATROL_GIVE_UP:";
 const RETITLE: &str = "MERGEPATROL_RETITLE:";
-const COMMIT: &str = "MERGEPATROL_COMMIT:";
+const COMMIT: &str = "MERGELOOP_COMMIT:";
 
 /// The reason the agent gave up, if its last message says it did.
 pub(crate) fn gave_up(text: &str) -> Option<String> {
@@ -1081,12 +1081,12 @@ mod retitle_tests {
 
     #[test]
     fn a_commit_subject_is_read_from_its_line() {
-        let text = "Dropped the export.\n  MERGEPATROL_COMMIT: fix(auth): stop exporting Session\n";
+        let text = "Dropped the export.\n  MERGELOOP_COMMIT: fix(auth): stop exporting Session\n";
         assert_eq!(
             commit_subject(text).as_deref(),
             Some("fix(auth): stop exporting Session")
         );
-        assert_eq!(commit_subject("MERGEPATROL_COMMIT: "), None);
+        assert_eq!(commit_subject("MERGELOOP_COMMIT: "), None);
         assert_eq!(commit_subject("Fixed."), None);
     }
 }
