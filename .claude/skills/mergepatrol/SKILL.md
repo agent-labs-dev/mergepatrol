@@ -93,7 +93,7 @@ A PR with no unresolved thread and nothing asked of a human goes on to the queue
 
 - Never call `answer_agent_review` on a PR you built, and never approve your own PR with `review_pull`. That would answer your own review.
 - After three reviews in a row that send findings back, the next one asks a human about what is still left. Don't try to beat it with a fourth fix: mark those `needs-human`.
-- To have the reviewer settle a finding now rather than on the next push, reply to it with `ask_agent_about_review`, giving its `head_sha` and finding id. Its answer, in `questions`, ends `VERDICT: withdrawn` or `VERDICT: stands`.
+- To have the reviewer settle a finding now rather than on the next push, reply to it with `ask_agent_about_review`, giving its `head_sha` and finding id. Its answer, in `questions`, ends `VERDICT: withdrawn` (the finding was wrong), `VERDICT: intended` (the code does what its author meant), or `VERDICT: stands`. Either of the first two lifts the finding.
 - A finding about what wasn't checked, such as "never run on a device" or "no tests cover this", is yours to close while you can: run it, or write the test, and say what you ran in its reply. Only when you can't, such as having no device, is it `needs-human`, and it says what a human would have to run.
 
 ### The ledger
