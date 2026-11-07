@@ -1386,6 +1386,7 @@ mod tests {
             suggestion: String::new(),
             evidence: None,
             needs_human: false,
+            verified: None,
             code: Vec::new(),
             related: Vec::new(),
         };

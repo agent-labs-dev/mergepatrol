@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, Evidence, FIXED_BY, Finding, Lean, LineKind, RESOLVED_BY,
-    SentBack, Spend, SpendTask,
+    Answered, CheckFailure, CodeLine, Evidence, FIXED_BY, Finding, Lean, LineKind, Panel,
+    RESOLVED_BY, SentBack, Spend, SpendTask, Verdict, Verifier, Vote,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -23,7 +23,7 @@ use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
     ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
-    ResolveRequest, Resolver, ReviewRequest, Verify, new_title,
+    ResolveRequest, Resolver, ReviewRequest, Verify, VerifyRequest, claim, new_title, vote,
 };
 use tokio::io::AsyncReadExt;
 
@@ -547,6 +547,13 @@ async fn review(
         }
     }
     check_evidence(&spec.head_sha, git, dir, &mut output.findings, events).await?;
+    let bench = Bench {
+        git,
+        dir,
+        head: &spec.head_sha,
+    };
+    let panel = (spec, resolver, base.as_str());
+    verify_findings(panel, &bench, out, &mut output.findings, events).await?;
     tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
     Ok(())
 }
@@ -807,6 +814,110 @@ async fn check_evidence(
     git.reset_to(dir, head).await
 }
 
+/// Where a panel's agents sit: each in a worktree of `head` of its own, off the job's checkout.
+struct Bench<'a> {
+    git: &'a Git,
+    dir: &'a Path,
+    head: &'a str,
+}
+
+impl Bench<'_> {
+    /// Runs one agent per seat, all at once, each fresh, in its own worktree, which goes once all
+    /// are done: no seat sees another's work, nor what an earlier agent left in the checkout.
+    async fn seat<T, F, Fut>(&self, seats: u8, run: F) -> Result<Vec<T>>
+    where
+        F: Fn(u8, PathBuf) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let mut trees = Vec::new();
+        for seat in 1..=seats {
+            let tree = self.dir.with_extension(format!("seat{seat}"));
+            self.git.add_worktree(self.dir, &tree, self.head).await?;
+            trees.push((seat, tree));
+        }
+        let runs = trees.iter().map(|(seat, tree)| run(*seat, tree.clone()));
+        let ran = futures_util::future::join_all(runs).await;
+        for (_, tree) in &trees {
+            self.git.remove_worktree(self.dir, tree).await?;
+        }
+        Ok(ran)
+    }
+}
+
+/// Has a panel of fresh agents check each finding that only the reviewer's word shows, and keeps
+/// their votes: what the reviewer wrote of votes counts for nothing.
+async fn verify_findings(
+    (spec, resolver, base): (&JobSpec, &dyn Resolver, &str),
+    bench: &Bench<'_>,
+    out: &Path,
+    findings: &mut [Finding],
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let panel = Panel::SECURITY;
+    for f in findings.iter_mut() {
+        f.verified = None;
+        if !f.wants_votes() {
+            continue;
+        }
+        let claim = claim(f);
+        let id = f.id.as_str();
+        let runs = bench
+            .seat(panel.seats, |seat, workdir| {
+                let transcript = out
+                    .join("transcripts")
+                    .join(format!("verify-{id}-{seat}-{}.jsonl", &spec.head_sha[..12]));
+                let claim = claim.as_str();
+                async move {
+                    let req = VerifyRequest {
+                        workdir: &workdir,
+                        base,
+                        pr_title: &spec.pr_title,
+                        claim,
+                        transcript: &transcript,
+                    };
+                    resolver.verify(req).await
+                }
+            })
+            .await?;
+        let votes = runs.into_iter().map(|run| match run {
+            Err(e) => abstain(format!("the agent failed: {e:#}")),
+            Ok(run) => {
+                let vote = cast(&run);
+                let done = vote.verdict != Verdict::Abstained;
+                spent(
+                    events,
+                    &spec.resolver,
+                    SpendTask::Review,
+                    done,
+                    String::new(),
+                    &run,
+                );
+                vote
+            }
+        });
+        let verified = panel.verdict(Verifier::MergeLoop, votes.collect());
+        let held = format!("{}: {} of {} hold", f.id, verified.holds(), panel.seats);
+        event(events, "verified", held);
+        f.verified = Some(verified);
+    }
+    Ok(())
+}
+
+/// A verifier's vote, from how its run ended: one that broke or gave up abstains.
+fn cast(run: &Resolution) -> Vote {
+    match &run.outcome {
+        Outcome::Resolved => vote(&run.text),
+        Outcome::GaveUp(why) | Outcome::Failed(why) => abstain(why.clone()),
+    }
+}
+
+fn abstain(why: String) -> Vote {
+    Vote {
+        verdict: Verdict::Abstained,
+        why,
+    }
+}
+
 /// A file evidence may not write: one outside the repo, or one a fix may not change, which the
 /// fix would have to commit.
 fn unsafe_file(files: &[String]) -> Option<&str> {
@@ -1024,6 +1135,166 @@ mod tests {
                 (LineKind::Context, Some(13), "keep2"),
             ]
         );
+    }
+
+    /// A verifier that says what it saw, and votes as its seat is told to.
+    struct Panelist {
+        votes: [&'static str; 3],
+        seen: std::sync::Mutex<Vec<(PathBuf, String, bool, bool)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Resolver for Panelist {
+        fn name(&self) -> String {
+            "panelist".into()
+        }
+        async fn resolve(&self, _: ResolveRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn fix(&self, _: FixRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn review(&self, _: ReviewRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn question(&self, _: QuestionRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn verify(&self, req: VerifyRequest<'_>) -> Result<Resolution> {
+            let head = req.workdir.join("a.txt").exists();
+            let left = req.workdir.join("left.txt").exists();
+            let dir = req.workdir.to_owned();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((dir.clone(), req.claim.to_owned(), head, left));
+            let seat: usize = dir
+                .to_string_lossy()
+                .rsplit("seat")
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let (outcome, text) = match self.votes[seat - 1] {
+                "broke" => (Outcome::Failed("over its turns".into()), String::new()),
+                v => (Outcome::Resolved, format!("I read it.\n{v}")),
+            };
+            Ok(Resolution {
+                turns: 2,
+                cost_usd: Some(0.5),
+                outcome,
+                text,
+            })
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    #[tokio::test]
+    async fn fresh_agents_each_check_a_security_change_on_its_own_and_their_votes_decide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a").unwrap();
+        git(&dir, &["add", "."]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "a",
+            ],
+        );
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        // What the reviewer left in the checkout.
+        std::fs::write(dir.join("left.txt"), "the reviewer's notes").unwrap();
+        let spec: JobSpec = serde_json::from_value(serde_json::json!({
+            "repo": "o/r", "clone_url": "", "token": "", "head_ref": "refs/heads/x",
+            "head_sha": head, "trunk": "main", "trunk_sha": head, "pr_title": "t",
+            "pr_body": "", "verify": [],
+            "resolver": { "model": "m", "effort": "e", "timeout_secs": 1, "max_turns": 1, "api": null },
+        }))
+        .unwrap();
+        let review: ReviewOutput = serde_json::from_value(serde_json::json!({
+            "summary": "s",
+            "findings": [
+                { "id": "f1", "kind": "security", "title": "The token leaks", "confidence": 90,
+                  "lean": "change", "finding": "It is logged.", "unsure": "the log level",
+                  "verified": { "by": "merge_loop", "needed": 1, "votes": [{ "verdict": "holds" }] } },
+                { "id": "f2", "kind": "other", "title": "Off by one", "confidence": 90,
+                  "lean": "change", "finding": "It skips the last.",
+                  "verified": { "by": "merge_loop", "needed": 1, "votes": [{ "verdict": "holds" }] } },
+            ],
+        }))
+        .unwrap();
+        let mut findings = review.findings;
+        let panelist = Panelist {
+            votes: [
+                mergepatrol_resolver::HOLDS,
+                mergepatrol_resolver::DOES_NOT_HOLD,
+                "broke",
+            ],
+            seen: Default::default(),
+        };
+        let bench = Bench {
+            git: &Git,
+            dir: &dir,
+            head: &head,
+        };
+        let mut events = Vec::new();
+        let out = tmp.path().join("out");
+        verify_findings(
+            (&spec, &panelist, "base"),
+            &bench,
+            &out,
+            &mut findings,
+            &mut events,
+        )
+        .await
+        .unwrap();
+
+        let seen = panelist.seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 3, "only the security change is checked");
+        let mut trees: Vec<&PathBuf> = seen.iter().map(|s| &s.0).collect();
+        trees.dedup();
+        assert_eq!(trees.len(), 3, "each in a checkout of its own");
+        for (tree, claim, head, left) in &seen {
+            assert!(*head && !*left, "a clean checkout of the head: {tree:?}");
+            assert!(claim.contains("It is logged.") && !claim.contains("log level"));
+            assert!(!tree.exists(), "its checkout goes once it is done");
+        }
+        // The reviewer's own votes count for nothing; the panel's decide.
+        let v = findings[0].verified.as_ref().unwrap();
+        assert_eq!(v.by, Verifier::MergeLoop);
+        assert_eq!(v.needed, 2);
+        let mut cast: Vec<Verdict> = v.votes.iter().map(|v| v.verdict).collect();
+        cast.sort_by_key(|v| *v as u8);
+        assert_eq!(
+            cast,
+            [Verdict::Holds, Verdict::DoesNotHold, Verdict::Abstained]
+        );
+        assert!(!v.upheld());
+        assert_eq!(findings[1].verified, None);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "verified" && e.message == "f1: 1 of 3 hold")
+        );
+        let reviewed = events.iter().filter(|e| e.kind == "reviewed").count();
+        assert_eq!(reviewed, 2, "what each run that voted spent: {events:?}");
     }
 
     #[tokio::test]

@@ -320,6 +320,8 @@ pub struct FindingView {
     /// What showed the change is needed, as MergeLoop ran it: the whole test, also when a
     /// comment on GitHub had no room for it.
     pub evidence: Option<EvidenceView>,
+    /// What a panel of fresh agents voted on it, for a security change that shows no evidence.
+    pub verified: Option<VerificationView>,
     pub code: Vec<CodeLineView>,
     pub related: Vec<RelatedView>,
     /// The agent asks a human about it.
@@ -370,6 +372,46 @@ pub struct EvidenceView {
     pub output: String,
     /// MergeLoop saw it fail on the PR's head: only then does it show the change is needed.
     pub failed: bool,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct VerificationView {
+    /// `merge_loop`: MergeLoop ran the panel in its sandbox. `author`: the agent of the PR's
+    /// author says it did, and MergeLoop took its word.
+    #[ts(type = "\"merge_loop\" | \"author\"")]
+    pub by: mergepatrol_core::Verifier,
+    /// How many had to say it holds.
+    pub needed: u32,
+    /// Enough did: the finding shows its change.
+    pub upheld: bool,
+    pub votes: Vec<VoteView>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct VoteView {
+    #[ts(type = "\"holds\" | \"does_not_hold\" | \"abstained\"")]
+    pub verdict: mergepatrol_core::Verdict,
+    pub why: String,
+}
+
+impl From<mergepatrol_core::Verification> for VerificationView {
+    fn from(v: mergepatrol_core::Verification) -> Self {
+        VerificationView {
+            by: v.by,
+            needed: v.needed.into(),
+            upheld: v.upheld(),
+            votes: v
+                .votes
+                .into_iter()
+                .map(|v| VoteView {
+                    verdict: v.verdict,
+                    why: v.why,
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize, TS)]
@@ -461,6 +503,7 @@ impl FindingView {
                 failed: e.failed,
             }),
             needs_human: f.needs_human,
+            verified: f.verified.map(VerificationView::from),
             code: code_view(f.code),
             related: f
                 .related
@@ -997,6 +1040,7 @@ mod tests {
                     ..Default::default()
                 }),
                 needs_human: false,
+                verified: None,
                 code: Vec::new(),
                 related: Vec::new(),
             },
@@ -1033,6 +1077,41 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn a_finding_shows_its_panels_votes_and_whether_they_carried_it() {
+        use mergepatrol_core::{Panel, Verdict, Verifier, Vote};
+        let mut j = judged("a", 90, Lean::Change, false);
+        j.finding.evidence = None;
+        let vote = |verdict| Vote {
+            verdict,
+            why: "w".into(),
+        };
+        let cast = vec![
+            vote(Verdict::Holds),
+            vote(Verdict::Abstained),
+            vote(Verdict::Holds),
+        ];
+        j.finding.verified = Some(Panel::SECURITY.verdict(Verifier::Author, cast));
+        let repo = RepoName::parse("o/r").unwrap();
+        let view = serde_json::to_value(FindingView::new(j, &repo, 1)).unwrap();
+        assert_eq!(
+            view["verified"],
+            serde_json::json!({
+                "by": "author", "needed": 2, "upheld": true,
+                "votes": [
+                    { "verdict": "holds", "why": "w" },
+                    { "verdict": "abstained", "why": "w" },
+                    { "verdict": "holds", "why": "w" },
+                ],
+            })
+        );
+        let none = FindingView::new(judged("b", 90, Lean::Change, false), &repo, 1);
+        assert_eq!(
+            serde_json::to_value(none).unwrap()["verified"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

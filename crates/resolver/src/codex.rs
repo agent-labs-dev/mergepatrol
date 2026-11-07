@@ -9,7 +9,8 @@ use serde_json::Value;
 use crate::cli::{self, Ended};
 use crate::{
     FixRequest, Outcome, QuestionRequest, Resolution, ResolveRequest, Resolver, ReviewRequest,
-    fix_prompt, gave_up, prompt, question_prompt, review_prompt,
+    VerifyRequest, fix_prompt, gave_up, prompt, question_prompt, review_prompt,
+    vote::verify_prompt,
 };
 
 /// The environment variable Codex reads the API key from.
@@ -177,6 +178,11 @@ impl Resolver for CodexResolver {
 
     async fn question(&self, req: QuestionRequest<'_>) -> Result<Resolution> {
         self.run(req.workdir, question_prompt(&req), req.transcript)
+            .await
+    }
+
+    async fn verify(&self, req: VerifyRequest<'_>) -> Result<Resolution> {
+        self.run(req.workdir, verify_prompt(&req), req.transcript)
             .await
     }
 }

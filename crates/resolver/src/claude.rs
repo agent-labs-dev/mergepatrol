@@ -8,7 +8,8 @@ use serde_json::Value;
 use crate::cli::{self, Ended};
 use crate::{
     FixRequest, Outcome, QuestionRequest, Resolution, ResolveRequest, Resolver, ReviewRequest,
-    fix_prompt, gave_up, prompt, question_prompt, review_prompt,
+    VerifyRequest, fix_prompt, gave_up, prompt, question_prompt, review_prompt,
+    vote::verify_prompt,
 };
 
 /// What the agent may use: to edit and run the repo's tools, or only to read.
@@ -168,6 +169,12 @@ impl Resolver for ClaudeResolver {
 
     async fn question(&self, req: QuestionRequest<'_>) -> Result<Resolution> {
         let prompt = question_prompt(&req);
+        self.run(req.workdir, prompt, Access::Read, req.transcript)
+            .await
+    }
+
+    async fn verify(&self, req: VerifyRequest<'_>) -> Result<Resolution> {
+        let prompt = verify_prompt(&req);
         self.run(req.workdir, prompt, Access::Read, req.transcript)
             .await
     }

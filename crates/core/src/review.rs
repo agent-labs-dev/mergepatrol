@@ -246,15 +246,19 @@ pub struct Finding {
     /// The change it would ask the author for.
     #[serde(default)]
     pub suggestion: String,
-    /// What shows the change is needed: a command that fails on the PR's head. A `change` of a
-    /// kind other than security carries one that MergeLoop ran and saw fail, or it is only a
-    /// note.
+    /// What shows the change is needed: a command that fails on the PR's head. A `change`
+    /// carries one that MergeLoop ran and saw fail, or a security one a panel's votes, or it is
+    /// only a note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Evidence>,
     /// The change needs a call the author cannot make from the PR: scope, product or design,
     /// access or credentials, or a change outside the repo.
     #[serde(default)]
     pub needs_human: bool,
+    /// What a panel of fresh agents made of it, each given only the finding and the code: for a
+    /// change that shows nothing MergeLoop ran, whether enough agree it holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<Verification>,
     /// The lines it is about, from the PR's diff.
     #[serde(default)]
     pub code: Vec<CodeLine>,
@@ -298,10 +302,113 @@ impl Finding {
     }
 
     /// Whether it shows the change is needed: MergeLoop ran its evidence on the PR's head and it
-    /// failed. A `security` finding always does: the code showing the hole is enough to close it.
+    /// failed. A `security` finding may show it by the code alone instead, when enough of a panel
+    /// of fresh agents agree that it holds.
     pub fn shows_the_change(&self) -> bool {
-        self.kind == Kind::Security || self.evidence.as_ref().is_some_and(|e| e.failed)
+        self.ran_failing()
+            || (self.kind == Kind::Security && self.verified.as_ref().is_some_and(|v| v.upheld()))
     }
+
+    /// Whether its route waits on a panel's votes: a `security` change for the author to make,
+    /// with no evidence MergeLoop saw fail.
+    pub fn wants_votes(&self) -> bool {
+        self.kind == Kind::Security
+            && self.lean == Lean::Change
+            && !self.needs_human
+            && !self.ran_failing()
+    }
+
+    fn ran_failing(&self) -> bool {
+        self.evidence.as_ref().is_some_and(|e| e.failed)
+    }
+}
+
+/// A panel of fresh agents that each check one thing on their own: how many sit, and how many
+/// must agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Panel {
+    pub seats: u8,
+    pub needed: u8,
+}
+
+impl Panel {
+    /// The panel that checks a security change the code alone shows: three, two of whom must
+    /// agree it holds.
+    pub const SECURITY: Panel = Panel {
+        seats: 3,
+        needed: 2,
+    };
+
+    /// What the panel decided from these votes: only the first `seats` count.
+    pub fn verdict(self, by: Verifier, mut votes: Vec<Vote>) -> Verification {
+        votes.truncate(self.seats.into());
+        Verification {
+            by,
+            needed: self.needed,
+            votes,
+        }
+    }
+}
+
+/// What a panel decided of a finding, with each vote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verification {
+    /// Who ran it. One the author's agent posts is its own, whatever it says.
+    #[serde(default = "author")]
+    pub by: Verifier,
+    /// How many had to agree it holds. One posted is held to MergeLoop's panel.
+    #[serde(default = "security_needed")]
+    pub needed: u8,
+    pub votes: Vec<Vote>,
+}
+
+fn author() -> Verifier {
+    Verifier::Author
+}
+
+fn security_needed() -> u8 {
+    Panel::SECURITY.needed
+}
+
+impl Verification {
+    /// How many said it holds.
+    pub fn holds(&self) -> usize {
+        let holds = self.votes.iter().filter(|v| v.verdict == Verdict::Holds);
+        holds.count()
+    }
+
+    /// Enough agreed it holds.
+    pub fn upheld(&self) -> bool {
+        self.holds() >= usize::from(self.needed)
+    }
+}
+
+/// Who ran a panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verifier {
+    /// MergeLoop, in its sandbox, each agent in a checkout of its own.
+    MergeLoop,
+    /// The agent of the PR's author, on its machine: MergeLoop takes its votes at its word, as it
+    /// does its evidence.
+    Author,
+}
+
+/// One agent's vote, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vote {
+    pub verdict: Verdict,
+    #[serde(default)]
+    pub why: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verdict {
+    Holds,
+    DoesNotHold,
+    /// The agent's run broke, or it named no verdict.
+    Abstained,
 }
 
 /// `text` as a URL's query value.
@@ -565,6 +672,7 @@ mod tests {
                 ..Evidence::default()
             }),
             needs_human: false,
+            verified: None,
             code: Vec::new(),
             related: Vec::new(),
         }
@@ -591,10 +699,6 @@ mod tests {
         let mut bare = finding(Kind::Other, 100, Lean::Change);
         bare.evidence = None;
         assert_eq!(s.route(&bare), Route::Cleared);
-        // A security one still goes back: the code showing the hole is enough.
-        let mut hole = finding(Kind::Security, 100, Lean::Change);
-        hole.evidence = None;
-        assert_eq!(s.route(&hole), Route::Author);
         // What hurts more goes back on less certainty.
         assert_eq!(
             s.route(&finding(Kind::Security, 60, Lean::Change)),
@@ -676,6 +780,60 @@ mod tests {
         call.evidence = None;
         call.needs_human = true;
         assert_eq!(s.route(&call), Route::Human);
+    }
+
+    fn votes(verdicts: &[Verdict]) -> Vec<Vote> {
+        verdicts
+            .iter()
+            .map(|&verdict| Vote {
+                verdict,
+                why: "w".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_security_change_with_no_evidence_goes_back_only_if_enough_fresh_agents_agree() {
+        use Verdict::*;
+        let s = ReviewSettings::default();
+        let mut hole = finding(Kind::Security, 100, Lean::Change);
+        hole.evidence = None;
+        // One agent's word is a note.
+        assert!(hole.wants_votes());
+        assert_eq!(s.route(&hole), Route::Cleared);
+        let panel = Panel::SECURITY;
+        for (cast, route) in [
+            (vec![Holds, Holds, DoesNotHold], Route::Author),
+            (vec![Holds, DoesNotHold, Abstained], Route::Cleared),
+            (vec![Holds, Abstained, Abstained], Route::Cleared),
+            (vec![Holds, Holds, Holds], Route::Author),
+        ] {
+            hole.verified = Some(panel.verdict(Verifier::MergeLoop, votes(&cast)));
+            assert_eq!(s.route(&hole), route, "{cast:?}");
+        }
+        // Only the panel's seats vote: more votes posted do not outvote it.
+        let stuffed = panel.verdict(
+            Verifier::Author,
+            votes(&[DoesNotHold, DoesNotHold, Holds, Holds, Holds]),
+        );
+        assert_eq!(stuffed.votes.len(), 3);
+        assert!(!stuffed.upheld());
+        // Evidence MergeLoop saw fail shows it without a vote, as for any kind.
+        let shown = finding(Kind::Security, 100, Lean::Change);
+        assert!(!shown.wants_votes());
+        assert_eq!(s.route(&shown), Route::Author);
+        // Votes do not stand in for evidence on other kinds.
+        let mut other = finding(Kind::Other, 100, Lean::Change);
+        other.evidence = None;
+        other.verified = Some(panel.verdict(Verifier::MergeLoop, votes(&[Holds, Holds, Holds])));
+        assert!(!other.wants_votes());
+        assert_eq!(s.route(&other), Route::Cleared);
+        // Nothing to vote on where the votes would not change the route.
+        let mut call = hole.clone();
+        call.needs_human = true;
+        let mut fine = hole.clone();
+        fine.lean = Lean::Fine;
+        assert!(!call.wants_votes() && !fine.wants_votes());
     }
 
     #[test]

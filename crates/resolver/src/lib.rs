@@ -8,6 +8,7 @@ mod claude;
 mod cli;
 mod codex;
 mod keys;
+mod vote;
 
 #[cfg(any(test, feature = "testing"))]
 pub use chatgpt::testing;
@@ -15,12 +16,13 @@ pub use chatgpt::{ChatGptAuth, ChatGptLogin, DeviceLogin};
 pub use claude::ClaudeResolver;
 pub use codex::CodexResolver;
 pub use keys::{KeyCheck, check_api_key};
+pub use vote::{DOES_NOT_HOLD, HOLDS, claim, vote};
 
 use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{Answer, Answered, CheckFailure, Finding, SentBack};
+use mergepatrol_core::{Answer, Answered, CheckFailure, Finding, Panel, SentBack};
 
 /// The checks a job's agent runs: the repo's verify commands, or, for a repo that sets none, the
 /// commands its own CI runs for a pull request. `None` when the repo has neither.
@@ -120,6 +122,16 @@ pub struct QuestionRequest<'a> {
     pub transcript: &'a Path,
 }
 
+/// One verifier's check of one finding, in a checkout of the PR's head of its own.
+pub struct VerifyRequest<'a> {
+    pub workdir: &'a Path,
+    pub base: &'a str,
+    pub pr_title: &'a str,
+    /// What the finding claims, as `claim` gives it.
+    pub claim: &'a str,
+    pub transcript: &'a Path,
+}
+
 /// How an agent run ended, and what it spent: every run that started has one, however it ended.
 #[derive(Debug)]
 pub struct Resolution {
@@ -157,6 +169,9 @@ pub trait Resolver: Send + Sync {
 
     /// Answers a human's question about a finding. Changes nothing.
     async fn question(&self, req: QuestionRequest<'_>) -> Result<Resolution>;
+
+    /// Checks a finding fresh, as `verify_prompt` asks, and votes on it. Changes nothing.
+    async fn verify(&self, req: VerifyRequest<'_>) -> Result<Resolution>;
 }
 
 pub(crate) const GIVE_UP: &str = "MERGEPATROL_GIVE_UP:";
@@ -410,11 +425,16 @@ pub const STANDS: &str = "VERDICT: stands";
 
 /// Whether an answer to the author's reply withdraws the finding: its last line says so.
 pub fn withdraws(answer: &str) -> bool {
+    last_line(answer).is_some_and(|l| l.eq_ignore_ascii_case(WITHDRAWN))
+}
+
+/// An answer's last line that says anything, as a verdict ends one.
+pub(crate) fn last_line(answer: &str) -> Option<&str> {
     answer
         .lines()
         .rev()
-        .find(|l| !l.trim().is_empty())
-        .is_some_and(|l| l.trim().trim_matches('`').eq_ignore_ascii_case(WITHDRAWN))
+        .map(|l| l.trim().trim_matches(['`', '*', '.', ' ']))
+        .find(|l| !l.is_empty())
 }
 
 /// The JSON a review answers with, as `review_prompt` describes it.
@@ -588,8 +608,10 @@ for that reason before you report it. The fix keeps that test as a regression te
 file of its own where the repo keeps its tests, named and written like them, so the repo's own \
 test command runs it. \
 {rerun} If you cannot make a command fail, lean `fine` and \
-say in `unsure` what you could not show. A `security` finding needs none: the code showing the \
-hole is enough to close it. Nor does a `pre_existing` one. A finding with no evidence gives `\"evidence\": null`. A finding you \
+say in `unsure` what you could not show. A `security` finding needs none: {seats} fresh agents, \
+given only the finding and the code, check it instead, and it goes back to the author only when \
+{needed} of them agree it holds. So say in `finding` where the hole is and how it is reached. Nor \
+does a `pre_existing` one need evidence. A finding with no evidence gives `\"evidence\": null`. A finding you \
 report again for a fix that is still missing carries its `evidence` again, written anew.
 
 Set `needs_human` to true only for a change the author cannot make from the PR and its \
@@ -614,6 +636,8 @@ Reply with the JSON alone, in this shape, and nothing else:
         queue_commits = queue_commits_section(req.queue_commits),
         base = req.base,
         verify = checks_section(req.verify, by),
+        seats = Panel::SECURITY.seats,
+        needed = Panel::SECURITY.needed,
         rerun = match by {
             Reviewer::Sandbox => "After the review MergeLoop runs each command on the PR alone, \
 with only the files it names, and a command it does not see fail does not go back to the author: \
@@ -638,11 +662,14 @@ nothing.
 
 {prompt}
 
+{panel}
+
 Once you have the JSON, post it as `review`, with the head it is of: `mergeloop call post_review \
 -`, given `{{\"repo\": \"{repo}\", \"number\": {number}, \"posted\": {{\"head_sha\": \"{head}\", \"review\": <the JSON>}}}}` \
 on stdin. MergeLoop judges each finding as it does its own: back to the author as a review \
 thread, to a human, or cleared.",
         prompt = prompt_for(req, Reviewer::Author),
+        panel = vote::author_panel(req.pr_title, req.base, head),
     )
 }
 
@@ -768,7 +795,8 @@ mod prompt_tests {
         assert!(ci.contains("declares no verify commands"));
         assert!(ci.contains("checks its own CI runs"));
         assert!(ci.contains("- `pnpm vitest run`"));
-        assert!(review.contains("`security` finding needs none"));
+        assert!(review.contains("`security` finding needs none: 3 fresh agents"));
+        assert!(review.contains("only when 2 of them agree it holds"));
     }
 
     #[test]
@@ -913,6 +941,8 @@ mod author_review_tests {
         assert!(brief.contains("in your checkout of the PR's head"));
         assert!(brief.contains("git worktree add --detach <dir> h1"));
         assert!(brief.contains("mergeloop call post_review -"));
+        // Its agent has fresh subagents vote on what would go back on its word alone.
+        assert!(brief.contains(&vote::author_panel("t", "abc", "h1")));
         assert!(brief.contains(
             r#"{"repo": "o/r", "number": 5, "posted": {"head_sha": "h1", "review": <the JSON>}}"#
         ));
