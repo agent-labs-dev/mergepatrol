@@ -3836,6 +3836,8 @@ async fn rebase_layers(
                 let why = format!("{e:#}: merging `{}` in instead", key.trunk);
                 record(ctx, key, pr.number, "merging-base", &why).await?;
                 spec.update = Update::Merge;
+                // The timed-out job revoked its token once it fetched.
+                spec.token = gh.read_token(&key.repo).await?;
                 let job_id = format!("{job_id}-merge");
                 run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?
             }

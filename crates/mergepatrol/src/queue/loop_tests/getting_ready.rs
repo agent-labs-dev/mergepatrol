@@ -23,6 +23,7 @@ use mergepatrol_executor::protocol::ReviewOutput;
 
 mod outcomes_after_intervening_review;
 mod outcomes_regression;
+mod timeout_token_regression;
 
 /// How long a scenario may take to end. It ends far sooner, or it is stuck.
 const SETTLES_WITHIN: Duration = Duration::from_secs(60);
