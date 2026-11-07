@@ -336,10 +336,21 @@ pub struct FindingView {
     pub bar: Bar,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum LeanView {
+    Fine,
+    Change,
+    /// A bug in code the PR did not bring: a note, to file as an issue.
+    PreExisting,
+}
+
+/// A human's call on a finding the agent asks about.
+#[derive(Clone, Copy, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CallView {
     Fine,
     Change,
 }
@@ -383,7 +394,7 @@ pub struct RelatedView {
 pub struct AnswerView {
     /// The finding's id.
     pub finding: String,
-    pub call: LeanView,
+    pub call: CallView,
     /// What to change. Required with `change`.
     #[serde(default)]
     pub note: String,
@@ -430,6 +441,7 @@ impl From<Judged> for FindingView {
             lean: match f.lean {
                 Lean::Fine => LeanView::Fine,
                 Lean::Change => LeanView::Change,
+                Lean::PreExisting => LeanView::PreExisting,
             },
             finding: f.finding,
             unsure: f.unsure,
@@ -495,12 +507,12 @@ impl From<ReviewRecord> for AgentReviewView {
                 .map(|(finding, a)| match a {
                     Answer::Fine => AnswerView {
                         finding,
-                        call: LeanView::Fine,
+                        call: CallView::Fine,
                         note: String::new(),
                     },
                     Answer::Change { note } => AnswerView {
                         finding,
-                        call: LeanView::Change,
+                        call: CallView::Change,
                         note,
                     },
                 })
@@ -736,11 +748,11 @@ fn answers_of(
             )));
         }
         let answer = match a.call {
-            LeanView::Fine => Answer::Fine,
-            LeanView::Change if a.note.trim().is_empty() => {
+            CallView::Fine => Answer::Fine,
+            CallView::Change if a.note.trim().is_empty() => {
                 return Err(ApiError::bad_request("Say what to change."));
             }
-            LeanView::Change => Answer::Change {
+            CallView::Change => Answer::Change {
                 note: a.note.trim().to_owned(),
             },
         };
@@ -1065,21 +1077,30 @@ mod tests {
         assert!(
             answers_of(
                 &r,
-                &body(vec![a("a", LeanView::Fine, ""), a("c", LeanView::Fine, "")])
+                &body(vec![a("a", CallView::Fine, ""), a("c", CallView::Fine, "")])
             )
             .is_err(),
             "not asked"
         );
         assert!(
-            answers_of(&r, &body(vec![a("a", LeanView::Change, " ")])).is_err(),
+            answers_of(&r, &body(vec![a("a", CallView::Change, " ")])).is_err(),
             "a change says what"
         );
-        let Ok(got) = answers_of(&r, &body(vec![a("a", LeanView::Change, "fix")])) else {
+        let Ok(got) = answers_of(&r, &body(vec![a("a", CallView::Change, "fix")])) else {
             panic!("a change that says what is an answer");
         };
         assert_eq!(
             got,
             BTreeMap::from([("a".into(), Answer::Change { note: "fix".into() })])
         );
+    }
+
+    #[test]
+    fn a_pre_existing_bug_shows_as_one_and_no_answer_can_call_one() {
+        let view = serde_json::to_value(FindingView::from(judged("a", 90, Lean::PreExisting, false)));
+        assert_eq!(view.unwrap()["lean"], "pre_existing");
+        // A human answers only what the agent asks, and it never asks about one.
+        let answer = serde_json::json!({ "finding": "a", "call": "pre_existing", "note": "" });
+        assert!(serde_json::from_value::<AnswerView>(answer).is_err());
     }
 }
