@@ -2321,10 +2321,52 @@ async fn checks_verdict(
     {
         unreported.clear();
     }
+    let reruns: BTreeSet<u64> = match &verdict {
+        (CheckState::Failed, failed) => failed
+            .iter()
+            .filter_map(|n| checks.reruns.get(n).copied())
+            .collect(),
+        _ => BTreeSet::new(),
+    };
     Ok(HeadChecks {
         verdict,
         unreported,
+        reruns: reruns.into_iter().collect(),
     })
+}
+
+/// How long GitHub may take to show the failed jobs it was asked to run again as running.
+const RERUN_STARTS_WITHIN: Duration = Duration::from_secs(2 * 60);
+const RERUN_POLL: Duration = Duration::from_secs(5);
+
+/// Has GitHub Actions run the failed jobs of the workflow runs `runs` on `sha` again, and waits
+/// until `sha`'s checks show them running rather than failed. `Event::ChecksRerun`, or
+/// `Event::RerunFailed` with why not.
+pub(crate) async fn rerun_failed(
+    gh: &dyn GitHub,
+    repo: &RepoName,
+    sha: &str,
+    runs: &[u64],
+) -> Result<Event> {
+    for run in runs {
+        if let Err(e) = gh.rerun_failed_jobs(repo, sha, *run).await {
+            return Ok(Event::RerunFailed(format!("{e:#}")));
+        }
+    }
+    let since = Instant::now();
+    loop {
+        let checks = gh.checks(repo, sha).await?;
+        if !checks.reruns.values().any(|run| runs.contains(run)) {
+            return Ok(Event::ChecksRerun);
+        }
+        if since.elapsed() >= RERUN_STARTS_WITHIN {
+            return Ok(Event::RerunFailed(format!(
+                "GitHub did not start the failed jobs again within {} minutes",
+                RERUN_STARTS_WITHIN.as_secs() / 60
+            )));
+        }
+        tokio::time::sleep(RERUN_POLL).await;
+    }
 }
 
 /// The method to merge into the trunk with: the repo's default, unless the repo's settings or the
@@ -2342,6 +2384,8 @@ struct HeadChecks {
     verdict: (CheckState, Vec<String>),
     /// The required checks that never reported on the head, though no other check runs.
     unreported: Vec<String>,
+    /// The workflow runs that can run the failed required checks again.
+    reruns: Vec<u64>,
 }
 
 /// Since when each required check has gone unreported on each of a job's heads, with no other
@@ -2607,6 +2651,7 @@ async fn run_job(
                 } else {
                     // GitHub merges a stack only when every layer's required checks passed.
                     let mut verdict = (CheckState::Passed, Vec::new());
+                    let mut reruns = Vec::new();
                     let mut silent = Vec::new();
                     for (i, head) in heads.iter().enumerate() {
                         let recheck = lane.recheck(unit.number);
@@ -2619,6 +2664,9 @@ async fn run_job(
                         match checks.verdict {
                             (CheckState::Failed, names) => {
                                 failing = i;
+                                if !ctx.prep.rerun_refused(key, unit.number, head) {
+                                    reruns = checks.reruns;
+                                }
                                 verdict = (CheckState::Failed, names);
                                 break;
                             }
@@ -2634,10 +2682,24 @@ async fn run_job(
                     let rechecking = lane
                         .recheck(unit.number)
                         .is_some_and(|(head, _)| heads.contains(&head));
+                    // A check that ran again on the recheck's new commit gets no more runs.
+                    if rechecking {
+                        reruns.clear();
+                    }
                     match verdict {
                         (CheckState::Passed, _) => Event::ChecksPassed,
+                        // Getting ready runs the failed jobs again, or fixes them.
+                        (CheckState::Failed, _) if !agent && !reruns.is_empty() => {
+                            Event::OnHold(Hold::PrepChecks)
+                        }
                         (CheckState::Failed, _) if !agent && !rechecking && job.can_fix() => {
                             Event::OnHold(Hold::PrepFixing)
+                        }
+                        (CheckState::Failed, failed) if !reruns.is_empty() => {
+                            Event::ChecksRerunnable {
+                                failed,
+                                runs: reruns,
+                            }
                         }
                         (CheckState::Failed, names) => Event::ChecksFailed(names),
                         (CheckState::Pending, _) if !missing.is_empty() => {
@@ -2688,6 +2750,25 @@ async fn run_job(
                     record_all(ctx, key, &prs, "published", head).await?;
                     let comment = format!("Pushed a fix as {head}. Waiting for checks.");
                     comment_all(gh, repo, &prs, &comment).await?;
+                }
+                event
+            }
+            Phase::Rerunning { failed, runs, .. } => {
+                let what = failed.join(", ");
+                record_all(ctx, key, &prs, "rerunning", &what).await?;
+                let comment = format!(
+                    "Required checks failed: {what}. Running the failed jobs again once, as a failure may not be the code's."
+                );
+                comment_all(gh, repo, &prs, &comment).await?;
+                let head = &heads[failing];
+                let event = rerun_failed(gh, repo, head, runs).await?;
+                match &event {
+                    Event::ChecksRerun => published_at = Instant::now(),
+                    Event::RerunFailed(why) => {
+                        ctx.prep.note_refused_rerun(key, unit.number, head);
+                        record_all(ctx, key, &prs, "rerun-failed", why).await?;
+                    }
+                    _ => {}
                 }
                 event
             }
@@ -3218,7 +3299,15 @@ async fn fix_and_publish(
     });
     // Only a fix of failed checks may propose a title: the job's word for it is not enough.
     let may_retitle = matches!(task, Task::FixChecks { .. });
-    let (spec, _granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
+    let (spec, granted) = job_spec(ctx, gh, key, pr, settings, head, base, below, task).await?;
+    if granted.is_none() {
+        let provider = spec.resolver.provider.name();
+        let mut why = format!("the workspace has no {provider} API key for the agent");
+        if let Some(url) = &spec.resolver.settings_url {
+            why.push_str(&format!(": add one in the dashboard's settings, {url}"));
+        }
+        return Ok(Event::FixFailed(why));
+    }
     let fixed = async {
         run_sandboxed(ctx, key, pr.number, &job_id, &spec, &out, snap.private).await?;
         let _cache = ctx.caches.lock(repo).await;

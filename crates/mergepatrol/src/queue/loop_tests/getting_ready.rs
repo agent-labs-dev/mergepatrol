@@ -417,6 +417,16 @@ fn answer(gh: &Fake, origin: &Path, method: &str, path: &str, body: &str) -> (u1
         gh.with_mut(|s| s.threads[i].1.push(text));
         return (201, "{}".into());
     }
+    if let Some(run) = rest
+        .strip_prefix("actions/runs/")
+        .and_then(|r| r.strip_suffix("/rerun-failed-jobs"))
+    {
+        assert_eq!(method, "POST");
+        return match gh.with_mut(|s| s.rerun(run.parse().unwrap())) {
+            Ok(()) => (201, "{}".into()),
+            Err(e) => (422, json!({ "message": e.to_string() }).to_string()),
+        };
+    }
     match (method, rest) {
         ("POST", "git/blobs") => {
             let content = body["content"].as_str().unwrap();
@@ -510,6 +520,17 @@ impl World {
         });
         let store = Arc::new(Mem::default());
         let mut ctx = ctx(store.clone());
+        // The workspace has a key for the agent, unless a test forgets it. Its review is off,
+        // as a key would turn it on, until a test turns it on.
+        *store.review_settings.lock().unwrap() = Some(ReviewSettings {
+            enabled: false,
+            ..ReviewSettings::default()
+        });
+        let key = mergepatrol_store::api_key_secret(Default::default());
+        ctx.vault
+            .set(Scope::Installation(1), key, "sk-test")
+            .await
+            .unwrap();
         ctx.config.data_dir = tmp.path().join("data");
         ctx.executor = agent.clone();
         ctx.jobs = Semaphore::new(2);
@@ -612,6 +633,16 @@ impl World {
 
     fn did(&self, number: PrNumber, kind: &str) -> bool {
         self.kinds(number).iter().any(|k| k == kind)
+    }
+
+    /// The workspace's model API key is gone: no agent can run.
+    async fn forget_model_key(&self) {
+        let key = mergepatrol_store::api_key_secret(Default::default());
+        self.ctx
+            .vault
+            .delete(Scope::Installation(1), key)
+            .await
+            .unwrap();
     }
 
     fn tasks(&self) -> Vec<Task> {
@@ -798,6 +829,54 @@ async fn a_failed_check_is_fixed_off_the_lane_then_merges() {
     let log = git(&world.origin, &["log", "--format=%B", "main..pr-1"]);
     assert!(log.starts_with("Fix it") && log.contains(FIXED_BY), "{log}");
     assert!(log.contains("the PR's change"), "{log}");
+}
+
+#[tokio::test]
+async fn a_flaky_job_runs_again_off_the_lane_and_merges_with_no_fix() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        checks_fail(s, 1);
+        s.actions = true;
+        s.flaky = true;
+    });
+    let _drain = world.drain().await;
+    world.tick().await;
+    assert_eq!(world.lane(), [(1, "Held(PrepChecks)".into())]);
+
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    let fixes = world.tasks();
+    assert!(
+        !fixes.iter().any(|t| matches!(t, Task::FixChecks { .. })),
+        "{fixes:?}"
+    );
+    assert!(world.did(1, "rerunning"), "{:?}", world.kinds(1));
+    assert_eq!(world.gh.with(|s| s.reran.len()), 1);
+}
+
+#[tokio::test]
+async fn a_job_that_fails_again_without_a_model_key_ejects_with_no_agent() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.checks.insert("ci".into(), CheckState::Failed);
+        s.actions = true;
+    });
+    world.forget_model_key().await;
+    let _drain = world.drain().await;
+    world.tick_until(|w| w.did(1, "ejected")).await;
+
+    let tasks = world.tasks();
+    assert!(
+        !tasks.iter().any(|t| matches!(t, Task::FixChecks { .. })),
+        "no agent runs: {tasks:?}"
+    );
+    assert!(world.did(1, "rerunning"), "{:?}", world.kinds(1));
+    let comment = world.gh.with(|s| s.comments.last().unwrap().1.clone());
+    assert!(comment.contains("required checks failed: ci"), "{comment}");
+    assert!(comment.contains("no Anthropic API key"), "{comment}");
+    assert!(
+        comment.contains("http://localhost:8080/o/settings"),
+        "{comment}"
+    );
 }
 
 #[tokio::test]

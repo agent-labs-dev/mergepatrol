@@ -40,6 +40,8 @@ pub trait GitHub: Send + Sync {
         sha: &str,
         names: &[String],
     ) -> Result<Vec<CheckFailure>>;
+    /// Runs the failed jobs of the workflow run `run_id`, one of `sha`'s, again.
+    async fn rerun_failed_jobs(&self, repo: &RepoName, sha: &str, run_id: u64) -> Result<()>;
     async fn merge(
         &self,
         repo: &RepoName,
@@ -145,6 +147,9 @@ impl GitHub for Installation {
         names: &[String],
     ) -> Result<Vec<CheckFailure>> {
         Installation::check_failures(self, repo, sha, names).await
+    }
+    async fn rerun_failed_jobs(&self, repo: &RepoName, _: &str, run_id: u64) -> Result<()> {
+        Installation::rerun_failed_jobs(self, repo, run_id).await
     }
     async fn merge(
         &self,

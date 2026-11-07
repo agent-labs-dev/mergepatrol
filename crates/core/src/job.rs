@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Hold, PrNumber};
 
+use Phase as P;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     Rebasing,
@@ -15,6 +17,15 @@ pub enum Phase {
         head: String,
         base: String,
         failed: Vec<String>,
+    },
+    /// The required checks `failed` on `head`, and GitHub Actions runs their failed jobs again
+    /// once, in the workflow runs `runs`, before a fix: a check may fail on what its next run
+    /// does not meet, as a dropped network request.
+    Rerunning {
+        head: String,
+        base: String,
+        failed: Vec<String>,
+        runs: Vec<u64>,
     },
     /// The agent gave up on the checks `failed` on `head`, as not the PR's to fix: they run
     /// again, on a new commit of the same files. The failure may be a flaky test, or a check that
@@ -131,6 +142,16 @@ pub enum Event {
     RebaseConflict,
     ChecksPassed,
     ChecksFailed(Vec<String>),
+    /// These required checks failed, and the workflow runs `runs` can run their failed jobs
+    /// again.
+    ChecksRerunnable {
+        failed: Vec<String>,
+        runs: Vec<u64>,
+    },
+    /// The failed jobs run again.
+    ChecksRerun,
+    /// GitHub would not run the failed jobs again, and said why.
+    RerunFailed(String),
     /// These required checks are still pending, `CHECKS_TIMEOUT` after the publish.
     ChecksTimedOut(Vec<String>),
     /// These required checks never reported on the head, `CHECKS_MISSING_FOR` after the others
@@ -196,7 +217,6 @@ impl Job {
 
     pub fn step(self, event: Event) -> Transition {
         use Event as E;
-        use Phase as P;
         match (&self.phase, event) {
             (P::Rebasing, E::Rebased { head, base }) => self.with(P::AwaitingChecks { head, base }),
             (P::Rebasing, E::RebaseFailed(r)) => Transition::Ejected(EjectReason::RebaseFailed(r)),
@@ -206,29 +226,32 @@ impl Job {
                 let head = head.clone();
                 self.with(P::Merging { head })
             }
-            (P::AwaitingChecks { head, base }, E::ChecksFailed(failed)) if self.can_fix() => {
-                let phase = P::Fixing {
+            (P::AwaitingChecks { head, base }, E::ChecksRerunnable { failed, runs }) => {
+                let phase = P::Rerunning {
                     head: head.clone(),
                     base: base.clone(),
                     failed,
+                    runs,
                 };
-                Transition::Continue(Job {
-                    phase,
-                    fixes: self.fixes + 1,
-                    ..self
-                })
+                self.with(phase)
             }
+            (P::Rerunning { head, base, .. }, E::ChecksRerun) => {
+                let phase = P::AwaitingChecks {
+                    head: head.clone(),
+                    base: base.clone(),
+                };
+                self.with(phase)
+            }
+            (P::Rerunning { failed, .. }, E::RerunFailed(_)) => {
+                let failed = failed.clone();
+                self.failed(failed)
+            }
+            (P::AwaitingChecks { .. }, E::ChecksFailed(failed)) => self.failed(failed),
             (P::AwaitingChecks { .. }, E::ChecksTimedOut(names)) => {
                 Transition::Ejected(EjectReason::ChecksTimedOut(names))
             }
             (P::AwaitingChecks { .. }, E::ChecksMissing(names)) => {
                 Transition::Ejected(EjectReason::ChecksMissing(names))
-            }
-            (P::AwaitingChecks { .. }, E::ChecksFailed(names)) => {
-                Transition::Ejected(EjectReason::ChecksFailed {
-                    names,
-                    fixes: self.fixes,
-                })
             }
 
             (P::Fixing { base, .. }, E::Fixed { head }) => {
@@ -286,6 +309,31 @@ impl Job {
 
             (phase, event) => panic!("event {event:?} is not valid in phase {phase:?}"),
         }
+    }
+
+    /// The required checks `failed` on the head the job waits for, or ran again: a fix while
+    /// one is left, or else the PR is ejected.
+    fn failed(self, failed: Vec<String>) -> Transition {
+        let (P::AwaitingChecks { head, base } | P::Rerunning { head, base, .. }) = &self.phase
+        else {
+            unreachable!("only checks fail")
+        };
+        if !self.can_fix() {
+            return Transition::Ejected(EjectReason::ChecksFailed {
+                names: failed,
+                fixes: self.fixes,
+            });
+        }
+        let phase = P::Fixing {
+            head: head.clone(),
+            base: base.clone(),
+            failed,
+        };
+        Transition::Continue(Job {
+            phase,
+            fixes: self.fixes + 1,
+            ..self
+        })
     }
 
     fn with(self, phase: Phase) -> Transition {
@@ -439,6 +487,79 @@ mod tests {
             panic!()
         };
         assert!(matches!(failed(again), Transition::Ejected(_)));
+    }
+
+    fn rerunnable(job: Job) -> Transition {
+        job.step(Event::ChecksRerunnable {
+            failed: vec!["ci".into()],
+            runs: vec![9],
+        })
+    }
+
+    #[test]
+    fn a_failed_check_runs_again_before_a_fix_and_waits_for_its_checks() {
+        let Transition::Continue(rerunning) = rerunnable(rebased(Job::start(7, 2))) else {
+            panic!()
+        };
+        assert_eq!(
+            rerunning.phase,
+            Phase::Rerunning {
+                head: "h1".into(),
+                base: "b1".into(),
+                failed: vec!["ci".into()],
+                runs: vec![9],
+            }
+        );
+        assert_eq!(rerunning.fixes, 0, "a rerun is no fix");
+        let Transition::Continue(again) = rerunning.step(Event::ChecksRerun) else {
+            panic!()
+        };
+        assert_eq!(
+            again.phase,
+            Phase::AwaitingChecks {
+                head: "h1".into(),
+                base: "b1".into()
+            }
+        );
+        let Transition::Continue(fixing) = failed(again) else {
+            panic!()
+        };
+        assert!(matches!(fixing.phase, Phase::Fixing { .. }));
+    }
+
+    #[test]
+    fn a_failed_check_with_no_fixes_runs_again_before_it_ejects() {
+        let Transition::Continue(rerunning) = rerunnable(rebased(Job::start(7, 0))) else {
+            panic!()
+        };
+        assert!(matches!(rerunning.phase, Phase::Rerunning { .. }));
+        let Transition::Continue(again) = rerunning.step(Event::ChecksRerun) else {
+            panic!()
+        };
+        assert!(matches!(failed(again), Transition::Ejected(_)));
+    }
+
+    #[test]
+    fn a_rerun_github_refuses_goes_on_as_a_failure() {
+        let Transition::Continue(rerunning) = rerunnable(rebased(Job::start(7, 2))) else {
+            panic!()
+        };
+        let refused = Event::RerunFailed("403".into());
+        let Transition::Continue(fixing) = rerunning.clone().step(refused.clone()) else {
+            panic!()
+        };
+        assert!(matches!(&fixing.phase, Phase::Fixing { failed, .. } if failed == &["ci"]));
+        let no_fixes = Job {
+            fix_attempts: 0,
+            ..rerunning
+        };
+        assert_eq!(
+            no_fixes.step(refused),
+            Transition::Ejected(EjectReason::ChecksFailed {
+                names: vec!["ci".into()],
+                fixes: 0
+            })
+        );
     }
 
     #[test]

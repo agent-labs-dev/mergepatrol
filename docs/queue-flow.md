@@ -11,6 +11,7 @@ flowchart TD
     subgraph ready ["Getting ready: each PR on its own, holding up no other"]
         rebase["Rebase, on a conflict"]
         ci["CI"]
+        rerun["Run the failed jobs again, once a head"]
         fixci["Fix"]
         patrols["bugpatrol / speedpatrol / sloppatrol"]:::later
         review["Code review"]
@@ -18,7 +19,9 @@ flowchart TD
         human["Human answers: keeps its place"]
 
         rebase --> ci
-        ci -- "failed" --> fixci
+        ci -- "failed" --> rerun
+        rerun -- "running" --> ci
+        rerun -- "ran again already" --> fixci
         fixci --> ci
         ci -.-> patrols
         patrols -.-> review
@@ -48,6 +51,7 @@ flowchart TD
 Dashed is planned, and not built.
 
 - **Rebase** runs only on a conflict with the trunk. A batch merges PRs as they are. A PR alone is rebased in the lane, unless GitHub can merge it as it is: not a stack, no conflict, a trunk that is not strict, checks passed on its head, and not a suspect of a failed batch.
+- **A failed GitHub Actions job** runs again once on each head before a fix, or before the PR is ejected with no fixes left: a failure such as a dropped network request may pass. GitHub's `run_attempt` on the workflow run says whether it ran again already, so a restart runs it no second time. A check of another app, or a commit status, goes straight to the fix.
 - **Fixes** are one budget for a PR or a stack, for its checks: `fix_ci.attempts`, 3 by default. They are counted from the `Fixed-by:` commits on top of the author's last commit, so a push from the author earns new ones.
 - **A stack** rebases and publishes as one. A conflict on any layer rebases it all. A fix goes on the lowest layer that failed, and the layers above it are rebased onto the fix.
 - **A fork** goes straight to the lane. No agent runs on it, so there is nothing to rebase past a conflict or to fix. Waiting for its checks here would save the lane little: a fork never joins a batch, so unless it sits on the current trunk, the lane rebases it and runs its checks again.
