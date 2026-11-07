@@ -314,10 +314,17 @@ impl Finding {
         Some(link(&title, &found))
     }
 
+    /// Every place its bug is, as a file and maybe a line: its own, then the others it names.
+    pub fn locations(&self) -> impl Iterator<Item = (&str, Option<u32>)> {
+        let own = self.file.as_deref().map(|file| (file, self.line));
+        let others = self.also_at.iter().map(|p| (p.file.as_str(), p.line));
+        own.into_iter().chain(others)
+    }
+
     /// Every place its bug is, as `file:line` or `file`: its own, then the others it names.
     pub fn places(&self) -> Vec<String> {
-        let own = self.file.iter().map(|file| at(file, self.line));
-        own.chain(self.also_at.iter().map(Place::to_string))
+        self.locations()
+            .map(|(file, line)| at(file, line))
             .collect()
     }
 
