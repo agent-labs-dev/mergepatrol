@@ -896,12 +896,20 @@ async fn merged_in_pr() -> World {
             commit(o, "shared.txt", "from main\n", "the trunk's change");
             git(o, &["checkout", "-q", "pr-1"]);
             let merged = Command::new("git")
+                .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
                 .args(["merge", "-q", "main"])
                 .current_dir(o)
                 .output()
                 .unwrap();
             assert!(!merged.status.success(), "the merge conflicts");
+            git(o, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
             commit(o, "shared.txt", "both\n", "Merge main into pr-1");
+            assert_eq!(
+                git(o, &["rev-list", "--parents", "-n1", "HEAD"])
+                    .split(' ')
+                    .count(),
+                3
+            );
             git(o, &["checkout", "-q", "main"]);
             commit(o, "other.txt", "from main\n", "the trunk's next change");
         },

@@ -1088,15 +1088,23 @@ fn merged_branch(dir: &Path) -> (String, String) {
     commit(dir, "a.ts", "main\n");
     git(dir, &["checkout", "-q", "pr"]);
     let out = Command::new("git")
+        .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
         .args(["merge", "-q", "main"])
         .current_dir(dir)
         .output()
         .unwrap();
     assert!(!out.status.success(), "the merge conflicts");
+    git(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
     std::fs::write(dir.join("a.ts"), "main\npr\n").unwrap();
     git(dir, &["add", "a.ts"]);
     git(dir, &["commit", "-q", "--no-edit"]);
     let head = git(dir, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(dir, &["rev-list", "--parents", "-n1", &head])
+            .split(' ')
+            .count(),
+        3
+    );
     git(dir, &["checkout", "-q", "main"]);
     let trunk = commit(dir, "other.txt", "from main\n");
     (head, trunk)
