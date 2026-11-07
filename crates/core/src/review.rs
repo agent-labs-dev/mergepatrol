@@ -311,7 +311,13 @@ pub struct Finding {
     pub verified: Option<Verification>,
     /// On a `fine` finding that reports again one the last review held the PR for: how it was
     /// settled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Anything else the agent writes there reads as none: a stray value costs an outcome, never
+    /// the review.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "settled_or_none"
+    )]
     pub settled: Option<Settled>,
     /// The lines it is about, from the PR's diff.
     #[serde(default)]
@@ -784,6 +790,21 @@ pub enum Settled {
     Fixed,
     Wrong,
     Intended,
+}
+
+fn settled_or_none<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Settled>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Text(String),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Written::deserialize(d)? {
+        Written::Text(t) if t == "fixed" => Some(Settled::Fixed),
+        Written::Text(t) if t == "wrong" => Some(Settled::Wrong),
+        Written::Text(t) if t == "intended" => Some(Settled::Intended),
+        Written::Text(_) | Written::Other(_) => None,
+    })
 }
 
 impl From<Settled> for Outcome {
@@ -1311,20 +1332,21 @@ mod tests {
 
     #[test]
     fn a_settled_finding_reads_as_the_agent_writes_it() {
-        let f: Finding = serde_json::from_value(serde_json::json!({
-            "kind": "other", "title": "t", "confidence": 90, "lean": "fine",
-            "finding": "", "settled": "wrong"
-        }))
-        .unwrap();
-        assert_eq!(f.settled, Some(Settled::Wrong));
-        assert!(
-            serde_json::from_value::<Finding>(serde_json::json!({
+        let read = |settled: serde_json::Value| -> Finding {
+            serde_json::from_value(serde_json::json!({
                 "kind": "other", "title": "t", "confidence": 90, "lean": "fine",
-                "finding": "", "settled": "dismissed"
+                "finding": "", "settled": settled
             }))
-            .is_err(),
-            "only a person dismisses"
-        );
+            .unwrap()
+        };
+        assert_eq!(read("wrong".into()).settled, Some(Settled::Wrong));
+        // Anything else is no outcome, never a review that cannot be read: only a person
+        // dismisses.
+        for other in ["dismissed", "", "Fixed!"] {
+            assert_eq!(read(other.into()).settled, None, "{other:?}");
+        }
+        assert_eq!(read(serde_json::Value::Null).settled, None);
+        assert_eq!(read(3.into()).settled, None);
     }
 
     #[test]
