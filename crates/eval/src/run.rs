@@ -318,6 +318,7 @@ pub(crate) mod fake {
 out="$3"
 mkdir -p "$out"
 cat > "$out/spec.json"
+env > "$out/env"
 if grep -q '"head_ref":"refs/pull/1/head"' "$out/spec.json"; then
   echo '{"summary":"S","findings":[]}' > "$out/review.json"
   echo '{"outcome":{"type":"done"},"events":[{"kind":"reviewed","message":"3 turns, $0.25, by m at medium effort"}]}' > "$out/result.json"

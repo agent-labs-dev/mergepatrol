@@ -147,7 +147,7 @@ impl Totals {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// It catches more and sends back no more false positives, or catches as much and sends
-    /// back fewer.
+    /// back fewer, and fails no more reviews: a failed review shows nothing.
     Keep,
     Drop,
 }
@@ -198,6 +198,7 @@ pub fn compare(a: &[Scored], b: &[Scored]) -> Comparison {
     let (a, b) = (Totals::of(&a), Totals::of(&b));
     let fp = (a.false_positives, b.false_positives);
     let better = (b.caught > a.caught && fp.1 <= fp.0) || (b.caught == a.caught && fp.1 < fp.0);
+    let better = better && b.failed <= a.failed;
     Comparison {
         verdict: if better { Verdict::Keep } else { Verdict::Drop },
         a,

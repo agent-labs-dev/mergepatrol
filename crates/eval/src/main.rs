@@ -2,6 +2,8 @@
 //! `evals/review/README.md`.
 
 mod case;
+#[cfg(test)]
+mod failed_review_tests;
 mod report;
 mod run;
 mod score;
@@ -17,7 +19,7 @@ use crate::run::{Agent, RunFile, Runner};
 const USAGE: &str = "usage:
   review-eval run --label <name> --model <model> [--provider anthropic|openai|openrouter]
                   [--effort medium] [--case <id>]... [--jobs 2] [--job-bin <mergepatrol>]
-                  [--out <run.json>] [--cases <dir>]
+                  [--out <run.json>] [--cases <dir>]       (the provider's key on stdin)
   review-eval report <run.json> [--cases <dir>]
   review-eval compare <a.json> <b.json> [--cases <dir>]";
 
@@ -147,13 +149,16 @@ fn run_args(f: &Flags) -> Result<RunArgs> {
     })
 }
 
-/// The environment variable that holds a provider's API key.
-fn key_var(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Anthropic => "ANTHROPIC_API_KEY",
-        Provider::OpenAi => "OPENAI_API_KEY",
-        Provider::OpenRouter => "OPENROUTER_API_KEY",
+/// The provider's API key, piped on stdin: an environment variable would reach every command
+/// the job runs, the evidence's among them, which must see only the job's proxy token.
+fn read_key(mut input: impl std::io::BufRead) -> Result<String> {
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    let key = line.trim();
+    if key.is_empty() {
+        bail!("pipe the provider's API key on stdin");
     }
+    Ok(key.to_owned())
 }
 
 fn read_run(path: &Path) -> Result<RunFile> {
@@ -170,12 +175,12 @@ fn scores(cases: &Path, run: &RunFile) -> Result<Vec<score::Scored>> {
     ))
 }
 
-/// Runs a command, and returns what it prints. `key` reads an environment variable.
-async fn execute(command: Command, key: impl Fn(&str) -> Option<String>) -> Result<String> {
+/// Runs a command, and returns what it prints. `key` reads the provider's API key, which only
+/// `run` needs.
+async fn execute(command: Command, key: impl FnOnce() -> Result<String>) -> Result<String> {
     match command {
         Command::Run(args) => {
-            let var = key_var(args.agent.provider);
-            let key = key(var).with_context(|| format!("set {var}"))?;
+            let key = key()?;
             run(args, key).await
         }
         Command::Report { run, cases } => report_run(&run, &cases),
@@ -219,7 +224,7 @@ async fn run(args: RunArgs, key: String) -> Result<String> {
 }
 
 /// The command line's command, run.
-async fn cli(args: &[String], key: impl Fn(&str) -> Option<String>) -> Result<String> {
+async fn cli(args: &[String], key: impl FnOnce() -> Result<String>) -> Result<String> {
     execute(parse(args)?, key).await
 }
 
@@ -244,7 +249,7 @@ fn finish(
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let ran = cli(&args, |var| std::env::var(var).ok()).await;
+    let ran = cli(&args, || read_key(std::io::stdin().lock())).await;
     finish(ran, &mut std::io::stdout(), &mut std::io::stderr())
 }
 
@@ -331,15 +336,14 @@ mod tests {
     }
 
     #[test]
-    fn each_provider_reads_its_own_key() {
-        let vars: Vec<_> = [Provider::Anthropic, Provider::OpenAi, Provider::OpenRouter]
-            .map(key_var)
-            .into();
-        assert_eq!(
-            vars,
-            ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]
-        );
+    fn the_key_is_the_first_line_piped_in() {
+        assert_eq!(read_key(&b"sk-1\n"[..]).unwrap(), "sk-1");
+        assert_eq!(read_key(&b"  sk-2  \nmore\n"[..]).unwrap(), "sk-2");
+        let none = read_key(&b"\n"[..]).unwrap_err();
+        assert_eq!(none.to_string(), "pipe the provider's API key on stdin");
     }
+
+    const SECRET: &str = "sk-eval-not-for-the-job";
 
     fn write_case(dir: &Path, pr: u64, expected: &str) {
         let yaml = format!(
@@ -367,7 +371,7 @@ mod tests {
             )))
             .unwrap()
         };
-        let key = |var: &str| (var == "ANTHROPIC_API_KEY").then(|| "k".to_owned());
+        let key = || Ok(SECRET.to_owned());
         let text = execute(command("pr-1"), key).await.unwrap();
         assert!(text.starts_with("L\n"), "{text}");
         assert!(text.contains("pr-1") && !text.contains("pr-2"), "{text}");
@@ -375,11 +379,22 @@ mod tests {
         assert_eq!(read_run(&out).unwrap().cases.len(), 1);
         assert!(dir.path().join("run/pr-1/result.json").exists());
 
-        let no_key = execute(command("pr-1"), |_| None).await.unwrap_err();
-        assert_eq!(no_key.to_string(), "set ANTHROPIC_API_KEY");
+        let env = std::fs::read_to_string(dir.path().join("run/pr-1/env")).unwrap();
+        assert!(
+            env.contains("PATH=") && !env.contains(SECRET),
+            "the job sees the key"
+        );
+
+        let no_key = execute(command("pr-1"), || read_key(&b""[..])).await;
+        assert!(no_key.is_err());
 
         let report = format!("report {} --cases {}", out.display(), cases.display());
-        assert_eq!(cli(&args(&report), key).await.unwrap(), text);
+        assert_eq!(
+            cli(&args(&report), || unreachable!("a report needs no key"))
+                .await
+                .unwrap(),
+            text
+        );
 
         let compare = format!(
             "compare {} {} --cases {}",
@@ -387,7 +402,11 @@ mod tests {
             out.display(),
             cases.display()
         );
-        let text = cli(&args(&compare), key).await.unwrap();
+        let text = cli(&args(&compare), || {
+            unreachable!("a comparison needs no key")
+        })
+        .await
+        .unwrap();
         assert!(
             text.starts_with("A L: ") && text.ends_with("verdict: drop B\n"),
             "{text}"
@@ -401,7 +420,7 @@ mod tests {
         std::fs::write(&bad, "{}").unwrap();
         for path in [bad, dir.path().join("gone.json")] {
             let c = parse(&args(&format!("report {}", path.display()))).unwrap();
-            assert!(execute(c, |_| None).await.is_err());
+            assert!(execute(c, || unreachable!()).await.is_err());
         }
     }
 

@@ -36,13 +36,15 @@ Rust and the dev Postgres from `compose.dev.yml`), and the agent's CLI (`claude`
 ```bash
 (cd ui && pnpm install && pnpm build)            # mergepatrol embeds the dashboard
 cargo build --release -p mergepatrol -p mergepatrol-eval
-ANTHROPIC_API_KEY=$(security find-generic-password -s <key-name> -w) \
+security find-generic-password -s <key-name> -w |
   target/release/review-eval run --label main --model claude-opus-5-5 --effort medium
 ```
 
 It prints each case and the totals, and writes the run to `target/review-eval/<label>.json`.
-`--case <id>` runs only some cases, `--jobs` how many at once (2), `--provider` picks `openai` or
-`openrouter` (with `OPENAI_API_KEY` or `OPENROUTER_API_KEY`).
+The provider's API key comes in on stdin, never in the environment: the job runs the evidence's
+commands, which must see only the token MergeLoop's proxy gives the job, as in production.
+`--case <id>` runs only some cases, `--jobs` how many at once (2), and `--provider` picks
+`openai` or `openrouter`, with that provider's key.
 
 ## Compare two runs
 
@@ -50,7 +52,8 @@ A prompt change lives in the binary, so build each side and point the run at it:
 
 ```bash
 git worktree add ../try my-prompt-branch && (cd ../try && cargo build --release -p mergepatrol)
-target/release/review-eval run --label try --model claude-opus-5-5 --job-bin ../try/target/release/mergepatrol
+security find-generic-password -s <key-name> -w |
+  target/release/review-eval run --label try --model claude-opus-5-5 --job-bin ../try/target/release/mergepatrol
 target/release/review-eval compare target/review-eval/main.json target/review-eval/try.json
 ```
 
