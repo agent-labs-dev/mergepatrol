@@ -58,6 +58,7 @@ async fn a_rebase_runs_in_a_gke_sandbox() {
             settings_url: None,
         },
         task: Default::default(),
+        update: Default::default(),
     };
     let out = tempfile::tempdir().unwrap();
     let start = Instant::now();

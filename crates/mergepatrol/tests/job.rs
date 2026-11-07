@@ -7,7 +7,7 @@ use std::time::Duration;
 use mergepatrol_core::{CheckFailure, Provider};
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, ApiAccess, BUNDLE_FILE, JobOutcome, JobSpec, REVIEW_FILE, ResolverSpec,
-    ReviewOutput, Task,
+    ReviewOutput, Task, Update,
 };
 use mergepatrol_executor::{Executor, LocalExecutor};
 
@@ -72,6 +72,7 @@ fn spec(url: &Path, head: &str, trunk: &str) -> JobSpec {
             settings_url: Some(SETTINGS.into()),
         },
         task: Default::default(),
+        update: Default::default(),
     }
 }
 
@@ -1073,4 +1074,194 @@ async fn an_openai_conflict_is_resolved_through_the_proxy() {
     );
     let log = git(&check, &["log", "-1", "--format=%B", "FETCH_HEAD"]);
     assert!(log.contains("Resolved-by: mergepatrol, codex ("), "{log}");
+}
+
+/// A branch kept up to date by merging, as #237's author does: `a.ts` conflicted with the trunk
+/// once, and a merge commit on the branch resolved it. The trunk then moved on elsewhere.
+/// Returns the remote's PR head and trunk.
+fn merged_branch(dir: &Path) -> (String, String) {
+    git(dir, &["init", "-q", "-b", "main"]);
+    commit(dir, "a.ts", "base\n");
+    git(dir, &["checkout", "-q", "-b", "pr"]);
+    commit(dir, "a.ts", "pr\n");
+    git(dir, &["checkout", "-q", "main"]);
+    commit(dir, "a.ts", "main\n");
+    git(dir, &["checkout", "-q", "pr"]);
+    let out = Command::new("git")
+        .args(["merge", "-q", "main"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the merge conflicts");
+    std::fs::write(dir.join("a.ts"), "main\npr\n").unwrap();
+    git(dir, &["add", "a.ts"]);
+    git(dir, &["commit", "-q", "--no-edit"]);
+    let head = git(dir, &["rev-parse", "HEAD"]);
+    git(dir, &["checkout", "-q", "main"]);
+    let trunk = commit(dir, "other.txt", "from main\n");
+    (head, trunk)
+}
+
+/// The job's bundle, fetched into a fresh repo with `main` from `origin`, at `result`.
+fn fetched_result(dir: &Path, origin: &Path, out: &Path) -> std::path::PathBuf {
+    let check = dir.join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(
+        &check,
+        &["fetch", "-q", origin.to_str().unwrap(), "main", "pr"],
+    );
+    git(
+        &check,
+        &[
+            "fetch",
+            "-q",
+            out.join(BUNDLE_FILE).to_str().unwrap(),
+            "refs/heads/result:refs/heads/result",
+        ],
+    );
+    check
+}
+
+#[tokio::test]
+async fn a_branch_that_merged_the_trunk_in_is_updated_by_merging_it_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = merged_branch(&origin);
+
+    // No agent: the branch already resolves the conflict a rebase would replay.
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.leave_conflicts = true;
+    spec.update = Update::Either;
+    let out = tmp.path().join("out");
+    let result = executor().run("t-merged", &spec, &out).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+
+    let check = fetched_result(tmp.path(), &origin, &out);
+    assert_merge_of(&check, &head, &trunk);
+    assert_eq!(git(&check, &["show", "result:a.ts"]), "main\npr");
+    assert_eq!(git(&check, &["show", "result:other.txt"]), "from main");
+    let message = git(&check, &["log", "-1", "--format=%B", "result"]);
+    assert!(message.starts_with("Merge main into pr"), "{message}");
+    assert!(message.contains("Updated-by: mergepatrol"), "{message}");
+
+    // A repo that merges PRs by rebasing them gets its rebase, conflict and all.
+    spec.update = Update::Rebase;
+    let result = executor()
+        .run("t-merged-rebase", &spec, &tmp.path().join("out2"))
+        .await
+        .unwrap();
+    let JobOutcome::Failed { reason } = result.outcome else {
+        panic!("{result:?}")
+    };
+    assert!(reason.starts_with("it conflicts in a.ts"), "{reason}");
+}
+
+/// `result` is a merge commit of `trunk` into `head`.
+fn assert_merge_of(check: &Path, head: &str, trunk: &str) {
+    assert_eq!(
+        git(check, &["rev-list", "--parents", "-n1", "result"]),
+        format!("{} {head} {trunk}", git(check, &["rev-parse", "result"]))
+    );
+}
+
+#[tokio::test]
+async fn a_linear_branch_whose_rebase_conflicts_and_merge_does_not_is_merged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    commit(&origin, "a.ts", "base\n");
+    git(&origin, &["checkout", "-q", "-b", "pr"]);
+    // A change to `a.ts` the branch later undoes: replayed, it conflicts; merged, it is gone.
+    commit(&origin, "a.ts", "tried\n");
+    commit(&origin, "a.ts", "base\n");
+    let head = commit(&origin, "feature.txt", "from the pr\n");
+    git(&origin, &["checkout", "-q", "main"]);
+    let trunk = commit(&origin, "a.ts", "main\n");
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.leave_conflicts = true;
+    spec.update = Update::Either;
+    let out = tmp.path().join("out");
+    let result = executor().run("t-linear", &spec, &out).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    let check = fetched_result(tmp.path(), &origin, &out);
+    assert_merge_of(&check, &head, &trunk);
+    assert_eq!(git(&check, &["show", "result:a.ts"]), "main");
+}
+
+#[tokio::test]
+async fn a_linear_branch_that_rebases_cleanly_is_rebased() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.update = Update::Either;
+    let out = tmp.path().join("out");
+    let result = executor().run("t-clean", &spec, &out).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    let check = fetched_result(tmp.path(), &origin, &out);
+    assert_eq!(git(&check, &["rev-parse", "result~1"]), trunk);
+    assert_eq!(
+        git(&check, &["rev-list", "--count", "--merges", "result"]),
+        "0"
+    );
+}
+
+#[tokio::test]
+async fn a_rebase_that_ran_out_of_time_is_merged_instead() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.update = Update::Merge;
+    let out = tmp.path().join("out");
+    let result = executor().run("t-forced", &spec, &out).await.unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    let check = fetched_result(tmp.path(), &origin, &out);
+    assert_merge_of(&check, &head, &trunk);
+}
+
+#[tokio::test]
+async fn a_merge_that_conflicts_has_the_agent_resolve_it_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, _) = merged_branch(&origin);
+    // The trunk changes `a.ts` again, after the branch's merge.
+    let trunk = commit(&origin, "a.ts", "main again\n");
+
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.update = Update::Either;
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    let out = tmp.path().join("out");
+    let result = with_fake_claude_running(
+        tmp.path(),
+        "printf 'main again\\npr\\n' > a.ts",
+        "Resolved.",
+    )
+    .run("t-merge-conflict", &spec, &out)
+    .await
+    .unwrap();
+    assert_eq!(result.outcome, JobOutcome::Done, "{result:?}");
+    let resolved = result
+        .events
+        .iter()
+        .filter(|e| e.kind == "resolved")
+        .count();
+    assert_eq!(resolved, 1, "{:?}", result.events);
+
+    let check = fetched_result(tmp.path(), &origin, &out);
+    assert_merge_of(&check, &head, &trunk);
+    assert_eq!(git(&check, &["show", "result:a.ts"]), "main again\npr");
+    let message = git(&check, &["log", "-1", "--format=%B", "result"]);
+    assert!(message.contains("Resolved-by: mergepatrol"), "{message}");
+    assert!(message.contains("Updated-by: mergepatrol"), "{message}");
 }

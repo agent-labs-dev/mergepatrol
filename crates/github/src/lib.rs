@@ -21,7 +21,8 @@ pub use detail::{
 };
 pub use files::{BranchFile, GitObject, ObjectsAt, Proposal, PullRef, SYMLINK_MODE};
 pub use repo::{
-    BranchMerge, HeadRepository, InboxPull, MergeOutcome, PrDetails, PullRequest, RepoOwner,
-    RepoSnapshot, ReviewThread, SnapshotParts, StackRef, ThreadComment, TreeEntry, queued,
+    BranchMerge, BranchMove, HeadRepository, InboxPull, MergeOutcome, PrDetails, PullRequest,
+    RepoOwner, RepoSnapshot, ReviewThread, SnapshotParts, StackRef, ThreadComment, TreeEntry,
+    queued,
 };
 pub use setup::{AppCredentials, GithubUser};

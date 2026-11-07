@@ -274,6 +274,75 @@ impl Git {
         self.rebase_step(wt, ok).await
     }
 
+    /// Whether `base..head` holds a merge commit: the branch keeps up with its base by merging.
+    pub async fn has_merges(&self, wt: &Path, base: &str, head: &str) -> Result<bool> {
+        let range = format!("{base}..{head}");
+        let merges = self
+            .run(wt, &["rev-list", "--merges", "-n1", &range])
+            .await?;
+        Ok(!merges.trim().is_empty())
+    }
+
+    /// Whether `a` and `b` merge with no conflict. Writes objects, and touches no worktree.
+    pub async fn merges_cleanly(&self, wt: &Path, a: &str, b: &str) -> Result<bool> {
+        let out = self
+            .git(wt, &["merge-tree", "--write-tree", "--no-messages", a, b])
+            .output()
+            .await?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => bail!(
+                "git merge-tree: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        }
+    }
+
+    /// Merges `rev` into HEAD as a merge commit with `message`, by MergeLoop. Returns the files
+    /// it conflicts in, left for `commit_merge`: none once it is committed.
+    pub async fn merge(&self, wt: &Path, rev: &str, message: &str) -> Result<Vec<String>> {
+        let mut cmd = self.git(
+            wt,
+            &["merge", "-q", "--no-ff", "--no-edit", "-m", message, rev],
+        );
+        as_mergeloop(&mut cmd);
+        let ok = cmd.output().await?.status.success();
+        let files = self.unmerged_files(wt).await?;
+        match (ok, files.is_empty()) {
+            (true, true) => Ok(Vec::new()),
+            (false, false) => Ok(files),
+            _ => bail!("git merge stopped without a conflict (exit ok: {ok}, unmerged: {files:?})"),
+        }
+    }
+
+    /// Commits the resolved conflict of a stopped `merge`, with its message plus `trailer`.
+    pub async fn commit_merge(&self, wt: &Path, message: &str, trailer: &str) -> Result<()> {
+        self.run(wt, &["add", "-A"]).await?;
+        let message = self.add_trailer(wt, message, trailer).await?;
+        let mut cmd = self.git(wt, &["commit", "-q", "--no-verify", "-F", "-"]);
+        as_mergeloop(&mut cmd);
+        input(cmd.stdin(Stdio::piped()), message.as_bytes(), "git commit").await?;
+        Ok(())
+    }
+
+    /// The parents of `rev`, the first parent first.
+    pub async fn parents(&self, wt: &Path, rev: &str) -> Result<Vec<String>> {
+        let line = self.run(wt, &["rev-list", "--parents", "-n1", rev]).await?;
+        Ok(line.split_whitespace().skip(1).map(str::to_owned).collect())
+    }
+
+    /// What `to`'s tree changes of `from`'s, file by file.
+    pub async fn tree_changes(&self, wt: &Path, from: &str, to: &str) -> Result<Vec<TreeChange>> {
+        let raw = self
+            .output(
+                wt,
+                &["diff-tree", "-r", "-z", "--raw", "--no-renames", from, to],
+            )
+            .await?;
+        parse_raw_diff(&raw)
+    }
+
     pub async fn rebase_abort(&self, wt: &Path) -> Result<()> {
         self.run(wt, &["rebase", "--abort"]).await?;
         Ok(())
@@ -392,26 +461,13 @@ impl Git {
             let author = self
                 .run(wt, &["log", "-1", "--format=%an <%ae>", &sha])
                 .await?;
-            let raw = self
-                .output(
-                    wt,
-                    &[
-                        "diff-tree",
-                        "-r",
-                        "-z",
-                        "--raw",
-                        "--no-renames",
-                        &format!("{sha}^"),
-                        &sha,
-                    ],
-                )
-                .await?;
+            let changes = self.tree_changes(wt, &format!("{sha}^"), &sha).await?;
             commits.push(LocalCommit {
                 sha,
                 tree,
                 message: message.trim_end().to_owned(),
                 author: author.trim().to_owned(),
-                changes: parse_raw_diff(&raw)?,
+                changes,
             });
         }
         Ok(commits)
@@ -443,12 +499,20 @@ impl Git {
 
     /// The objects reachable from `head` but not from `base`: commits, trees, and blobs.
     pub async fn objects(&self, wt: &Path, base: &str, head: &str) -> Result<Vec<String>> {
-        let range = format!("{base}..{head}");
-        Ok(lines(
-            &self
-                .run(wt, &["rev-list", "--objects", "--no-object-names", &range])
-                .await?,
-        ))
+        self.objects_beyond(wt, head, &[base]).await
+    }
+
+    /// The objects reachable from `head` but from none of `known`.
+    pub async fn objects_beyond(
+        &self,
+        wt: &Path,
+        head: &str,
+        known: &[&str],
+    ) -> Result<Vec<String>> {
+        let known: Vec<String> = known.iter().map(|k| format!("^{k}")).collect();
+        let mut args = vec!["rev-list", "--objects", "--no-object-names", head];
+        args.extend(known.iter().map(String::as_str));
+        Ok(lines(&self.run(wt, &args).await?))
     }
 
     /// One file's changes from `from` to `to`, with `context` lines around each hunk.
@@ -566,6 +630,12 @@ impl Git {
             .map(|p| String::from_utf8(p.to_vec()).context("non-UTF-8 path"))
             .collect()
     }
+}
+
+/// Makes MergeLoop the author of the commit `cmd` makes, as it is the committer.
+fn as_mergeloop(cmd: &mut tokio::process::Command) {
+    cmd.env("GIT_AUTHOR_NAME", COMMITTER.0)
+        .env("GIT_AUTHOR_EMAIL", COMMITTER.1);
 }
 
 /// Sends `token` as GitHub's basic auth, through the environment. An empty token sends none.

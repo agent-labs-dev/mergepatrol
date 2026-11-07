@@ -25,6 +25,26 @@ pub trait Executor: Send + Sync {
     async fn run(&self, job_id: &str, spec: &JobSpec, out: &Path) -> Result<JobResult>;
 }
 
+/// The job ran past its executor's limit. That says nothing of the PR: the job may be slow on a
+/// long history, or its machine may be.
+#[derive(Debug)]
+pub struct TimedOut(pub Duration);
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the job did not finish in {:?}", self.0)
+    }
+}
+
+impl std::error::Error for TimedOut {}
+
+impl TimedOut {
+    /// Whether `e`, or what it wraps, is a job that timed out.
+    pub fn caused(e: &anyhow::Error) -> bool {
+        e.chain().any(|c| c.is::<TimedOut>())
+    }
+}
+
 /// Runs `<program> job --out <dir>` on this machine. No isolation.
 pub struct LocalExecutor {
     pub program: PathBuf,
@@ -145,7 +165,7 @@ async fn run_with_spec(mut cmd: Command, spec: &JobSpec, timeout: Duration) -> R
     drop(stdin);
     let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(out) => out?,
-        Err(_) => bail!("the job did not finish in {timeout:?}"),
+        Err(_) => return Err(TimedOut(timeout).into()),
     };
     let mut logs = String::from_utf8_lossy(&out.stdout).into_owned();
     logs.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -195,6 +215,38 @@ fn path_str(p: &Path) -> Result<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_job_that_runs_out_of_time_says_so_as_its_own_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let program = tmp.path().join("job.sh");
+        std::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executor = LocalExecutor {
+            program,
+            timeout: Duration::from_millis(200),
+        };
+        let spec: JobSpec = serde_json::from_value(serde_json::json!({
+            "repo": "o/r", "clone_url": "", "token": "", "head_ref": "refs/heads/pr",
+            "head_sha": "h", "trunk": "main", "trunk_sha": "t", "pr_title": "", "pr_body": "",
+            "verify": [], "resolver": { "model": "m", "effort": "e", "timeout_secs": 1,
+            "max_turns": 1, "api": null },
+        }))
+        .unwrap();
+        let err = executor
+            .run("j", &spec, &tmp.path().join("out"))
+            .await
+            .unwrap_err()
+            .context("the job failed");
+        assert!(TimedOut::caused(&err), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("the job did not finish in 200ms"),
+            "{err:#}"
+        );
+        // An older orchestrator's spec, with no word on how to update, rebases.
+        assert_eq!(spec.update, crate::protocol::Update::Rebase);
+    }
 
     #[tokio::test]
     async fn a_hung_docker_command_is_cut_short() {

@@ -1017,11 +1017,22 @@ impl Installation {
         tree: &str,
         parent: &str,
     ) -> Result<String> {
+        self.create_commit_of(repo, message, tree, &[parent]).await
+    }
+
+    /// `create_commit` with each of `parents`, the first parent first: a merge commit.
+    pub async fn create_commit_of(
+        &self,
+        repo: &RepoName,
+        message: &str,
+        tree: &str,
+        parents: &[&str],
+    ) -> Result<String> {
         let r: Value = self
             .rest(
                 Method::POST,
                 &format!("/repos/{repo}/git/commits"),
-                Some(json!({ "message": message, "tree": tree, "parents": [parent] })),
+                Some(json!({ "message": message, "tree": tree, "parents": parents })),
             )
             .await?;
         Ok(r["sha"].as_str().context("commit sha")?.to_owned())
@@ -1035,26 +1046,22 @@ impl Installation {
         before: &str,
         after: &str,
     ) -> Result<()> {
-        self.force_update_branches(repo_id, &[(branch, before, after)])
-            .await
+        let force = BranchMove {
+            branch,
+            before,
+            after,
+            force: true,
+        };
+        self.update_branches(repo_id, &[force]).await
     }
 
-    /// Moves each `(branch, before, after)`, all or none: `updateRefs` is atomic. It fails if a
-    /// branch is not at its `before`, also one whose `after` is the same.
-    pub async fn force_update_branches(
-        &self,
-        repo_id: &str,
-        moves: &[(&str, &str, &str)],
-    ) -> Result<()> {
+    /// Makes each move, all or none: `updateRefs` is atomic. It fails if a branch is not at its
+    /// `before`, also one whose `after` is the same.
+    pub async fn update_branches(&self, repo_id: &str, moves: &[BranchMove<'_>]) -> Result<()> {
         let query = "mutation($repo: ID!, $updates: [RefUpdate!]!) {
             updateRefs(input: { repositoryId: $repo, refUpdates: $updates }) { clientMutationId }
         }";
-        let updates: Vec<Value> = moves
-            .iter()
-            .map(|(branch, before, after)| {
-                json!({ "name": format!("refs/heads/{branch}"), "beforeOid": before, "afterOid": after, "force": true })
-            })
-            .collect();
+        let updates: Vec<Value> = moves.iter().map(BranchMove::ref_update).collect();
         let _: Value = self
             .graphql(
                 "update refs",
@@ -1784,6 +1791,27 @@ fn fit_comment(text: &str) -> std::borrow::Cow<'_, str> {
         .take(COMMENT_CHARS - CUT.chars().count())
         .collect();
     format!("{keep}{CUT}").into()
+}
+
+/// A branch's move from `before` to `after`.
+pub struct BranchMove<'a> {
+    pub branch: &'a str,
+    pub before: &'a str,
+    pub after: &'a str,
+    /// `after` need not descend from `before`: a force-push, which a branch may forbid. A merge
+    /// of the base into the branch goes without.
+    pub force: bool,
+}
+
+impl BranchMove<'_> {
+    fn ref_update(&self) -> Value {
+        json!({
+            "name": format!("refs/heads/{}", self.branch),
+            "beforeOid": self.before,
+            "afterOid": self.after,
+            "force": self.force,
+        })
+    }
 }
 
 #[cfg(test)]

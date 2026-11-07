@@ -12,19 +12,19 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
     Answered, CheckFailure, CodeLine, Depth, FIXED_BY, Finding, Lean, LineKind, Panel, RESOLVED_BY,
-    SentBack, Spend, SpendTask, Verdict, Vote, merge_reviews, most_first,
+    SentBack, Spend, SpendTask, UPDATED_BY, Verdict, Vote, merge_reviews, most_first,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
-    ResolverSpec, ReviewOutput, Task,
+    ResolverSpec, ReviewOutput, Task, Update,
 };
 use mergepatrol_executor::proxy::Api;
 use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
     ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
-    ResolveRequest, Resolver, ReviewRequest, Scope, Verify, VerifyRequest, claim, commit_subject,
-    new_title, vote,
+    ResolveRequest, Resolver, ReviewRequest, Scope, Stopped, Verify, VerifyRequest, claim,
+    commit_subject, new_title, vote,
 };
 use tokio::io::AsyncReadExt;
 
@@ -195,8 +195,11 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
     // The bundle holds the commits on top of what the orchestrator already has.
     let (exclude, done) = match &spec.task {
         Task::Rebase => {
-            rebase(spec, &git, resolver, &checks, dir, out, events).await?;
-            if git.rev_parse(dir, "HEAD").await? == spec.trunk_sha {
+            update(spec, &git, resolver, &checks, dir, out, events).await?;
+            let tree = |rev: &str| format!("{rev}^{{tree}}");
+            if git.rev_parse(dir, &tree("HEAD")).await?
+                == git.rev_parse(dir, &tree(&spec.trunk_sha)).await?
+            {
                 bail!(
                     "nothing is left to merge: its changes are already on {}",
                     spec.trunk
@@ -282,7 +285,10 @@ fn resolver(spec: &ResolverSpec) -> Box<dyn Resolver> {
     }
 }
 
-async fn rebase(
+/// Brings the PR up to date with `trunk_sha`, as `spec.update` asks: replays its commits, or
+/// merges the base in. A branch that keeps up by merging already resolves what a replay of its
+/// commits would conflict in again, commit by commit.
+async fn update(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
@@ -291,73 +297,110 @@ async fn rebase(
     out: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
+    let (trunk, head) = (&spec.trunk_sha, &spec.head_sha);
+    let merge = match spec.update {
+        Update::Rebase => false,
+        Update::Merge => true,
+        Update::Either => git.has_merges(dir, trunk, head).await?,
+    };
+    if merge {
+        return merge_in(spec, git, resolver, checks, dir, out, events).await;
+    }
+    let step = git.rebase(dir, trunk, spec.upstream.as_deref()).await?;
+    if matches!(step, RebaseStep::Conflict { .. })
+        && spec.update == Update::Either
+        && git.merges_cleanly(dir, trunk, head).await?
+    {
+        git.rebase_abort(dir).await?;
+        event(
+            events,
+            "merging-base",
+            "the rebase conflicts and a merge does not: merging",
+        );
+        return merge_in(spec, git, resolver, checks, dir, out, events).await;
+    }
+    rebase(spec, git, resolver, checks, dir, out, events, step).await
+}
+
+/// Merges `trunk_sha` into the PR head, with the agent on its conflicts, once.
+async fn merge_in(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &dyn Resolver,
+    checks: &Verify,
+    dir: &Path,
+    out: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let base = spec.base_ref.as_deref().unwrap_or(&spec.trunk);
+    let branch = spec.head_ref.strip_prefix("refs/heads/");
+    let message = match branch {
+        Some(branch) => format!("Merge {base} into {branch}\n\n{UPDATED_BY}"),
+        None => format!("Merge {base}\n\n{UPDATED_BY}"),
+    };
+    let files = git.merge(dir, &spec.trunk_sha, &message).await?;
+    if files.is_empty() {
+        event(events, "base-merged", &spec.trunk_sha);
+        return Ok(());
+    }
+    let transcript = out
+        .join("transcripts")
+        .join(format!("merge-{}.jsonl", &spec.trunk_sha[..12]));
+    resolve(
+        spec,
+        git,
+        resolver,
+        checks,
+        dir,
+        &files,
+        Stopped::Merge,
+        &transcript,
+        events,
+    )
+    .await?;
+    git.commit_merge(
+        dir,
+        &message,
+        &format!("{RESOLVED_BY}, {}", resolver.name()),
+    )
+    .await?;
+    verify(spec, dir, events, "the resolution").await
+}
+
+/// Replays the PR's commits from `step`, where `git.rebase` left off, with the agent on each
+/// commit that conflicts.
+#[allow(clippy::too_many_arguments)]
+async fn rebase(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &dyn Resolver,
+    checks: &Verify,
+    dir: &Path,
+    out: &Path,
+    events: &mut Vec<JobEvent>,
+    mut step: RebaseStep,
+) -> Result<()> {
     let mut resolved_any = false;
-    let mut step = git
-        .rebase(dir, &spec.trunk_sha, spec.upstream.as_deref())
-        .await?;
     while let RebaseStep::Conflict { commit, files } = step {
-        event(events, "conflict", files.join(", "));
-        if spec.leave_conflicts {
-            bail!("{LEFT_CONFLICT} in {}", files.join(", "));
-        }
-        if spec.resolver.api.is_none() {
-            let files = files.join(", ");
-            let credential = spec.resolver.provider.credential();
-            match &spec.resolver.settings_url {
-                Some(url) => bail!(
-                    "it conflicts in {files}, and the workspace has no {credential} for an agent to resolve that: add one in the dashboard's settings, {url}"
-                ),
-                None => bail!(
-                    "it conflicts in {files}, and the job has no {credential} for an agent to resolve that"
-                ),
-            }
-        }
         let commit_message = git.commit_message(dir, &commit).await?;
-        let stopped_at = git.rev_parse(dir, "HEAD").await?;
         let transcript = out
             .join("transcripts")
             .join(format!("{}.jsonl", &commit[..12]));
-        let run = resolver
-            .resolve(ResolveRequest {
-                workdir: dir,
-                conflicted_files: &files,
-                pr_title: &spec.pr_title,
-                pr_body: &spec.pr_body,
-                commit_message: &commit_message,
-                trunk: &spec.trunk,
-                verify: checks,
-                transcript: &transcript,
-            })
-            .await
-            .map_err(|e| anyhow!("the resolver failed: {e:#}"))?;
-        let done = run.outcome == Outcome::Resolved;
-        spent(
+        let stopped = Stopped::Replay {
+            commit_message: &commit_message,
+        };
+        resolve(
+            spec,
+            git,
+            resolver,
+            checks,
+            dir,
+            &files,
+            stopped,
+            &transcript,
             events,
-            &spec.resolver,
-            SpendTask::Rebase,
-            done,
-            files.join(", "),
-            &run,
-        );
-        match run.outcome {
-            Outcome::Resolved => {}
-            Outcome::GaveUp(reason) => bail!("the resolver gave up: {reason}"),
-            Outcome::Failed(why) => bail!("the resolver failed: {why}"),
-        }
-        if git.rev_parse(dir, "HEAD").await? != stopped_at {
-            bail!("the agent moved HEAD");
-        }
-        for f in &files {
-            let content = tokio::fs::read_to_string(dir.join(f))
-                .await
-                .unwrap_or_default();
-            if content
-                .lines()
-                .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
-            {
-                bail!("conflict markers are left in {f}");
-            }
-        }
+        )
+        .await?;
         resolved_any = true;
         step = git
             .continue_resolution(dir, &format!("{RESOLVED_BY}, {}", resolver.name()))
@@ -366,6 +409,81 @@ async fn rebase(
 
     if resolved_any {
         verify(spec, dir, events, "the resolution").await?;
+    }
+    Ok(())
+}
+
+/// Has the agent resolve the conflict in `files`, where a rebase or merge `stopped`, and
+/// checks what it left: HEAD where it was, and no conflict markers.
+#[allow(clippy::too_many_arguments)]
+async fn resolve(
+    spec: &JobSpec,
+    git: &Git,
+    resolver: &dyn Resolver,
+    checks: &Verify,
+    dir: &Path,
+    files: &[String],
+    stopped: Stopped<'_>,
+    transcript: &Path,
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    event(events, "conflict", files.join(", "));
+    if spec.leave_conflicts {
+        bail!("{LEFT_CONFLICT} in {}", files.join(", "));
+    }
+    if spec.resolver.api.is_none() {
+        let files = files.join(", ");
+        let credential = spec.resolver.provider.credential();
+        match &spec.resolver.settings_url {
+            Some(url) => bail!(
+                "it conflicts in {files}, and the workspace has no {credential} for an agent to resolve that: add one in the dashboard's settings, {url}"
+            ),
+            None => bail!(
+                "it conflicts in {files}, and the job has no {credential} for an agent to resolve that"
+            ),
+        }
+    }
+    let stopped_at = git.rev_parse(dir, "HEAD").await?;
+    let run = resolver
+        .resolve(ResolveRequest {
+            workdir: dir,
+            conflicted_files: files,
+            pr_title: &spec.pr_title,
+            pr_body: &spec.pr_body,
+            stopped,
+            trunk: &spec.trunk,
+            verify: checks,
+            transcript,
+        })
+        .await
+        .map_err(|e| anyhow!("the resolver failed: {e:#}"))?;
+    let done = run.outcome == Outcome::Resolved;
+    spent(
+        events,
+        &spec.resolver,
+        SpendTask::Rebase,
+        done,
+        files.join(", "),
+        &run,
+    );
+    match run.outcome {
+        Outcome::Resolved => {}
+        Outcome::GaveUp(reason) => bail!("the resolver gave up: {reason}"),
+        Outcome::Failed(why) => bail!("the resolver failed: {why}"),
+    }
+    if git.rev_parse(dir, "HEAD").await? != stopped_at {
+        bail!("the agent moved HEAD");
+    }
+    for f in files {
+        let content = tokio::fs::read_to_string(dir.join(f))
+            .await
+            .unwrap_or_default();
+        if content
+            .lines()
+            .any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
+        {
+            bail!("conflict markers are left in {f}");
+        }
     }
     Ok(())
 }

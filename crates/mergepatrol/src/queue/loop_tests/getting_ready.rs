@@ -9,8 +9,9 @@ use std::pin::Pin;
 use std::process::{Command, Stdio};
 
 use base64::Engine;
-use mergepatrol_core::{FIXED_BY, Outcome, Settled};
-use mergepatrol_executor::protocol::JobResult;
+use mergepatrol_core::{FIXED_BY, Outcome, Settled, UPDATED_BY};
+use mergepatrol_executor::TimedOut;
+use mergepatrol_executor::protocol::{JobResult, Update};
 use mergepatrol_git::cache_path;
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
@@ -75,7 +76,11 @@ struct Agent {
     during: Mutex<VecDeque<During>>,
     /// Why the agent cannot do any job, if it cannot.
     fails: Mutex<Option<String>>,
+    /// How many of the next jobs run out of time.
+    times_out: Mutex<u32>,
     tasks: Mutex<Vec<Task>>,
+    /// How each rebase job was asked to update its branch.
+    updates: Mutex<Vec<Update>>,
 }
 
 impl Agent {
@@ -86,6 +91,11 @@ impl Agent {
         if !matches!(spec.task, Task::Rebase) {
             commit(dir, "fix.txt", "fixed\n", &format!("Fix it\n\n{FIXED_BY}"));
             return Ok(Vec::new());
+        }
+        let range = format!("{}..HEAD", spec.trunk_sha);
+        let has_merges = !git(dir, &["rev-list", "--merges", &range]).is_empty();
+        if spec.update == Update::Merge || (spec.update == Update::Either && has_merges) {
+            return self.merge(spec, dir);
         }
         let upstream = match &spec.upstream {
             Some(upstream) => upstream.clone(),
@@ -119,15 +129,54 @@ impl Agent {
             message: conflicts,
         }])
     }
+
+    /// Merges the base into the branch, as the job does, resolving its conflict once.
+    fn merge(&self, spec: &JobSpec, dir: &Path) -> std::result::Result<Vec<JobEvent>, String> {
+        let message = format!("Merge main\n\n{UPDATED_BY}");
+        let merged = Command::new("git")
+            .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
+            .args(["merge", "-q", "--no-ff", "-m", &message, &spec.trunk_sha])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        if merged.status.success() {
+            return Ok(Vec::new());
+        }
+        let conflicts = git(dir, &["diff", "--name-only", "--diff-filter=U"]);
+        if spec.leave_conflicts {
+            return Err(format!("{LEFT_CONFLICT} in {conflicts}"));
+        }
+        for file in conflicts.lines() {
+            std::fs::write(dir.join(file), "resolved\n").unwrap();
+        }
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "--no-edit"]);
+        Ok(vec![JobEvent {
+            kind: "resolved".into(),
+            message: conflicts,
+        }])
+    }
 }
 
 #[async_trait]
 impl Executor for Agent {
     async fn run(&self, _: &str, spec: &JobSpec, out: &Path) -> Result<JobResult> {
         self.tasks.lock().unwrap().push(spec.task.clone());
+        if spec.task == Task::Rebase {
+            self.updates.lock().unwrap().push(spec.update);
+        }
         let during = self.during.lock().unwrap().pop_front();
         if let Some(during) = during {
             during.await;
+        }
+        let timed_out = {
+            let mut left = self.times_out.lock().unwrap();
+            let timed_out = *left > 0;
+            *left = left.saturating_sub(1);
+            timed_out
+        };
+        if timed_out {
+            return Err(TimedOut(Duration::from_secs(2400)).into());
         }
         let failed = |reason, events| JobResult {
             outcome: JobOutcome::Failed { reason },
@@ -206,6 +255,20 @@ fn update_refs(gh: &Fake, origin: &Path, updates: &[Value]) -> Value {
         git(origin, &["rev-parse", &name]) != str_of(u, "beforeOid")
     }) {
         return json!({ "errors": [{ "message": "a ref moved" }] });
+    }
+    let forward = |u: &Value| {
+        let (before, after) = (str_of(u, "beforeOid"), str_of(u, "afterOid"));
+        let ancestor = ["merge-base", "--is-ancestor", &before, &after];
+        Command::new("git")
+            .args(ancestor)
+            .current_dir(origin)
+            .status()
+            .unwrap()
+            .success()
+    };
+    let forbids_force = gh.with(|s| s.forbids_force);
+    if forbids_force && updates.iter().any(|u| u["force"] == true || !forward(u)) {
+        return json!({ "errors": [{ "message": "force-pushes are blocked" }] });
     }
     let mut s = gh.state.lock().unwrap();
     for u in updates {
@@ -439,12 +502,13 @@ fn answer(gh: &Fake, origin: &Path, method: &str, path: &str, body: &str) -> (u1
         }
         ("POST", "git/trees") => (201, sha_of(create_tree(origin, &body))),
         ("POST", "git/commits") => {
-            let (tree, parent) = (
-                body["tree"].as_str().unwrap(),
-                body["parents"][0].as_str().unwrap(),
-            );
+            let tree = body["tree"].as_str().unwrap();
+            let mut args = vec!["commit-tree", tree];
+            for parent in body["parents"].as_array().unwrap() {
+                args.extend(["-p", parent.as_str().unwrap()]);
+            }
+            args.extend(["-F", "-"]);
             let message = body["message"].as_str().unwrap().as_bytes();
-            let args = ["commit-tree", tree, "-p", parent, "-F", "-"];
             (201, sha_of(git_with(origin, &args, &[], Some(message))))
         }
         ("POST", "git/refs") => {
@@ -516,7 +580,9 @@ impl World {
             origin: origin.clone(),
             during: Default::default(),
             fails: Default::default(),
+            times_out: Default::default(),
             tasks: Default::default(),
+            updates: Default::default(),
         });
         let store = Arc::new(Mem::default());
         let mut ctx = ctx(store.clone());
@@ -578,11 +644,18 @@ impl World {
     }
 
     async fn tick(&self) {
+        self.try_tick().await.unwrap();
+    }
+
+    /// A tick, which fails on a job's error outside the PR, for the next to run it again.
+    async fn try_tick(&self) -> Result<()> {
         let sandbox = JobSandbox {
             ctx: &self.ctx,
             gh: &self.installation,
         };
-        tick(&self.ctx, &*self.gh, &sandbox, &repo()).await.unwrap();
+        tick(&self.ctx, &*self.gh, &sandbox, &repo())
+            .await
+            .map(drop)
     }
 
     /// Ticks until `done`.
@@ -808,6 +881,198 @@ async fn a_conflict_github_shows_is_rebased_before_the_lane_sees_it() {
     let _drain = world.drain().await;
     world.tick_until(|w| !w.merged().is_empty()).await;
     assert_eq!(world.tasks(), [Task::Rebase], "the lane needs no agent");
+}
+
+/// PR 1 keeps up with `main` by merging, as #237's author does: its merge resolved a conflict
+/// in `shared.txt`. Then `main` moved on, and GitHub says the PR conflicts, so it is brought up
+/// to date. Its branch refuses a force-push.
+async fn merged_in_pr() -> World {
+    World::new(
+        |o| {
+            commit(o, "shared.txt", "base\n", "start");
+            git(o, &["checkout", "-q", "-b", "pr-1"]);
+            commit(o, "shared.txt", "from the pr\n", "the PR's change");
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, "shared.txt", "from main\n", "the trunk's change");
+            git(o, &["checkout", "-q", "pr-1"]);
+            let merged = Command::new("git")
+                .args(["merge", "-q", "main"])
+                .current_dir(o)
+                .output()
+                .unwrap();
+            assert!(!merged.status.success(), "the merge conflicts");
+            commit(o, "shared.txt", "both\n", "Merge main into pr-1");
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, "other.txt", "from main\n", "the trunk's next change");
+        },
+        |s, o| {
+            add_pr(s, 1, o);
+            s.prs.get_mut(&1).unwrap().conflicting = true;
+            s.forbids_force = true;
+        },
+    )
+    .await
+}
+
+/// The commit `rev`'s parents.
+fn parents(world: &World, rev: &str) -> Vec<String> {
+    let line = git(&world.origin, &["rev-list", "--parents", "-n1", rev]);
+    line.split_whitespace().skip(1).map(str::to_owned).collect()
+}
+
+#[tokio::test]
+async fn a_branch_that_merged_the_trunk_in_is_merged_again_with_no_agent_and_no_force() {
+    let world = merged_in_pr().await;
+    let before = world.pr(1).head_ref_oid;
+    let trunk = world.branch("main");
+    let _drain = world.drain().await;
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    assert_eq!(*world.agent.updates.lock().unwrap(), [Update::Either]);
+    assert!(!world.did(1, "resolved"), "{:?}", world.kinds(1));
+    assert!(!world.did(1, "ejected"));
+    let head = world.pr(1).head_ref_oid;
+    assert_eq!(parents(&world, &head), [before, trunk]);
+    let message = git(&world.origin, &["log", "-1", "--format=%B", &head]);
+    assert!(message.contains(UPDATED_BY), "{message}");
+}
+
+#[tokio::test]
+async fn a_repo_that_merges_by_rebasing_gets_a_rebase() {
+    let world = merged_in_pr().await;
+    world.gh.with_mut(|s| {
+        s.repo_merge_methods = Some(vec!["rebase".into()]);
+        s.forbids_force = false;
+    });
+    let _drain = world.drain().await;
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    let updates = world.agent.updates.lock().unwrap().clone();
+    assert!(updates.iter().all(|u| *u == Update::Rebase), "{updates:?}");
+    let head = world.pr(1).head_ref_oid;
+    assert_eq!(parents(&world, &head).len(), 1);
+}
+
+#[tokio::test]
+async fn a_rebase_that_runs_out_of_time_merges_the_trunk_in_instead() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world
+        .gh
+        .with_mut(|s| s.prs.get_mut(&1).unwrap().conflicting = true);
+    *world.agent.times_out.lock().unwrap() = 1;
+    let before = world.pr(1).head_ref_oid;
+    let _drain = world.drain().await;
+    world.tick_until(|w| !w.merged().is_empty()).await;
+    let updates = world.agent.updates.lock().unwrap().clone();
+    assert_eq!(updates, [Update::Either, Update::Merge]);
+    assert!(world.did(1, "merging-base"), "{:?}", world.kinds(1));
+    assert!(!world.did(1, "ejected"));
+    let head = world.pr(1).head_ref_oid;
+    assert_eq!(parents(&world, &head)[0], before);
+}
+
+#[tokio::test]
+async fn a_rebase_that_runs_out_of_time_where_it_cannot_merge_runs_again_not_ejected() {
+    let world = World::one_pr("feature.txt", "other.txt").await;
+    world.gh.with_mut(|s| {
+        s.prs.get_mut(&1).unwrap().conflicting = true;
+        s.repo_merge_methods = Some(vec!["rebase".into()]);
+    });
+    // Off the lane, then in it, as the lane takes what getting ready could not settle.
+    *world.agent.times_out.lock().unwrap() = 2;
+    let _drain = world.drain().await;
+    let mut failed_ticks = 0;
+    let since = Instant::now();
+    while world.merged().is_empty() {
+        assert!(
+            since.elapsed() < SETTLES_WITHIN,
+            "stuck: {:?}",
+            world.kinds(1)
+        );
+        if let Err(e) = world.try_tick().await {
+            assert!(TimedOut::caused(&e), "{e:#}");
+            failed_ticks += 1;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        failed_ticks, 1,
+        "the lane's job ran out of time, and ran again"
+    );
+    assert_eq!(world.tasks(), [Task::Rebase, Task::Rebase, Task::Rebase]);
+    assert!(!world.did(1, "ejected"), "{:?}", world.kinds(1));
+}
+
+#[tokio::test]
+async fn a_layer_over_a_rebased_one_is_rebased_too() {
+    // The layer above merged the trunk in; the layer below did not, and is rebased.
+    let world = World::new(
+        |o| {
+            commit(o, "shared.txt", "base\n", "start");
+            git(o, &["checkout", "-q", "-b", "pr-1"]);
+            commit(o, "lower.txt", "from layer 1\n", "layer 1");
+            git(o, &["checkout", "-q", "-b", "pr-2"]);
+            commit(o, "upper.txt", "from layer 2\n", "layer 2");
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, "other.txt", "from main\n", "the trunk's change");
+            git(o, &["checkout", "-q", "pr-2"]);
+            git(o, &["merge", "-q", "--no-edit", "main"]);
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, "more.txt", "from main\n", "the trunk's next change");
+        },
+        |s, o| {
+            s.add_stack(1, &[1, 2], &[1, 2]);
+            point_at_branch(s, 1, o);
+            point_at_branch(s, 2, o);
+        },
+    )
+    .await;
+    let event = rebase_stack(&world).await;
+    assert!(matches!(event, Event::Rebased { .. }), "{event:?}");
+    let updates = world.agent.updates.lock().unwrap().clone();
+    assert_eq!(updates, [Update::Either, Update::Rebase]);
+    let below = git(&world.origin, &["rev-parse", "pr-2~1"]);
+    assert_eq!(below, world.branch("pr-1"));
+}
+
+#[tokio::test]
+async fn a_layer_over_a_merged_one_may_merge_too() {
+    let world = World::new(
+        |o| {
+            commit(o, "shared.txt", "base\n", "start");
+            git(o, &["checkout", "-q", "-b", "pr-1"]);
+            commit(o, "lower.txt", "from layer 1\n", "layer 1");
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, "other.txt", "from main\n", "the trunk's change");
+            git(o, &["checkout", "-q", "pr-1"]);
+            git(o, &["merge", "-q", "--no-edit", "main"]);
+            git(o, &["checkout", "-q", "-b", "pr-2"]);
+            commit(o, "upper.txt", "from layer 2\n", "layer 2");
+            // The layer above keeps up with the one below by merging it.
+            git(o, &["checkout", "-q", "pr-1"]);
+            commit(o, "lower.txt", "more from layer 1\n", "layer 1 again");
+            git(o, &["checkout", "-q", "pr-2"]);
+            git(o, &["merge", "-q", "--no-edit", "pr-1"]);
+            git(o, &["checkout", "-q", "main"]);
+            commit(o, "more.txt", "from main\n", "the trunk's next change");
+        },
+        |s, o| {
+            s.add_stack(1, &[1, 2], &[1, 2]);
+            point_at_branch(s, 1, o);
+            point_at_branch(s, 2, o);
+            s.forbids_force = true;
+        },
+    )
+    .await;
+    let heads = [world.pr(1).head_ref_oid, world.pr(2).head_ref_oid];
+    let event = rebase_stack(&world).await;
+    assert!(matches!(event, Event::Rebased { .. }), "{event:?}");
+    let updates = world.agent.updates.lock().unwrap().clone();
+    assert_eq!(updates, [Update::Either, Update::Either]);
+    let lower = world.branch("pr-1");
+    assert_eq!(
+        parents(&world, &lower),
+        [heads[0].clone(), world.branch("main")]
+    );
+    assert_eq!(parents(&world, "pr-2"), [heads[1].clone(), lower]);
 }
 
 #[tokio::test]

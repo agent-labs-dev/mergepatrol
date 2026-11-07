@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
 use mergepatrol_core::RepoName;
-use mergepatrol_git::Git;
+use mergepatrol_git::{Git, TreeChange};
 use mergepatrol_github::{Installation, TreeEntry};
 
 pub struct Publish<'a> {
@@ -49,56 +49,14 @@ pub async fn create_commits(
         .await?
         .into_iter()
         .collect();
-    let new_blobs: HashSet<String> = commits
-        .iter()
-        .flat_map(|c| &c.changes)
-        .filter(|c| !c.is_submodule())
-        .filter_map(|c| c.sha.clone())
-        .filter(|sha| !on_github.contains(sha))
-        .collect();
-    stream::iter(new_blobs)
-        .map(|sha| async move {
-            let remote = gh
-                .create_blob(p.repo, &git.read_blob(wt, &sha).await?)
-                .await?;
-            if remote != sha {
-                bail!("blob {sha} uploaded as {remote}");
-            }
-            Ok(())
-        })
-        .buffer_unordered(UPLOADS)
-        .try_collect::<Vec<()>>()
-        .await?;
+    let changes = commits.iter().flat_map(|c| &c.changes);
+    upload_blobs(gh, git, wt, p.repo, changes, |sha| !on_github.contains(sha)).await?;
 
     let mut parent = p.base.to_owned();
     let mut parent_tree = git.rev_parse(wt, &format!("{}^{{tree}}", p.base)).await?;
 
     for commit in commits {
-        let mut entries = Vec::with_capacity(commit.changes.len());
-        for change in &commit.changes {
-            let entry = match &change.sha {
-                None => TreeEntry {
-                    path: change.path.clone(),
-                    mode: "100644".into(),
-                    kind: "blob",
-                    sha: None,
-                },
-                Some(sha) if change.is_submodule() => TreeEntry {
-                    path: change.path.clone(),
-                    mode: change.mode.clone(),
-                    kind: "commit",
-                    sha: Some(sha.clone()),
-                },
-                Some(sha) => TreeEntry {
-                    path: change.path.clone(),
-                    mode: change.mode.clone(),
-                    kind: "blob",
-                    sha: Some(sha.clone()),
-                },
-            };
-            entries.push(entry);
-        }
-
+        let entries: Vec<TreeEntry> = commit.changes.iter().map(tree_entry).collect();
         let tree = gh.create_tree(p.repo, &parent_tree, &entries).await?;
         if tree != commit.tree {
             bail!(
@@ -119,4 +77,86 @@ pub async fn create_commits(
     }
 
     Ok(parent)
+}
+
+/// Recreates `local_head`, a merge of `base` into `expected_head`, on GitHub: one commit with
+/// both as its parents, and the merge's message. No branch moves. Only what the merge made
+/// itself is new to GitHub: the files that both sides changed, and the agent's resolution.
+pub async fn create_merge(
+    gh: &Installation,
+    git: &Git,
+    wt: &Path,
+    p: &Publish<'_>,
+) -> Result<String> {
+    let changes = git.tree_changes(wt, p.expected_head, p.local_head).await?;
+    let made: HashSet<String> = git
+        .objects_beyond(wt, p.local_head, &[p.expected_head, p.base])
+        .await?
+        .into_iter()
+        .collect();
+    upload_blobs(gh, git, wt, p.repo, &changes, |sha| made.contains(sha)).await?;
+
+    let head_tree = git
+        .rev_parse(wt, &format!("{}^{{tree}}", p.expected_head))
+        .await?;
+    let entries: Vec<TreeEntry> = changes.iter().map(tree_entry).collect();
+    let tree = gh.create_tree(p.repo, &head_tree, &entries).await?;
+    let local_tree = git
+        .rev_parse(wt, &format!("{}^{{tree}}", p.local_head))
+        .await?;
+    if tree != local_tree {
+        bail!(
+            "tree of the merge {} came out as {tree} on GitHub, expected {local_tree}",
+            p.local_head
+        );
+    }
+    let message = git.commit_message(wt, p.local_head).await?;
+    gh.create_commit_of(p.repo, &message, &tree, &[p.expected_head, p.base])
+        .await
+}
+
+/// Uploads the blobs of `changes` that are `new` to GitHub.
+async fn upload_blobs<'c>(
+    gh: &Installation,
+    git: &Git,
+    wt: &Path,
+    repo: &RepoName,
+    changes: impl IntoIterator<Item = &'c TreeChange>,
+    new: impl Fn(&str) -> bool,
+) -> Result<()> {
+    let blobs: HashSet<String> = changes
+        .into_iter()
+        .filter(|c| !c.is_submodule())
+        .filter_map(|c| c.sha.clone())
+        .filter(|sha| new(sha))
+        .collect();
+    stream::iter(blobs)
+        .map(|sha| async move {
+            let remote = gh
+                .create_blob(repo, &git.read_blob(wt, &sha).await?)
+                .await?;
+            if remote != sha {
+                bail!("blob {sha} uploaded as {remote}");
+            }
+            Ok(())
+        })
+        .buffer_unordered(UPLOADS)
+        .try_collect::<Vec<()>>()
+        .await?;
+    Ok(())
+}
+
+/// The entry of GitHub's tree that makes `change`.
+fn tree_entry(change: &TreeChange) -> TreeEntry {
+    let (mode, kind) = match &change.sha {
+        None => ("100644".to_owned(), "blob"),
+        Some(_) if change.is_submodule() => (change.mode.clone(), "commit"),
+        Some(_) => (change.mode.clone(), "blob"),
+    };
+    TreeEntry {
+        path: change.path.clone(),
+        mode,
+        kind,
+        sha: change.sha.clone(),
+    }
 }

@@ -40,20 +40,23 @@ pub type PrNumber = u64;
 pub const FIXED_BY: &str = "Fixed-by: mergepatrol";
 /// The trailer of a commit whose conflict the agent resolved in a rebase.
 pub const RESOLVED_BY: &str = "Resolved-by: mergepatrol";
+/// The trailer of the merge commit that brought a PR up to date with its base.
+pub const UPDATED_BY: &str = "Updated-by: mergepatrol";
 /// The empty commit that runs a PR's checks again.
 pub const RECHECK_MESSAGE: &str =
     "Run the checks again\n\nThe agent found nothing to fix in the code.";
 
 /// How many of a PR's fix budget its commits have used, from `messages`, newest first: the
 /// agent's fixes on top of the PR. The author's next commit ends the count, so new code earns new
-/// fixes, and the commits themselves survive a restart or a rebase.
+/// fixes, and the commits themselves survive a restart, a rebase, or a merge of the base.
 pub fn fixes_used<'a>(messages: impl IntoIterator<Item = &'a str>) -> u32 {
     let mut used = 0;
     for message in messages {
         if message.lines().any(|l| l.starts_with(FIXED_BY)) {
             used += 1;
         // A rebase's rewrite adds trailers after it.
-        } else if !message.starts_with(RECHECK_MESSAGE) {
+        } else if !message.starts_with(RECHECK_MESSAGE) && !message.lines().any(|l| l == UPDATED_BY)
+        {
             break;
         }
     }
@@ -198,6 +201,8 @@ mod tests {
         let rewritten = format!("{RECHECK_MESSAGE}\n\nCo-authored-by: a <a@example.com>");
         assert_eq!(fixes_used([rewritten.as_str(), fix]), 1);
         assert_eq!(fixes_used([]), 0);
+        let merged = format!("Merge main into pr\n\n{UPDATED_BY}");
+        assert_eq!(fixes_used([merged.as_str(), fix, "the author's"]), 1);
     }
 
     #[test]

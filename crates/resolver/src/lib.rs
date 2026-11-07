@@ -71,12 +71,20 @@ pub struct ResolveRequest<'a> {
     pub conflicted_files: &'a [String],
     pub pr_title: &'a str,
     pub pr_body: &'a str,
-    /// The message of the PR commit that did not apply.
-    pub commit_message: &'a str,
+    pub stopped: Stopped<'a>,
     pub trunk: &'a str,
     pub verify: &'a Verify,
     /// Where to write the agent's transcript.
     pub transcript: &'a Path,
+}
+
+/// Where bringing the PR up to date stopped at its conflict.
+#[derive(Clone, Copy)]
+pub enum Stopped<'a> {
+    /// A rebase, at the PR commit with this message, which did not apply.
+    Replay { commit_message: &'a str },
+    /// A merge of the trunk into the PR.
+    Merge,
 }
 
 pub struct FixRequest<'a> {
@@ -280,8 +288,10 @@ pub(crate) fn prompt(req: &ResolveRequest<'_>) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let verify = verify_section(req.verify, "resolve");
-    format!(
-        "You are resolving a rebase conflict for a merge queue.
+    let trunk = req.trunk;
+    let stopped = match req.stopped {
+        Stopped::Replay { commit_message } => format!(
+            "You are resolving a rebase conflict for a merge queue.
 
 A pull request is being rebased onto `{trunk}`. One of its commits did not apply cleanly.
 
@@ -291,7 +301,25 @@ Pull request: {title}
 
 The commit that did not apply:
 
-{commit}
+{commit_message}",
+            title = req.pr_title,
+            body = req.pr_body,
+        ),
+        Stopped::Merge => format!(
+            "You are resolving a merge conflict for a merge queue.
+
+A pull request is being brought up to date by merging `{trunk}` into it, and the merge \
+conflicts. `MERGE_HEAD` is `{trunk}`.
+
+Pull request: {title}
+
+{body}",
+            title = req.pr_title,
+            body = req.pr_body,
+        ),
+    };
+    format!(
+        "{stopped}
 
 These files have conflict markers:
 {files}
@@ -308,17 +336,13 @@ Rules:
 - Edit only the files listed above, and other files of the pull request that a generator rewrites. \
 MergeLoop rejects a result that changes any other file.
 - Remove every conflict marker.
-- Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
+- Do not run git commands that change state (no add, commit, merge, rebase, reset, checkout, stash).
 - Do not refactor or improve unrelated code.
 
 {verify}
 
 If you cannot resolve the conflict with confidence, stop and reply with one line: \
-`{GIVE_UP} <the reason>`. Do not guess.",
-        trunk = req.trunk,
-        title = req.pr_title,
-        body = req.pr_body,
-        commit = req.commit_message,
+`{GIVE_UP} <the reason>`. Do not guess."
     )
 }
 

@@ -921,6 +921,8 @@ const pathSteps: Record<string, [string, boolean, boolean]> = {
   "rebase-skipped": ["Rebase skipped", false, false],
   conflict: ["Conflict", true, true],
   resolved: ["Conflict resolved", false, false],
+  "merging-base": ["Merging the base branch in instead", false, true],
+  "base-merged": ["Base branch merged in", false, false],
   unresolved: ["Could not resolve the conflict", true, false],
   fixing: ["Fixing the checks", true, true],
   fix: ["Fix committed", false, false],

@@ -41,6 +41,8 @@ Then it runs alone or tested in a [batch](#batches), and merges once its checks 
 
 When a rebase has conflicts, an agent resolves them. Claude is the default. A plain `git rebase` runs first, so the agent runs only on real conflicts. A conflict found in the queue goes back to getting ready, keeping its place, so the agent holds up no other PR.
 
+A PR that keeps up with its base branch by merging, as when its author never force-pushes, is brought up to date the same way: MergeLoop merges the base branch into it and pushes that merge commit without force. A rebase would replay each of its commits and conflict again in files its merges already resolve. A PR whose rebase conflicts while a merge of the base branch is clean is merged too. A conflict in the merge goes to the agent once, on the merge, and the same checks hold: no file outside the PR, no conflict markers left. A repo that merges PRs by rebasing them always gets a rebase, as GitHub would replay the merge's commits too. A rebase that runs out of time merges the base branch in instead; the time running out is never a reason to eject the PR.
+
 When a PR's required checks fail, MergeLoop first runs their failed GitHub Actions jobs again, once for each head, since a failure such as a dropped network request may pass on the next run. That needs the App's `actions: write` permission: an App created before this permission existed must be given it on GitHub, and until then the checks go straight to the fix. A check that is not a GitHub Actions job is not run again. If the checks still fail, an agent fixes them. It reads what GitHub shows of the failure, commits a fix on top of the PR, and the checks run again. After three fixes that do not make the checks pass, the PR is ejected. A PR gets three fixes in all, and a push from its author earns new ones. When the agent gives up because the failure is not the PR's to fix, as with a flaky test, an outage or a title since changed, an empty commit runs the checks once more, and a failure then ejects the PR. When what fails is a check of the PR's title, the agent sets a title that meets it, and the checks run the same way. A failure found in the queue goes back to getting ready, keeping its place, so the agent holds up no other PR. Without a model API key in the workspace's settings, no agent can fix the checks: a PR whose checks still fail after they run again is ejected, and its comment says to add a key.
 
 ### Automatic review
@@ -100,7 +102,7 @@ A stack of PRs, made with `gh stack`, is one item of the queue: the label on any
 - The stack gets ready as one item, off the queue, like a single PR: a conflict on any layer rebases the whole stack, and it waits for each layer's checks. A failed check is fixed on the lowest layer it failed on, and the layers above it are rebased onto the fix. The layers share one fix budget.
 - The stack waits while any of its PRs is a draft or waits for a review.
 - In a batch, the stack is one step: its top PR holds every layer below it.
-- Alone, MergeLoop rebases each layer onto the one below it, the bottom onto the base branch, and waits for each layer's checks. A failed check is fixed on the layer it failed on, and the layers above it are rebased onto the fix.
+- Alone, MergeLoop rebases each layer onto the one below it, the bottom onto the base branch, and waits for each layer's checks. A layer that keeps up by merging, over a layer below that did too, has the layer below merged into it instead. Over a rebased layer, a layer is rebased. A failed check is fixed on the layer it failed on, and the layers above it are rebased onto the fix.
 - A failed stack is ejected whole.
 
 Every merge goes through the asynchronous merge API, stacked or not. A merge still pending when MergeLoop restarts is waited for, not requested again.
@@ -112,7 +114,7 @@ A maintainer queues a PR from a fork with the label, as any other. Its author is
 - It merges the PR only as it was when the label went on. MergeLoop reads that head from the `labeled` webhook, or, without webhooks, from when it first sees the PR. If the author pushes after that, the PR leaves the queue, and a maintainer adds the label again to queue the new commits.
 - It never tests the PR in a batch, whose draft PR runs CI with the repo's secrets. The PR runs alone, with the fork's own CI.
 - It skips getting ready. No agent runs on it, and running alone, it is rebased and its checks run again in the queue anyway.
-- It runs no agent on the PR: a plain `git rebase` only. A conflict, or a failed required check, ejects the PR, for its author to fix.
+- It runs no agent on the PR: a plain `git rebase`, or merge of the base branch, only. A conflict, or a failed required check, ejects the PR, for its author to fix.
 - It pushes the rebase to the fork, which GitHub allows while the author allows edits by maintainers. Without that, a PR that needs a rebase waits on hold until they allow it. GitHub does not let the App push to a fork that an organization owns, nor push changes to workflow files to a fork: such a PR that needs a rebase is ejected, for its author to rebase.
 - While GitHub waits for a maintainer to approve the fork's workflow runs, the PR waits on hold.
 
