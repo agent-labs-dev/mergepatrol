@@ -105,10 +105,34 @@ pub struct ReviewRequest<'a> {
     pub sent_back: &'a [SentBack],
     /// The repo's verify commands: how it runs its checks, which a review's evidence builds on.
     pub verify: &'a Verify,
-    /// What the queue's agent committed on a version already approved, as "sha subject". When
-    /// any, only these need reading.
-    pub queue_commits: &'a [String],
+    /// What of the PR needs reading.
+    pub scope: Scope<'a>,
     pub transcript: &'a Path,
+}
+
+/// What of a PR a review reads: all of it, or only what changed since an earlier review of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scope<'a> {
+    /// `base..HEAD`: the first review, or one after a rebase.
+    #[default]
+    Whole,
+    /// What the queue's agent committed on a version already approved, as "sha subject".
+    QueueCommits(&'a [String]),
+    /// The head the last review sent findings back on, which HEAD descends from: only
+    /// `<it>..HEAD` needs reviewing, so a fix round does not turn up what the first pass missed.
+    Since(&'a str),
+}
+
+impl<'a> Scope<'a> {
+    /// What a review reads: the queue's commits on an approved version, else what changed since
+    /// `reviewed`, the head findings went back on that HEAD still descends from, else all of it.
+    pub fn of(queue_commits: &'a [String], reviewed: Option<&'a str>) -> Self {
+        match (queue_commits, reviewed) {
+            ([], Some(at)) => Scope::Since(at),
+            ([], None) => Scope::Whole,
+            (commits, _) => Scope::QueueCommits(commits),
+        }
+    }
 }
 
 pub struct QuestionRequest<'a> {
@@ -538,17 +562,25 @@ with the same title, so the author can tell it is the same one, and say what is 
     )
 }
 
-fn queue_commits_section(queue_commits: &[String]) -> String {
-    if queue_commits.is_empty() {
-        return String::new();
-    }
-    format!(
-        "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
+/// What of the PR to read, when not all of it.
+fn scope_section(scope: Scope<'_>) -> String {
+    match scope {
+        Scope::Whole => String::new(),
+        Scope::Since(reviewed) => format!(
+            "\nYou reviewed this PR at `{reviewed}`, and sent findings back to its author. Review \
+only `git diff {reviewed}..HEAD`, what changed since, with `git log` and `git show`, and read the \
+rest of the PR only to judge it. Check the findings you sent back wherever they are, but report \
+nothing else about the rest of the PR unless what changed since breaks it: what you did not find \
+on the first pass is not the author's to fix now.\n"
+        ),
+        Scope::QueueCommits(commits) => format!(
+            "\nThis PR was approved at an earlier version. Since then the merge queue's agent \
 changed it, to fix failed checks or resolve a conflict in a rebase. Review only these commits, \
 with `git show`, and read the rest of the PR only to judge them. Report nothing about the rest of \
 the PR unless one of these breaks it.\n{}\n",
-        queue_commits.join("\n")
-    )
+            commits.join("\n")
+        ),
+    }
 }
 
 fn prompt_for(req: &ReviewRequest<'_>, by: Reviewer) -> String {
@@ -558,7 +590,7 @@ fn prompt_for(req: &ReviewRequest<'_>, by: Reviewer) -> String {
 Pull request: {title}
 
 {body}
-{answered}{sent_back}{queue_commits}
+{answered}{sent_back}{scope}
 Its changes are `git diff {base}..HEAD`. Read them, and read the code around them that you need \
 to judge them: callers, tests, config, deploy files, earlier migrations, docs. Use `git log`, \
 `git show` and `git diff`, and read files. You may run the repo's tests and tools, and write \
@@ -633,7 +665,7 @@ Reply with the JSON alone, in this shape, and nothing else:
         body = req.pr_body,
         answered = answered_section(req.answered),
         sent_back = sent_back_section(req.sent_back),
-        queue_commits = queue_commits_section(req.queue_commits),
+        scope = scope_section(req.scope),
         base = req.base,
         verify = checks_section(req.verify, by),
         seats = Panel::SECURITY.seats,
@@ -746,7 +778,7 @@ mod prompt_tests {
             trunk: "main",
             answered: &[],
             sent_back: &[],
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::Configured(vec!["cargo test".into()]),
             transcript: Path::new("t"),
         });
@@ -772,7 +804,7 @@ mod prompt_tests {
             trunk: "main",
             answered: &[],
             sent_back: &[],
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
@@ -788,7 +820,7 @@ mod prompt_tests {
             trunk: "main",
             answered: &[],
             sent_back: &[],
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::Ci(vec!["pnpm vitest run".into()]),
             transcript: Path::new("t"),
         });
@@ -809,7 +841,7 @@ mod prompt_tests {
             trunk: "main",
             answered: &[],
             sent_back: &[],
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
@@ -876,7 +908,7 @@ mod prompt_tests {
             trunk: "main",
             answered: &answered,
             sent_back: &sent_back,
-            queue_commits: &commits,
+            scope: Scope::QueueCommits(&commits),
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
@@ -903,13 +935,59 @@ mod prompt_tests {
             trunk: "main",
             answered: &[],
             sent_back: &[],
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::None,
             transcript: Path::new("t"),
         });
         assert!(!first.contains("Humans already answered"));
         assert!(!first.contains("You sent these findings back"));
         assert!(!first.contains("Review only these commits"));
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use std::path::Path;
+
+    use super::*;
+
+    fn with(scope: Scope<'_>) -> String {
+        review_prompt(&ReviewRequest {
+            workdir: Path::new("."),
+            base: "b4se",
+            pr_title: "t",
+            pr_body: "b",
+            trunk: "main",
+            answered: &[],
+            sent_back: &[],
+            scope,
+            verify: &Verify::None,
+            transcript: Path::new("t"),
+        })
+    }
+
+    #[test]
+    fn the_queues_commits_then_the_reviewed_head_narrow_a_review() {
+        let queue = ["abc Fix ci".to_owned()];
+        assert_eq!(Scope::of(&queue, Some("0ld")), Scope::QueueCommits(&queue));
+        assert_eq!(Scope::of(&[], Some("0ld")), Scope::Since("0ld"));
+        assert_eq!(Scope::of(&[], None), Scope::Whole);
+    }
+
+    #[test]
+    fn a_round_after_findings_went_back_reviews_only_what_changed_since() {
+        let since = with(Scope::Since("0ld"));
+        assert!(
+            since.contains("Review only `git diff 0ld..HEAD`"),
+            "{since}"
+        );
+        // What went back is checked wherever it is; nothing else outside the new commits is.
+        assert!(since.contains("Check the findings you sent back wherever they are"));
+        assert!(since.contains("nothing else about the rest of the PR unless"));
+        // The rest of the PR is still there to judge the new commits by.
+        assert!(since.contains("git diff b4se..HEAD"));
+        let whole = with(Scope::Whole);
+        assert!(!whole.contains("Review only"), "{whole}");
     }
 }
 
@@ -929,7 +1007,7 @@ mod author_review_tests {
             trunk: "main",
             answered: &[],
             sent_back: &[],
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::None,
             transcript: Path::new("t"),
         };

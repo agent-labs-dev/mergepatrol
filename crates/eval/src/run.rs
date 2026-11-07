@@ -134,6 +134,7 @@ pub fn spec(case: &Case, agent: &Agent, api: ApiAccess) -> JobSpec {
             answered: Vec::new(),
             sent_back: Vec::new(),
             since: None,
+            reviewed: None,
         },
     }
 }
@@ -248,7 +249,8 @@ mod tests {
             Task::Review {
                 answered: Vec::new(),
                 sent_back: Vec::new(),
-                since: None
+                since: None,
+                reviewed: None
             }
         );
         let r = s.resolver;

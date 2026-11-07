@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use mergepatrol_resolver::{ReviewRequest, Verify, author_review_brief};
+use mergepatrol_resolver::{ReviewRequest, Scope, Verify, author_review_brief};
 
 #[test]
 fn the_authors_panel_checks_a_checkout_of_the_prs_head() {
@@ -15,7 +15,7 @@ fn the_authors_panel_checks_a_checkout_of_the_prs_head() {
         trunk: "main",
         answered: &[],
         sent_back: &[],
-        queue_commits: &[],
+        scope: Scope::Whole,
         verify: &Verify::None,
         transcript: Path::new("t"),
     };

@@ -71,6 +71,10 @@ pub enum Task {
         /// reading.
         #[serde(default)]
         since: Option<String>,
+        /// The head `sent_back` went back on: once the PR's head descends from it, only what
+        /// changed since needs reviewing.
+        #[serde(default)]
+        reviewed: Option<String>,
     },
     /// Answer a question about a finding of the review, and write `ANSWER_FILE`. `sent_back`:
     /// the finding went back to the author, and this is their reply, which it may withdraw on.
