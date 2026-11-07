@@ -509,17 +509,30 @@ async fn review(
         &run,
     );
     let mut output = parsed?;
-    with_code(git, dir, &base, &spec.head_sha, &mut output.findings).await?;
-    check_evidence(&spec.head_sha, git, dir, &mut output.findings, events).await?;
     let bench = Bench {
         git,
         dir,
         head: &spec.head_sha,
     };
     let panel = (spec, resolver, base.as_str());
-    verify_findings(panel, &bench, out, &mut output.findings, events).await?;
+    check_findings(panel, &bench, out, &mut output.findings, events).await?;
     tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
     Ok(())
+}
+
+/// Backs what the agent found with what MergeLoop saw itself: the code at each place, each
+/// change's evidence run on the head, and a panel's votes on a security change without any.
+async fn check_findings(
+    panel: (&JobSpec, &dyn Resolver, &str),
+    bench: &Bench<'_>,
+    out: &Path,
+    findings: &mut [Finding],
+    events: &mut Vec<JobEvent>,
+) -> Result<()> {
+    let Bench { git, dir, head } = *bench;
+    with_code(git, dir, panel.2, head, findings).await?;
+    check_evidence(head, git, dir, findings, events).await?;
+    verify_findings(panel, bench, out, findings, events).await
 }
 
 /// Gives each finding, each other place it is, and what it relates to their code at `head`.

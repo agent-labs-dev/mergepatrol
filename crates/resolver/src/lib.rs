@@ -778,7 +778,7 @@ mod prompt_tests {
             trunk: "main",
             answered: &[],
             sent_back,
-            queue_commits: &[],
+            scope: Scope::Whole,
             verify: &Verify::None,
             transcript: Path::new("t"),
         }
