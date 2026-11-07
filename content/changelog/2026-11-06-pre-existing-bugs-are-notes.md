@@ -1,6 +1,7 @@
 ---
 title: A bug your PR didn't bring is a note, not a hold
 kind: improved
+image: /changelog/pre-existing-bugs/after.png
 ---
 
 When the review finds a bug in code your PR didn't add, it says so: the finding is marked as already there before this PR. It never goes back to the author and never holds the PR, whatever its kind or how sure the agent is.
