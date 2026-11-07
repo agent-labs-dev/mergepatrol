@@ -59,7 +59,7 @@ pub struct HumanTimeView {
 #[derive(Clone, Debug, PartialEq, Serialize, TS)]
 #[ts(export)]
 pub struct ReviewStatsView {
-    /// The PRs reviewed in the last `days`.
+    /// The PRs first reviewed in the last `days`, each with its whole history.
     pub days: u32,
     pub prs: u32,
     pub changes: ChangeOutcomesView,
@@ -174,7 +174,7 @@ pub(crate) async fn review_stats_view(
 ) -> Result<Json<ReviewStatsView>, ApiError> {
     let (id, readable) = caller.workspace_repos(&app, id).await?;
     let (repo, days) = (q.repo()?, q.days()?);
-    let mut reviews = app.store.reviews_since(id, days).await?;
+    let mut reviews = app.store.reviews_of_prs_since(id, days).await?;
     reviews.retain(|r| readable.contains(&r.repo) && repo.as_ref().is_none_or(|p| *p == r.repo));
     Ok(Json(review_stats(&reviews, days)))
 }

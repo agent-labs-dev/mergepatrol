@@ -191,6 +191,13 @@ pub trait ReviewStore: Send + Sync {
     async fn approve_resolved(&self, id: i64) -> Result<bool>;
     /// The workspace's reviews of the last `days`, newest first.
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>>;
+    /// Every review of the workspace's PRs first reviewed in the last `days`, newest first: a
+    /// PR's whole history, never the end of one.
+    async fn reviews_of_prs_since(
+        &self,
+        installation_id: u64,
+        days: u32,
+    ) -> Result<Vec<ReviewRecord>>;
     /// `None`: the workspace never saved any, and has the defaults.
     async fn review_settings(&self, installation_id: u64) -> Result<Option<ReviewSettings>>;
     async fn set_review_settings(
@@ -785,6 +792,28 @@ impl ReviewStore for PgStore {
         records(&rows)
     }
 
+    async fn reviews_of_prs_since(
+        &self,
+        installation_id: u64,
+        days: u32,
+    ) -> Result<Vec<ReviewRecord>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM agent_reviews
+             WHERE installation_id = $1 AND (repo, number) IN (
+                 SELECT repo, number FROM agent_reviews WHERE installation_id = $1
+                 GROUP BY repo, number
+                 HAVING min(created_at) > now() - make_interval(days => $2))
+             ORDER BY id DESC"
+        ))
+        .bind(installation_id as i64)
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await?;
+        records(&rows)
+    }
+
     async fn review_settings(&self, installation_id: u64) -> Result<Option<ReviewSettings>> {
         let row = sqlx::query("SELECT settings FROM review_settings WHERE installation_id = $1")
             .bind(installation_id as i64)
@@ -894,6 +923,44 @@ mod tests {
 
     fn outcomes(r: &ReviewRecord) -> Vec<Option<Outcome>> {
         r.findings.iter().map(|f| f.outcome).collect()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn a_window_takes_the_prs_first_reviewed_in_it_with_all_their_reviews(pool: PgPool) {
+        let store = PgStore::migrate(pool.clone()).await.unwrap();
+        // #1 was first reviewed 40 days ago, and a rebase carried its approval today.
+        let old = store.start_review(1, &repo(), 1, "a").await.unwrap();
+        let carried = store.start_review(1, &repo(), 1, "b").await.unwrap();
+        sqlx::query(
+            "UPDATE agent_reviews SET created_at = now() - interval '40 days' WHERE id = $1",
+        )
+        .bind(old.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // #2 was first reviewed 10 days ago, and again today.
+        let first = store.start_review(1, &repo(), 2, "c").await.unwrap();
+        let again = store.start_review(1, &repo(), 2, "d").await.unwrap();
+        sqlx::query(
+            "UPDATE agent_reviews SET created_at = now() - interval '10 days' WHERE id = $1",
+        )
+        .bind(first.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Another workspace's is not this one's.
+        store.start_review(2, &repo(), 3, "e").await.unwrap();
+
+        let ids = |rs: Vec<ReviewRecord>| rs.iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store.reviews_of_prs_since(1, 30).await.unwrap()),
+            [again.id, first.id],
+            "#2's whole history, newest first, and none of #1's"
+        );
+        assert_eq!(
+            ids(store.reviews_of_prs_since(1, 60).await.unwrap()),
+            [again.id, first.id, carried.id, old.id]
+        );
     }
 
     #[sqlx::test(migrations = false)]

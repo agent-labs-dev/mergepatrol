@@ -5,6 +5,6 @@ import type { RoundsView } from "./RoundsView";
 
 export type ReviewStatsView = { 
 /**
- * The PRs reviewed in the last `days`.
+ * The PRs first reviewed in the last `days`, each with its whole history.
  */
 days: number, prs: number, changes: ChangeOutcomesView, rounds: RoundsView, humans: HumanTimeView, };

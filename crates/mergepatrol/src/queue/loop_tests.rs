@@ -1163,6 +1163,9 @@ impl ReviewStore for Mem {
     async fn reviews_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
         unreachable!()
     }
+    async fn reviews_of_prs_since(&self, _: u64, _: u32) -> Result<Vec<ReviewRecord>> {
+        unreachable!()
+    }
     async fn review_settings(&self, _: u64) -> Result<Option<ReviewSettings>> {
         Ok(self.review_settings.lock().unwrap().clone())
     }
