@@ -392,6 +392,7 @@ fn posted_review(review: &serde_json::Value) -> std::result::Result<ReviewOutput
     if let Some(by) = review["by"].as_str() {
         output.summary = format!("`{by}`'s agent reviewed this. {}", output.summary);
     }
+    output.findings.truncate(crate::job::FINDINGS_MAX);
     for (i, f) in output.findings.iter_mut().enumerate() {
         f.id = format!("f{}", i + 1);
         f.confidence = f.confidence.min(100);
@@ -1155,6 +1156,12 @@ mod tests {
         assert_eq!(output.findings[0].confidence, 100);
         assert!(output.findings[0].shows_the_change());
         assert!(posted_review(&serde_json::json!({ "findings": "no" })).is_err());
+        // At most as many as MergeLoop's own agent may report, so the summary fits GitHub.
+        let many: Vec<_> = (0..30)
+            .map(|i| serde_json::json!({ "kind": "other", "title": format!("t{i}"), "confidence": 90, "lean": "pre_existing", "finding": "x" }))
+            .collect();
+        let many = serde_json::json!({ "summary": "s", "findings": many });
+        assert_eq!(posted_review(&many).unwrap().findings.len(), 25);
         // Whoever posted it is named, in code so GitHub pings no one, as any writer of the repo may review for its author.
         let by = serde_json::json!({ "summary": "s", "findings": [], "by": "octo" });
         assert_eq!(
@@ -1275,8 +1282,6 @@ mod tests {
         }
     }
 
-    /// However long what the agent wrote, a comment fits GitHub without its test, and with it
-    /// only whole: the thread, a reply in it, and the review's summary.
     #[test]
     fn a_pre_existing_bug_is_a_note_to_file_not_one_the_review_cleared() {
         let repo = RepoName::parse("o/r").unwrap();
@@ -1303,6 +1308,8 @@ mod tests {
         assert!(!body.contains("What it cleared"), "{body}");
     }
 
+    /// However long what the agent wrote, a comment fits GitHub without its test, and with it
+    /// only whole: the thread, a reply in it, and the review's summary.
     #[test]
     fn every_comment_fits_github_however_long_what_the_agent_wrote() {
         let huge = "y".repeat(200_000);

@@ -597,6 +597,9 @@ async fn answer(
     Ok(())
 }
 
+/// The most findings a review keeps, so its summary fits GitHub.
+pub(crate) const FINDINGS_MAX: usize = 25;
+
 /// The review in the agent's answer: its JSON, alone or in a code block.
 fn parse_review(text: &str) -> Result<ReviewOutput> {
     let json = match (text.find('{'), text.rfind('}')) {
@@ -606,7 +609,7 @@ fn parse_review(text: &str) -> Result<ReviewOutput> {
     let mut output: ReviewOutput =
         serde_json::from_str(json).context("the agent's review does not parse")?;
     output.findings.retain(|f| !f.title.trim().is_empty());
-    output.findings.truncate(25);
+    output.findings.truncate(FINDINGS_MAX);
     Ok(output)
 }
 
