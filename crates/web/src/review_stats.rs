@@ -67,7 +67,9 @@ pub struct ReviewStatsView {
     pub humans: HumanTimeView,
 }
 
-/// The review's numbers over these reviews, of any PRs, in any order.
+/// The review's numbers over these reviews, of any PRs, in any order. A PR's reviews count up
+/// to its first approval: a later one is a rebase carrying it, findings and all, or a review of
+/// what the queue's agent changed since.
 fn review_stats(reviews: &[ReviewRecord], days: u32) -> ReviewStatsView {
     let mut prs: BTreeMap<(&str, &str, u64), Vec<&ReviewRecord>> = BTreeMap::new();
     for r in reviews {
@@ -79,22 +81,24 @@ fn review_stats(reviews: &[ReviewRecord], days: u32) -> ReviewStatsView {
         .into_values()
         .map(|mut of| {
             of.sort_by_key(|r| r.id);
+            if let Some(i) = of.iter().position(|r| r.status == ReviewStatus::Approved) {
+                of.truncate(i + 1);
+            }
             of
         })
         .collect();
     ReviewStatsView {
         days,
         prs: prs.len() as u32,
-        changes: changes(reviews),
+        changes: changes(prs.iter().flatten().copied()),
         rounds: rounds(prs.iter().map(|of| reviews_to_pass(of))),
         humans: humans(&prs),
     }
 }
 
-fn changes(reviews: &[ReviewRecord]) -> ChangeOutcomesView {
+fn changes<'a>(reviews: impl Iterator<Item = &'a ReviewRecord>) -> ChangeOutcomesView {
     let mut v = ChangeOutcomesView::default();
     let asked_for = reviews
-        .iter()
         .flat_map(|r| &r.findings)
         .filter(|j| j.finding.lean == Lean::Change && (j.sent_back || j.withdrawn || j.asked));
     for j in asked_for {
@@ -198,6 +202,7 @@ mod tests {
                 suggestion: String::new(),
                 evidence: None,
                 needs_human: false,
+                verified: None,
                 settled: None,
                 also_at: Vec::new(),
                 code: Vec::new(),
@@ -334,6 +339,47 @@ mod tests {
                 not_passed: 1,
             }
         );
+    }
+
+    #[test]
+    fn a_review_after_the_pr_passed_counts_for_nothing() {
+        let asked = ReviewRecord {
+            answered_by: Some("mona".into()),
+            ..review(
+                2,
+                1,
+                Approved,
+                vec![change("f2", false, Some(Outcome::Dismissed))],
+            )
+        };
+        // A rebase carries the approval to a new head, findings and all.
+        let carried = ReviewRecord {
+            id: 3,
+            head_sha: "rebased".into(),
+            ..asked.clone()
+        };
+        let s = review_stats(
+            &[
+                review(
+                    1,
+                    1,
+                    Changes,
+                    vec![change("f1", true, Some(Outcome::Fixed))],
+                ),
+                asked,
+                carried,
+            ],
+            30,
+        );
+        assert_eq!(
+            s.changes,
+            ChangeOutcomesView {
+                fixed: 1,
+                dismissed: 1,
+                ..ChangeOutcomesView::default()
+            }
+        );
+        assert_eq!((s.humans.asked_prs, s.humans.answered), (1, 1));
     }
 
     #[test]
