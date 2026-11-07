@@ -8,6 +8,7 @@ import type { CodeLineView } from "./api/CodeLineView";
 import type { EntryView } from "./api/EntryView";
 import type { FindingView } from "./api/FindingView";
 import type { KindView } from "./api/KindView";
+import type { VerificationView } from "./api/VerificationView";
 import { ErrorText, field, primary, secondary, timeAgo } from "./ui";
 
 /*
@@ -269,6 +270,54 @@ function Evidence({ f }: { f: FindingView }) {
   );
 }
 
+const said = { holds: "Holds", does_not_hold: "Does not hold", abstained: "No vote" } as const;
+
+/** How many of a finding's panel said it holds, and who ran the panel. */
+function tally(v: VerificationView) {
+  const holds = v.votes.filter((x) => x.verdict === "holds").length;
+  return `${holds} of ${v.votes.length} fresh agents said it holds, and ${v.needed} had to`;
+}
+
+/**
+ * What a panel of fresh agents voted on a security finding with no failing command: each saw only
+ * the finding and the code. One the author's agent ran is its word: MergeLoop did not run it.
+ */
+function Votes({ f }: { f: FindingView }) {
+  const v = f.verified;
+  if (!v || f.evidence?.failed) return null;
+  return (
+    <div className="mt-2 overflow-hidden rounded-md border border-line bg-surface text-xs">
+      <p className="border-b border-line bg-sunken px-3 py-1.5 text-muted">
+        {v.by === "merge_loop"
+          ? "MergeLoop had fresh agents check it, each with only this finding and the code: "
+          : "The author's agent says its fresh subagents checked it; MergeLoop did not run them: "}
+        {tally(v)}
+      </p>
+      <ul className="divide-y divide-line-soft">
+        {v.votes.map((x, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: votes have no id, and never reorder
+          <li key={i} className="flex gap-3 px-3 py-1.5">
+            <span
+              className={`w-24 shrink-0 ${
+                x.verdict === "holds"
+                  ? "text-bad"
+                  : x.verdict === "abstained"
+                    ? "text-faint"
+                    : "text-ok"
+              }`}
+            >
+              {said[x.verdict]}
+            </span>
+            <span className="text-fg-2">
+              <Md>{x.why}</Md>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function Kbd({ children }: { children: ReactNode }) {
   return (
     <kbd className="rounded border border-line-strong bg-surface px-1 font-mono text-[10px] text-muted shadow-xs">
@@ -346,6 +395,9 @@ function ClearedList({
               <span className="flex-1 text-fg-2">
                 <Md>{f.title}</Md>
               </span>
+              {f.verified && !f.verified.upheld && (
+                <span className="text-xs text-faint">{tally(f.verified)}</span>
+              )}
               <span className="text-xs text-faint tabular-nums">{pct(f.confidence)}</span>
             </li>
           ))}
@@ -484,6 +536,7 @@ function SentBackList({ findings }: { findings: FindingView[] }) {
           {!f.withdrawn && (
             <div className="pl-5">
               <Evidence f={f} />
+              <Votes f={f} />
             </div>
           )}
         </li>
@@ -979,6 +1032,7 @@ function Answering({
             )}
             <div className="mt-2 max-w-3xl">
               <Evidence f={f} />
+              <Votes f={f} />
             </div>
             {f.related.length > 0 && (
               <>
