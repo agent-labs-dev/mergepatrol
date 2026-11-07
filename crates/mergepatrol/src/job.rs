@@ -610,7 +610,8 @@ fn parse_review(text: &str) -> Result<ReviewOutput> {
     Ok(output)
 }
 
-/// The PR's changes to `file` around `line`: the hunk that holds it, or the first hunk.
+/// The PR's changes to `file` around `line`: the hunk that holds it, or the first hunk when it
+/// names no line. A line no hunk holds shows the file there.
 async fn diff_lines(
     git: &Git,
     dir: &Path,
@@ -627,7 +628,11 @@ async fn diff_lines(
                 .any(|c| c.kind != LineKind::Removed && c.number == Some(l))
         })
     };
-    let Some(hunk) = hunks.iter().find(at).or(hunks.first()) else {
+    let hunk = match line {
+        Some(_) => hunks.iter().find(at),
+        None => hunks.first(),
+    };
+    let Some(hunk) = hunk else {
         // Not changed by the PR: the lines as they are.
         return file_lines(git, dir, head, file, line).await;
     };
@@ -1016,6 +1021,35 @@ mod tests {
                 (LineKind::Context, Some(13), "keep2"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_line_the_pr_did_not_change_shows_the_file_there_not_another_hunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let sh = |cmd: &str| {
+            let ok = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "{cmd}");
+        };
+        sh(
+            "git init -q && git config user.email t@t && git config user.name t \
+            && seq 1 40 > a && git add a && git commit -qm base \
+            && sed -i.bak 's/^2$/two/' a && rm a.bak && git commit -qam head",
+        );
+        let lines = diff_lines(&Git, dir.path(), "HEAD~1", "HEAD", "a", Some(35))
+            .await
+            .unwrap();
+        let hot: Vec<&str> = lines
+            .iter()
+            .filter(|c| c.hot)
+            .map(|c| c.text.as_str())
+            .collect();
+        assert_eq!(hot, ["35"]);
+        assert!(lines.iter().all(|c| c.kind == LineKind::Context));
     }
 
     #[tokio::test]
