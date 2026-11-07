@@ -326,9 +326,16 @@ impl Git {
             .await
     }
 
-    /// Commits the changes to tracked files, and the untracked files in `new`, as MergeLoop.
+    /// Commits the changes to tracked files, and the untracked files in `new` still there, as
+    /// MergeLoop.
     pub async fn commit(&self, wt: &Path, new: &[String], message: &str) -> Result<()> {
         self.run(wt, &["add", "-u"]).await?;
+        let left = self.untracked_files(wt).await?;
+        let new: Vec<&str> = new
+            .iter()
+            .filter(|f| left.contains(f))
+            .map(String::as_str)
+            .collect();
         if !new.is_empty() {
             let mut cmd = self.git(
                 wt,
