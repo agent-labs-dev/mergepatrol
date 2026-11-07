@@ -1,6 +1,7 @@
 ---
 title: Security findings go back to you only when fresh agents agree
 kind: improved
+pr: 266
 image: /changelog/security-findings-are-voted-on/after.png
 ---
 
