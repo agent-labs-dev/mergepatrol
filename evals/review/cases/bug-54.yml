@@ -1,0 +1,76 @@
+repo: agent-labs-dev/mergepatrol
+pr: 54
+base: caecd8d81dfaea7eb98135107080e7774c8a2e29
+head: 73e27fc8a59ce2db2b629a8bd1cc3acd632504cd
+title: "fix: stop GitHub blips and rate limits from ejecting PRs"
+body: |-
+  ## Summary
+
+  Until now, any error inside a PR's job ejected the PR. That covered one GitHub 502 during the wait for CI (polled every 15s), a rate limit, or a failed token mint. GitHub requests were never retried, so a short GitHub blip was enough to label PRs `failed`.
+
+  ```diff
+   Installation::request / token / read_token
+  -  send once
+  +  send, and again after a network error, a 5xx, or a rate limit (429, or 403 with
+  +  x-ratelimit-remaining: 0 / retry-after / "secondary rate limit"), up to 5 tries:
+  +  1s, 2s, 4s, 8s, or as long as GitHub says (at most 10 min). Each try builds the
+  +  request anew, so its token or JWT is never one that expired while it waited.
+
+   merge
+     PUT /pulls/{n}/merge-async
+  +  not 200/202/409? GET /pulls/{n}: merged at this head → Merged
+     (covers a merge whose reply was lost, and a retry that found it merged; a retry
+     that finds it still pending gets a 409, which already waits for it)
+
+   tick
+     run_job
+  -    Err → eject
+  +    Err → the PR stays active, the tick fails, and the next tick runs the job again
+  +    Err for 30 min straight → eject (in memory; reset when the PR leaves the queue)
+  ```
+
+  A job that runs again is cheap. A PR already on the trunk skips the sandbox and goes straight back to waiting for checks. Failures inside the job (a conflict, a failed verify, a bad publish) are still events that eject, as before.
+
+  The App's API base URL is now a field, so tests can point the client at a local fake GitHub. The README says a GitHub outage no longer ejects.
+
+  ## Evidence
+
+  Nothing visible changes.
+
+  New tests, each failing with its fix disabled:
+
+  - `a_github_outage_keeps_the_pr_in_its_place` (queue loop): one PR read fails with a 502.
+    - **Before:** the PR is ejected.
+    - **After:** the tick fails, the PR stays `Active` with its label, and the next tick merges it.
+  - `a_pr_whose_job_keeps_failing_is_ejected`: GitHub stays down. Still in the queue at 29m59s, ejected at 30m.
+  - `a_pr_queued_again_gets_a_new_window_for_errors`: a dequeued PR's error timer is cleared.
+  - `a_5xx_is_sent_again`, `a_rate_limit_waits_as_told_then_sends_again`, `each_attempt_builds_the_request_anew`, `a_client_error_is_not_sent_again`: against a local fake GitHub.
+    - **Before:** a single request.
+    - **After:** sent again after a 502 or a 429, and never after a 404.
+  - `transient_failures_are_retried_and_others_are_not`: the wait for 5xx, 429, a 403 rate limit (primary and secondary), and a 403 permission error.
+  - `a_merge_that_went_through_counts_though_its_reply_failed`: a 405 to the merge-async PUT, then the PR reads as merged.
+    - **Before:** `Rejected`.
+    - **After:** `Merged { sha: "m1" }`. `a_rejected_merge_stays_rejected` covers the other side.
+
+  `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, and `cargo test --workspace` all pass.
+
+  Reviewed with sol-loop: 3 rounds with gpt-6.1-sol, the last on the rebase onto the stacks change (#51). Sol verdict: approved
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  Nothing is stored. The error timer lives in memory, so a revert is clean.
+
+  **Blast Radius:** queue
+
+  - A PR that hits a long GitHub outage now sits at the head of its lane for up to 30 minutes before it is ejected. Before, it was ejected at once. A rate-limited request can hold its lane for up to 10 minutes per try.
+  - A retried POST that GitHub had in fact applied can post a duplicate comment. A retried `updateRefs` can read as "the branch was pushed to", which reruns the job. Both are rare, and neither loses work.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+expected:
+  bugs:
+    - at:
+        - { file: crates/github/src/app.rs, lines: 378-384 }
+      what: "Rate-limit detection misses GraphQL's limit: HTTP 200 with a RATE_LIMITED error, so it never retries."
+      fixed_by: "#104"

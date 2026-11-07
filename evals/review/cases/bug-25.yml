@@ -1,0 +1,80 @@
+repo: agent-labs-dev/mergepatrol
+pr: 25
+base: 7fd068bd813291b11feabcad274a08c38224807e
+head: 8044c1394c9c3ef9793fa2a919a441afd589e2d7
+title: "feat: run Mergepatrol on GCP, each job in its own Cloud Run sandbox, deploying from main"
+body: |-
+  ## Summary
+
+  Mergepatrol runs on GCP as one environment, in project `mergepatrol`, and serves `https://mergepatrol.ai`. Each rebase job runs as an execution of a Cloud Run Job (sandboxed with gVisor) instead of a local container. A push to `main` deploys.
+
+  ```mermaid
+  sequenceDiagram
+      participant O as orchestrator (Cloud Run service)
+      participant R as Run Admin API
+      participant J as mergepatrol-job (Cloud Run Job)
+      O->>O: open mailbox slot, single-use token
+      O->>R: jobs:run, args [job, --remote, <url>/jobs/<token>]
+      J->>O: GET spec (once)
+      J->>O: POST result.bundle, result.json (16 MiB chunks)
+      J->>O: POST done
+      O->>R: poll the execution every 10s; cancel on drop or after 40m
+  ```
+
+  The job's service account has no roles. Its only way into the orchestrator is its link. The token is in the execution's arguments, so anyone who can read the project's Cloud Run executions can see it.
+
+  ```text
+  deploy/gcp/
+  ├── bootstrap.sh     # idempotent: APIs, registry, accounts, Cloud SQL, secrets, GitHub OIDC, first deploy
+  └── cloudbuild.yaml  # build both images, deploy job, then orchestrator
+  .github/workflows/
+  └── deploy.yml       # push to main → gcloud builds submit (keyless, via Workload Identity Federation)
+  ```
+
+  - The orchestrator runs as one instance that is always on (min/max 1, no CPU throttling), with Postgres 17 on Cloud SQL over its Unix socket.
+  - `MERGEPATROL_EXECUTOR=cloud-run` with `MERGEPATROL_CLOUD_RUN_JOB=projects/…/jobs/mergepatrol-job`.
+  - The service is public through `--no-invoker-iam-check`, because the org's domain-restricted sharing policy refuses an `allUsers` binding.
+  - Only `refs/heads/main` of this repo can sign in to the deploy account. The repo is pinned by its id.
+
+  ## Evidence
+
+  Nothing on screen changes.
+
+  - New `remote` tests pass:
+    - the spec can be fetched only once;
+    - the chunked upload reassembles;
+    - a job that ends without its result fails;
+    - a job cut off by the timeout is cancelled.
+  - The whole workspace passes `cargo test --workspace`, clippy and fmt.
+  - `bootstrap.sh` has run against the live project. Cloud Build `ac459d6e` succeeded, `mergepatrol-job` is deployed, and the service returns `200`. Its log shows `jobs run as Cloud Run Job executions`.
+  - sqlx reads `?host=/cloudsql/mergepatrol:us-west1:mergepatrol` as a socket.
+  - **Not yet verified:**
+    - a real conflict job running on Cloud Run. That needs the GitHub App, which needs the `mergepatrol.ai` certificate (still being issued);
+    - `deploy.yml`. Its first run is the merge of this PR.
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  Revert the commits, or set `MERGEPATROL_EXECUTOR` back to `docker`. The GCP resources stay until someone deletes them.
+
+  **Blast Radius:** deploy
+
+  Merging deploys the current `main` to `mergepatrol.ai` on every push, with no test gate (the repo has no CI yet). Local and Docker runs are unchanged.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/25?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795846992&installation_model_id=434381&pr_number=25&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F25&signature=67c62f75708d858319d5f44bf3d19587d8b2f273cb463ffd64449ff31443a184"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: .github/workflows/deploy.yml, lines: 24-25 }
+        - { file: .github/workflows/deploy.yml, lines: 30 }
+      what: "Actions pinned to mutable tags, not SHAs; the org's policy refuses them, so the deploy never starts."
+      fixed_by: "#26"

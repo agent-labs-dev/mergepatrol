@@ -46,13 +46,16 @@ pub struct Scored {
     pub cost_usd: Option<f64>,
 }
 
-/// Whether a finding is about a bug: the same file, at a line within `NEAR` of its lines.
+/// Whether a finding is about a bug: in a file it lives in, within `NEAR` lines of it there.
 pub fn about(bug: &Bug, finding: &Finding) -> bool {
     let (Some(file), Some(line)) = (&finding.file, finding.line) else {
         return false;
     };
-    let near = bug.lines.start().saturating_sub(NEAR)..=bug.lines.end() + NEAR;
-    file.trim_start_matches("./") == bug.file && near.contains(&line)
+    let file = file.trim_start_matches("./");
+    bug.at.iter().any(|p| {
+        let near = p.lines.start().saturating_sub(NEAR)..=p.lines.end() + NEAR;
+        file == p.file && near.contains(&line)
+    })
 }
 
 /// Scores a case's review, as MergeLoop routes its findings under `settings`.
@@ -220,7 +223,7 @@ mod tests {
             .iter()
             .map(|(file, lines)| {
                 format!(
-                    "    - file: {file}\n      lines: {lines}\n      what: w\n      fixed_by: x\n"
+                    "    - at: [{{ file: {file}, lines: {lines} }}]\n      what: w\n      fixed_by: x\n"
                 )
             })
             .collect();
@@ -295,6 +298,21 @@ mod tests {
         assert!(!about(&b, &change("src/a.rs", 52 + NEAR + 1)));
         assert!(!about(&b, &change("src/b.rs", 45)));
         assert!(!about(&b, &change("a.rs", 45)));
+    }
+
+    #[test]
+    fn a_finding_near_any_place_a_bug_lives_is_about_it() {
+        let c = case(
+            "  bugs:\n    - at:\n        - { file: a.rs, lines: 10 }\n        - { file: b.rs, lines: 90-95 }\n      what: w\n      fixed_by: x\n",
+        );
+        let Expected::Bugs(b) = c.expected else {
+            unreachable!()
+        };
+        let b = b.iter().next().unwrap();
+        assert!(about(b, &change("a.rs", 12)));
+        assert!(about(b, &change("b.rs", 99)));
+        assert!(!about(b, &change("b.rs", 10)));
+        assert!(!about(b, &change("a.rs", 92)));
     }
 
     #[test]

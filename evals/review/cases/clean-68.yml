@@ -1,0 +1,61 @@
+repo: agent-labs-dev/mergepatrol
+pr: 68
+base: 993b6a379bbab8266d593ef7b57fdaa0c91fdfeb
+head: 6f2d56b848cc6b63db80c912f6013174aefa88be
+title: "feat: rotate the secret key without losing the stored secrets"
+body: |-
+  ## Summary
+
+  Until now, the key that encrypts the stored secrets (the GitHub App, and each workspace's Anthropic API key) could not change. If it leaked, there was no way to replace it, and changing it made every stored secret unreadable. Now it can be rotated. The self-hosted compose setup also stops putting it in the container's environment.
+
+  ```diff
+   MERGEPATROL_SECRET_KEY=<key>
+  +MERGEPATROL_SECRET_KEY=<new>,<old>     # the first encrypts; all of them decrypt
+  +MERGEPATROL_SECRET_KEY_FILE=<path>     # or read it from a file (compose: a Docker secret)
+  ```
+
+  ```diff
+   orchestrator startup
+     Vault::new(keys)
+  +  Vault::rotate()            # only with more than one key
+  +    for each secret not encrypted under the first key
+  +      re-encrypt; compare-and-swap on the old ciphertext; keep hint and updated_at
+  ```
+
+  - Decryption tries each key in turn (AES-GCM authenticates, so a wrong key fails cleanly). There is no migration and no key-id column.
+  - The README covers rotation. On GCP it takes 4 deploys, because Cloud Run runs the old revision beside the new one: `<old>,<new>`, then `<new>,<old>`, then `<new>,<old>` again, then `<new>`.
+
+  ## Evidence
+
+  No change on screen.
+
+  - **Test:** `vault::tests::rotate_moves_every_secret_to_the_new_key`. Two secrets are sealed with the old key. A vault with `new, old` still reads them. `rotate()` returns 2, then 0. After that, a new-key-only vault reads both, the old key fails, and the hint and `updated_at` are unchanged.
+  - **End to end on the real binary**, against a fresh Postgres database:
+    - A row is sealed with k1 from outside the binary (Python `cryptography`).
+    - Startup with the file `k2,k1` logs `"re-encrypted secrets with the first MERGEPATROL_SECRET_KEY: the others can go","rotated":1`.
+    - After that, k1 fails to decrypt (`InvalidTag`), k2 decrypts `sk-ant-proof-wxyz`, and `updated_at` still holds the time the row was inserted.
+    - A second startup re-encrypts nothing.
+    - Setting both the env var and the file fails with `set MERGEPATROL_SECRET_KEY or MERGEPATROL_SECRET_KEY_FILE, not both`.
+  - **Compose secret:** a Docker secret built from the env var is mounted at `/run/secrets/secret_key`, `0444`, so a non-root user can read it. The value is not in the container's env. An unset var fails with `environment variable "MERGEPATROL_SECRET_KEY" required by secret ... is not set`.
+  - `cargo fmt --check`, `cargo clippy -D warnings` and `cargo test --workspace` pass.
+
+  Reviewed with sol-loop: 2 rounds with gpt-6.1-sol. Sol verdict: approved (it caught that a deploy runs two revisions at once, which led to the staged GCP steps).
+
+  ## Merge Danger
+
+  **Door:** two-way. A single key behaves as before, and with one key `rotate()` returns without doing anything. The only way to cause a one-way effect is to drop the old key before a rotation has finished, and the README orders the steps to prevent that.
+
+  **Blast Radius:** self-hosters
+
+  People who self-host with compose now get the key as a file, through `MERGEPATROL_SECRET_KEY_FILE`, instead of through the environment. They still set `MERGEPATROL_SECRET_KEY` in their shell, as before. Anyone who has overridden `environment:` with their own `MERGEPATROL_SECRET_KEY` will hit the "not both" error until they remove one of the two. The hosted GCP deploy is unchanged.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/68?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795864965&installation_model_id=434381&pr_number=68&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F68&signature=778132fb7b48288d84e2dd5be61dcca20cd0bc19c9ea706a55e41d058f3e4374"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected: clean

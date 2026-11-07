@@ -78,43 +78,57 @@ impl From<Expected> for ExpectedText {
     }
 }
 
-/// At least one bug.
+/// At least one: of a case's bugs, or of the places a bug lives. A case with no bugs is
+/// `clean`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Vec<Bug>", into = "Vec<Bug>")]
-pub struct Bugs(Vec<Bug>);
+#[serde(try_from = "Vec<T>", into = "Vec<T>")]
+#[serde(bound(
+    serialize = "T: Clone + Serialize",
+    deserialize = "T: Deserialize<'de>"
+))]
+pub struct NonEmpty<T>(Vec<T>);
 
-impl Bugs {
-    pub fn iter(&self) -> std::slice::Iter<'_, Bug> {
+impl<T> NonEmpty<T> {
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
 }
 
-impl TryFrom<Vec<Bug>> for Bugs {
+impl<T> TryFrom<Vec<T>> for NonEmpty<T> {
     type Error = &'static str;
 
-    fn try_from(bugs: Vec<Bug>) -> Result<Self, Self::Error> {
-        if bugs.is_empty() {
-            return Err("`bugs` is empty: a PR with none is `clean`");
+    fn try_from(items: Vec<T>) -> Result<Self, Self::Error> {
+        if items.is_empty() {
+            return Err("the list is empty");
         }
-        Ok(Bugs(bugs))
+        Ok(NonEmpty(items))
     }
 }
 
-impl From<Bugs> for Vec<Bug> {
-    fn from(bugs: Bugs) -> Self {
-        bugs.0
+impl<T> From<NonEmpty<T>> for Vec<T> {
+    fn from(items: NonEmpty<T>) -> Self {
+        items.0
     }
 }
+
+pub type Bugs = NonEmpty<Bug>;
 
 /// A bug the PR shipped, where it lives on the PR's head, and what fixed it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bug {
-    pub file: String,
-    pub lines: Lines,
+    /// Each place the fix had to change: one bug may span a few.
+    pub at: NonEmpty<Place>,
     pub what: String,
     /// The PR or commit that fixed it, e.g. `#193`.
     pub fixed_by: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Place {
+    pub file: String,
+    pub lines: Lines,
 }
 
 /// Lines `start` to `end` of a file, both included, counted from 1. Written `40-52`, or `40`.
@@ -249,18 +263,28 @@ mod tests {
     fn a_case_reads_its_bugs_and_where_they_live() {
         let case = Case::parse(
             "pr-7",
-            &yaml("  bugs:\n    - file: src/a.rs\n      lines: 40-52\n      what: w\n      fixed_by: '#9'\n    - file: b.rs\n      lines: 3\n      what: w\n      fixed_by: '#9'\n"),
+            &yaml("  bugs:\n    - at:\n        - { file: src/a.rs, lines: 40-52 }\n        - { file: b.rs, lines: 3 }\n      what: w\n      fixed_by: '#9'\n    - at: [{ file: c.rs, lines: 7 }]\n      what: w\n      fixed_by: '#9'\n"),
         )
         .unwrap();
         assert_eq!(case.id, "pr-7");
         let Expected::Bugs(bugs) = &case.expected else {
             panic!("not bugs");
         };
-        let lines: Vec<_> = bugs
+        let places: Vec<Vec<_>> = bugs
             .iter()
-            .map(|b| (b.lines.start(), b.lines.end()))
+            .map(|b| {
+                b.at.iter()
+                    .map(|p| (p.file.as_str(), p.lines.start(), p.lines.end()))
+                    .collect()
+            })
             .collect();
-        assert_eq!(lines, [(40, 52), (3, 3)]);
+        assert_eq!(
+            places,
+            [
+                vec![("src/a.rs", 40, 52), ("b.rs", 3, 3)],
+                vec![("c.rs", 7, 7)]
+            ]
+        );
     }
 
     #[test]
@@ -275,11 +299,12 @@ mod tests {
     fn a_case_that_could_not_be_scored_does_not_load() {
         let bug = |lines: &str| {
             yaml(&format!(
-                "  bugs:\n    - file: a\n      lines: {lines}\n      what: w\n      fixed_by: x\n"
+                "  bugs:\n    - at: [{{ file: a, lines: {lines} }}]\n      what: w\n      fixed_by: x\n"
             ))
         };
         for bad in [
             yaml("  bugs: []\n"),
+            yaml("  bugs:\n    - at: []\n      what: w\n      fixed_by: x\n"),
             bug("52-40"),
             bug("0"),
             bug("x"),
@@ -292,10 +317,20 @@ mod tests {
     }
 
     #[test]
+    fn every_case_in_the_repo_loads() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/review/cases");
+        let cases = load(&dir).unwrap();
+        assert!(cases.len() >= 20, "{} cases", cases.len());
+        assert!(cases.iter().any(|c| c.expected == Expected::Clean));
+    }
+
+    #[test]
     fn a_case_writes_back_as_it_reads() {
         let case = Case::parse(
             "c",
-            &yaml("  bugs:\n    - file: a\n      lines: 4-9\n      what: w\n      fixed_by: x\n"),
+            &yaml(
+                "  bugs:\n    - at: [{ file: a, lines: 4-9 }]\n      what: w\n      fixed_by: x\n",
+            ),
         )
         .unwrap();
         let again = Case::parse("c", &serde_yaml::to_string(&case).unwrap()).unwrap();
