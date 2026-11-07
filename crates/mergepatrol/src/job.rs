@@ -23,7 +23,8 @@ use mergepatrol_executor::remote;
 use mergepatrol_git::{Git, RebaseStep};
 use mergepatrol_resolver::{
     ClaudeResolver, CodexResolver, FixRequest, Outcome, QuestionRequest, Resolution,
-    ResolveRequest, Resolver, ReviewRequest, Scope, Verify, VerifyRequest, claim, new_title, vote,
+    ResolveRequest, Resolver, ReviewRequest, Scope, Verify, VerifyRequest, claim, commit_subject,
+    new_title, vote,
 };
 use tokio::io::AsyncReadExt;
 
@@ -414,7 +415,10 @@ async fn fix(
     // A fix is done once it is committed: until then, any failure leaves it unfixed.
     let fixed = match &title {
         Some(title) => Err(anyhow!("{RETITLED}{title}")),
-        None => commit_fix(spec, git, resolver, (&run.outcome, what), dir, events).await,
+        None => {
+            let subject = commit_subject(&run.text).unwrap_or_else(|| format!("Fix {what}"));
+            commit_fix(spec, git, resolver, (&run.outcome, &subject), dir, events).await
+        }
     };
     spent(
         events,
@@ -427,12 +431,12 @@ async fn fix(
     fixed
 }
 
-/// Checks the agent's fix, and commits it.
+/// Checks the agent's fix, and commits it with `subject`.
 async fn commit_fix(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    (outcome, what): (&Outcome, &str),
+    (outcome, subject): (&Outcome, &str),
     dir: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
@@ -447,12 +451,11 @@ async fn commit_fix(
     if !git.is_dirty(dir).await? {
         bail!("the agent changed nothing");
     }
+    // The fix's new files are those there before MergeLoop's own checks run, which may leave some.
+    let new = git.untracked_files(dir).await?;
     verify(spec, dir, events, "the fix").await?;
-    git.commit_all(
-        dir,
-        &format!("Fix {what}\n\n{FIXED_BY}, {}", resolver.name()),
-    )
-    .await
+    let message = format!("{subject}\n\n{FIXED_BY}, {}", resolver.name());
+    git.commit(dir, &new, &message).await
 }
 
 /// How many lines of context a finding's code shows around what it is about.
