@@ -478,7 +478,7 @@ async fn a_fix_is_committed_with_the_subject_the_agent_writes() {
     let answer = "MERGELOOP_COMMIT: fix(auth): stop exporting Session";
     let (message, _) = fixed_with("echo fixed > feature.txt", answer, &[]).await;
     assert!(
-        message.starts_with("fix(auth): stop exporting Session\n\nFixed-by: mergepatrol"),
+        message.starts_with("fix(auth): stop exporting Session\n\nFixed-by: mergeloop"),
         "{message}"
     );
 }

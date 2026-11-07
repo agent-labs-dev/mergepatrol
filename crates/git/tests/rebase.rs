@@ -113,7 +113,7 @@ async fn resolution_leaves_untracked_files_out() {
     std::fs::write(wt.join("a.txt"), "trunk\npr\n").unwrap();
     std::fs::write(wt.join("\u{1}\u{b0}@@0D@8"), "").unwrap();
     assert_eq!(
-        git.continue_resolution(wt, "Resolved-by: mergepatrol (test)")
+        git.continue_resolution(wt, "Resolved-by: mergeloop (test)")
             .await
             .unwrap(),
         RebaseStep::Done
