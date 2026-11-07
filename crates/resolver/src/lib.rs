@@ -563,7 +563,10 @@ the agent that wrote the PR, who must fix it before the PR can merge.
 Every finding you lean `change` on, except a `security` one, must carry `evidence`: a command, \
 run from the repo's root, that fails on this PR because of what the finding says, and the files \
 you wrote for it, most often one focused test. Write the test, run the command, and see it fail \
-for that reason before you report it. {rerun} If you cannot make a command fail, lean `fine` and \
+for that reason before you report it. The fix keeps that test as a regression test, so write it in a new \
+file of its own where the repo keeps its tests, named and written like them, so the repo's own \
+test command runs it. \
+{rerun} If you cannot make a command fail, lean `fine` and \
 say in `unsure` what you could not show. A `security` finding needs none: the code showing the \
 hole is enough to close it. A finding with no evidence gives `\"evidence\": null`. A finding you \
 report again for a fix that is still missing carries its `evidence` again, written anew.
@@ -702,6 +705,8 @@ mod prompt_tests {
         // A change of a kind other than security needs something showing it, or it is a note.
         assert!(review.contains("must carry `evidence`"));
         assert!(review.contains("see it fail"));
+        // A fix commits the review's test, so it goes where the repo's own test command runs it.
+        assert!(review.contains("a new file of its own where the repo keeps its tests"));
         assert!(review.contains("- `cargo test`"));
         // A repo with no verify commands still gets evidence: the command sets itself up.
         assert!(review.contains("make it install what it needs first"));
