@@ -1,6 +1,7 @@
 ---
 title: A bug your PR didn't bring is a note, not a hold
 kind: improved
+pr: 267
 image: /changelog/pre-existing-bugs/after.png
 ---
 
