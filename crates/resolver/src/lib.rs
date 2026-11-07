@@ -200,6 +200,7 @@ pub trait Resolver: Send + Sync {
 
 pub(crate) const GIVE_UP: &str = "MERGEPATROL_GIVE_UP:";
 const RETITLE: &str = "MERGEPATROL_RETITLE:";
+const COMMIT: &str = "MERGEPATROL_COMMIT:";
 
 /// The reason the agent gave up, if its last message says it did.
 pub(crate) fn gave_up(text: &str) -> Option<String> {
@@ -213,6 +214,14 @@ pub(crate) fn gave_up(text: &str) -> Option<String> {
 pub fn new_title(text: &str) -> Option<String> {
     text.lines()
         .find_map(|l| l.trim().strip_prefix(RETITLE))
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
+
+/// The subject the agent writes for its fix's commit, if its last message says one.
+pub fn commit_subject(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(COMMIT))
         .map(|t| t.trim().to_owned())
         .filter(|t| !t.is_empty())
 }
@@ -349,6 +358,10 @@ Rules:
 - Do not refactor or improve unrelated code.
 
 {verify}
+
+MergeLoop commits your fix. End your reply with one line: `{COMMIT} <the commit's subject>`. \
+Write it in the form the repo's commit history and its commit hooks ask for, such as a \
+Conventional Commits type and scope when the repo uses them.
 
 Give up rather than guess when the failure is not the pull request's to fix: a flaky test, an \
 outage, a missing secret, a failure that the logs do not explain, or a fix that changes what the \
@@ -1064,6 +1077,17 @@ mod retitle_tests {
         );
         assert_eq!(new_title("MERGEPATROL_RETITLE:   "), None);
         assert_eq!(new_title("Fixed."), None);
+    }
+
+    #[test]
+    fn a_commit_subject_is_read_from_its_line() {
+        let text = "Dropped the export.\n  MERGEPATROL_COMMIT: fix(auth): stop exporting Session\n";
+        assert_eq!(
+            commit_subject(text).as_deref(),
+            Some("fix(auth): stop exporting Session")
+        );
+        assert_eq!(commit_subject("MERGEPATROL_COMMIT: "), None);
+        assert_eq!(commit_subject("Fixed."), None);
     }
 }
 

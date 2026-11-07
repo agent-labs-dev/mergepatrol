@@ -429,6 +429,73 @@ async fn a_rebase_agent_with_a_shell_may_regenerate_but_not_move_head() {
     assert!(!bundled);
 }
 
+/// Runs a fix of `feature.txt` whose agent runs `shell` and answers `answer`, then MergeLoop runs
+/// `verify`: the fix commit's message, and the files it changed.
+async fn fixed_with(shell: &str, answer: &str, verify: &[&str]) -> (String, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let origin = tmp.path().join("origin");
+    std::fs::create_dir(&origin).unwrap();
+    let (head, trunk) = remote(&origin, "feature.txt", "other.txt");
+
+    let executor = with_fake_claude_running(tmp.path(), shell, answer);
+    let mut spec = spec(&origin, &head, &trunk);
+    spec.verify = verify.iter().map(|c| c.to_string()).collect();
+    spec.resolver.api = Some(ApiAccess {
+        base_url: "http://127.0.0.1:9".into(),
+        token: "job-token".into(),
+    });
+    spec.task = Task::FixChecks {
+        failures: vec![CheckFailure {
+            name: "Desktop Knip".into(),
+            details: "feature.txt is wrong".into(),
+        }],
+    };
+    let out = tmp.path().join("out");
+    let result = executor.run("t-fix", &spec, &out).await.unwrap();
+    assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
+
+    let check = tmp.path().join("check");
+    std::fs::create_dir(&check).unwrap();
+    git(&check, &["init", "-q"]);
+    git(&check, &["fetch", "-q", origin.to_str().unwrap(), "pr"]);
+    git(
+        &check,
+        &[
+            "fetch",
+            "-q",
+            out.join(BUNDLE_FILE).to_str().unwrap(),
+            "refs/heads/result:refs/heads/result",
+        ],
+    );
+    (
+        git(&check, &["log", "-1", "--format=%B", "result"]),
+        git(&check, &["diff", "--name-only", "result~1", "result"]),
+    )
+}
+
+#[tokio::test]
+async fn a_fix_is_committed_with_the_subject_the_agent_writes() {
+    let answer = "MERGEPATROL_COMMIT: fix(auth): stop exporting Session";
+    let (message, _) = fixed_with("echo fixed > feature.txt", answer, &[]).await;
+    assert!(
+        message.starts_with("fix(auth): stop exporting Session\n\nFixed-by: mergepatrol"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_fix_without_a_subject_names_the_check() {
+    let (message, _) = fixed_with("echo fixed > feature.txt", "done", &[]).await;
+    assert!(message.starts_with("Fix Desktop Knip\n\n"), "{message}");
+}
+
+#[tokio::test]
+async fn a_fix_keeps_the_agents_new_files_but_not_what_the_checks_leave() {
+    let shell = "echo fixed > feature.txt && echo new > added.txt";
+    let (_, files) = fixed_with(shell, "done", &["echo junk > coverage.out"]).await;
+    assert_eq!(files, "added.txt\nfeature.txt");
+}
+
 #[tokio::test]
 async fn a_fix_on_a_stack_layer_goes_on_top_of_that_layer() {
     let tmp = tempfile::tempdir().unwrap();
