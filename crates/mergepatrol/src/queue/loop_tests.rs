@@ -289,7 +289,7 @@ impl Fake {
             .any(|m| !m.iter().any(|m| m == method))
         {
             return Ok(MergeOutcome::Rejected(format!(
-                "{method} merges are not allowed on this repository."
+                "{method} merges are not allowed on this repository"
             )));
         }
         let layers: Vec<PrNumber> = s
@@ -1814,6 +1814,40 @@ async fn a_pr_merges_with_a_method_the_repos_settings_allow() {
     }));
     run.tick().await;
     assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+/// productstudioinc/halo#3433: an admin turned off merge commits after the queue read the repo.
+#[tokio::test(start_paused = true)]
+async fn a_pr_whose_merge_method_was_turned_off_merges_with_one_still_allowed() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    run.gh
+        .then(|s| s.repo_merge_methods = Some(vec!["squash".into()]));
+    run.tick().await;
+    assert_eq!(run.merged(), [1]);
+    assert_eq!(run.kinds(1).last().unwrap(), "merged");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_batch_whose_merge_method_was_turned_off_merges_with_one_still_allowed() {
+    let run = Run::batching(Fake::new(prs(&[1, 2])));
+    run.gh
+        .then(|s| s.repo_merge_methods = Some(vec!["squash".into()]));
+    let start = Instant::now();
+    run.tick().await;
+    assert_eq!(run.merged(), [1, 2]);
+    assert!(
+        start.elapsed() < MERGE_RETRY_AFTER,
+        "a refused method is not retried as it was"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_merge_no_method_is_allowed_for_ejects_the_pr() {
+    let run = Run::new(Fake::new(|s| s.add_pr(1)));
+    run.gh.then(|s| s.repo_merge_methods = Some(vec![]));
+    run.tick().await;
+    assert_eq!(run.merged(), [] as [PrNumber; 0]);
+    assert_eq!(run.labels(1), [FAILED]);
 }
 
 fn prep_run(setup: impl FnOnce(&mut State)) -> Run {

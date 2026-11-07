@@ -1257,20 +1257,33 @@ impl Installation {
         sha: &str,
         method: &str,
     ) -> Result<MergeOutcome> {
+        let outcome = self.request_merge(repo, number, sha, method).await;
+        if let Ok(MergeOutcome::Merged { .. }) = outcome {
+            return outcome;
+        }
+        // A merge can go through though GitHub says otherwise: a reply lost in a 502, a retry that
+        // found it merged already, or a merge GitHub reported failed after it applied.
+        match self.merged_as(repo, number, sha).await? {
+            Some(sha) => Ok(MergeOutcome::Merged { sha }),
+            None => outcome,
+        }
+    }
+
+    /// What GitHub answers the merge, once it has finished.
+    async fn request_merge(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        sha: &str,
+        method: &str,
+    ) -> Result<MergeOutcome> {
         let res = self
             .request(
                 Method::PUT,
                 &format!("/repos/{repo}/pulls/{number}/merge-async"),
                 Some(json!({ "sha": sha, "merge_method": method, "merge_action": "direct_merge" })),
             )
-            .await;
-        // A merge can go through though its reply says otherwise: lost in a 502, or a retry that
-        // found it merged already.
-        let answered = matches!(&res, Ok(r) if matches!(r.status, StatusCode::OK | StatusCode::ACCEPTED | StatusCode::CONFLICT));
-        if !answered && let Some(sha) = self.merged_as(repo, number, sha).await? {
-            return Ok(MergeOutcome::Merged { sha });
-        }
-        let res = res?;
+            .await?;
         let mut result = match res.status {
             StatusCode::OK | StatusCode::ACCEPTED | StatusCode::CONFLICT => res.body,
             StatusCode::BAD_REQUEST
@@ -1993,7 +2006,11 @@ mod tests {
     }
 
     async fn merge_answered(pr: &'static str) -> (MergeOutcome, Vec<String>) {
-        let (gh, requests) = fake::serve(vec![(405, "", NOT_MERGEABLE), (200, "", pr)]).await;
+        merge_replied((405, "", NOT_MERGEABLE), pr).await
+    }
+
+    async fn merge_replied(reply: fake::Scripted, pr: &'static str) -> (MergeOutcome, Vec<String>) {
+        let (gh, requests) = fake::serve(vec![reply, (200, "", pr)]).await;
         let repo = RepoName::parse("o/r").unwrap();
         let outcome = gh.merge(&repo, 7, "abc", "squash").await.unwrap();
         let requests = requests.lock().unwrap().clone();
@@ -2023,6 +2040,36 @@ mod tests {
         let (outcome, _) = merge_answered(pr).await;
         assert!(
             matches!(&outcome, MergeOutcome::Rejected(m) if m.contains("not mergeable")),
+            "{outcome:?}"
+        );
+    }
+
+    /// agent-labs-dev/nebula#11706: GitHub merged the PR, yet answered the merge with this.
+    const COULD_NOT_COMPLETE: &str = r#"{"status":"failed","details":{"message":"This merge could not be completed. Please try again."}}"#;
+
+    #[tokio::test]
+    async fn a_merge_github_reports_failed_counts_once_the_pr_shows_merged() {
+        let pr = r#"{"merged":true,"head":{"sha":"abc"},"merge_commit_sha":"m1"}"#;
+        let (outcome, requests) = merge_replied((202, "", COULD_NOT_COMPLETE), pr).await;
+        assert!(
+            matches!(&outcome, MergeOutcome::Merged { sha } if sha == "m1"),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            requests,
+            [
+                "PUT /repos/o/r/pulls/7/merge-async HTTP/1.1",
+                "GET /repos/o/r/pulls/7 HTTP/1.1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_github_reports_failed_stays_rejected_while_the_pr_is_open() {
+        let pr = r#"{"merged":false,"head":{"sha":"abc"},"merge_commit_sha":null}"#;
+        let (outcome, _) = merge_replied((202, "", COULD_NOT_COMPLETE), pr).await;
+        assert!(
+            matches!(&outcome, MergeOutcome::Rejected(m) if m == "This merge could not be completed. Please try again"),
             "{outcome:?}"
         );
     }
