@@ -1131,10 +1131,20 @@ impl ReviewStore for Mem {
     ) -> Result<()> {
         let mut reviews = self.reviews.lock().unwrap();
         let r = reviews.iter_mut().find(|r| r.id == id).unwrap();
+        let before = r.findings.clone();
         for (finding, outcome) in outcomes {
             if let Some(f) = r.findings.iter_mut().find(|f| &f.finding.id == finding) {
                 f.settle(*outcome);
             }
+        }
+        // As the store does: the PR's earlier reviews that raised it are settled with it.
+        let settled = mergepatrol_core::newly_settled(&before, &r.findings);
+        let pr = (r.repo.clone(), r.number);
+        for e in reviews
+            .iter_mut()
+            .filter(|e| e.id < id && (e.repo.clone(), e.number) == pr)
+        {
+            mergepatrol_core::carry_back(&mut e.findings, &e.answers, &settled);
         }
         Ok(())
     }

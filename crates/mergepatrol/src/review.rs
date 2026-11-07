@@ -404,7 +404,7 @@ pub(crate) async fn conclude(
     if !ctx.store.finish_review(r.id, r.claim, &done).await? {
         return Ok(());
     }
-    settle_earlier(ctx, r, &done).await?;
+    settle_last(ctx, r, &done).await?;
     let (kind, message) = ended(&done);
     record(ctx, key, r.number, kind, &message).await?;
     publish(ctx, gh, key, &now, r, &done).await
@@ -446,17 +446,16 @@ async fn judge(
     })
 }
 
-/// What became of what earlier reviews held the PR for, as this one says. A finding sent back
-/// on more than one head is settled on each: an outcome already given stands.
-async fn settle_earlier(ctx: &Ctx, r: &ReviewRecord, done: &ReviewDone) -> Result<()> {
+/// What became of what the last review held the PR for, as this one says. The store carries it
+/// back to each earlier review that raised the same finding.
+async fn settle_last(ctx: &Ctx, r: &ReviewRecord, done: &ReviewDone) -> Result<()> {
+    let earlier = earlier_reviews(ctx, r).await?;
+    let Some(last) = earlier.first() else {
+        return Ok(());
+    };
     let found: Vec<Finding> = done.findings.iter().map(|j| j.finding.clone()).collect();
-    for earlier in earlier_reviews(ctx, r).await? {
-        let settled = settled_by(&earlier.findings, &earlier.answers, &found);
-        if !settled.is_empty() {
-            ctx.store.settle_findings(earlier.id, &settled).await?;
-        }
-    }
-    Ok(())
+    let settled = settled_by(&last.findings, &last.answers, &found);
+    ctx.store.settle_findings(last.id, &settled).await
 }
 
 /// How the review ended, as the PR's activity says it.

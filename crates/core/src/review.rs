@@ -346,6 +346,17 @@ pub struct Place {
 pub const ISSUE_URL_CHARS: usize = 1_500;
 
 impl Finding {
+    /// Whether it is about `title`: as a later review raises the same finding again, however it
+    /// is cased or spaced.
+    pub fn titled(&self, title: &str) -> bool {
+        self.title.trim().eq_ignore_ascii_case(title.trim())
+    }
+
+    /// Whether `other` raises the same finding.
+    pub fn same_as(&self, other: &Finding) -> bool {
+        self.titled(&other.title)
+    }
+
     /// A link that opens a new issue on `repo` for a bug the PR did not bring, filled in from
     /// the finding: `None` for any other finding. It fits `ISSUE_URL_CHARS`, whatever the agent
     /// wrote.
@@ -839,17 +850,44 @@ pub fn settled_by(
     answers: &BTreeMap<String, Answer>,
     now: &[Finding],
 ) -> Vec<(String, Outcome)> {
-    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
     last.iter()
         .filter(|j| j.open(answers))
         .filter_map(|j| {
-            let again = now.iter().find(|f| same(&f.title, &j.finding.title))?;
+            let again = now.iter().find(|f| f.same_as(&j.finding))?;
             (again.lean == Lean::Fine).then(|| {
                 let settled = again.settled.unwrap_or(Settled::Fixed);
                 (j.finding.id.clone(), settled.into())
             })
         })
         .collect()
+}
+
+/// The outcomes `after` gives that `before` had not, by title: what an edit of a review's
+/// findings settled.
+pub fn newly_settled(before: &[Judged], after: &[Judged]) -> Vec<(String, Outcome)> {
+    after
+        .iter()
+        .zip(before)
+        .filter(|(_, b)| b.outcome.is_none())
+        .filter_map(|(a, _)| Some((a.finding.title.clone(), a.outcome?)))
+        .collect()
+}
+
+/// An earlier review's findings, given what a later review of the PR settled, by title: an open
+/// one raised again there was settled with it. Whether any changed.
+pub fn carry_back(
+    findings: &mut [Judged],
+    answers: &BTreeMap<String, Answer>,
+    settled: &[(String, Outcome)],
+) -> bool {
+    let mut changed = false;
+    for j in findings.iter_mut().filter(|j| j.open(answers)) {
+        if let Some((_, outcome)) = settled.iter().find(|(t, _)| j.finding.titled(t)) {
+            j.settle(*outcome);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// What a human's answers settle: a change they called fine is dismissed.
@@ -1266,6 +1304,45 @@ mod tests {
                 ("f4".to_owned(), Outcome::Fixed),
             ]
         );
+    }
+
+    #[test]
+    fn a_later_reviews_outcome_carries_back_to_the_same_open_finding() {
+        let back = |id, title| Judged {
+            sent_back: true,
+            ..judged(id, title, Lean::Change)
+        };
+        let before = vec![
+            back("f1", "Retry never stops"),
+            back("f2", "The lock races"),
+        ];
+        let mut after = before.clone();
+        after[0].settle(Outcome::Wrong);
+        let settled = newly_settled(&before, &after);
+        assert_eq!(
+            settled,
+            vec![("Retry never stops".to_owned(), Outcome::Wrong)]
+        );
+        // Settled already: no news.
+        assert!(newly_settled(&after, &after).is_empty());
+
+        let mut earlier = vec![
+            back("f3", " retry NEVER stops"),
+            Judged {
+                outcome: Some(Outcome::Fixed),
+                ..back("f4", "Retry never stops")
+            },
+            back("f5", "The lock races"),
+            // Not held for a change: nothing to settle.
+            judged("f6", "Retry never stops", Lean::Change),
+        ];
+        assert!(carry_back(&mut earlier, &BTreeMap::new(), &settled));
+        let outcomes: Vec<_> = earlier.iter().map(|j| j.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [Some(Outcome::Wrong), Some(Outcome::Fixed), None, None]
+        );
+        assert!(!carry_back(&mut earlier[2..], &BTreeMap::new(), &settled));
     }
 
     #[test]

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{
     Answer, Judged, Outcome, PrNumber, Question, RepoName, ReviewSettings, ReviewStatus,
-    dismiss_sent_back, settle_answers,
+    carry_back, dismiss_sent_back, newly_settled, settle_answers,
 };
 use sqlx::Row;
 use sqlx::postgres::PgRow;
@@ -265,6 +265,7 @@ impl PgStore {
         let status =
             ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?;
         let answered = row.get::<Option<String>, _>("answered_by").is_some();
+        let before = findings.clone();
         let Some(status) = edit(&mut findings, status, answered) else {
             return Ok(None);
         };
@@ -276,9 +277,44 @@ impl PgStore {
         .bind(status.as_str())
         .execute(&mut *tx)
         .await?;
+        carry_back_outcomes(&mut tx, id, &newly_settled(&before, &findings)).await?;
         tx.commit().await?;
         Ok(Some(status))
     }
+}
+
+/// What review `id` just settled, given to the same open findings of the PR's earlier reviews:
+/// each time a finding was raised is settled with it. Locks from newer to older, as every caller
+/// holds `id` first.
+async fn carry_back_outcomes(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: i64,
+    settled: &[(String, Outcome)],
+) -> Result<()> {
+    if settled.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query(
+        "SELECT e.id, e.findings, e.answers FROM agent_reviews e, agent_reviews r
+         WHERE r.id = $1 AND e.installation_id = r.installation_id AND e.repo = r.repo
+           AND e.number = r.number AND e.id < r.id
+         ORDER BY e.id DESC FOR UPDATE OF e",
+    )
+    .bind(id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in rows {
+        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
+        let answers: BTreeMap<String, Answer> = serde_json::from_value(row.get("answers"))?;
+        if carry_back(&mut findings, &answers, settled) {
+            sqlx::query("UPDATE agent_reviews SET findings = $2, updated_at = now() WHERE id = $1")
+                .bind(row.get::<i64, _>("id"))
+                .bind(serde_json::to_value(&findings)?)
+                .execute(&mut **tx)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -545,6 +581,7 @@ impl ReviewStore for PgStore {
             return Ok(false);
         };
         let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
+        let before = findings.clone();
         settle_answers(&mut findings, &a.answers);
         sqlx::query(
             "UPDATE agent_reviews SET status = $2, answers = $3, answered_by = $4, note = $5,
@@ -559,6 +596,7 @@ impl ReviewStore for PgStore {
         .bind(serde_json::to_value(&findings)?)
         .execute(&mut *tx)
         .await?;
+        carry_back_outcomes(&mut tx, id, &newly_settled(&before, &findings)).await?;
         tx.commit().await?;
         Ok(true)
     }
