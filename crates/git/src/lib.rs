@@ -316,9 +316,10 @@ impl Git {
         }
     }
 
-    /// Commits the resolved conflict of a stopped `merge`, with its message plus `trailer`.
+    /// Commits the resolved conflict of a stopped `merge`, with its message plus `trailer`. Stages
+    /// tracked files only: what the resolver's checks leave behind stays out.
     pub async fn commit_merge(&self, wt: &Path, message: &str, trailer: &str) -> Result<()> {
-        self.run(wt, &["add", "-A"]).await?;
+        self.run(wt, &["add", "-u"]).await?;
         let message = self.add_trailer(wt, message, trailer).await?;
         let mut cmd = self.git(wt, &["commit", "-q", "--no-verify", "-F", "-"]);
         as_mergeloop(&mut cmd);
