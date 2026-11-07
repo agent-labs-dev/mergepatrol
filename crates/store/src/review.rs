@@ -814,6 +814,7 @@ mod tests {
                 verified: None,
                 code: Vec::new(),
                 related: Vec::new(),
+                also_at: Vec::new(),
             },
             asked,
             sent_back: false,

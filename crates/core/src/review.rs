@@ -265,6 +265,20 @@ pub struct Finding {
     /// Other code it read to get here.
     #[serde(default)]
     pub related: Vec<Related>,
+    /// The other places the same bug is, past `file` and `line`: a fix settles every one.
+    #[serde(default)]
+    pub also_at: Vec<Place>,
+}
+
+/// Another place a finding's bug is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    pub file: String,
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// Its lines, from the PR's diff.
+    #[serde(default)]
+    pub code: Vec<CodeLine>,
 }
 
 /// The longest new-issue link a finding gives: GitHub drops much longer ones, and a review's
@@ -287,10 +301,9 @@ impl Finding {
             )
         };
         let found = format!("Found by MergeLoop's review of #{pr}, which did not bring it.");
-        let at = match (&self.file, self.line) {
-            (Some(file), Some(line)) => format!("`{file}:{line}`\n\n"),
-            (Some(file), None) => format!("`{file}`\n\n"),
-            _ => String::new(),
+        let at = match self.places().as_slice() {
+            [] => String::new(),
+            places => format!("`{}`\n\n", places.join("`, `")),
         };
         let full = link(&self.title, &format!("{at}{}\n\n{found}", self.finding));
         if full.len() <= ISSUE_URL_CHARS {
@@ -299,6 +312,13 @@ impl Finding {
         // 80 characters of 4 bytes, each byte `%XX`, leave room for the rest.
         let title: String = self.title.chars().take(80).collect();
         Some(link(&title, &found))
+    }
+
+    /// Every place its bug is, as `file:line` or `file`: its own, then the others it names.
+    pub fn places(&self) -> Vec<String> {
+        let own = self.file.iter().map(|file| at(file, self.line));
+        own.chain(self.also_at.iter().map(Place::to_string))
+            .collect()
     }
 
     /// Whether it shows the change is needed: MergeLoop ran its evidence on the PR's head and it
@@ -409,6 +429,20 @@ pub enum Verdict {
     DoesNotHold,
     /// The agent's run broke, or it named no verdict.
     Abstained,
+}
+
+/// A place as `file:line`, or `file` without a line.
+fn at(file: &str, line: Option<u32>) -> String {
+    match line {
+        Some(line) => format!("{file}:{line}"),
+        None => file.to_owned(),
+    }
+}
+
+impl std::fmt::Display for Place {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&at(&self.file, self.line))
+    }
 }
 
 /// `text` as a URL's query value.
@@ -675,7 +709,28 @@ mod tests {
             verified: None,
             code: Vec::new(),
             related: Vec::new(),
+            also_at: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_finding_names_every_place_its_bug_is() {
+        let f: Finding = serde_json::from_value(serde_json::json!({
+            "kind": "other", "title": "t", "file": "a.rs", "line": 3,
+            "confidence": 90, "lean": "change", "finding": "f",
+            "also_at": [{ "file": "b.rs", "line": 9 }, { "file": "c.rs" }],
+        }))
+        .unwrap();
+        assert_eq!(f.places(), ["a.rs:3", "b.rs:9", "c.rs"]);
+        // A review stored before `also_at` reads as one place.
+        let old: Finding = serde_json::from_value(serde_json::json!({
+            "kind": "other", "title": "t", "file": "a.rs",
+            "confidence": 90, "lean": "change", "finding": "f",
+        }))
+        .unwrap();
+        assert_eq!(old.places(), ["a.rs"]);
+        // One about the whole PR is at no place.
+        assert!(finding(Kind::Other, 90, Lean::Change).places().is_empty());
     }
 
     #[test]
@@ -756,6 +811,20 @@ mod tests {
         let long = f.issue_url(&repo, 12).unwrap();
         assert!(long.len() <= ISSUE_URL_CHARS, "{}", long.len());
         assert!(long.contains("%2312"));
+        // A bug that recurs is filed once, with every place it is.
+        let mut many = finding(Kind::Other, 90, Lean::PreExisting);
+        many.file = Some("a.rs".into());
+        many.line = Some(7);
+        many.also_at = vec![Place {
+            file: "b.rs".into(),
+            line: Some(2),
+            code: Vec::new(),
+        }];
+        let url = many.issue_url(&repo, 12).unwrap();
+        assert!(
+            url.contains("body=%60a.rs%3A7%60%2C%20%60b.rs%3A2%60%0A%0A"),
+            "{url}"
+        );
     }
 
     #[test]

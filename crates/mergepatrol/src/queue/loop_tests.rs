@@ -908,6 +908,7 @@ impl Mem {
                     verified: None,
                     code: Vec::new(),
                     related: Vec::new(),
+                    also_at: Vec::new(),
                 },
                 asked: false,
                 sent_back: false,
