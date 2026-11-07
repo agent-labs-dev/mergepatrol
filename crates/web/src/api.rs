@@ -80,7 +80,7 @@ pub struct EntryView {
     /// What the queue is doing with it now. Null unless `state` is `active`, or until its job
     /// has begun.
     pub step: Option<ActiveStepView>,
-    /// The fixes it has used, for its checks and its review.
+    /// The fixes it has used, for its checks.
     pub fixes: u32,
     /// The fixes it gets.
     pub fix_budget: u32,

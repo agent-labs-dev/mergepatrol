@@ -1425,8 +1425,8 @@ impl Installation {
     }
 
     /// Posts a review of `head` with `verdict`: its body, and a thread for each comment. A
-    /// comment GitHub turns down, on a line outside the diff, goes in the body. A request for
-    /// changes GitHub turns down, on a PR the App opened, goes as a comment.
+    /// request for changes GitHub turns down, on a PR the App opened, goes as a comment. A
+    /// comment GitHub turns down, on a line outside the diff, goes in the body.
     pub async fn review_lines(
         &self,
         repo: &RepoName,
@@ -1453,10 +1453,10 @@ impl Installation {
         };
         let all = with_comments(body, comments);
         let mut tries = vec![(verdict, json!(lines), body)];
-        if !comments.is_empty() {
-            tries.push((verdict, json!([]), all.as_str()));
-        }
         if verdict != Verdict::Comment {
+            tries.push((Verdict::Comment, json!(lines), body));
+        }
+        if !comments.is_empty() {
             tries.push((Verdict::Comment, json!([]), all.as_str()));
         }
         let mut last = None;

@@ -20,7 +20,7 @@ stage: StageView | null,
  */
 step: ActiveStepView | null, 
 /**
- * The fixes it has used, for its checks and its review.
+ * The fixes it has used, for its checks.
  */
 fixes: number, 
 /**
