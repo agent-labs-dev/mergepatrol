@@ -1055,7 +1055,6 @@ mod tests {
     fn record(findings: Vec<Judged>, answers: BTreeMap<String, Answer>) -> ReviewRecord {
         ReviewRecord {
             since_head: None,
-            agent_fixed: false,
             claim: 0,
             id: 1,
             installation_id: 1,

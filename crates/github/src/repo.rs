@@ -11,6 +11,7 @@ use mergepatrol_core::{
 use crate::Installation;
 use crate::app::AsUser;
 use crate::codeowners::{self, CodeOwners};
+use crate::setup::Verdict;
 
 /// Marks the one comment per PR that MergeLoop keeps up to date.
 const STICKY_MARKER: &str = "<!-- mergepatrol:status -->";
@@ -145,9 +146,13 @@ impl From<Actor> for Person {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReviewNode {
     state: String,
     author: Option<Actor>,
+    /// Whoever read the PR wrote it: read as the App, MergeLoop's own review.
+    #[serde(default)]
+    viewer_did_author: bool,
 }
 
 impl PullRequest {
@@ -203,14 +208,29 @@ impl PullRequest {
             .is_some_and(|a| a.login.eq_ignore_ascii_case(login))
     }
 
-    /// Why GitHub would not merge this PR yet, if it would not.
+    /// Whether, read as the App, MergeLoop's own review asks for changes.
+    pub fn changes_requested_by_viewer(&self) -> bool {
+        self.details
+            .latest_opinionated_reviews
+            .iter()
+            .any(|r| r.state == "CHANGES_REQUESTED" && r.viewer_did_author)
+    }
+
+    /// Why GitHub would not merge this PR yet, if it would not. Changes only MergeLoop's own
+    /// review asks for are its review gate's to hold for, which dismisses them once it passes.
     pub fn hold_reason(&self) -> Option<Hold> {
         if self.is_draft {
             return Some(Hold::Draft);
         }
+        let only_ours = self.changes_requested_by_viewer()
+            && self
+                .details
+                .latest_opinionated_reviews
+                .iter()
+                .all(|r| r.state != "CHANGES_REQUESTED" || r.viewer_did_author);
         match self.review_decision() {
             Some("REVIEW_REQUIRED") => Some(Hold::ReviewRequired),
-            Some("CHANGES_REQUESTED") => Some(Hold::ChangesRequested),
+            Some("CHANGES_REQUESTED") if !only_ours => Some(Hold::ChangesRequested),
             _ => None,
         }
     }
@@ -370,7 +390,7 @@ macro_rules! summary_fields {
         "number state title body isDraft isCrossRepository reviewDecision baseRefName headRefName headRefOid labels(first: 100) { nodes { name } } stack { number baseRefName }
   maintainerCanModify headRepository { nameWithOwner owner { __typename } }
   url createdAt additions deletions changedFiles author { __typename login avatarUrl }
-  latestOpinionatedReviews(first: 20) { nodes { state author { login avatarUrl } } }
+  latestOpinionatedReviews(first: 20) { nodes { state viewerDidAuthor author { login avatarUrl } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login avatarUrl } } } }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
     };
@@ -1404,14 +1424,15 @@ impl Installation {
         Ok(())
     }
 
-    /// Reviews the PR at `head` as the App, with `comments` on their lines. A comment with no
-    /// line is on its whole file. When GitHub turns a line down, as one outside the diff, the
-    /// comments go in the body instead.
+    /// Posts a review of `head` with `verdict`: its body, and a thread for each comment. A
+    /// comment GitHub turns down, on a line outside the diff, goes in the body. A request for
+    /// changes GitHub turns down, on a PR the App opened, goes as a comment.
     pub async fn review_lines(
         &self,
         repo: &RepoName,
         number: PrNumber,
         head: &str,
+        verdict: Verdict,
         body: &str,
         comments: &[ThreadComment],
     ) -> Result<()> {
@@ -1425,21 +1446,78 @@ impl Installation {
                 None => json!({ "path": c.path, "subject_type": "file", "body": c.body }),
             })
             .collect();
-        let review = |lines: &[Value], body: &str| json!({ "commit_id": head, "event": "COMMENT", "body": body, "comments": lines });
-        let res = self
-            .request(Method::POST, &path, Some(review(&lines, body)))
-            .await?;
-        if res.status.is_success() {
-            return Ok(());
-        }
-        if res.status != StatusCode::UNPROCESSABLE_ENTITY || comments.is_empty() {
-            anyhow::bail!("POST {path}: {} {}", res.status, res.body);
-        }
+        let event = |v: Verdict| match v {
+            Verdict::Approve => "APPROVE",
+            Verdict::RequestChanges => "REQUEST_CHANGES",
+            Verdict::Comment => "COMMENT",
+        };
         let all = with_comments(body, comments);
-        let _: Value = self
-            .rest(Method::POST, &path, Some(review(&[], &all)))
-            .await?;
-        Ok(())
+        let mut tries = vec![(verdict, json!(lines), body)];
+        if !comments.is_empty() {
+            tries.push((verdict, json!([]), all.as_str()));
+        }
+        if verdict != Verdict::Comment {
+            tries.push((Verdict::Comment, json!([]), all.as_str()));
+        }
+        let mut last = None;
+        for (v, lines, body) in tries {
+            let review =
+                json!({ "commit_id": head, "event": event(v), "body": body, "comments": lines });
+            let res = self.request(Method::POST, &path, Some(review)).await?;
+            if res.status.is_success() {
+                return Ok(());
+            }
+            if res.status != StatusCode::UNPROCESSABLE_ENTITY {
+                anyhow::bail!("POST {path}: {} {}", res.status, res.body);
+            }
+            last = Some(format!("POST {path}: {} {}", res.status, res.body));
+        }
+        anyhow::bail!("{}", last.unwrap_or_default())
+    }
+
+    /// Dismisses each request for changes on the PR whose body holds `mark`: MergeLoop's own,
+    /// once what it sent back no longer holds. How many it dismissed.
+    pub async fn dismiss_reviews_marked(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        mark: &str,
+        message: &str,
+    ) -> Result<usize> {
+        #[derive(Deserialize)]
+        struct Review {
+            id: u64,
+            state: String,
+            #[serde(default)]
+            body: String,
+        }
+        let mut dismissed = 0;
+        for page in 1.. {
+            let reviews: Vec<Review> = self
+                .rest(
+                    Method::GET,
+                    &format!("/repos/{repo}/pulls/{number}/reviews?per_page=100&page={page}"),
+                    None,
+                )
+                .await?;
+            for r in reviews
+                .iter()
+                .filter(|r| r.state == "CHANGES_REQUESTED" && r.body.contains(mark))
+            {
+                let _: Value = self
+                    .rest(
+                        Method::PUT,
+                        &format!("/repos/{repo}/pulls/{number}/reviews/{}/dismissals", r.id),
+                        Some(json!({ "message": message, "event": "DISMISS" })),
+                    )
+                    .await?;
+                dismissed += 1;
+            }
+            if reviews.len() < 100 {
+                break;
+            }
+        }
+        Ok(dismissed)
     }
 
     /// The PR's review threads that start with a comment holding `mark`, up to 100: MergeLoop's
@@ -2016,6 +2094,82 @@ mod tests {
             assert!(pr.authored_by("ada") && !pr.authored_by("bo"));
             assert_eq!(pr.awaits_approval(), awaits, "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn changes_only_mergeloop_asks_for_are_not_githubs_hold() {
+        let asked = |reviews: &str| {
+            leak(
+                UNREVIEWED
+                    .replace(
+                        r#""codeowners0":{"text":"/.github/ @joaquim-verges @jnsdls\n"}"#,
+                        r#""codeowners0":null"#,
+                    )
+                    .replace(
+                        r#""reviewDecision":null"#,
+                        r#""reviewDecision":"CHANGES_REQUESTED""#,
+                    )
+                    .replace(r#""latestOpinionatedReviews":{"nodes":[]}"#, reviews),
+            )
+        };
+        let ours = r#"{"state":"CHANGES_REQUESTED","viewerDidAuthor":true,"author":null}"#;
+        let theirs = r#"{"state":"CHANGES_REQUESTED","viewerDidAuthor":false,"author":null}"#;
+        let repo = RepoName::parse("o/r").unwrap();
+        for (nodes, by_us, hold) in [
+            (format!("[{ours}]"), true, None),
+            (
+                format!("[{ours},{theirs}]"),
+                true,
+                Some(Hold::ChangesRequested),
+            ),
+            (format!("[{theirs}]"), false, Some(Hold::ChangesRequested)),
+        ] {
+            let reviews = format!(r#""latestOpinionatedReviews":{{"nodes":{nodes}}}"#);
+            let (gh, _) = fake::serve(vec![(200, "", asked(&reviews))]).await;
+            let pr = gh.pull_request(&repo, 11186).await.unwrap();
+            assert_eq!(pr.changes_requested_by_viewer(), by_us, "{nodes}");
+            assert_eq!(pr.hold_reason(), hold, "{nodes}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_mergeloops_own_requests_for_changes_are_dismissed() {
+        let reviews = r#"[
+            {"id":1,"state":"CHANGES_REQUESTED","body":"**MergeLoop's review** <!-- mark -->"},
+            {"id":2,"state":"CHANGES_REQUESTED","body":"a human's"},
+            {"id":3,"state":"COMMENTED","body":"<!-- mark -->"}
+        ]"#;
+        let (gh, requests) = fake::serve(vec![(200, "", reviews), (200, "", "{}")]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        let dismissed = gh.dismiss_reviews_marked(&repo, 7, "<!-- mark -->", "cleared");
+        assert_eq!(dismissed.await.unwrap(), 1);
+        assert_eq!(
+            *requests.lock().unwrap(),
+            [
+                "GET /repos/o/r/pulls/7/reviews?per_page=100&page=1 HTTP/1.1",
+                "PUT /repos/o/r/pulls/7/reviews/1/dismissals HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_for_changes_github_turns_down_goes_as_a_comment() {
+        let (gh, requests) = fake::serve_whole(vec![(422, "", "{}"), (200, "", "{}")]).await;
+        let repo = RepoName::parse("o/r").unwrap();
+        gh.review_lines(&repo, 7, "abc", Verdict::RequestChanges, "body", &[])
+            .await
+            .unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0].contains(r#""event":"REQUEST_CHANGES""#),
+            "{}",
+            requests[0]
+        );
+        assert!(
+            requests[1].contains(r#""event":"COMMENT""#),
+            "{}",
+            requests[1]
+        );
     }
 
     #[tokio::test]

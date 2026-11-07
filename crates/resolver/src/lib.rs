@@ -82,8 +82,6 @@ pub struct ResolveRequest<'a> {
 pub struct FixRequest<'a> {
     pub workdir: &'a Path,
     pub failures: &'a [CheckFailure],
-    /// What the agent's review sent back, to fix instead of `failures`.
-    pub findings: &'a [Finding],
     pub pr_title: &'a str,
     pub pr_body: &'a str,
     pub trunk: &'a str,
@@ -321,82 +319,7 @@ If you cannot resolve the conflict with confidence, stop and reply with one line
     )
 }
 
-/// Asks for what a review sent back: its findings, not a failure to read.
-fn fix_review_prompt(req: &FixRequest<'_>) -> String {
-    let findings = req
-        .findings
-        .iter()
-        .map(|f| {
-            let place = match (&f.file, f.line) {
-                (Some(file), Some(line)) => format!(" ({file}:{line})"),
-                (Some(file), None) => format!(" ({file})"),
-                _ => String::new(),
-            };
-            let shown = match &f.evidence {
-                Some(e) if e.failed => match e.files.as_slice() {
-                    [] => format!("\n\n`{}` fails on this head.", e.command),
-                    files => format!(
-                        "\n\n`{}` fails on this head, with the review's test, which is in place \
-in {}.",
-                        e.command,
-                        files.join(", ")
-                    ),
-                },
-                _ => String::new(),
-            };
-            format!(
-                "## {}{place}\n\n{}\n\nThe change asked for: {}{shown}",
-                f.title,
-                f.finding.trim(),
-                f.suggestion.trim()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let verify = verify_section(req.verify, "fix");
-    format!(
-        "You are fixing what a code review found in a pull request, for a merge queue.
-
-The pull request sits on top of `{trunk}`.
-
-Pull request: {title}
-
-{body}
-
-What the review found:
-
-{findings}
-
-Check each finding against the code first, then change the code so that none applies any more. \
-Use `git log`, `git show` and `git diff {trunk}...HEAD` to see what the pull request changes.
-
-Rules:
-- Make the smallest change that settles each finding, in the spirit of the pull request. Prefer \
-deleting or narrowing code over a new lock, cache, helper or option.
-- Fix the case the finding names, not its neighbours.
-- A finding that names a command that fails is fixed once that command passes. Leave the files \
-the review wrote for it as they are: MergeLoop runs the command after your fix, and rejects the \
-fix if it still fails or if those files changed. They are committed with the fix.
-- When another finding is about behaviour, add one focused test that fails without the fix.
-- Do not delete, skip or weaken tests or checks.
-- Do not edit `.github/` or `.mergepatrol/`: MergeLoop rejects the fix if you do.
-- Do not run git commands that change state (no add, commit, rebase, reset, checkout, stash).
-- Do not refactor or improve unrelated code.
-
-{verify}
-
-Give up rather than guess when a finding is wrong, or settling it changes what the pull request \
-means. Then stop and reply with one line: `{GIVE_UP} <the reason>`.",
-        trunk = req.trunk,
-        title = req.pr_title,
-        body = req.pr_body,
-    )
-}
-
 pub(crate) fn fix_prompt(req: &FixRequest<'_>) -> String {
-    if !req.findings.is_empty() {
-        return fix_review_prompt(req);
-    }
     let failures = req
         .failures
         .iter()

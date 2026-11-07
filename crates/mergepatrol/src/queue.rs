@@ -40,6 +40,7 @@ use crate::credentials::ChatGpt;
 use crate::github::GitHub;
 use crate::job::{GAVE_UP, LEFT_CONFLICT, RETITLED};
 use crate::publish::{Publish, create_commits, publish};
+use crate::review::REVIEW_MARK;
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
@@ -851,6 +852,19 @@ async fn review_hold(
     Ok(None)
 }
 
+/// Dismisses the changes MergeLoop's review asked for on PRs its review gate lets go on, as
+/// GitHub would not merge them otherwise. One that fails stays: GitHub turns the merge down,
+/// and says why.
+async fn withdraw_change_requests(gh: &dyn GitHub, repo: &RepoName, layers: &[PullRequest]) {
+    for pr in layers.iter().filter(|pr| pr.changes_requested_by_viewer()) {
+        let why = "MergeLoop's review no longer holds this PR.";
+        let dismissed = gh.dismiss_reviews_marked(repo, pr.number, REVIEW_MARK, why);
+        if let Err(e) = dismissed.await {
+            tracing::warn!(%repo, pr = pr.number, error = %format!("{e:#}"), "could not dismiss the review's request for changes");
+        }
+    }
+}
+
 /// Whether the author resolved what the agent's review sent back to them alone: each finding
 /// had a thread, and no thread on the PR is left open.
 fn resolved(r: &mergepatrol_store::ReviewRecord, unresolved: u32) -> bool {
@@ -1135,7 +1149,12 @@ async fn sync_lane(
                     false => (pr.number, pr.head_ref_oid.as_str(), pr.unresolved_threads),
                 })
                 .collect();
-            review_hold(ctx, key, &read.review, unit.stacked, &heads, &mut started).await?
+            let hold =
+                review_hold(ctx, key, &read.review, unit.stacked, &heads, &mut started).await?;
+            if hold.is_none() {
+                withdraw_change_requests(gh, repo, &unit.layers).await;
+            }
+            hold
         } {
             Some(reason)
         } else if let Some(reason) = unit.hold_reason() {
@@ -1324,26 +1343,6 @@ impl Unit {
                     && pr.stack.as_ref().map(|s| s.number) == stack
                     && pr.merges_into() == trunk
             })
-    }
-
-    /// The unit as it is now, and the index of its PR `number`, if that PR is still at `head`, and
-    /// the agent may fix it with fixes left.
-    pub(crate) async fn to_fix(
-        &self,
-        gh: &dyn GitHub,
-        key: &LaneKey,
-        settings: &RepoSettings,
-        number: PrNumber,
-        head: &str,
-    ) -> Result<Option<(Unit, usize)>> {
-        let now = self.refreshed(gh, &key.repo).await?;
-        let layer = now.layers.iter().position(|pr| pr.number == number);
-        let Some(layer) = layer.filter(|&i| now.layers[i].head_ref_oid == head) else {
-            return Ok(None);
-        };
-        let fixes_left = now.fixes_used(gh, &key.repo).await? < settings.fix_ci.allowed();
-        let fixable = now.fixable(&settings.label, &key.trunk);
-        Ok((fixes_left && fixable).then_some((now, layer)))
     }
 
     /// How many fixes its PRs used, of the one budget they share.
@@ -2745,6 +2744,9 @@ async fn run_job(
                     if started {
                         ctx.reviews.notify_one();
                     }
+                    if hold.is_none() {
+                        withdraw_change_requests(gh, repo, &now.layers).await;
+                    }
                     hold
                 } {
                     Event::OnHold(reason)
@@ -3330,28 +3332,6 @@ async fn still_queued(
         && now.branch_heads(gh, &key.repo).await? == heads)
 }
 
-/// Has the agent fix what a review of `unit`'s layer `layer` sent back to its author, and pushes
-/// the fix, with the layers above it on top, for a new review to check.
-pub(crate) async fn fix_findings(
-    ctx: &Ctx,
-    gh: &Installation,
-    key: &LaneKey,
-    unit: &Unit,
-    layer: usize,
-    settings: &RepoSettings,
-    findings: Vec<mergepatrol_core::Finding>,
-) -> Result<Event> {
-    let snap = GitHub::snapshot(gh, &key.repo, &settings.labels()).await?;
-    let head = &unit.layers[layer].head_ref_oid;
-    let base = unit.below(gh, key, layer).await?;
-    let task = Task::FixReview { findings };
-    let sandbox = JobSandbox { ctx, gh };
-    let event = sandbox
-        .fix_and_restack(key, &snap, unit, layer, settings, head, &base, task, true)
-        .await;
-    sandbox.published(key, event).await
-}
-
 /// Pushes an empty commit on `head`, on which CI runs anew and reads the PR as it is now. A
 /// re-run through the Actions API would read the PR as it was, and need another permission.
 async fn push_recheck(
@@ -3727,7 +3707,6 @@ async fn import_job_output(
 }
 
 mod prep;
-pub(crate) use prep::Claim;
 
 #[cfg(test)]
 mod loop_tests;

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, Evidence, FIXED_BY, Finding, Lean, LineKind, Panel,
-    RESOLVED_BY, SentBack, Spend, SpendTask, Verdict, Verifier, Vote,
+    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, Lean, LineKind, Panel, RESOLVED_BY,
+    SentBack, Spend, SpendTask, Verdict, Verifier, Vote,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -211,22 +211,7 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
                 &git,
                 resolver,
                 &checks,
-                (failures, &[], &what),
-                dir,
-                out,
-                events,
-            )
-            .await?;
-            (&spec.head_sha, "fixed")
-        }
-        Task::FixReview { findings } => {
-            let what = "the review's findings";
-            fix(
-                spec,
-                &git,
-                resolver,
-                &checks,
-                (&[], findings, what),
+                (failures, &what),
                 dir,
                 out,
                 events,
@@ -401,7 +386,7 @@ async fn fix(
     git: &Git,
     resolver: &dyn Resolver,
     checks: &Verify,
-    (failures, findings, what): (&[CheckFailure], &[Finding], &str),
+    (failures, what): (&[CheckFailure], &str),
     dir: &Path,
     out: &Path,
     events: &mut Vec<JobEvent>,
@@ -409,12 +394,10 @@ async fn fix(
     let transcript = out
         .join("transcripts")
         .join(format!("fix-{}.jsonl", &spec.head_sha[..12]));
-    apply_evidence(git, dir, findings).await?;
     let run = resolver
         .fix(FixRequest {
             workdir: dir,
             failures,
-            findings,
             pr_title: &spec.pr_title,
             pr_body: &spec.pr_body,
             trunk: &spec.trunk,
@@ -424,16 +407,13 @@ async fn fix(
         .await
         .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
     let title = match run.outcome {
-        Outcome::Resolved if !failures.is_empty() => new_title(&run.text),
+        Outcome::Resolved => new_title(&run.text),
         _ => None,
     };
     // A fix is done once it is committed: until then, any failure leaves it unfixed.
     let fixed = match &title {
         Some(title) => Err(anyhow!("{RETITLED}{title}")),
-        None => {
-            let ran = (&run.outcome, findings, what);
-            commit_fix(spec, git, resolver, ran, dir, events).await
-        }
+        None => commit_fix(spec, git, resolver, (&run.outcome, what), dir, events).await,
     };
     spent(
         events,
@@ -446,12 +426,12 @@ async fn fix(
     fixed
 }
 
-/// Checks the agent's fix, and commits it: with the review's tests for `findings`, which now pass.
+/// Checks the agent's fix, and commits it.
 async fn commit_fix(
     spec: &JobSpec,
     git: &Git,
     resolver: &dyn Resolver,
-    (outcome, findings, what): (&Outcome, &[Finding], &str),
+    (outcome, what): (&Outcome, &str),
     dir: &Path,
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
@@ -467,7 +447,6 @@ async fn commit_fix(
         bail!("the agent changed nothing");
     }
     verify(spec, dir, events, "the fix").await?;
-    evidence_passes(git, dir, findings, events).await?;
     git.commit_all(
         dir,
         &format!("Fix {what}\n\n{FIXED_BY}, {}", resolver.name()),
@@ -988,56 +967,6 @@ fn unsafe_file(files: &[String]) -> Option<&str> {
                 || p.starts_with(".mergepatrol")
         })
         .map(String::as_str)
-}
-
-/// The fix starts from the review's tests for what it fixes, in place, as the review ran them.
-async fn apply_evidence(git: &Git, dir: &Path, findings: &[Finding]) -> Result<()> {
-    for e in shown(findings) {
-        if !e.patch.is_empty() {
-            git.apply(dir, &e.patch)
-                .await
-                .with_context(|| format!("the review's test for `{}` does not apply", e.command))?;
-        }
-    }
-    Ok(())
-}
-
-/// After the fix, each command that showed a finding passes, and the review's tests are as they
-/// were: checked once every command ran, as a command may write files too.
-async fn evidence_passes(
-    git: &Git,
-    dir: &Path,
-    findings: &[Finding],
-    events: &mut Vec<JobEvent>,
-) -> Result<()> {
-    for e in shown(findings) {
-        event(events, "evidence", e.command.as_str());
-        let ran = run_command(dir, &e.command).await?;
-        if !ran.passed {
-            bail!(
-                "`{}` still fails after the fix:\n```\n{}\n```",
-                e.command,
-                ran.tail
-            );
-        }
-    }
-    for e in shown(findings) {
-        if !e.patch.is_empty() && !git.holds(dir, &e.patch).await? {
-            bail!(
-                "the fix changed the review's test in {}",
-                e.files.join(", ")
-            );
-        }
-    }
-    Ok(())
-}
-
-/// The evidence MergeLoop saw fail, of the findings that have it.
-fn shown(findings: &[Finding]) -> impl Iterator<Item = &Evidence> {
-    findings
-        .iter()
-        .filter_map(|f| f.evidence.as_ref())
-        .filter(|e| e.failed)
 }
 
 /// How a command ran: whether it passed, and the end of what it printed.

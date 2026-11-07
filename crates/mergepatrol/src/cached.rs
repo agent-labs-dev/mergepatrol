@@ -434,6 +434,15 @@ impl GitHub for Cached<'_> {
     async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String> {
         GitHub::pr_body(self.gh, repo, number).await
     }
+    async fn dismiss_reviews_marked(
+        &self,
+        repo: &RepoName,
+        number: PrNumber,
+        mark: &str,
+        message: &str,
+    ) -> Result<usize> {
+        GitHub::dismiss_reviews_marked(self.gh, repo, number, mark, message).await
+    }
     async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
         GitHub::set_body(self.gh, repo, number, body).await
     }

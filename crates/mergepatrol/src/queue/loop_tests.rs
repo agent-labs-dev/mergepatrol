@@ -69,8 +69,13 @@ struct State {
     checks: BTreeMap<String, CheckState>,
     checks_on: HashMap<String, BTreeMap<String, CheckState>>,
     comments: Vec<(PrNumber, String)>,
+    /// The PRs whose request for changes MergeLoop dismissed, in order.
+    dismissed: Vec<PrNumber>,
     /// The reviews posted on each PR: their body, and how many threads they start.
     reviews: Vec<(PrNumber, String, usize)>,
+    /// Each of those reviews' state: `COMMENTED`, `CHANGES_REQUESTED` until it is dismissed,
+    /// then `DISMISSED`.
+    review_states: Vec<String>,
     /// The review threads those started, in order: their first comment, the replies in them, and
     /// whether they are resolved.
     threads: Vec<(String, Vec<String>, bool)>,
@@ -627,6 +632,21 @@ impl GitHub for Fake {
         Ok(())
     }
 
+    async fn dismiss_reviews_marked(
+        &self,
+        _: &RepoName,
+        number: PrNumber,
+        _: &str,
+        _: &str,
+    ) -> Result<usize> {
+        self.with_mut(|s| {
+            s.dismissed.push(number);
+            let pr = s.prs.get_mut(&number).unwrap();
+            pr.review_decision = None;
+            pr.details = Default::default();
+        });
+        Ok(1)
+    }
     async fn sticky_comment(&self, _: &RepoName, number: PrNumber, body: &str) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         if s.failing_comments > 0 {
@@ -831,8 +851,6 @@ struct Mem {
     label_heads: Mutex<HashMap<PrNumber, String>>,
     /// The agent's reviews, oldest first.
     reviews: Mutex<Vec<ReviewRecord>>,
-    /// The reviews whose findings the agent fixes first, with nothing posted yet.
-    fixing: Mutex<std::collections::HashSet<i64>>,
     /// Reading a review fails, as when the database is down.
     review_reads_fail: Mutex<bool>,
     review_settings: Mutex<Option<ReviewSettings>>,
@@ -968,7 +986,6 @@ impl ReviewStore for Mem {
             number: pr,
             head_sha: head.to_owned(),
             since_head: None,
-            agent_fixed: false,
             claim: 0,
             status: ReviewStatus::Pending,
             error: None,
@@ -991,13 +1008,7 @@ impl ReviewStore for Mem {
     async fn claim_review(&self, _: Duration) -> Result<Option<ReviewRecord>> {
         unreachable!()
     }
-    async fn finish_review(
-        &self,
-        id: i64,
-        _: i64,
-        done: &ReviewDone,
-        fixing: bool,
-    ) -> Result<bool> {
+    async fn finish_review(&self, id: i64, _: i64, done: &ReviewDone) -> Result<bool> {
         let mut reviews = self.reviews.lock().unwrap();
         let r = reviews.iter_mut().find(|r| r.id == id).unwrap();
         r.status = done.status;
@@ -1005,20 +1016,7 @@ impl ReviewStore for Mem {
         r.summary = done.summary.clone();
         r.findings = done.findings.clone();
         r.asked = done.asked.clone();
-        if fixing {
-            self.fixing.lock().unwrap().insert(id);
-        }
         Ok(true)
-    }
-    async fn rerun_review(&self, id: i64, _: i64, _: Duration) -> Result<()> {
-        let mut reviews = self.reviews.lock().unwrap();
-        reviews.iter_mut().find(|r| r.id == id).unwrap().status = ReviewStatus::Pending;
-        self.fixing.lock().unwrap().remove(&id);
-        Ok(())
-    }
-    async fn settle_review(&self, id: i64, _: i64) -> Result<()> {
-        self.fixing.lock().unwrap().remove(&id);
-        Ok(())
     }
     async fn retry_review(&self, _: i64, _: i64, _: &str, _: Duration) -> Result<()> {
         unreachable!()
@@ -1026,7 +1024,6 @@ impl ReviewStore for Mem {
     async fn stale_review(&self, id: i64, _: i64) -> Result<()> {
         let mut reviews = self.reviews.lock().unwrap();
         reviews.iter_mut().find(|r| r.id == id).unwrap().status = ReviewStatus::Stale;
-        self.fixing.lock().unwrap().remove(&id);
         Ok(())
     }
     async fn release_reviews(&self) -> Result<u64> {
@@ -1056,11 +1053,6 @@ impl ReviewStore for Mem {
             r.submitted = Some(review.clone());
             true
         }))
-    }
-    async fn mark_agent_fixed(&self, id: i64) -> Result<()> {
-        let mut reviews = self.reviews.lock().unwrap();
-        reviews.iter_mut().find(|r| r.id == id).unwrap().agent_fixed = true;
-        Ok(())
     }
     async fn review_queue_change(
         &self,
@@ -1913,7 +1905,7 @@ async fn a_pr_the_lane_is_running_gets_no_job_off_it() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_review_fix_and_a_check_fix_take_turns() {
+async fn a_check_fix_waits_for_the_job_that_holds_its_pr() {
     let run = prep_run(failing_ci);
     let key = LaneKey {
         installation_id: 1,
@@ -2318,40 +2310,6 @@ async fn a_job_beside_the_lane_goes_by_the_refs_not_the_lagging_pr() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_review_fix_finds_the_layer_of_its_pr_and_the_stacks_budget() {
-    let run = Run::new(Fake::new(|s| {
-        s.add_stack(10, &[1, 2], &[2]);
-        s.fixes_used.insert(2, 2);
-    }));
-    let key = LaneKey {
-        installation_id: 1,
-        repo: repo(),
-        trunk: "main".into(),
-    };
-    let labeled = run.gh.with(|s| vec![s.prs[&1].clone()]);
-    let stack = units(&*run.gh, &repo(), &labeled).await.unwrap().remove(0);
-    assert_eq!((stack.number, stack.prs()), (10, vec![1, 2]));
-    let settings = &run.ctx.config.repo_defaults;
-    let to_fix = |number, head: String| {
-        let (run, key, stack) = (&run, &key, &stack);
-        async move {
-            let found = stack.to_fix(&*run.gh, key, settings, number, &head);
-            found.await.unwrap().map(|(_, layer)| layer)
-        }
-    };
-    let head = run.gh.with(|s| s.head(1));
-    assert_eq!(to_fix(1, head.clone()).await, Some(0));
-    assert_eq!(to_fix(2, run.gh.with(|s| s.head(2))).await, Some(1));
-    assert_eq!(to_fix(1, "pushed".into()).await, None);
-
-    let change = |edit: fn(&mut State)| edit(&mut run.gh.state.lock().unwrap());
-    change(|s| {
-        s.fixes_used.insert(1, 1);
-    });
-    assert_eq!(to_fix(1, head).await, None, "layers share one budget");
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_fork_pr_skips_getting_ready() {
     let run = prep_run(|s| {
         fork_pr(s);
@@ -2522,11 +2480,27 @@ async fn a_pr_goes_on_once_its_author_resolves_every_comment_with_no_human() {
         f.threaded = true;
     });
     threads(1);
+    // Its review requested changes, as GitHub shows it: MergeLoop's own.
+    run.gh.with_mut(|s| {
+        let pr = s.prs.get_mut(&1).unwrap();
+        pr.review_decision = Some("CHANGES_REQUESTED".into());
+        pr.details = serde_json::from_value(serde_json::json!({
+            "url": "", "createdAt": "", "additions": 0, "deletions": 0, "changedFiles": 0,
+            "author": null, "reviewRequests": { "nodes": [] }, "commits": null,
+            "latestOpinionatedReviews": { "nodes": [
+                { "state": "CHANGES_REQUESTED", "viewerDidAuthor": true, "author": null },
+            ] },
+        }))
+        .unwrap();
+    });
     run.tick().await;
     assert_eq!(run.lane(), [(1, "Held(ReviewChanges)".into())]);
-    // The author answers it and resolves the thread: no human approves, and it merges.
+    assert!(run.gh.with(|s| s.dismissed.is_empty()));
+    // The author answers it and resolves the thread: no human approves, MergeLoop withdraws
+    // its request for changes, and it merges.
     threads(0);
     run.drain().await;
+    assert_eq!(run.gh.with(|s| s.dismissed.clone()), [1]);
     assert_eq!(run.merged(), [1]);
 }
 
