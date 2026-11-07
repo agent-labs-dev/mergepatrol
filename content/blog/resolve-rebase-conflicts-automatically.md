@@ -121,7 +121,7 @@ built around. The behaviour above is the default rather than a configuration exe
 
 1. **Sign in and install the App** on the repositories you want queued, at
    [mergeloop.ai](https://mergeloop.ai).
-2. **Set up a repo.** MergeLoop opens a pull request that adds `.mergepatrol/mergepatrol.yml` on
+2. **Set up a repo.** MergeLoop opens a pull request that adds `.mergeloop/mergeloop.yml` on
    the default branch. Merging it is what turns the queue on; a pull request cannot change its own
    queue settings.
 3. **Add your model key** in Settings. Anthropic or OpenAI, your account, your spend limit. The
@@ -130,14 +130,14 @@ built around. The behaviour above is the default rather than a configuration exe
    anything is pushed:
 
    ```yaml
-   # .mergepatrol/mergepatrol.yml
+   # .mergeloop/mergeloop.yml
    batch_size: 8
    verify:
      - cargo test --workspace
      - pnpm -C ui run lint
    ```
 
-5. **Label a pull request** with `mergepatrol`. `mergepatrol:priority` puts it at the front of the
+5. **Label a pull request** with `mergeloop`. `mergeloop:priority` puts it at the front of the
    queue.
 
 From there the queue does what the section above describes: a plain rebase first, the agent only

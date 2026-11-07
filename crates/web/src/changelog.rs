@@ -18,7 +18,7 @@ use crate::blog::{Analytics, escape, page};
 #[allow_missing = true]
 struct Entries;
 
-const REPO: &str = "https://github.com/agent-labs-dev/mergepatrol";
+const REPO: &str = "https://github.com/agent-labs-dev/mergeloop";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, TS)]
 #[serde(rename_all = "lowercase")]

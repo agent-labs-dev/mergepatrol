@@ -70,10 +70,12 @@ deploy's workload identity matches the repo's ID, not its name. Releases name th
 container images after the repo, so the next one publishes `ghcr.io/agent-labs-dev/mergeloop`
 and `-job`; the `mergepatrol` images keep their tags but get no new ones.
 
-Compatibility names intentionally retained in code: Rust packages and binaries, the
-Artifact Registry images and GCP resources, `MERGEPATROL_*` settings, `mergepatrol`
-queue labels, `.mergepatrol/mergepatrol.yml`, API fields, Git refs, comment markers, the
-`mergepatrol` skill name and installed paths, the menu bar app's bundle ID and Keychain
-service, and the rolling `Mergepatrol.zip` download URL. Its bundle is now `MergeLoop.app`.
-Existing social-card URLs serve the new artwork. Past changelog screenshots remain records
-of the UI at the time. None of these identifiers should be renamed as a string replacement.
+What users see says `mergeloop`: new repos get `.mergeloop/mergeloop.yml` and the `mergeloop`
+labels, and MergeLoop's branches, commit trailers, comment markers, agent skill and API fields
+use the new name. MergeLoop still reads what it wrote as Mergepatrol: a config file at
+`.mergepatrol/mergepatrol.yml`, which keeps `mergepatrol` as its default label, `Fixed-by:` and
+`Resolved-by: mergepatrol` trailers, and its old comment markers. Updating a repo's skill moves
+it from `skills/mergepatrol`. Internal names stay: Rust packages and binaries, the Artifact
+Registry images and GCP resources, `MERGEPATROL_*` settings, Git refs under the queue's cache, the
+menu bar app's bundle ID and Keychain service. Existing social-card URLs moved to
+`/og/mergeloop-og-*`. Past changelog screenshots remain records of the UI at the time.

@@ -21,7 +21,7 @@ Anthropic's models, Codex for OpenAI's, on the workspace's own key):
 1. **It reads the failure.** The agent gets each failed check's output and annotations, and for a
    GitHub Actions job, the end of its log.
 2. **It commits a fix on top of the PR,** in the same sandbox a rebase runs in. It may change any
-   file except those under `.github/` and `.mergepatrol/`, so it cannot edit CI or the queue's own
+   file except those under `.github/` and `.mergeloop/`, so it cannot edit CI or the queue's own
    settings to make a check pass.
 3. **Your `verify` commands run** before anything is pushed.
 4. **The checks run again.** The PR keeps its place at the head of the queue meanwhile.
@@ -48,7 +48,7 @@ failure: the job runs again.
 ## Setting it up
 
 The fix agent is on by default once a workspace has a model key. In
-`.mergepatrol/mergepatrol.yml`:
+`.mergeloop/mergeloop.yml`:
 
 ```yaml
 fix_ci:
@@ -65,7 +65,7 @@ from the check output alone. The full reference is in [Configuration](/docs/conf
 
 The agent's commit goes through the same required checks as any other, and through your `verify`
 commands first, so a fix that does not pass does not merge. It cannot touch `.github/` or
-`.mergepatrol/`. It runs in a sandboxed job whose GitHub token can read only the one repo: see
+`.mergeloop/`. It runs in a sandboxed job whose GitHub token can read only the one repo: see
 [how jobs are isolated](/docs/self-hosting#how-jobs-are-isolated). If you would rather a human fix
 every failure, set `fix_ci.enabled: false`: the queue then ejects on failure, as other queues do.
 

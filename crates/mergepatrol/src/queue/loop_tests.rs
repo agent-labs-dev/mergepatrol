@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use mergepatrol_billing::{Billing, FAIR_USE_PRS, StripeConfig};
 use mergepatrol_core::{
-    AgentSettings, Bar, CheckFailure, EntryState, Finding, Judged, Kind, LabelSpec, Labels, Lean,
-    Spend, Stage, Step, StepTimes, WorkspaceDefaults,
+    AgentSettings, Bar, CheckFailure, ConfigPath, ConfigText, EntryState, Finding, Judged, Kind,
+    LabelSpec, Labels, Lean, Spend, Stage, Step, StepTimes, WorkspaceDefaults,
 };
 use mergepatrol_executor::LocalExecutor;
 use mergepatrol_executor::proxy::Upstreams;
@@ -25,8 +25,8 @@ use crate::config::ExecutorConfig;
 
 mod getting_ready;
 
-const TRIGGER: &str = "mergepatrol";
-const FAILED: &str = "mergepatrol:failed";
+const TRIGGER: &str = "mergeloop";
+const FAILED: &str = "mergeloop:failed";
 
 fn repo() -> RepoName {
     RepoName::parse("o/r").unwrap()
@@ -416,8 +416,11 @@ impl GitHub for Fake {
         1
     }
 
-    async fn config_file(&self, _: &RepoName) -> Result<Option<String>> {
-        Ok(self.state.lock().unwrap().config.clone())
+    async fn config_file(&self, _: &RepoName) -> Result<ConfigText> {
+        Ok(ConfigText {
+            at: ConfigPath::Current,
+            text: self.state.lock().unwrap().config.clone(),
+        })
     }
 
     async fn snapshot(&self, _: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
@@ -700,7 +703,7 @@ impl GitHub for Fake {
         &self,
         _: &RepoName,
         number: PrNumber,
-        _: &str,
+        _: &[&str],
         _: &str,
     ) -> Result<usize> {
         self.with_mut(|s| {
@@ -1248,10 +1251,10 @@ impl ReadCache for Mem {
     async fn github_reads(&self, _: u64, _: &RepoName) -> Result<RepoReads> {
         unreachable!()
     }
-    async fn config_read(&self, _: u64, _: &RepoName) -> Result<Option<Option<String>>> {
+    async fn config_read(&self, _: u64, _: &RepoName) -> Result<Option<ConfigText>> {
         unreachable!()
     }
-    async fn save_config_read(&self, _: u64, _: &RepoName, _: i64, _: Option<&str>) -> Result<()> {
+    async fn save_config_read(&self, _: u64, _: &RepoName, _: i64, _: &ConfigText) -> Result<()> {
         unreachable!()
     }
     async fn save_repository_read(
@@ -3871,7 +3874,7 @@ async fn green_prs_are_tested_together_and_merged_without_a_rebase() {
     // The batch's branch is gone, which closes its draft PR.
     assert_eq!(
         run.gh.with(|s| s.deleted.clone()),
-        ["mergepatrol/batch-1-2-3"]
+        ["mergeloop/batch-1-2-3"]
     );
     assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
     assert!(run.lane().is_empty());
@@ -3981,7 +3984,7 @@ async fn a_batch_stops_at_the_first_conflict() {
 async fn the_trunk_moving_while_a_batch_is_tested_builds_it_again() {
     let run = Run::batching(Fake::new(prs(&[1, 2])));
     // The checks of both PRs are read, then the batch's.
-    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    const BATCH: &str = "mergeloop/batch-1-2@t-1-2";
     run.gh.then(|_| {});
     run.gh.then(|_| {});
     run.gh.then(|s| {
@@ -4050,14 +4053,14 @@ async fn a_batch_cut_short_by_a_restart_is_built_again() {
     ]);
     lane.activate(1);
     lane.activate(2);
-    lane.batch_branch = Some("mergepatrol/batch-1-2".into());
+    lane.batch_branch = Some("mergeloop/batch-1-2".into());
     run.store.lanes.lock().unwrap().insert(key, lane);
     run.gh
         .state
         .lock()
         .unwrap()
         .branches
-        .insert("mergepatrol/batch-1-2".into(), "stale".into());
+        .insert("mergeloop/batch-1-2".into(), "stale".into());
     run.tick().await;
     assert_eq!(run.merged(), [1, 2]);
 }
@@ -4065,7 +4068,7 @@ async fn a_batch_cut_short_by_a_restart_is_built_again() {
 /// Ticks until the batch of 1 and 2 waits for its checks, then drops the tick, as a restart
 /// does.
 async fn cut_short_while_testing(run: &Run) {
-    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    const BATCH: &str = "mergeloop/batch-1-2@t-1-2";
     run.gh.with_mut(|s| {
         s.checks_on
             .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
@@ -4083,10 +4086,7 @@ async fn a_batch_cut_short_by_a_restart_picks_up_where_it_was() {
     assert_eq!(run.merged(), [1, 2]);
     // The same branch and draft PR, which CI kept testing.
     assert_eq!(run.gh.with(|s| s.drafts.len()), 1);
-    assert_eq!(
-        run.gh.with(|s| s.deleted.clone()),
-        ["mergepatrol/batch-1-2"]
-    );
+    assert_eq!(run.gh.with(|s| s.deleted.clone()), ["mergeloop/batch-1-2"]);
     assert_eq!(
         run.kinds(1),
         ["enqueued", "batch", "batch-resumed", "merged"]
@@ -4096,7 +4096,7 @@ async fn a_batch_cut_short_by_a_restart_picks_up_where_it_was() {
 #[tokio::test(start_paused = true)]
 async fn a_batch_whose_poll_fails_picks_up_where_it_was() {
     let run = Run::batching(Fake::new(prs(&[1, 2])));
-    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    const BATCH: &str = "mergeloop/batch-1-2@t-1-2";
     run.gh.with_mut(|s| {
         s.checks_on
             .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
@@ -4121,7 +4121,7 @@ async fn a_batch_whose_poll_fails_picks_up_where_it_was() {
 #[tokio::test(start_paused = true)]
 async fn a_batch_whose_poll_keeps_failing_stops() {
     let run = Run::batching(Fake::new(prs(&[1, 2])));
-    const BATCH: &str = "mergepatrol/batch-1-2@t-1-2";
+    const BATCH: &str = "mergeloop/batch-1-2@t-1-2";
     run.gh.with_mut(|s| {
         s.checks_on
             .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
@@ -4134,10 +4134,7 @@ async fn a_batch_whose_poll_keeps_failing_stops() {
     // Resumed, its poll fails past the window: the batch stops, and its PRs go back.
     run.gh.then(|s| s.failing_snapshots = 1);
     assert!(run.try_tick().await.is_err());
-    assert_eq!(
-        run.gh.with(|s| s.deleted.clone()),
-        ["mergepatrol/batch-1-2"]
-    );
+    assert_eq!(run.gh.with(|s| s.deleted.clone()), ["mergeloop/batch-1-2"]);
 }
 
 /// Ticks until the next merge, which a restart cuts short: GitHub merges it meanwhile, or not.
@@ -4275,7 +4272,7 @@ async fn a_green_stack_is_tested_in_a_batch_and_merged_at_once() {
     );
     assert_eq!(
         run.gh.with(|s| s.deleted.clone()),
-        ["mergepatrol/batch-1-10-4"]
+        ["mergeloop/batch-1-10-4"]
     );
     assert_eq!(run.kinds(2), ["enqueued", "batch", "merged"]);
     let comment = run.gh.with(|s| {
@@ -4357,7 +4354,7 @@ async fn a_batch_with_a_stack_picks_up_where_it_was_after_a_restart() {
         prs(&[1])(s);
         s.add_stack(10, &[2, 3], &[3]);
     }));
-    const BATCH: &str = "mergepatrol/batch-1-10@t-1-2-3";
+    const BATCH: &str = "mergeloop/batch-1-10@t-1-2-3";
     run.gh.with_mut(|s| {
         s.checks_on
             .insert(BATCH.into(), [("ci".into(), CheckState::Pending)].into())
@@ -4515,7 +4512,7 @@ async fn a_fork_pr_goes_by_its_pull_ref_which_the_pr_lags_behind() {
 
 /// A MergeLoop that GitHub delivers webhooks to.
 fn with_webhooks(run: &mut Run) {
-    run.ctx.config.public_url = "https://mergepatrol.example".into();
+    run.ctx.config.public_url = "https://mergeloop.example".into();
     run.ctx.hosted_app = Some(AppCredentials {
         id: 1,
         slug: "mp".into(),
@@ -4766,7 +4763,7 @@ fn billed(run: &mut Run, plans: &Arc<Plans>) {
         webhook_secret: String::new(),
         price: String::new(),
     };
-    let billing = Billing::new(plans.clone(), stripe, "https://mergepatrol.test");
+    let billing = Billing::new(plans.clone(), stripe, "https://mergeloop.test");
     run.ctx.billing = Some(Arc::new(billing));
 }
 
@@ -4794,7 +4791,7 @@ async fn a_private_repo_waits_on_hold_until_subscribed() {
     assert_eq!(run.kinds(1), ["enqueued", "held"]);
     let comment = run.gh.with(|s| s.comments.last().unwrap().1.clone());
     assert!(comment.contains("Start a free trial of 14 days"));
-    assert!(comment.contains("https://mergepatrol.test/o/settings"));
+    assert!(comment.contains("https://mergeloop.test/o/settings"));
     // Its author takes a seat already, so the subscription starts with it.
     assert_eq!(*plans.seats.lock().unwrap(), ["ada"]);
 
@@ -5049,7 +5046,7 @@ async fn while_a_pr_waits_for_checks_the_other_lanes_sync_but_not_one_a_restart_
         trunk: "hotfix".into(),
     };
     let cut_short = Lane {
-        batch_branch: Some("mergepatrol/batch-9".into()),
+        batch_branch: Some("mergeloop/batch-9".into()),
         ..Lane::default()
     };
     run.store.lanes.lock().unwrap().insert(hotfix, cut_short);

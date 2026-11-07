@@ -13,7 +13,7 @@ export type RepoStatusView = { state: RepoStateView,
  */
 installed: boolean, 
 /**
- * The default branch has `.mergepatrol/mergepatrol.yml`, as of the last look.
+ * The default branch has the config file, as of the last look.
  */
 has_config: boolean, 
 /**

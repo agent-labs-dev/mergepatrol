@@ -642,10 +642,14 @@ pub struct AnswerAgentReview {
     pub request_changes: bool,
 }
 
-/// Hidden in answers so deliveries are not read as new replies. Keep the pre-rebrand markers:
-/// an old revision still serves webhooks while the new revision rolls out.
-pub(crate) const ANSWERED_MARK: &str = "Answered Mergepatrol's review.";
-pub(crate) const LINE_MARK: &str = "<sub>On Mergepatrol's review:";
+/// Hidden in answers so deliveries are not read as new replies. Each after the first is how
+/// MergeLoop marked them as Mergepatrol, which a revision from then still writes while the new
+/// one rolls out.
+pub(crate) const ANSWERED_MARKS: [&str; 2] =
+    ["mergeloop:answered", "Answered Mergepatrol's review."];
+pub(crate) const LINE_MARKS: [&str; 2] = ["mergeloop:line-answer", "<sub>On Mergepatrol's review:"];
+const ANSWERED_MARK: &str = ANSWERED_MARKS[0];
+const LINE_MARK: &str = LINE_MARKS[0];
 
 /// Answers what the review asks: posts a review of the PR as the caller, with each change asked
 /// for on its line, and lets the PR on in the queue, or holds it for a push.

@@ -43,7 +43,7 @@ export function Permalink({ workspace }: { workspace: number }) {
   const lanes = useQuery({
     queryKey: ["lanes", workspace],
     queryFn: () => fetchLanes(workspace),
-    enabled: amongOpen && s.mergepatrol.state !== "off",
+    enabled: amongOpen && s.mergeloop.state !== "off",
   });
 
   if (!Number.isInteger(n) || status.isError)
@@ -67,7 +67,7 @@ export function Permalink({ workspace }: { workspace: number }) {
         replace
       />
     );
-  if (s.mergepatrol.state === "off")
+  if (s.mergeloop.state === "off")
     return (
       <Navigate to="/$account/settings" params={{ account }} search={{ repo: full }} replace />
     );

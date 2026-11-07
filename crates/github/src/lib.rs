@@ -19,7 +19,7 @@ pub use detail::{
     CheckRun, CheckRunState, DiffOf, Label, PullDetail, PullDiffs, SignedImages, ThreadSummary,
     TimelineEvent, TimelineItem,
 };
-pub use files::{BranchFile, GitObject, ObjectsAt, Proposal, PullRef, SYMLINK_MODE};
+pub use files::{BranchFile, ConfigFile, GitObject, ObjectsAt, Proposal, PullRef, SYMLINK_MODE};
 pub use repo::{
     BranchMerge, HeadRepository, InboxPull, MergeOutcome, PrDetails, PullRequest, RepoOwner,
     RepoSnapshot, ReviewThread, SnapshotParts, StackRef, ThreadComment, TreeEntry, queued,

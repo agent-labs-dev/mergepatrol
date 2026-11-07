@@ -10,7 +10,7 @@ fn billing(store: Arc<PgStore>) -> Billing {
         webhook_secret: "whsec".into(),
         price: "price".into(),
     };
-    Billing::new(store, config, "https://mergepatrol.test/")
+    Billing::new(store, config, "https://mergeloop.test/")
 }
 
 fn sub(status: &str) -> Subscription {
@@ -60,7 +60,7 @@ async fn a_private_repo_holds_until_subscribed(pool: PgPool) {
     let b = billing(store.clone());
     let hold = b.gate(1, "o", true, NOW).await.unwrap().unwrap();
     assert!(hold.comment.contains("free trial of 14 days"));
-    assert!(hold.comment.contains("https://mergepatrol.test/o/settings"));
+    assert!(hold.comment.contains("https://mergeloop.test/o/settings"));
     // Public repos stay free.
     assert_eq!(b.gate(1, "o", false, NOW).await.unwrap(), None);
 

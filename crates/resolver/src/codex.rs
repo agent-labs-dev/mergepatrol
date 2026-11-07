@@ -54,20 +54,20 @@ impl CodexResolver {
                 "-c",
                 &format!("model_reasoning_effort={}", toml(&self.effort)),
             ])
-            .args(["-c", "model_provider=\"mergepatrol\""])
-            .args(["-c", "model_providers.mergepatrol.name=\"MergeLoop\""])
+            .args(["-c", "model_provider=\"mergeloop\""])
+            .args(["-c", "model_providers.mergeloop.name=\"MergeLoop\""])
             .args([
                 "-c",
                 &format!(
-                    "model_providers.mergepatrol.base_url={}",
+                    "model_providers.mergeloop.base_url={}",
                     toml(&self.base_url)
                 ),
             ])
             .args([
                 "-c",
-                &format!("model_providers.mergepatrol.env_key=\"{KEY_VAR}\""),
+                &format!("model_providers.mergeloop.env_key=\"{KEY_VAR}\""),
             ])
-            .args(["-c", "model_providers.mergepatrol.wire_api=\"responses\""])
+            .args(["-c", "model_providers.mergeloop.wire_api=\"responses\""])
             .arg(prompt);
         Ok(cmd)
     }
@@ -225,8 +225,8 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         for arg in [
-            "model_providers.mergepatrol.base_url=\"http://orchestrator/openai/v1\"",
-            "model_providers.mergepatrol.env_key=\"MERGEPATROL_API_KEY\"",
+            "model_providers.mergeloop.base_url=\"http://orchestrator/openai/v1\"",
+            "model_providers.mergeloop.env_key=\"MERGEPATROL_API_KEY\"",
             "model_reasoning_effort=\"high\"",
             "gpt-6.1-sol",
         ] {

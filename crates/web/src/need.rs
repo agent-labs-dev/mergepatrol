@@ -201,8 +201,8 @@ fn need(status: &PullStateView, exit: Option<&ExitRecord>) -> Need {
         layer: None,
         detail,
     };
-    if status.mergepatrol.state != RepoStateView::On {
-        let why = status.mergepatrol.config_error.clone().map_or_else(
+    if status.mergeloop.state != RepoStateView::On {
+        let why = status.mergeloop.config_error.clone().map_or_else(
             || "MergeLoop is not installed on it, it has no config file, or the dashboard turned it off".to_owned(),
             |e| format!("its config file does not parse: {e}"),
         );
@@ -330,7 +330,7 @@ mod tests {
             repo: "o/r".into(),
             number: 6,
             url: String::new(),
-            mergepatrol: RepoStatusView {
+            mergeloop: RepoStatusView {
                 state: RepoStateView::On,
                 installed: true,
                 has_config: true,
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     fn a_repo_whose_queue_does_not_run_needs_a_human() {
         let mut off = status(None);
-        off.mergepatrol.state = RepoStateView::Off;
+        off.mergeloop.state = RepoStateView::Off;
         let v = view(off, None, None, None);
         assert_eq!((v.needs, v.exit_code), (NeedKind::Off, 2));
     }

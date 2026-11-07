@@ -13,10 +13,10 @@ use futures_util::future::try_join_all;
 use mergepatrol_analytics::{Analytics, Exit};
 use mergepatrol_billing::Billing;
 use mergepatrol_core::{
-    BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure,
+    BatchStep, BuiltBatch, CHECKS_MISSING_FOR, CHECKS_TIMEOUT, Candidate, CheckFailure, ConfigPath,
     EjectReason, EntryState, Event, Hold, Job, Lane, LaneChange, LayerHead, PendingMerge, Phase,
-    PrNumber, PrSummary, RECHECK_MESSAGE, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, SpendTask, Transition, body_closing_commit_issues,
+    PrNumber, PrSummary, RECHECK_MESSAGE, RepoName, RepoSettings, ReviewSettings, ReviewStatus,
+    SpendTask, Transition, body_closing_commit_issues,
 };
 use mergepatrol_executor::Executor;
 use mergepatrol_executor::protocol::{
@@ -40,7 +40,7 @@ use crate::credentials::ChatGpt;
 use crate::github::GitHub;
 use crate::job::{GAVE_UP, LEFT_CONFLICT, RETITLED};
 use crate::publish::{Publish, create_commits, publish};
-use crate::review::REVIEW_MARK;
+use crate::review::REVIEW_MARKS;
 
 const CHECKS_POLL: Duration = Duration::from_secs(15);
 /// With no required checks, how long after a publish its checks may first count as green: a
@@ -66,7 +66,7 @@ const MERGE_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// the PR is ejected. Shorter failures leave it at the head of the queue, to run again.
 const JOB_ERRORS_FOR: Duration = Duration::from_secs(30 * 60);
 /// A fix may change any file but these: CI's own config, and the queue's.
-const FIX_PROTECTED: [&str; 2] = [".github/", ".mergepatrol/"];
+const FIX_PROTECTED: [&str; 3] = [".github/", ".mergeloop/", ".mergepatrol/"];
 /// How long to wait for a fork PR's pull ref to follow a push to the fork.
 const PULL_REF_WAIT: Duration = Duration::from_secs(30);
 /// How long a fork PR may wait for its pin, the head its label went on at, before it leaves.
@@ -415,7 +415,13 @@ async fn discover_once(ctx: &Ctx) -> Result<()> {
                 .map(|r| r.repo)
                 .collect();
             follow_renames(ctx.store.as_ref(), &gh, &repos).await?;
-            let has = gh.have_file(&repos, REPO_CONFIG_PATH).await?;
+            let mut has = vec![false; repos.len()];
+            for at in ConfigPath::ALL {
+                let here = gh.have_file(&repos, at.path()).await?;
+                has.iter_mut()
+                    .zip(here)
+                    .for_each(|(has, here)| *has |= here);
+            }
             anyhow::Ok(
                 repos
                     .into_iter()
@@ -686,7 +692,7 @@ async fn read_repo(ctx: &Ctx, gh: &dyn GitHub, repo: &RepoName) -> Result<Option
         .store
         .inherited(installation, &ctx.config.repo_defaults)
         .await?;
-    let settings = match RepoSettings::from_file(file.as_deref(), &inherited) {
+    let settings = match file.settings(&inherited) {
         Ok(s) => s,
         Err(e) => {
             // Paused: the settings it would run with are a guess.
@@ -856,7 +862,7 @@ async fn review_hold(
 async fn withdraw_change_requests(gh: &dyn GitHub, repo: &RepoName, layers: &[PullRequest]) {
     for pr in layers.iter().filter(|pr| pr.changes_requested_by_viewer()) {
         let why = "MergeLoop's review no longer holds this PR.";
-        let dismissed = gh.dismiss_reviews_marked(repo, pr.number, REVIEW_MARK, why);
+        let dismissed = gh.dismiss_reviews_marked(repo, pr.number, &REVIEW_MARKS, why);
         if let Err(e) = dismissed.await {
             tracing::warn!(%repo, pr = pr.number, error = %format!("{e:#}"), "could not dismiss the review's request for changes");
         }
@@ -2117,7 +2123,7 @@ async fn build_batch(
     }
     let repo = &key.repo;
     let numbers: Vec<String> = units.iter().map(|u| u.number.to_string()).collect();
-    let branch = format!("mergepatrol/batch-{}", numbers.join("-"));
+    let branch = format!("mergeloop/batch-{}", numbers.join("-"));
     lane.batch_branch = Some(branch.clone());
     ctx.store.save_lane(key, lane).await?;
 
@@ -3757,7 +3763,7 @@ async fn publish_to_fork(
 
 /// The branch a rebased stack layer waits on, until the layers' branches move.
 fn restack_branch(pr: &PullRequest) -> String {
-    format!("mergepatrol/restack-{}", pr.number)
+    format!("mergeloop/restack-{}", pr.number)
 }
 
 /// Rebases each layer from `rebased.len()` up, and creates its commits on GitHub: pushes its new

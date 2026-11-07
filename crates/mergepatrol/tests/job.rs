@@ -559,7 +559,7 @@ async fn a_review_since_an_approval_names_only_the_queues_commits() {
     git(&origin, &["add", "-A"]);
     git(
         &origin,
-        &["commit", "-qm", "Fix ci\n\nFixed-by: mergepatrol, a"],
+        &["commit", "-qm", "Fix ci\n\nFixed-by: mergeloop, a"],
     );
     let head = git(&origin, &["rev-parse", "HEAD"]);
 
@@ -1072,5 +1072,5 @@ async fn an_openai_conflict_is_resolved_through_the_proxy() {
         "{resolved}"
     );
     let log = git(&check, &["log", "-1", "--format=%B", "FETCH_HEAD"]);
-    assert!(log.contains("Resolved-by: mergepatrol, codex ("), "{log}");
+    assert!(log.contains("Resolved-by: mergeloop, codex ("), "{log}");
 }

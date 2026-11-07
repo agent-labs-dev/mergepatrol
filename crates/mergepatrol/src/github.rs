@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use mergepatrol_core::{CheckFailure, LabelSpec, Labels, PrNumber, REPO_CONFIG_PATH, RepoName};
+use mergepatrol_core::{CheckFailure, ConfigText, LabelSpec, Labels, PrNumber, RepoName};
 use mergepatrol_github::{
     BranchMerge, BranchRules, Checks, Installation, MergeOutcome, PullRequest, RepoSnapshot,
 };
@@ -12,7 +12,7 @@ use mergepatrol_github::{
 pub trait GitHub: Send + Sync {
     fn installation_id(&self) -> u64;
     /// The repo's config file on its default branch.
-    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>>;
+    async fn config_file(&self, repo: &RepoName) -> Result<ConfigText>;
     async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot>;
     async fn pull_request(&self, repo: &RepoName, number: PrNumber) -> Result<PullRequest>;
     /// The open PRs of a stack, bottom to top.
@@ -83,12 +83,12 @@ pub trait GitHub: Send + Sync {
     /// The PR's description as GitHub has it now, never from a cache.
     async fn pr_body(&self, repo: &RepoName, number: PrNumber) -> Result<String>;
     async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()>;
-    /// Dismisses each request for changes on the PR whose body holds `mark`.
+    /// Dismisses each request for changes on the PR whose body holds one of `marks`.
     async fn dismiss_reviews_marked(
         &self,
         repo: &RepoName,
         number: PrNumber,
-        mark: &str,
+        marks: &[&str],
         message: &str,
     ) -> Result<usize>;
 }
@@ -98,8 +98,12 @@ impl GitHub for Installation {
     fn installation_id(&self) -> u64 {
         self.id
     }
-    async fn config_file(&self, repo: &RepoName) -> Result<Option<String>> {
-        Ok(self.default_branch_file(repo, REPO_CONFIG_PATH).await?.text)
+    async fn config_file(&self, repo: &RepoName) -> Result<ConfigText> {
+        let found = Installation::config_file(self, repo).await?;
+        Ok(ConfigText {
+            at: found.at,
+            text: found.file.text,
+        })
     }
     async fn snapshot(&self, repo: &RepoName, labels: &Labels) -> Result<RepoSnapshot> {
         Installation::snapshot(self, repo, labels).await
@@ -218,10 +222,10 @@ impl GitHub for Installation {
         &self,
         repo: &RepoName,
         number: PrNumber,
-        mark: &str,
+        marks: &[&str],
         message: &str,
     ) -> Result<usize> {
-        Installation::dismiss_reviews_marked(self, repo, number, mark, message).await
+        Installation::dismiss_reviews_marked(self, repo, number, marks, message).await
     }
     async fn set_body(&self, repo: &RepoName, number: PrNumber, body: &str) -> Result<()> {
         Installation::set_body(self, repo, number, body).await

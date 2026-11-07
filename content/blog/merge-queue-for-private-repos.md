@@ -86,10 +86,10 @@ against a free plan you cannot use.
 ## Trying it without committing
 
 1. Install the App on one repository, ideally a private one with steady merge traffic.
-2. Merge the setup pull request that adds `.mergepatrol/mergepatrol.yml`, and set your `verify`
+2. Merge the setup pull request that adds `.mergeloop/mergeloop.yml`, and set your `verify`
    commands. Leaving the model key out is a reasonable first week: you get the queue and the
    batching, with conflicts still ejected to a human.
-3. Label a few pull requests `mergepatrol` and watch a batch form.
+3. Label a few pull requests `mergeloop` and watch a batch form.
 
 If the queue does not shorten your day, uninstall the App and nothing else changes: what it added
 is the config file, an agent skill file and its queue labels, all of which you can delete.

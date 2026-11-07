@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use mergepatrol_analytics::{Analytics, WorkspaceInfo};
-use mergepatrol_core::{REPO_CONFIG_PATH, RepoName};
+use mergepatrol_core::{ConfigPath, RepoName};
 use mergepatrol_store::{BRANCH_RULES, Change};
 use serde_json::Value;
 use sha2::Sha256;
@@ -255,15 +255,18 @@ fn config_after_push(payload: &Value) -> Option<bool> {
         return None;
     }
     let has = |commit: &Value, list: &str| {
-        commit[list]
-            .as_array()
-            .is_some_and(|files| files.iter().any(|f| f == REPO_CONFIG_PATH))
+        commit[list].as_array().is_some_and(|files| {
+            files
+                .iter()
+                .any(|f| ConfigPath::ALL.iter().any(|at| f == at.path()))
+        })
     };
     payload["commits"].as_array()?.iter().rev().find_map(|c| {
-        if has(c, "removed") {
-            Some(false)
-        } else if has(c, "added") || has(c, "modified") {
+        // A commit that moves the file to the new path removes the old one.
+        if has(c, "added") || has(c, "modified") {
             Some(true)
+        } else if has(c, "removed") {
+            Some(false)
         } else {
             None
         }

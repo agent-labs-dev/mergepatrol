@@ -9,7 +9,7 @@ use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd};
 use crate::blog::{Analytics, escape, page};
 
 const README: &str = include_str!("../../../README.md");
-const REPO: &str = "https://github.com/agent-labs-dev/mergepatrol";
+const REPO: &str = "https://github.com/agent-labs-dev/mergeloop";
 
 pub struct Doc {
     pub slug: &'static str,
@@ -35,8 +35,8 @@ pub const DOCS: &[Doc] = &[
     },
     Doc {
         slug: "configuration",
-        title: "Configuration: .mergepatrol/mergepatrol.yml",
-        description: "Every setting in a repo's .mergepatrol/mergepatrol.yml: the label, batch size, the agent's model, verify commands, CI fixes, extra branches and review bars.",
+        title: "Configuration: .mergeloop/mergeloop.yml",
+        description: "Every setting in a repo's .mergeloop/mergeloop.yml: the label, batch size, the agent's model, verify commands, CI fixes, extra branches and review bars.",
         sections: &["Repo settings"],
     },
     Doc {
@@ -295,11 +295,11 @@ mod tests {
         );
         assert_eq!(
             rewrite("#on-gcp", &all),
-            "https://github.com/agent-labs-dev/mergepatrol#on-gcp"
+            "https://github.com/agent-labs-dev/mergeloop#on-gcp"
         );
         assert_eq!(
             rewrite("CONTRIBUTING.md", &all),
-            "https://github.com/agent-labs-dev/mergepatrol/blob/main/CONTRIBUTING.md"
+            "https://github.com/agent-labs-dev/mergeloop/blob/main/CONTRIBUTING.md"
         );
         assert_eq!(rewrite("https://x.dev/a", &all), "https://x.dev/a");
     }

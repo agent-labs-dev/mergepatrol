@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{PrNumber, REPO_CONFIG_PATH, ReviewStatus};
+use crate::{PrNumber, ReviewStatus};
 
 /// Why a queued PR keeps its place instead of merging. Its text is what the PR's comment and
 /// event say.
@@ -141,7 +141,7 @@ impl fmt::Display for Hold {
                 let queues: Vec<String> = queues.iter().map(|b| format!("`{b}`")).collect();
                 write!(
                     f,
-                    "targets `{base}`, which has no queue (queues: {}; `branches` in `{REPO_CONFIG_PATH}` adds one)",
+                    "targets `{base}`, which has no queue (queues: {}; `branches` in the config file adds one)",
                     queues.join(", ")
                 )
             }
@@ -191,7 +191,7 @@ mod tests {
         };
         assert_eq!(
             hold.to_string(),
-            "targets `next`, which has no queue (queues: `main`, `release`; `branches` in `.mergepatrol/mergepatrol.yml` adds one)"
+            "targets `next`, which has no queue (queues: `main`, `release`; `branches` in the config file adds one)"
         );
     }
 }

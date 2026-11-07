@@ -35,8 +35,8 @@ The useful way to read a migration is by what stays recognisable:
 
 | bors-ng | MergeLoop |
 | --- | --- |
-| `bors r+` in a comment | add the `mergepatrol` label to the pull request |
-| `bors r+ p=1` sets a priority | `mergepatrol:priority` jumps the queue |
+| `bors r+` in a comment | add the `mergeloop` label to the pull request |
+| `bors r+ p=1` sets a priority | `mergeloop:priority` jumps the queue |
 | Tests the combined tree before landing | queued pull requests are tested together on a draft pull request |
 | A failed batch is split to find the culprit | the same: a failed batch splits in half repeatedly down to the pull request that broke it |
 | Conflicts bounced back to the author | a plain `git rebase` first, an agent only on a real conflict, then your `verify` commands before anything is pushed |
@@ -55,7 +55,7 @@ Two differences are worth stating plainly rather than smoothing over:
 
 1. **Install the App** on the repositories bors was serving, at
    [mergeloop.ai](https://mergeloop.ai).
-2. **Merge the setup pull request** that adds `.mergepatrol/mergepatrol.yml` to the default branch.
+2. **Merge the setup pull request** that adds `.mergeloop/mergeloop.yml` to the default branch.
    This is the switch: a pull request cannot change its own queue settings, so the config lands by
    review.
 3. **Set `verify` and `batch_size`.** `verify` is the list of commands that must pass on a
@@ -63,7 +63,7 @@ Two differences are worth stating plainly rather than smoothing over:
    with the ones that take under a couple of minutes:
 
    ```yaml
-   # .mergepatrol/mergepatrol.yml
+   # .mergeloop/mergeloop.yml
    batch_size: 8
    verify:
      - cargo test --workspace
@@ -74,8 +74,8 @@ Two differences are worth stating plainly rather than smoothing over:
    OpenAI key, so model spend is at cost.
 5. **Retire bors** from the branch. Remove its required status check and its webhook, then turn off
    the instance. Run both queues on one branch and they will race each other for merges.
-6. **Label pull requests** `mergepatrol`. If you have an existing workflow that comments `bors r+`,
-   change it to add the label instead; `gh pr edit <n> --add-label mergepatrol` does it from a
+6. **Label pull requests** `mergeloop`. If you have an existing workflow that comments `bors r+`,
+   change it to add the label instead; `gh pr edit <n> --add-label mergeloop` does it from a
    script.
 
 Nothing about your CI has to change. The batch is tested on a draft pull request, so the

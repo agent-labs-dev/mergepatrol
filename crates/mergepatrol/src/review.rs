@@ -131,7 +131,7 @@ async fn settings(ctx: &Ctx, gh: &Installation, repo: &RepoName) -> Result<RepoS
         .store
         .inherited(GitHub::installation_id(gh), &ctx.config.repo_defaults)
         .await?;
-    Ok(RepoSettings::from_file(file.as_deref(), &defaults).unwrap_or(defaults))
+    Ok(file.settings(&defaults).unwrap_or(defaults))
 }
 
 fn lane_key(r: &ReviewRecord, pr: &PullRequest) -> LaneKey {
@@ -228,7 +228,7 @@ async fn earlier(ctx: &Ctx, gh: &Installation, r: &ReviewRecord) -> Result<Earli
             SentBack {
                 reply: thread
                     .and_then(|t| t.reply.as_ref())
-                    .filter(|(_, body)| !body.contains(REPLY_MARK))
+                    .filter(|(_, body)| !REPLY_MARKS.iter().any(|m| body.contains(m)))
                     .map(|(_, body)| body.clone())
                     .unwrap_or_default(),
                 resolved: thread.is_some_and(|t| t.resolved),
@@ -564,12 +564,17 @@ async fn codeowners(gh: &Installation, repo: &RepoName) -> Option<CodeOwners> {
 }
 
 /// Starts each of MergeLoop's threads, with the finding's title, so the next review finds it.
-const MARK: &str = "<!-- mergepatrol-finding: ";
-/// Ends the body of each of MergeLoop's reviews, so its request for changes is dismissed once
+/// Each mark after the first is how MergeLoop wrote it as Mergepatrol, on threads still open.
+const MARKS: [&str; 2] = ["<!-- mergeloop-finding: ", "<!-- mergepatrol-finding: "];
+const MARK: &str = MARKS[0];
+/// End the body of each of MergeLoop's reviews, so its request for changes is dismissed once
 /// what it sent back no longer holds.
-pub(crate) const REVIEW_MARK: &str = "<!-- mergepatrol-review -->";
-/// Ends each of MergeLoop's replies in a thread, so a reply is not taken for the author's.
-const REPLY_MARK: &str = "<!-- mergepatrol-reply -->";
+pub(crate) const REVIEW_MARKS: [&str; 2] =
+    ["<!-- mergeloop-review -->", "<!-- mergepatrol-review -->"];
+const REVIEW_MARK: &str = REVIEW_MARKS[0];
+/// End each of MergeLoop's replies in a thread, so a reply is not taken for the author's.
+const REPLY_MARKS: [&str; 2] = ["<!-- mergeloop-reply -->", "<!-- mergepatrol-reply -->"];
+const REPLY_MARK: &str = REPLY_MARKS[0];
 
 /// A title as threads match it: as bounded as the comment that carries it.
 fn norm(title: &str) -> String {
@@ -595,13 +600,15 @@ fn clip(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
 
 /// The title of the finding a thread of MergeLoop's is about.
 fn title_of(t: &ReviewThread) -> Option<String> {
-    let rest = &t.body[t.body.find(MARK)? + MARK.len()..];
+    let rest = MARKS
+        .iter()
+        .find_map(|m| Some(&t.body[t.body.find(m)? + m.len()..]))?;
     Some(rest[..rest.find(" -->")?].to_owned())
 }
 
 /// MergeLoop's threads on the PR. None when GitHub could not say.
 async fn threads(gh: &Installation, r: &ReviewRecord) -> Vec<ReviewThread> {
-    gh.threads_marked(&r.repo, r.number, MARK)
+    gh.threads_marked(&r.repo, r.number, &MARKS)
         .await
         .inspect_err(|e| {
             tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not read the review threads");
@@ -686,7 +693,7 @@ async fn post(
     }
     if !sent_back {
         let why = format!("Nothing it asked for holds since the review of `{short}`.");
-        let dismissed = gh.dismiss_reviews_marked(&r.repo, r.number, REVIEW_MARK, &why);
+        let dismissed = gh.dismiss_reviews_marked(&r.repo, r.number, &REVIEW_MARKS, &why);
         if let Err(e) = dismissed.await {
             tracing::warn!(repo = %r.repo, pr = r.number, error = %format!("{e:#}"), "could not dismiss the review's request for changes");
         }

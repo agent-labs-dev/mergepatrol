@@ -6,16 +6,14 @@
 //! on GitHub, where they go, so nobody waits on a hold they think they cleared.
 
 use anyhow::{Context, Result};
-use mergepatrol_core::{
-    Answer, PrNumber, REPO_CONFIG_PATH, RepoName, RepoSettings, ReviewStatus, review_url,
-};
+use mergepatrol_core::{Answer, PrNumber, RepoName, RepoSettings, ReviewStatus, review_url};
 use mergepatrol_github::{App, Installation, PullRequest};
 use mergepatrol_store::{ReviewAnswers, ReviewRecord};
 use serde_json::Value;
 
 use crate::AppState;
 use crate::gate::merge_requested;
-use crate::review::{ANSWERED_MARK, LINE_MARK};
+use crate::review::{ANSWERED_MARKS, LINE_MARKS};
 
 /// A human's word on a PR, as a delivery brings it.
 #[derive(Debug, PartialEq)]
@@ -66,7 +64,11 @@ pub(crate) fn reply(event: Option<&str>, payload: &Value) -> Option<Reply> {
         return None;
     }
     let body = said["body"].as_str().unwrap_or_default();
-    if body.contains(ANSWERED_MARK) || body.contains(LINE_MARK) {
+    if ANSWERED_MARKS
+        .iter()
+        .chain(&LINE_MARKS)
+        .any(|m| body.contains(m))
+    {
         return None;
     }
     Some(Reply {
@@ -147,8 +149,9 @@ async fn told_to_merge(
     pr: &PullRequest,
 ) -> Result<bool> {
     let defaults = app.store.inherited(gh.id, &app.repo_defaults).await?;
-    let file = gh.default_branch_file(repo, REPO_CONFIG_PATH).await?;
-    let settings = RepoSettings::from_file(file.text.as_deref(), &defaults).unwrap_or(defaults);
+    let found = gh.config_file(repo).await?;
+    let settings = RepoSettings::from_file_at(found.at, found.file.text.as_deref(), &defaults)
+        .unwrap_or(defaults);
     merge_requested(app.store.as_ref(), gh, repo, pr, &settings.label).await
 }
 
@@ -264,7 +267,7 @@ mod tests {
     #[test]
     fn a_human_reply_on_a_pr_is_read_and_the_rest_is_not() {
         let human = json!({ "login": "ann", "type": "User" });
-        let bot = json!({ "login": "merge-patrol[bot]", "type": "Bot" });
+        let bot = json!({ "login": "mergeloop[bot]", "type": "Bot" });
         let pr = json!({ "number": 5 });
         let review = |state: &str, user: &Value, body: &str| {
             json!({ "action": "submitted", "pull_request": pr,
@@ -294,7 +297,7 @@ mod tests {
                 review(
                     "approved",
                     &human,
-                    &format!("ok\n\n<sub>{ANSWERED_MARK}</sub>"),
+                    &format!("ok\n\n<sub>{}</sub>", ANSWERED_MARKS[1]),
                 ),
                 None,
             ),
@@ -307,7 +310,7 @@ mod tests {
             (
                 "pull_request_review_comment",
                 json!({ "action": "created", "pull_request": pr,
-                        "comment": { "user": human, "body": format!("x\n\n{LINE_MARK} t</sub>") } }),
+                        "comment": { "user": human, "body": format!("x\n\n<!-- {} -->", LINE_MARKS[0]) } }),
                 None,
             ),
             (

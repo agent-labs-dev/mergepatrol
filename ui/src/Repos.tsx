@@ -185,7 +185,7 @@ function Item({
   );
 }
 
-/** The repo's `mergepatrol` agent skill, which only a repo with a config file is checked for. */
+/** The repo's `mergeloop` agent skill, which only a repo with a config file is checked for. */
 function useSkill(workspace: number, repo: RepoView) {
   return useQuery({
     queryKey: ["repo-skill", workspace, repo.repo],
@@ -445,7 +445,11 @@ function ConfigFact({ workspace, repo: r }: { workspace: number; repo: RepoView 
           Does not parse{r.on && ", so the queue is paused"}
         </span>
       ) : r.has_config ? (
-        <code className="rounded bg-sunken px-1 text-xs">.mergepatrol/mergepatrol.yml</code>
+        config.data ? (
+          <code className="rounded bg-sunken px-1 text-xs">{config.data.path}</code>
+        ) : (
+          <span className="text-muted">On the default branch</span>
+        )
       ) : (
         <span className="text-muted">None on the default branch</span>
       )}

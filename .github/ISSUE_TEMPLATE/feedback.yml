@@ -24,7 +24,7 @@ body:
       label: Steps to reproduce
       description: For a bug. Link the pull request, and the MergeLoop comment on it, if there is one.
       placeholder: |
-        1. Label a PR with `mergepatrol`
+        1. Label a PR with `mergeloop`
         2. ...
   - type: input
     id: deployment

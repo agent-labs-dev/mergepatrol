@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Committer of the local rebase. The published commits get GitHub's bot identity instead.
-const COMMITTER: (&str, &str) = ("MergeLoop", "mergepatrol@users.noreply.github.com");
+const COMMITTER: (&str, &str) = ("MergeLoop", "mergeloop@users.noreply.github.com");
 
 #[derive(Clone, Copy, Default)]
 pub struct Git;

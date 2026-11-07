@@ -16,7 +16,7 @@ against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 | | Mergify | MergeLoop |
 | --- | --- | --- |
 | Price | Open Source $0; Free $0 for up to 5 users on private repos; Max $21 a seat a month; Enterprise custom | Public repos free; private repos $15 a seat a month after a 14-day trial; self-hosted free |
-| Configuration | `.mergify.yml`: `queue_rules`, conditions, priorities, scopes | `.mergepatrol/mergepatrol.yml`: label, batch size, verify commands, agent settings, extra branches |
+| Configuration | `.mergify.yml`: `queue_rules`, conditions, priorities, scopes | `.mergeloop/mergeloop.yml`: label, batch size, verify commands, agent settings, extra branches |
 | Batching | `batch_size`, `batch_max_wait_time`; a failed batch is bisected | `batch_size`; a failed batch is split in half down to the PR that broke it |
 | Parallel testing | Up to 128 speculative checks | No speculative builds: one batch of up to `batch_size` PRs (8 by default) |
 | A PR that conflicts with its base | We found no conflict resolution in Mergify's docs | An agent resolves the conflict, your `verify` commands run, and the PR keeps its place |
@@ -53,9 +53,9 @@ against Mergify's [docs](https://docs.mergify.com/merge-queue/),
 1. [Install MergeLoop](/docs/getting-started) on the repositories and merge its setup PR.
 2. Remove the repo's `queue_rules` from `.mergify.yml`, or uninstall Mergify there. Two queues on
    one branch race each other for merges.
-3. Set `batch_size` in `.mergepatrol/mergepatrol.yml` to what you used in Mergify, and `verify` to
+3. Set `batch_size` in `.mergeloop/mergeloop.yml` to what you used in Mergify, and `verify` to
    your fastest checks.
-4. Change whatever queued with Mergify, a label or a command, to add the `mergepatrol` label.
+4. Change whatever queued with Mergify, a label or a command, to add the `mergeloop` label.
    `<label>:priority` jumps the queue.
 
 ## FAQ
@@ -65,5 +65,5 @@ We found no conflict resolution in Mergify's documentation as of 31 October 2026
 for failing CI hands a quarantined test to Claude Code or Cursor as a prompt, outside the queue.
 
 **Does MergeLoop support priorities?**
-Yes, with a second label, `mergepatrol:priority` by default, or `priority` on the `queue_pull` MCP
+Yes, with a second label, `mergeloop:priority` by default, or `priority` on the `queue_pull` MCP
 tool. It has no rules engine beyond that.
