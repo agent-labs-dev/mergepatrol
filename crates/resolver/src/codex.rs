@@ -46,6 +46,8 @@ impl CodexResolver {
             // The job's container is the sandbox, and Codex's own does not run inside gVisor.
             // Nothing asks for approval: there is nobody to answer.
             .arg("--dangerously-bypass-approvals-and-sandbox")
+            // Like Claude's `--bare`: no AGENTS.md of its own. The prompt names the files to read.
+            .args(["-c", "project_doc_max_bytes=0"])
             .args(["--model", &self.model])
             .args([
                 "-c",
@@ -225,6 +227,23 @@ mod tests {
             assert!(args.iter().any(|a| a == arg), "{arg} in {args:?}");
         }
         assert_eq!(args.last().map(String::as_str), Some("p"));
+    }
+
+    #[test]
+    fn codex_reads_no_agents_md_of_its_own() {
+        // The prompt says which instruction files to read, and from which commit: a review reads
+        // the base's, so a PR's own AGENTS.md cannot steer it.
+        let cmd = resolver().command(Path::new("."), "p".into()).unwrap();
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-c" && w[1] == "project_doc_max_bytes=0"),
+            "{args:?}"
+        );
     }
 
     #[test]
