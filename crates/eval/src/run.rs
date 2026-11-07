@@ -135,6 +135,7 @@ pub fn spec(case: &Case, agent: &Agent, api: ApiAccess) -> JobSpec {
             sent_back: Vec::new(),
             since: None,
             reviewed: None,
+            depth: mergepatrol_core::Depth::Standard,
         },
     }
 }
@@ -250,7 +251,8 @@ mod tests {
                 answered: Vec::new(),
                 sent_back: Vec::new(),
                 since: None,
-                reviewed: None
+                reviewed: None,
+                depth: mergepatrol_core::Depth::Standard,
             }
         );
         let r = s.resolver;

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
-    Answered, Evidence, Finding, Judged, Lean, PrNumber, RepoName, RepoSettings, ReviewSettings,
-    ReviewStatus, SentBack, Verdict, Verification, review_status, review_url,
+    Answered, Depth, Evidence, Finding, Judged, Lean, PrNumber, RepoName, RepoSettings,
+    ReviewSettings, ReviewStatus, SentBack, Verdict, Verification, review_status, review_url,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
@@ -165,7 +165,7 @@ async fn review(ctx: &Ctx, r: ReviewRecord) -> Result<()> {
     let found = match pr.is_cross_repository {
         // A fork's code is not trusted: no agent reads it, as none rebases or fixes it.
         true => Err("The agent does not review PRs from forks.".to_owned()),
-        false => run_review(ctx, &gh, &key, &pr, &settings, &r).await,
+        false => run_review(ctx, &gh, &key, &pr, (&settings, bars.depth), &r).await,
     };
     let output = match found {
         Ok(output) => Ok(output),
@@ -248,7 +248,7 @@ async fn run_review(
     gh: &Installation,
     key: &LaneKey,
     pr: &PullRequest,
-    settings: &RepoSettings,
+    (settings, depth): (&RepoSettings, Depth),
     r: &ReviewRecord,
 ) -> std::result::Result<ReviewOutput, String> {
     let Earlier {
@@ -270,6 +270,7 @@ async fn run_review(
             sent_back,
             since: r.since_head.clone(),
             reviewed,
+            depth,
         };
         let (spec, granted) =
             job_spec(ctx, gh, key, pr, settings, &r.head_sha, &trunk, None, task).await?;
@@ -1175,7 +1176,7 @@ mod tests {
             vote(Verdict::Holds),
             vote(Verdict::DoesNotHold),
         ];
-        f.finding.verified = Some(Panel::SECURITY.verdict(cast.clone()));
+        f.finding.verified = Some(Panel::FINDING.verdict(cast.clone()));
         let body = thread_body(&f, "abc1234");
         assert!(
             body.contains("MergeLoop had 3 fresh agents check it, each given only this finding and the code: 2 of 3 say it holds, and 2 had to."),
@@ -1188,7 +1189,7 @@ mod tests {
             vote(Verdict::DoesNotHold),
             vote(Verdict::Abstained),
         ];
-        f.finding.verified = Some(Panel::SECURITY.verdict(down));
+        f.finding.verified = Some(Panel::FINDING.verdict(down));
         f.sent_back = false;
         let done = ReviewDone {
             status: ReviewStatus::Approved,
