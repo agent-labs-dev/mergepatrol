@@ -2,7 +2,7 @@
 //! The job writes `result.json`, and on success `result.bundle` (a review, `review.json`; an
 //! answer, `answer.md`), to its output directory.
 
-use mergepatrol_core::{Answered, CheckFailure, Finding, Provider, SentBack, SpendTask};
+use mergepatrol_core::{Answered, CheckFailure, Depth, Finding, Provider, SentBack, SpendTask};
 use serde::{Deserialize, Serialize};
 
 pub const RESULT_FILE: &str = "result.json";
@@ -73,6 +73,9 @@ pub enum Task {
         /// changed since needs reviewing.
         #[serde(default)]
         reviewed: Option<String>,
+        /// How hard it looks: how many reviewers, and which changes a panel checks.
+        #[serde(default)]
+        depth: Depth,
     },
     /// Answer a question about a finding of the review, and write `ANSWER_FILE`. `sent_back`:
     /// the finding went back to the author, and this is their reply, which it may withdraw on.

@@ -5,4 +5,8 @@ export type SetReviewSettings = { enabled: boolean, bars: Array<BarView>,
 /**
  * Unset keeps what is saved.
  */
-require_resolved?: boolean, };
+require_resolved?: boolean, 
+/**
+ * Unset keeps what is saved.
+ */
+depth?: "quick" | "standard" | "deep", };

@@ -17,4 +17,8 @@ bars: Array<BarView>,
  * Whether its gate waits for every review thread to be resolved. Unset follows the
  * workspace.
  */
-require_resolved?: boolean, };
+require_resolved?: boolean, 
+/**
+ * How hard its review looks. Unset follows the workspace.
+ */
+depth?: "quick" | "standard" | "deep", };

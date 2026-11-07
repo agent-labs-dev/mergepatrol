@@ -7,8 +7,8 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use mergepatrol_core::{
-    Answer, Bar, CodeLine, Judged, Kind, Lean, LineKind, PrNumber, Question, Related, RepoName,
-    ReviewOverrides, ReviewSettings, ReviewStatus,
+    Answer, Bar, CodeLine, Depth, Judged, Kind, Lean, LineKind, PrNumber, Question, Related,
+    RepoName, ReviewOverrides, ReviewSettings, ReviewStatus,
 };
 use mergepatrol_github::setup::{self, LineComment, Verdict};
 use mergepatrol_store::{ReviewAnswers, ReviewRecord};
@@ -90,6 +90,10 @@ pub struct RepoReviewView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub require_resolved: Option<bool>,
+    /// How hard its review looks. Unset follows the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "\"quick\" | \"standard\" | \"deep\"")]
+    pub depth: Option<Depth>,
 }
 
 impl From<ReviewOverrides> for RepoReviewView {
@@ -98,6 +102,7 @@ impl From<ReviewOverrides> for RepoReviewView {
             enabled: o.enabled,
             bars: bar_views(&o.bars),
             require_resolved: o.require_resolved,
+            depth: o.depth,
         }
     }
 }
@@ -108,6 +113,7 @@ impl From<RepoReviewView> for ReviewOverrides {
             enabled: v.enabled,
             bars: bars_of(&v.bars),
             require_resolved: v.require_resolved,
+            depth: v.depth,
         }
     }
 }
@@ -122,6 +128,9 @@ pub struct ReviewSettingsView {
     pub bars: Vec<BarView>,
     /// Whether the gate waits for every review thread on a PR to be resolved.
     pub require_resolved: bool,
+    /// How hard the review looks, unless a repo's config file says otherwise.
+    #[ts(type = "\"quick\" | \"standard\" | \"deep\"")]
+    pub depth: Depth,
     pub defaults: Vec<BarView>,
     /// Each kind's findings over `days`, by confidence.
     pub history: Vec<KindHistoryView>,
@@ -160,6 +169,10 @@ pub struct SetReviewSettings {
     #[serde(default)]
     #[ts(optional)]
     pub require_resolved: Option<bool>,
+    /// Unset keeps what is saved.
+    #[serde(default)]
+    #[ts(optional, type = "\"quick\" | \"standard\" | \"deep\"")]
+    pub depth: Option<Depth>,
 }
 
 /// How far back the track record goes.
@@ -182,6 +195,7 @@ async fn settings_view(app: &AppState, id: u64) -> Result<Json<ReviewSettingsVie
         enabled: full.enabled,
         bars: bar_views(&full.bars),
         require_resolved: full.require_resolved,
+        depth: full.depth,
         defaults: bar_views(&ReviewSettings::default().bars),
         history: history(&reviews),
         days: HISTORY_DAYS,
@@ -236,19 +250,27 @@ pub(crate) async fn set_review_settings(
 ) -> Result<Json<ReviewSettingsView>, ApiError> {
     let id = caller.workspace(id)?;
     let saved = app.store.review_settings(id).await?.unwrap_or_default();
-    let mut settings = ReviewSettings {
-        enabled: body.enabled,
-        require_resolved: body.require_resolved.unwrap_or(saved.require_resolved),
-        ..ReviewSettings::default()
-    };
-    settings.bars.extend(bars_of(&body.bars));
+    let settings = settings_from(body, &saved);
     app.store.set_review_settings(id, &settings).await?;
     tracing::info!(
         installation = id,
         enabled = settings.enabled,
+        depth = settings.depth.as_str(),
         "set the review settings"
     );
     settings_view(&app, id).await
+}
+
+/// The settings a PUT saves: what it sets, over the defaults, and what it leaves unset as saved.
+fn settings_from(body: SetReviewSettings, saved: &ReviewSettings) -> ReviewSettings {
+    let mut settings = ReviewSettings {
+        enabled: body.enabled,
+        require_resolved: body.require_resolved.unwrap_or(saved.require_resolved),
+        depth: body.depth.unwrap_or(saved.depth),
+        ..ReviewSettings::default()
+    };
+    settings.bars.extend(bars_of(&body.bars));
+    settings
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
@@ -965,6 +987,35 @@ mod tests {
     use super::*;
     use mergepatrol_core::Finding;
 
+    #[test]
+    fn a_review_depth_saves_and_reads_back_and_unset_keeps_what_is_saved() {
+        let saved = ReviewSettings {
+            depth: Depth::Deep,
+            require_resolved: false,
+            ..ReviewSettings::default()
+        };
+        let body: SetReviewSettings =
+            serde_json::from_value(serde_json::json!({ "enabled": true, "bars": [] })).unwrap();
+        let kept = settings_from(body, &saved);
+        assert_eq!((kept.depth, kept.require_resolved), (Depth::Deep, false));
+        let body: SetReviewSettings = serde_json::from_value(
+            serde_json::json!({ "enabled": true, "bars": [], "depth": "quick" }),
+        )
+        .unwrap();
+        assert_eq!(settings_from(body, &saved).depth, Depth::Quick);
+        // A repo's config file sets it over the workspace's, as the dashboard edits it.
+        let repo: RepoReviewView = serde_json::from_value(
+            serde_json::json!({ "enabled": null, "bars": [], "depth": "deep" }),
+        )
+        .unwrap();
+        let o = ReviewOverrides::from(repo);
+        assert_eq!(o.depth, Some(Depth::Deep));
+        let back = serde_json::to_value(RepoReviewView::from(o)).unwrap();
+        assert_eq!(back["depth"], "deep");
+        let unset = serde_json::to_value(RepoReviewView::from(ReviewOverrides::default())).unwrap();
+        assert!(unset.get("depth").is_none(), "{unset}");
+    }
+
     fn judged(id: &str, confidence: u8, lean: Lean, asked: bool) -> Judged {
         Judged {
             finding: Finding {
@@ -1037,7 +1088,7 @@ mod tests {
             vote(Verdict::Abstained),
             vote(Verdict::Holds),
         ];
-        j.finding.verified = Some(Panel::SECURITY.verdict(cast));
+        j.finding.verified = Some(Panel::FINDING.verdict(cast));
         let repo = RepoName::parse("o/r").unwrap();
         let view = serde_json::to_value(FindingView::new(j, &repo, 1)).unwrap();
         assert_eq!(

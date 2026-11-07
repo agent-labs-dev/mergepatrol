@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mergepatrol_core::{
-    Answered, CheckFailure, CodeLine, FIXED_BY, Finding, Lean, LineKind, Panel, RESOLVED_BY,
-    SentBack, Spend, SpendTask, Verdict, Vote,
+    Answered, CheckFailure, CodeLine, Depth, FIXED_BY, Finding, Lean, LineKind, Panel, RESOLVED_BY,
+    SentBack, Spend, SpendTask, Verdict, Vote, merge_reviews, most_first,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, BUNDLE_FILE, JobEvent, JobOutcome, JobResult, JobSpec, RESULT_FILE, REVIEW_FILE,
@@ -225,8 +225,9 @@ async fn run(spec: &JobSpec, dir: &Path, out: &Path, events: &mut Vec<JobEvent>)
             sent_back,
             since,
             reviewed,
+            depth,
         } => {
-            let earlier = (answered.as_slice(), sent_back.as_slice());
+            let earlier = (answered.as_slice(), sent_back.as_slice(), *depth);
             let since = (since.as_deref(), reviewed.as_deref());
             return review(
                 spec, &git, resolver, &checks, earlier, since, dir, out, events,
@@ -466,7 +467,7 @@ async fn review(
     git: &Git,
     resolver: &dyn Resolver,
     checks: &Verify,
-    (answered, sent_back): (&[Answered], &[SentBack]),
+    (answered, sent_back, depth): (&[Answered], &[SentBack], Depth),
     (since, reviewed): (Option<&str>, Option<&str>),
     dir: &Path,
     out: &Path,
@@ -475,64 +476,131 @@ async fn review(
     let base = git.merge_base(dir, &spec.trunk_sha, &spec.head_sha).await?;
     let queue_commits = queue_commits(git, dir, &spec.head_sha, &base, since).await?;
     let reviewed = since_reviewed(git, dir, spec, &base, reviewed).await?;
-    let scope = Scope::of(&queue_commits, reviewed);
-    event(
-        events,
-        "reviewing",
-        format!("{}..{}", &base[..12], &spec.head_sha[..12]),
-    );
-    let transcript = out
-        .join("transcripts")
-        .join(format!("review-{}.jsonl", &spec.head_sha[..12]));
-    let run = resolver
-        .review(ReviewRequest {
-            workdir: dir,
-            base: &base,
-            pr_title: &spec.pr_title,
-            pr_body: &spec.pr_body,
-            trunk: &spec.trunk,
-            answered,
-            sent_back,
-            scope,
-            verify: checks,
-            transcript: &transcript,
-        })
-        .await
-        .map_err(|e| anyhow!("the agent failed: {e:#}"))?;
-    let parsed = parse_review(&run.outcome, &run.text);
-    spent(
-        events,
-        &spec.resolver,
-        SpendTask::Review,
-        parsed.is_ok(),
-        String::new(),
-        &run,
-    );
-    let mut output = parsed?;
+    event(events, "reviewing", reviewing(&base, &spec.head_sha, depth));
     let bench = Bench {
         git,
         dir,
         head: &spec.head_sha,
     };
+    let review_in = |workdir: PathBuf, name: String| {
+        let transcript = out
+            .join("transcripts")
+            .join(format!("{name}-{}.jsonl", &spec.head_sha[..12]));
+        let (base, scope) = (base.as_str(), Scope::of(&queue_commits, reviewed));
+        async move {
+            let req = ReviewRequest {
+                workdir: &workdir,
+                base,
+                pr_title: &spec.pr_title,
+                pr_body: &spec.pr_body,
+                trunk: &spec.trunk,
+                answered,
+                sent_back,
+                scope,
+                depth,
+                verify: checks,
+                transcript: &transcript,
+            };
+            reviewed_by(git, resolver, req, &spec.head_sha).await
+        }
+    };
+    let ran = bench.reviewers(depth.reviewers(), review_in).await?;
+    let mut output = merged(&spec.resolver, ran, events)?;
     let panel = (spec, resolver, base.as_str());
-    check_findings(panel, &bench, out, &mut output.findings, events).await?;
+    check_findings(panel, &bench, out, depth, &mut output.findings, events).await?;
     tokio::fs::write(out.join(REVIEW_FILE), serde_json::to_vec_pretty(&output)?).await?;
     Ok(())
 }
 
 /// Backs what the agent found with what MergeLoop saw itself: the code at each place, each
-/// change's evidence run on the head, and a panel's votes on a security change without any.
+/// change's evidence run on the head, and a panel's votes on a change without any, of a kind
+/// `depth` votes on.
 async fn check_findings(
     panel: (&JobSpec, &dyn Resolver, &str),
     bench: &Bench<'_>,
     out: &Path,
+    depth: Depth,
     findings: &mut [Finding],
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
     let Bench { git, dir, head } = *bench;
     with_code(git, dir, panel.2, head, findings).await?;
     check_evidence(head, git, dir, findings, events).await?;
-    verify_findings(panel, bench, out, findings, events).await
+    verify_findings(panel, bench, out, depth, findings, events).await
+}
+
+/// What the review reads, and how hard it looks: `abc..def at deep: 3 reviewers`.
+fn reviewing(base: &str, head: &str, depth: Depth) -> String {
+    let looks = match depth.reviewers() {
+        1 => "1 reviewer".to_owned(),
+        n => format!("{n} reviewers"),
+    };
+    format!(
+        "{}..{} at {}: {looks}",
+        &base[..12],
+        &head[..12],
+        depth.as_str()
+    )
+}
+
+/// The reviewers' findings, merged, with what each run spent: an error only when none found any.
+fn merged(
+    resolver: &ResolverSpec,
+    ran: Vec<(Option<Resolution>, Result<ReviewOutput>)>,
+    events: &mut Vec<JobEvent>,
+) -> Result<ReviewOutput> {
+    let mut reviews = Vec::new();
+    let mut failed = None;
+    for (run, found) in ran {
+        if let Some(run) = &run {
+            spent(
+                events,
+                resolver,
+                SpendTask::Review,
+                found.is_ok(),
+                String::new(),
+                run,
+            );
+        }
+        match found {
+            Ok(output) => reviews.push(output),
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    let Some(first) = reviews.first() else {
+        return Err(failed.unwrap_or_else(|| anyhow!("no reviewer ran")));
+    };
+    let summary = first.summary.clone();
+    let findings = merge_reviews(reviews.into_iter().map(|r| r.findings).collect());
+    let mut findings = most_first(findings, FINDINGS_MAX);
+    for (i, f) in findings.iter_mut().enumerate() {
+        f.id = format!("f{}", i + 1);
+    }
+    Ok(ReviewOutput { summary, findings })
+}
+
+/// One reviewer's run, and what it found, with what it wrote for each change's evidence taken
+/// from its checkout. `None` for a run that never ended in an answer.
+async fn reviewed_by(
+    git: &Git,
+    resolver: &dyn Resolver,
+    req: ReviewRequest<'_>,
+    head: &str,
+) -> (Option<Resolution>, Result<ReviewOutput>) {
+    let workdir = req.workdir.to_owned();
+    let run = match resolver.review(req).await {
+        Ok(run) => run,
+        Err(e) => return (None, Err(anyhow!("the agent failed: {e:#}"))),
+    };
+    let found = match parse_review(&run.outcome, &run.text) {
+        Ok(mut output) => take_patches(head, git, &workdir, &mut output.findings)
+            .await
+            .map(|()| output),
+        Err(e) => Err(e),
+    };
+    (Some(run), found)
 }
 
 /// Gives each finding, each other place it is, and what it relates to their code at `head`.
@@ -666,7 +734,7 @@ fn parse_review(outcome: &Outcome, text: &str) -> Result<ReviewOutput> {
     let mut output: ReviewOutput =
         serde_json::from_str(json).context("the agent's review does not parse")?;
     output.findings.retain(|f| !f.title.trim().is_empty());
-    output.findings.truncate(FINDINGS_MAX);
+    output.findings = most_first(std::mem::take(&mut output.findings), FINDINGS_MAX);
     for (i, f) in output.findings.iter_mut().enumerate() {
         f.id = format!("f{}", i + 1);
         f.confidence = f.confidence.min(100);
@@ -818,9 +886,36 @@ fn spent(
     event(events, spend.kind(), spend.message());
 }
 
-/// Runs each finding's evidence on the head alone, with only the files it names, and keeps what
-/// that showed: the agent's word that a command fails counts for nothing. Only a change's evidence
-/// runs, as only a change can go back to the author. The tree is left at the head.
+/// Takes onto each change's evidence what the agent wrote for it in `tree`, the checkout it
+/// reviewed in, and drops what the agent said the command did: its word counts for nothing.
+async fn take_patches(head: &str, git: &Git, tree: &Path, findings: &mut [Finding]) -> Result<()> {
+    for f in findings.iter_mut() {
+        let runs = f.lean == Lean::Change;
+        let Some(e) = f.evidence.as_mut() else {
+            continue;
+        };
+        (e.patch, e.output, e.failed) = (String::new(), String::new(), false);
+        if !runs || e.command.trim().is_empty() {
+            continue;
+        }
+        match unsafe_file(&e.files) {
+            Some(file) => e.output = format!("MergeLoop does not run evidence that writes {file}."),
+            None => e.patch = git.patch_of(tree, head, &e.files).await?,
+        }
+    }
+    Ok(())
+}
+
+/// Whether MergeLoop runs a finding's evidence: only a change's, as only a change can go back to
+/// the author, and none that writes a file it may not.
+fn runs_evidence(f: &Finding) -> bool {
+    f.evidence.as_ref().is_some_and(|e| {
+        f.lean == Lean::Change && !e.command.trim().is_empty() && unsafe_file(&e.files).is_none()
+    })
+}
+
+/// Runs each change's evidence on the head alone, with only the files `take_patches` took for it,
+/// and keeps what that showed. The tree is left at the head.
 async fn check_evidence(
     head: &str,
     git: &Git,
@@ -828,42 +923,27 @@ async fn check_evidence(
     findings: &mut [Finding],
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
-    // What the agent wrote for each, taken before the tree goes back to the head.
-    let mut patches = Vec::new();
     for f in findings.iter_mut() {
-        let Some(e) = f.evidence.as_mut() else {
-            patches.push(None);
+        if !runs_evidence(f) {
             continue;
-        };
-        (e.patch, e.output, e.failed) = (String::new(), String::new(), false);
-        let runs = f.lean == Lean::Change && !e.command.trim().is_empty();
-        let patch = match (runs, unsafe_file(&e.files)) {
-            (false, _) => None,
-            (true, Some(file)) => {
-                e.output = format!("MergeLoop does not run evidence that writes {file}.");
-                None
-            }
-            (true, None) => Some(git.patch_of(dir, head, &e.files).await?),
-        };
-        patches.push(patch);
-    }
-    for (f, patch) in findings.iter_mut().zip(patches) {
-        let (Some(e), Some(patch)) = (f.evidence.as_mut(), patch) else {
+        }
+        let id = f.id.clone();
+        let Some(e) = f.evidence.as_mut() else {
             continue;
         };
         git.reset_to(dir, head).await?;
-        if !patch.is_empty()
-            && let Err(err) = git.apply(dir, &patch).await
+        if !e.patch.is_empty()
+            && let Err(err) = git.apply(dir, &e.patch).await
         {
-            e.output = format!("{err:#}");
+            (e.output, e.patch) = (format!("{err:#}"), String::new());
             continue;
         }
-        event(events, "evidence", format!("{}: {}", f.id, e.command));
+        event(events, "evidence", format!("{id}: {}", e.command));
         let ran = run_command(dir, &e.command).await?;
         // A command that never ends may be stuck on the machine, not on the PR. One the shell
         // could not find or start never ran: the checkout lacks a tool, the PR is not to blame.
         e.failed = !ran.passed && !ran.timed_out && !ran.not_run;
-        (e.output, e.patch) = (ran.tail, patch);
+        e.output = ran.tail;
     }
     git.reset_to(dir, head).await
 }
@@ -896,6 +976,21 @@ impl Bench<'_> {
         }
         Ok(ran)
     }
+
+    /// Runs `n` reviewers: one in the job's own checkout, or each fresh in a seat of its own.
+    async fn reviewers<T, F, Fut>(&self, n: u8, run: F) -> Result<Vec<T>>
+    where
+        F: Fn(PathBuf, String) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        match n {
+            1 => Ok(vec![run(self.dir.to_owned(), "review".into()).await]),
+            n => {
+                let seat = |seat, tree| run(tree, format!("review-{seat}"));
+                self.seat(n, seat).await
+            }
+        }
+    }
 }
 
 /// Has a panel of fresh agents check each finding that only the reviewer's word shows, and keeps
@@ -904,13 +999,14 @@ async fn verify_findings(
     (spec, resolver, base): (&JobSpec, &dyn Resolver, &str),
     bench: &Bench<'_>,
     out: &Path,
+    depth: Depth,
     findings: &mut [Finding],
     events: &mut Vec<JobEvent>,
 ) -> Result<()> {
-    let panel = Panel::SECURITY;
+    let panel = Panel::FINDING;
     for f in findings.iter_mut() {
         f.verified = None;
-        if !f.wants_votes() {
+        if !f.wants_votes(depth) {
             continue;
         }
         let claim = claim(f);
@@ -1302,6 +1398,7 @@ mod tests {
             (&spec, &panelist, "base"),
             &bench,
             &out,
+            Depth::Standard,
             &mut findings,
             &mut events,
         )
@@ -1336,6 +1433,197 @@ mod tests {
         );
         let reviewed = events.iter().filter(|e| e.kind == "reviewed").count();
         assert_eq!(reviewed, 2, "what each run that voted spent: {events:?}");
+    }
+
+    #[test]
+    fn only_a_changes_command_runs_and_none_that_writes_a_file_it_may_not() {
+        let with = |lean, command: &str, file: &str| Finding {
+            lean,
+            evidence: Some(mergepatrol_core::Evidence {
+                command: command.into(),
+                files: vec![file.into()],
+                ..mergepatrol_core::Evidence::default()
+            }),
+            ..serde_json::from_value(serde_json::json!({
+                "kind": "other", "title": "t", "confidence": 90, "lean": "change", "finding": "f"
+            }))
+            .unwrap()
+        };
+        assert!(runs_evidence(&with(Lean::Change, "sh t.sh", "t.sh")));
+        assert!(!runs_evidence(&with(Lean::Change, " ", "t.sh")));
+        assert!(!runs_evidence(&with(Lean::Fine, "sh t.sh", "t.sh")));
+        assert!(!runs_evidence(&with(
+            Lean::Change,
+            "sh t.sh",
+            ".github/t.sh"
+        )));
+    }
+
+    /// Reviewers that each find something of their own, by their seat, and a panel that agrees.
+    struct Reviewers {
+        seen: std::sync::Mutex<Vec<(PathBuf, Depth)>>,
+        votes: std::sync::Mutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl Resolver for Reviewers {
+        fn name(&self) -> String {
+            "reviewers".into()
+        }
+        async fn resolve(&self, _: ResolveRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn fix(&self, _: FixRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn review(&self, req: ReviewRequest<'_>) -> Result<Resolution> {
+            let dir = req.workdir.to_owned();
+            self.seen.lock().unwrap().push((dir.clone(), req.depth));
+            let change = |title: &str, line: u32, evidence: serde_json::Value| {
+                serde_json::json!({
+                    "kind": "other", "title": title, "file": "a.txt", "line": line,
+                    "confidence": 90, "lean": "change", "finding": "f", "suggestion": "s",
+                    "evidence": evidence,
+                })
+            };
+            let seat = dir
+                .to_string_lossy()
+                .rsplit("seat")
+                .next()
+                .unwrap()
+                .to_owned();
+            let findings = match seat.as_str() {
+                "1" => {
+                    // Its test, in its own checkout.
+                    std::fs::write(dir.join("check.sh"), "exit 1\n").unwrap();
+                    let shown =
+                        serde_json::json!({ "command": "sh check.sh", "files": ["check.sh"] });
+                    vec![change("Off by one", 1, shown)]
+                }
+                "2" => vec![
+                    change("Skips the last", 2, serde_json::Value::Null),
+                    change("Null deref", 40, serde_json::Value::Null),
+                ],
+                _ => {
+                    return Ok(Resolution {
+                        turns: 1,
+                        cost_usd: Some(1.0),
+                        outcome: Outcome::Failed("over its turns".into()),
+                        text: String::new(),
+                    });
+                }
+            };
+            let text =
+                serde_json::json!({ "summary": format!("seat {seat}"), "findings": findings });
+            Ok(Resolution {
+                turns: 3,
+                cost_usd: Some(1.0),
+                outcome: Outcome::Resolved,
+                text: text.to_string(),
+            })
+        }
+        async fn question(&self, _: QuestionRequest<'_>) -> Result<Resolution> {
+            unreachable!()
+        }
+        async fn verify(&self, _: VerifyRequest<'_>) -> Result<Resolution> {
+            *self.votes.lock().unwrap() += 1;
+            Ok(Resolution {
+                turns: 2,
+                cost_usd: Some(0.5),
+                outcome: Outcome::Resolved,
+                text: format!("It is reached.\n{}", mergepatrol_resolver::HOLDS),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deep_review_merges_fresh_reviewers_findings_and_a_panel_votes_on_the_unshown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(&dir, &["add", "."]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "a",
+            ],
+        );
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        let spec: JobSpec = serde_json::from_value(serde_json::json!({
+            "repo": "o/r", "clone_url": "", "token": "", "head_ref": "refs/heads/x",
+            "head_sha": head, "trunk": "main", "trunk_sha": head, "pr_title": "t",
+            "pr_body": "", "verify": [],
+            "resolver": { "model": "m", "effort": "e", "timeout_secs": 1, "max_turns": 1, "api": null },
+        }))
+        .unwrap();
+        let reviewers = Reviewers {
+            seen: Default::default(),
+            votes: Default::default(),
+        };
+        let out = tmp.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let mut events = Vec::new();
+        review(
+            &spec,
+            &Git,
+            &reviewers,
+            &Verify::None,
+            (&[], &[], Depth::Deep),
+            (None, None),
+            &dir,
+            &out,
+            &mut events,
+        )
+        .await
+        .unwrap();
+
+        let seen = reviewers.seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 3, "three reviewers");
+        let mut trees: Vec<&PathBuf> = seen.iter().map(|s| &s.0).collect();
+        trees.dedup();
+        assert_eq!(trees.len(), 3, "each in a checkout of its own");
+        assert!(seen.iter().all(|(t, d)| *d == Depth::Deep && !t.exists()));
+        let output: ReviewOutput =
+            serde_json::from_slice(&std::fs::read(out.join(REVIEW_FILE)).unwrap()).unwrap();
+        let titles: Vec<&str> = output.findings.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(titles, ["Off by one", "Null deref"], "one per issue");
+        assert_eq!(output.summary, "seat 1");
+        // The evidence one reviewer wrote in its own checkout ran, and showed the change.
+        let off = &output.findings[0];
+        assert_eq!(off.id, "f1");
+        assert!(off.evidence.as_ref().unwrap().failed, "{off:?}");
+        assert!(off.verified.is_none());
+        // A change of any kind that nothing ran shows goes to the panel.
+        let null = &output.findings[1];
+        assert_eq!(null.id, "f2");
+        assert!(null.verified.as_ref().unwrap().upheld());
+        assert_eq!(reviewers.votes.into_inner().unwrap(), 3);
+        // Each run's spend: two reviewers that reviewed, one that did not, three votes.
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind.ends_with("reviewed"))
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(
+            kinds.iter().filter(|k| **k == "reviewed").count(),
+            5,
+            "{events:?}"
+        );
+        assert_eq!(kinds.iter().filter(|k| **k == "unreviewed").count(), 1);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == "reviewing" && e.message.ends_with("deep: 3 reviewers")),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]

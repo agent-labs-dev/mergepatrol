@@ -510,6 +510,7 @@ async fn a_review_since_an_approval_names_only_the_queues_commits() {
         sent_back: Vec::new(),
         since: Some(approved),
         reviewed: None,
+        depth: mergepatrol_core::Depth::Standard,
     };
     let result = executor
         .run("t6", &spec, &tmp.path().join("out"))
@@ -543,6 +544,7 @@ async fn review_prompt_after(
         sent_back: Vec::new(),
         since: None,
         reviewed: Some(reviewed.into()),
+        depth: mergepatrol_core::Depth::Standard,
     };
     let result = executor.run("t7", &spec, &tmp.join("out")).await.unwrap();
     assert!(matches!(result.outcome, JobOutcome::Done), "{result:?}");
@@ -638,6 +640,7 @@ async fn a_review_writes_what_the_agent_found_with_the_code_it_is_about() {
         sent_back: Vec::new(),
         since: None,
         reviewed: None,
+        depth: mergepatrol_core::Depth::Standard,
     };
     let out = tmp.path().join("out");
     // The fake CLI echoes its answer, so one line: `echo` would break a `\n`.
@@ -713,6 +716,7 @@ async fn evidence_counts_only_once_the_job_saw_it_fail() {
         sent_back: Vec::new(),
         since: None,
         reviewed: None,
+        depth: mergepatrol_core::Depth::Standard,
     };
     let change = |title: &str, evidence: serde_json::Value| {
         serde_json::json!({
@@ -792,6 +796,7 @@ async fn a_review_the_agent_cannot_give_fails_and_says_why() {
         sent_back: Vec::new(),
         since: None,
         reviewed: None,
+        depth: mergepatrol_core::Depth::Standard,
     };
     let out = tmp.path().join("out");
     let result = with_fake_claude(tmp.path(), "Looks good to me!")

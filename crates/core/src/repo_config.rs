@@ -726,6 +726,7 @@ agent:
             enabled: Some(true),
             bars: [(crate::Kind::Security, crate::Bar::Always)].into(),
             require_resolved: Some(false),
+            depth: Some(crate::Depth::Deep),
         };
         assert_eq!(
             RepoSettings::from_file(Some(&s.to_yaml(&defaults())), &defaults()),

@@ -100,6 +100,47 @@ impl From<Bar> for BarText {
     }
 }
 
+/// How hard a review looks, which its spend follows. `Deep` is for code where one missed bug costs
+/// more than the extra review.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Depth {
+    /// One reviewer, who reports only what could be wrong.
+    Quick,
+    /// One reviewer, who also says what it checked and found sound.
+    #[default]
+    Standard,
+    /// Several reviewers at once, each fresh, whose findings merge; a panel then votes on every
+    /// change nothing MergeLoop ran shows, of any kind.
+    Deep,
+}
+
+impl Depth {
+    pub const ALL: [Depth; 3] = [Depth::Quick, Depth::Standard, Depth::Deep];
+
+    /// As the config file and the API name it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Depth::Quick => "quick",
+            Depth::Standard => "standard",
+            Depth::Deep => "deep",
+        }
+    }
+
+    /// How many reviewers look, each fresh and on its own.
+    pub fn reviewers(self) -> u8 {
+        match self {
+            Depth::Quick | Depth::Standard => 1,
+            Depth::Deep => 3,
+        }
+    }
+
+    /// Whether a panel's votes may show a change of `kind` that no command MergeLoop ran showed.
+    pub fn votes_on(self, kind: Kind) -> bool {
+        self == Depth::Deep || kind == Kind::Security
+    }
+}
+
 /// A workspace's review settings: whether its repos' queues review, and each kind's bar.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSettings {
@@ -110,6 +151,8 @@ pub struct ReviewSettings {
     /// it: its author resolves each, fixed or answered.
     #[serde(default = "yes")]
     pub require_resolved: bool,
+    #[serde(default)]
+    pub depth: Depth,
 }
 
 fn yes() -> bool {
@@ -125,6 +168,7 @@ impl Default for ReviewSettings {
             enabled: true,
             bars: Kind::ALL.map(|k| (k, default_bar(k))).into(),
             require_resolved: true,
+            depth: Depth::default(),
         }
     }
 }
@@ -152,6 +196,7 @@ impl ReviewSettings {
             enabled: repo.enabled.unwrap_or(self.enabled),
             bars,
             require_resolved: repo.require_resolved.unwrap_or(self.require_resolved),
+            depth: repo.depth.unwrap_or(self.depth),
         }
     }
 
@@ -193,11 +238,16 @@ pub struct ReviewOverrides {
     pub bars: BTreeMap<Kind, Bar>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_resolved: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<Depth>,
 }
 
 impl ReviewOverrides {
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.bars.is_empty() && self.require_resolved.is_none()
+        self.enabled.is_none()
+            && self.bars.is_empty()
+            && self.require_resolved.is_none()
+            && self.depth.is_none()
     }
 }
 
@@ -329,17 +379,16 @@ impl Finding {
     }
 
     /// Whether it shows the change is needed: MergeLoop ran its evidence on the PR's head and it
-    /// failed. A `security` finding may show it by the code alone instead, when enough of a panel
-    /// of fresh agents agree that it holds.
+    /// failed, or enough of a panel of fresh agents agree that it holds. Only a finding that
+    /// `wants_votes` keeps a panel's votes: where they come in, the rest are dropped.
     pub fn shows_the_change(&self) -> bool {
-        self.ran_failing()
-            || (self.kind == Kind::Security && self.verified.as_ref().is_some_and(|v| v.upheld()))
+        self.ran_failing() || self.verified.as_ref().is_some_and(|v| v.upheld())
     }
 
-    /// Whether its route waits on a panel's votes: a `security` change for the author to make,
-    /// with no evidence MergeLoop saw fail.
-    pub fn wants_votes(&self) -> bool {
-        self.kind == Kind::Security
+    /// Whether its route waits on a panel's votes: a change for the author to make, with no
+    /// evidence MergeLoop saw fail, of a kind `depth` votes on.
+    pub fn wants_votes(&self, depth: Depth) -> bool {
+        depth.votes_on(self.kind)
             && self.lean == Lean::Change
             && !self.needs_human
             && !self.ran_failing()
@@ -359,9 +408,9 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// The panel that checks a security change the code alone shows: three, two of whom must
-    /// agree it holds.
-    pub const SECURITY: Panel = Panel {
+    /// The panel that checks a change the code alone shows: three, two of whom must agree it
+    /// holds.
+    pub const FINDING: Panel = Panel {
         seats: 3,
         needed: 2,
     };
@@ -426,6 +475,106 @@ impl std::fmt::Display for Place {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&at(&self.file, self.line))
     }
+}
+
+/// How far apart two reviewers' lines may be and still be about the same issue.
+const SAME_PLACE_LINES: u32 = 3;
+
+/// Several reviewers' findings, one for each issue, in the order first found: two of different
+/// reviewers are of the same issue when they are of the same kind and about the same place, the
+/// same file a few lines apart at any place either names, or, with no line, the same title. Of
+/// those, the one that says most stands for both, and names every place either did: a change
+/// over a note, evidence over none, then the surer. A reviewer's own findings are as many issues
+/// as it says.
+pub fn merge_reviews(reviews: Vec<Vec<Finding>>) -> Vec<Finding> {
+    // Each issue: the finding that stands for it, and the reviewers who found it.
+    let mut issues: Vec<(Finding, Vec<usize>)> = Vec::new();
+    for (by, review) in reviews.into_iter().enumerate() {
+        for f in review {
+            let same = issues
+                .iter_mut()
+                .find(|(standing, found)| !found.contains(&by) && same_issue(standing, &f));
+            match same {
+                Some((standing, found)) => {
+                    found.push(by);
+                    match says_more(&f, standing) {
+                        true => {
+                            let other = std::mem::replace(standing, f);
+                            take_places(standing, &other);
+                        }
+                        false => take_places(standing, &f),
+                    }
+                }
+                None => issues.push((f, vec![by])),
+            }
+        }
+    }
+    issues.into_iter().map(|(f, _)| f).collect()
+}
+
+fn same_place((a, x): (&str, Option<u32>), (b, y): (&str, Option<u32>)) -> bool {
+    a == b && matches!((x, y), (Some(x), Some(y)) if x.abs_diff(y) <= SAME_PLACE_LINES)
+}
+
+/// Adds to `keep` the places of `other` it does not already name.
+fn take_places(keep: &mut Finding, other: &Finding) {
+    let new: Vec<Place> = other
+        .locations()
+        .filter(|&p| !keep.locations().any(|q| same_place(p, q) || p == q))
+        .map(|(file, line)| Place {
+            file: file.to_owned(),
+            line,
+            code: Vec::new(),
+        })
+        .collect();
+    keep.also_at.extend(new);
+}
+
+fn same_issue(a: &Finding, b: &Finding) -> bool {
+    let near = || {
+        a.locations()
+            .any(|p| b.locations().any(|q| same_place(p, q)))
+    };
+    let titled = || a.file == b.file && title_words(&a.title) == title_words(&b.title);
+    a.kind == b.kind
+        && match (a.line, b.line) {
+            (Some(_), Some(_)) => near(),
+            _ => near() || titled(),
+        }
+}
+
+fn title_words(title: &str) -> Vec<String> {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether `a` says more of an issue than `b`.
+fn says_more(a: &Finding, b: &Finding) -> bool {
+    let weight = |f: &Finding| (weight(f.lean), f.evidence.is_some(), f.confidence);
+    weight(a) > weight(b)
+}
+
+/// How much a lean asks of anyone: a change, then a bug to file, then a note.
+fn weight(lean: Lean) -> u8 {
+    match lean {
+        Lean::Change => 2,
+        Lean::PreExisting => 1,
+        Lean::Fine => 0,
+    }
+}
+
+/// At most `max` findings, in the order found: what a cap drops is the notes first, then the bugs
+/// to file, never a change while a note is left.
+pub fn most_first(findings: Vec<Finding>, max: usize) -> Vec<Finding> {
+    let mut order: Vec<usize> = (0..findings.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(weight(findings[i].lean)));
+    order.truncate(max);
+    order.sort_unstable();
+    let mut findings: Vec<Option<Finding>> = findings.into_iter().map(Some).collect();
+    order.iter().filter_map(|&i| findings[i].take()).collect()
 }
 
 /// `text` as a URL's query value.
@@ -846,9 +995,9 @@ mod tests {
         let mut hole = finding(Kind::Security, 100, Lean::Change);
         hole.evidence = None;
         // One agent's word is a note.
-        assert!(hole.wants_votes());
+        assert!(hole.wants_votes(Depth::Standard));
         assert_eq!(s.route(&hole), Route::Cleared);
-        let panel = Panel::SECURITY;
+        let panel = Panel::FINDING;
         for (cast, route) in [
             (vec![Holds, Holds, DoesNotHold], Route::Author),
             (vec![Holds, DoesNotHold, Abstained], Route::Cleared),
@@ -864,20 +1013,19 @@ mod tests {
         assert!(!stuffed.upheld());
         // Evidence MergeLoop saw fail shows it without a vote, as for any kind.
         let shown = finding(Kind::Security, 100, Lean::Change);
-        assert!(!shown.wants_votes());
+        assert!(!shown.wants_votes(Depth::Deep));
         assert_eq!(s.route(&shown), Route::Author);
-        // Votes do not stand in for evidence on other kinds.
+        // At standard depth only a security change waits on votes: another kind needs evidence.
         let mut other = finding(Kind::Other, 100, Lean::Change);
         other.evidence = None;
-        other.verified = Some(panel.verdict(votes(&[Holds, Holds, Holds])));
-        assert!(!other.wants_votes());
+        assert!(!other.wants_votes(Depth::Standard) && !other.wants_votes(Depth::Quick));
         assert_eq!(s.route(&other), Route::Cleared);
         // Nothing to vote on where the votes would not change the route.
         let mut call = hole.clone();
         call.needs_human = true;
         let mut fine = hole.clone();
         fine.lean = Lean::Fine;
-        assert!(!call.wants_votes() && !fine.wants_votes());
+        assert!(!call.wants_votes(Depth::Deep) && !fine.wants_votes(Depth::Deep));
     }
 
     #[test]
@@ -907,6 +1055,7 @@ mod tests {
             enabled: None,
             bars: BTreeMap::from([(Kind::Security, Bar::Always), (Kind::Other, Bar::From(65))]),
             require_resolved: None,
+            depth: None,
         };
         let s = ws.with(&repo);
         assert!(s.enabled);
@@ -941,5 +1090,250 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_deep_review_has_a_panel_vote_on_any_change_nothing_it_ran_shows() {
+        use Verdict::*;
+        let s = ReviewSettings {
+            depth: Depth::Deep,
+            ..ReviewSettings::default()
+        };
+        let mut other = finding(Kind::Other, 90, Lean::Change);
+        other.evidence = None;
+        assert!(other.wants_votes(Depth::Deep));
+        assert_eq!(s.route(&other), Route::Cleared);
+        other.verified = Some(Panel::FINDING.verdict(votes(&[Holds, Holds, DoesNotHold])));
+        assert_eq!(s.route(&other), Route::Author);
+        other.verified = Some(Panel::FINDING.verdict(votes(&[Holds, DoesNotHold, Abstained])));
+        assert_eq!(s.route(&other), Route::Cleared);
+        // Its bar still holds: upheld, but under it, is a note.
+        other.confidence = 70;
+        other.verified = Some(Panel::FINDING.verdict(votes(&[Holds, Holds, Holds])));
+        assert_eq!(s.route(&other), Route::Cleared);
+    }
+
+    #[test]
+    fn depth_is_standard_unless_the_workspace_or_the_repo_sets_it() {
+        assert_eq!(ReviewSettings::default().depth, Depth::Standard);
+        // Settings stored before depth existed read as standard.
+        let stored = serde_json::json!({ "enabled": true, "bars": {} });
+        let old: ReviewSettings = serde_json::from_value(stored).unwrap();
+        assert_eq!(old.depth, Depth::Standard);
+        let ws = ReviewSettings {
+            depth: Depth::Quick,
+            ..ReviewSettings::default()
+        };
+        assert_eq!(ws.with(&ReviewOverrides::default()).depth, Depth::Quick);
+        let o: ReviewOverrides = serde_yaml::from_str("depth: deep").unwrap();
+        assert!(!o.is_empty());
+        assert_eq!(ws.with(&o).depth, Depth::Deep);
+        assert_eq!(serde_yaml::to_string(&o).unwrap(), "depth: deep\n");
+        assert!(serde_yaml::from_str::<ReviewOverrides>("depth: thorough").is_err());
+        assert_eq!(
+            Depth::ALL.map(|d| (d.as_str(), d.reviewers())),
+            [("quick", 1), ("standard", 1), ("deep", 3)]
+        );
+    }
+
+    fn at(title: &str, kind: Kind, file: &str, line: u32, lean: Lean, confidence: u8) -> Finding {
+        Finding {
+            title: title.into(),
+            file: Some(file.into()),
+            line: Some(line),
+            evidence: None,
+            ..finding(kind, confidence, lean)
+        }
+    }
+
+    #[test]
+    fn reviewers_findings_merge_one_per_issue_in_the_order_first_found() {
+        let a = vec![
+            at(
+                "Retry never stops",
+                Kind::Other,
+                "src/retry.rs",
+                40,
+                Lean::Change,
+                70,
+            ),
+            at(
+                "Token compared with ==",
+                Kind::Security,
+                "src/auth.rs",
+                12,
+                Lean::Change,
+                80,
+            ),
+        ];
+        let mut shown = at(
+            "The retry loop has no cap",
+            Kind::Other,
+            "src/retry.rs",
+            42,
+            Lean::Change,
+            60,
+        );
+        shown.evidence = Some(Evidence {
+            command: "cargo test retry".into(),
+            ..Evidence::default()
+        });
+        let b = vec![
+            // The same bug, two lines on, with evidence: that one speaks for it.
+            shown.clone(),
+            // The same line, another kind: another issue.
+            at(
+                "Retry logs the token",
+                Kind::Security,
+                "src/retry.rs",
+                40,
+                Lean::Change,
+                75,
+            ),
+        ];
+        let c = vec![
+            // A sound note in the same place as a bug: the bug is what matters there.
+            at(
+                "Retry is sound",
+                Kind::Other,
+                "src/retry.rs",
+                41,
+                Lean::Fine,
+                95,
+            ),
+            // Far enough away to be another issue.
+            at(
+                "Backoff overflows",
+                Kind::Other,
+                "src/retry.rs",
+                90,
+                Lean::Change,
+                85,
+            ),
+            at(
+                "Token compared with ==",
+                Kind::Security,
+                "src/auth.rs",
+                12,
+                Lean::Change,
+                90,
+            ),
+        ];
+        let merged = merge_reviews(vec![a, b, c]);
+        let titles: Vec<&str> = merged.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "The retry loop has no cap",
+                "Token compared with ==",
+                "Retry logs the token",
+                "Backoff overflows",
+            ]
+        );
+        assert_eq!(merged[0], shown);
+        // Of two alike, the surer one.
+        assert_eq!(merged[1].confidence, 90);
+    }
+
+    #[test]
+    fn a_bug_found_at_several_places_merges_with_one_found_at_any_of_them() {
+        let mut class = at(
+            "Unchecked unwrap",
+            Kind::Other,
+            "a.rs",
+            10,
+            Lean::Change,
+            80,
+        );
+        class.also_at = vec![Place {
+            file: "b.rs".into(),
+            line: Some(50),
+            code: Vec::new(),
+        }];
+        let one = at(
+            "Panics on empty input",
+            Kind::Other,
+            "b.rs",
+            51,
+            Lean::Change,
+            90,
+        );
+        let merged = merge_reviews(vec![vec![class], vec![one]]);
+        assert_eq!(merged.len(), 1);
+        // The surer one stands for it, and keeps every place, so one fix settles them all.
+        assert_eq!(merged[0].title, "Panics on empty input");
+        let also: Vec<String> = merged[0].also_at.iter().map(|p| p.to_string()).collect();
+        assert_eq!(also, ["a.rs:10"]);
+    }
+
+    #[test]
+    fn a_cap_on_findings_drops_notes_before_any_change() {
+        let note = |i: u32| {
+            at(
+                &format!("sound {i}"),
+                Kind::Other,
+                "a.rs",
+                i * 10,
+                Lean::Fine,
+                90,
+            )
+        };
+        let mut findings: Vec<Finding> = (1..=25).map(note).collect();
+        findings.push(at(
+            "Token leaks",
+            Kind::Security,
+            "b.rs",
+            1,
+            Lean::Change,
+            80,
+        ));
+        findings.push(at("Old bug", Kind::Other, "c.rs", 1, Lean::PreExisting, 80));
+        let kept = most_first(findings, 25);
+        assert_eq!(kept.len(), 25);
+        // In the order found, without the last notes.
+        assert_eq!(kept[0].title, "sound 1");
+        assert_eq!(kept[22].title, "sound 23");
+        assert_eq!(kept[23].title, "Token leaks");
+        assert_eq!(kept[24].title, "Old bug");
+        let few = vec![note(1), note(2)];
+        assert_eq!(most_first(few.clone(), 25), few);
+    }
+
+    #[test]
+    fn findings_about_a_whole_file_or_pr_merge_only_with_the_same_title() {
+        let whole = |title: &str| Finding {
+            title: title.into(),
+            ..finding(Kind::Other, 80, Lean::Change)
+        };
+        let file = |title: &str| Finding {
+            file: Some("Cargo.toml".into()),
+            ..whole(title)
+        };
+        let merged = merge_reviews(vec![
+            vec![
+                whole("No test covers the retry"),
+                file("A crate is pinned to git"),
+            ],
+            vec![
+                whole("No test covers the  retry."),
+                whole("The PR does more than it says"),
+                file("A crate is pinned to git"),
+            ],
+        ]);
+        let titles: Vec<&str> = merged.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "No test covers the retry",
+                "A crate is pinned to git",
+                "The PR does more than it says"
+            ]
+        );
+        // A reviewer's own findings are as many issues as it says, however close.
+        let one = vec![whole("Twice"), whole("Twice")];
+        assert_eq!(merge_reviews(vec![one.clone()]), one);
+        let near = |line| at("x", Kind::Other, "a.rs", line, Lean::Change, 80);
+        let merged = merge_reviews(vec![vec![near(1), near(2)], vec![near(3)]]);
+        assert_eq!(merged.len(), 2);
     }
 }
