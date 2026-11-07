@@ -1,6 +1,7 @@
 ---
 title: Security findings go back to you only when fresh agents agree
 kind: improved
+image: /changelog/security-findings-are-voted-on/after.png
 ---
 
 A security finding the review can't show with a failing test no longer comes back to you on one agent's word. Three fresh agents each check it on their own, seeing only the finding and the code, and it goes back only when two of them say it holds. Otherwise it's a note that says how the vote went.
