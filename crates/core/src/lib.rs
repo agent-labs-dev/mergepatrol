@@ -41,7 +41,7 @@ pub const FIXED_BY: &str = "Fixed-by: mergepatrol";
 /// The trailer of a commit whose conflict the agent resolved in a rebase.
 pub const RESOLVED_BY: &str = "Resolved-by: mergepatrol";
 /// The trailer of the merge commit that brought a PR up to date with its base.
-pub const UPDATED_BY: &str = "Updated-by: mergepatrol";
+pub const UPDATED_BY: &str = "Updated-by: mergeloop";
 /// The empty commit that runs a PR's checks again.
 pub const RECHECK_MESSAGE: &str =
     "Run the checks again\n\nThe agent found nothing to fix in the code.";

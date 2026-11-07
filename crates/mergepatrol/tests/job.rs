@@ -1144,7 +1144,7 @@ async fn a_branch_that_merged_the_trunk_in_is_updated_by_merging_it_again() {
     assert_eq!(git(&check, &["show", "result:other.txt"]), "from main");
     let message = git(&check, &["log", "-1", "--format=%B", "result"]);
     assert!(message.starts_with("Merge main into pr"), "{message}");
-    assert!(message.contains("Updated-by: mergepatrol"), "{message}");
+    assert!(message.contains("Updated-by: mergeloop"), "{message}");
 
     // A repo that merges PRs by rebasing them gets its rebase, conflict and all.
     spec.update = Update::Rebase;
@@ -1263,5 +1263,5 @@ async fn a_merge_that_conflicts_has_the_agent_resolve_it_once() {
     assert_eq!(git(&check, &["show", "result:a.ts"]), "main again\npr");
     let message = git(&check, &["log", "-1", "--format=%B", "result"]);
     assert!(message.contains("Resolved-by: mergepatrol"), "{message}");
-    assert!(message.contains("Updated-by: mergepatrol"), "{message}");
+    assert!(message.contains("Updated-by: mergeloop"), "{message}");
 }
