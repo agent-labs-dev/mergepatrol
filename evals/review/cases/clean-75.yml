@@ -1,0 +1,62 @@
+repo: agent-labs-dev/mergeloop
+pr: 75
+base: 2343f3dcd3ab4f76280188a34ee91fc553bdecec
+head: 2fbb191fbf3e47d12341426e2da816990e4bd1ae
+title: "fix: delete expired sessions, old job outputs, and the refs of PRs that left"
+body: |-
+  ## Summary
+
+  Three kinds of data piled up that nothing reads:
+
+  - **Sessions:** every sign-in left a row after it expired.
+  - **Job outputs:** every job left its output and agent transcript in `data/jobs/`.
+  - **PR refs:** every PR left `refs/mergepatrol/{pr,result,publish}/<n>` in its repo's cache, so git's gc kept its commits forever.
+
+  ```diff
+   lead (the instance holding the queue lock)
+     spawn supervise, discover
+  +  spawn prune: every hour
+  +    delete_expired_sessions(now)
+  +    remove data/jobs/<id> unchanged for 7 days
+
+   exit(pr)                                  # the PR leaves the queue
+  +  forget_refs: delete refs/mergepatrol/{pr,result,publish}/<n>
+  +               (errors only warn; git's auto gc then drops the commits)
+  ```
+
+  Events and exits are not pruned, because History and Activity read them. The README now says job outputs are kept 7 days.
+
+  ## Evidence
+
+  Nothing visible changes.
+
+  New tests, each failing with its fix disabled:
+  - `deleting_a_prs_refs_keeps_the_others` (git): deleting `pr/1`, `result/1` and `publish/1` leaves `pr/12` alone. Deleting refs that don't exist is fine.
+  - `only_expired_sessions_are_deleted` (store).
+  - `only_old_job_outputs_are_deleted`: a folder modified 8 days ago goes, a new one stays, and a missing `jobs/` is fine.
+  - `a_merged_pr_leaves_no_refs_in_the_cache` (queue loop): after PR 1 merges, only `refs/mergepatrol/pr/2` is left.
+
+  `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, and `cargo test --workspace` all pass.
+
+  Reviewed with sol-loop: 1 round with gpt-6.1-sol. Sol verdict: approved. Sol had one nit, which I declined: pruning could race a retried job that reuses a folder last touched 7 days earlier. A job lasts at most 40 minutes.
+
+  ## Merge Danger
+
+  **Door:** one-way, for the deleted data
+
+  Transcripts older than 7 days are gone once this runs.
+
+  **Blast Radius:** small
+
+  A PR that joins the queue again fetches its refs again.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/75?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795866082&installation_model_id=434381&pr_number=75&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F75&signature=bd66e705932f7afe8d5d2a07fe88789b217e485a04c703055b05b590735323e1"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected: clean

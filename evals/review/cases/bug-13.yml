@@ -1,0 +1,77 @@
+repo: agent-labs-dev/mergeloop
+pr: 13
+base: 8c7d6db80e79982b94302e79582bd509746ea822
+head: 2938ef475556776220c1a11b900529914a6ac4c2
+title: "feat: start queued work within a second of a GitHub change, not on the next poll"
+body: |-
+  ## Summary
+
+  GitHub webhooks wake a repo's queue as soon as something changes, rather than on the next poll. A webhook is only a wake-up: the queue still reads state from GitHub, as it does when it polls. A lost delivery costs time, not state.
+
+  ```mermaid
+  sequenceDiagram
+      participant GH as GitHub
+      participant W as POST /webhooks/github
+      participant Q as Repo queue
+      GH->>W: event + X-Hub-Signature-256
+      W->>W: HMAC check against the App's webhook secret
+      W->>Q: wake(installation, repo)
+      Q->>GH: read the lane and the PR (as on a poll)
+  ```
+
+  ```diff
+   run_repo
+     loop
+       tick
+  -    sleep(poll)
+  +    wait(poll) or until a webhook for this repo
+
+   run_job, waiting for checks
+  -  sleep(15s)
+  +  wait(15s) or until a webhook for this repo
+  ```
+
+  - **Manifest:** new Apps get `hook_attributes` (`<public URL>/webhooks/github`, active only on https) and `default_events`: `pull_request`, `pull_request_review`, `push`, `check_suite`, `check_run`, `status`. GitHub generates the secret, which we already store.
+  - **Hosted:** optional `MERGEPATROL_GITHUB_WEBHOOK_SECRET`. Without it, the route returns 404 and the queue only polls.
+  - **Localhost:** no webhooks, polling as before. The README shows how to get them through a `cloudflared` tunnel.
+  - An App created before this has no webhook. Create it again to get one.
+
+  ## Evidence
+
+  Nothing changes on screen. Run live on this repo: a new App created through a `cloudflared` tunnel, with the poll set to 600s so that only a webhook could react in time.
+
+  - **Before:** label → `enqueued` takes up to one poll. #4 started 63s after #3 merged.
+    **After:** #11 labeled at 00:38:51.9, `enqueued` at 00:38:52.7, merged at 00:39:03. #12, same: under a second to `enqueued`.
+  - **Tests:**
+    ```text
+    a_signed_webhook_wakes_its_repo                         → 204, wakes (7, "o/r")
+    a_badly_signed_webhook_wakes_nothing                    → 401 for a wrong or missing signature
+    without_a_webhook_secret_webhooks_are_off               → 404
+    a_webhook_cuts_the_wait_short_even_when_it_came_first   → wait returns at once; another repo's webhook does not count
+    ```
+    Full `cargo test` is green, DB tests included.
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  **Blast Radius:** queue
+
+  The new route is unauthenticated apart from the HMAC, and all it can do is make a repo's queue tick early. A forged or replayed delivery costs, at most, an extra read from GitHub. Wakes are coalesced into one permit per repo, so a burst of deliveries is one tick.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/13?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795826411&installation_model_id=434381&pr_number=13&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F13&signature=54efbfb8900529be6f507cbfbb8e52d3eea9813f745a5807d64a22a4e87f69c3"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: crates/web/src/lib.rs, lines: 85 }
+        - { file: crates/web/src/webhook.rs, lines: 19-23 }
+      what: "The webhook route keeps axum's 2 MB body limit; GitHub sends up to 25 MB, so big deliveries are lost."
+      fixed_by: "#73"

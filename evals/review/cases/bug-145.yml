@@ -1,0 +1,48 @@
+repo: agent-labs-dev/mergeloop
+pr: 145
+base: 7e7ddddab21cc788d3b373d07ea6b993e6b12e2b
+head: fa6665d590f77d994743a3aea51df286880f2467
+title: "fix(review): let an author approve their own PR into the queue"
+body: |-
+  ## Why
+
+  @joaquim-nebula hit **"Review Can not approve your own pull request"** on the agent-review submit step ("Approve, into the queue") for their own PR. GitHub refuses every APPROVE review from a PR's author, whatever the repo's rules say, and Mergepatrol passed that refusal straight back. Authors could never approve their own PR into the queue, even on repos that need no approval to merge.
+
+  ## What changes
+
+  When the person approving is the PR's author (checked against the PR's author login, ignoring case, for both a dashboard session and a GitHub-token/MCP caller):
+
+  - **GitHub requires no approval to merge** (`reviewDecision` is not `REVIEW_REQUIRED` and no code-owner review is outstanding): Mergepatrol posts no APPROVE review. Any text goes on the PR as a COMMENT review. The agent review is still recorded as **approved**, so the agent gate clears and the PR takes its place in the queue. `review_pull` with `queue: true` labels it as before.
+  - **GitHub requires an approval** (`REVIEW_REQUIRED`, including a code-owner review that `reviewDecision` leaves out): Mergepatrol refuses with a 422: *"GitHub won't let you approve your own PR, and {repo} needs an approval to merge it. Ask a reviewer."* Otherwise the queue would just hold the PR.
+
+  Approvals from anyone other than the author behave exactly as before.
+
+  The check is `approval()` in `crates/web/src/api.rs`, built on two new `PullRequest` methods in `crates/github/src/repo.rs`: `authored_by(login)` and `awaits_approval()`. The second reuses the queue's own `review_decision()`, so this check and the queue's `Hold::ReviewRequired` can't disagree. Both `review_pull` and `answer_agent_review` use it. The MCP tool descriptions and the changelog are updated.
+
+  ## Verification
+
+  - New test `an_authors_own_approval_stands_only_where_none_is_required` covers three cases: no rule, `REVIEW_REQUIRED`, and a code-owner rule with an empty `reviewDecision`. Confirmed it fails when `awaits_approval` ignores the code-owner case.
+  - `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` pass. `cargo test -p mergepatrol-github` passes (50).
+  - The Postgres-backed web tests couldn't run on this box (no Docker); CI covers them.
+  - Not exercised live against GitHub: the hosted flow needs a real author session.
+
+  No `mergepatrol` label; the maintainer queues it.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  ---
+  Assisted by [Nebula](https://nebula.gg).
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/145?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1796000871&installation_model_id=434381&pr_number=145&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F145&signature=fd5de79cd1102a506b5cfbcdd94579a2dcd2cc3bcd5338e67243197dcfa680d2"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: crates/web/src/review.rs, lines: 543-545 }
+      what: "Fixes the author's approval but the author's send-back still posts REQUEST_CHANGES, which GitHub refuses."
+      fixed_by: "#147"

@@ -1306,6 +1306,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mergepatrol-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "mergepatrol-core",
+ "mergepatrol-executor",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "mergepatrol-executor"
 version = "0.1.0"
 dependencies = [

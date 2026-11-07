@@ -1,0 +1,127 @@
+repo: agent-labs-dev/mergeloop
+pr: 142
+base: df04618999834c8592525f81d32280761f6eafb9
+head: 3647cd68e93f7bff35c68da8701784057f8060eb
+title: "feat: an agent reviews each queued PR, and asks a human only what it isn't sure of"
+body: |-
+  ## Summary
+
+  The merge queue's first gate is now an agent's review, when a workspace turns **Automatic review** on (off by default: it runs on the workspace's key). The agent clears alone what it accepts and is sure enough of. It asks a human only about the rest, and the dashboard shows only those findings, each with its code, why the agent was unsure, and what it already checked. The flow follows the picked prototype (Q, RB, SB) on [`prototype/auto-review`](https://github.com/agent-labs-dev/mergepatrol/tree/prototype/auto-review).
+
+  ```mermaid
+  sequenceDiagram
+      participant Tick as Queue tick
+      participant Worker as Review worker
+      participant Job as Sandbox job
+      participant Human
+      Tick->>Tick: review_hold: PR held (Reviewing), keeps its place
+      Tick-->>Worker: start_review(head)
+      Worker->>Job: Task::Review (read-only agent)
+      Job-->>Worker: findings + code excerpts
+      Worker->>Worker: judge: clears if lean=fine and confidence ≥ kind's bar
+      alt nothing to ask
+          Worker->>Tick: approved → takes its place in line
+      else asks
+          Worker->>Human: COMMENT review on GitHub, review requested from CODEOWNERS
+          Human->>Worker: answers on the dashboard → their own review on GitHub
+          Worker->>Tick: all fine → approved / a change → held for the next push
+      end
+  ```
+
+  ```diff
+   crates/core/src/review.rs          + Kind, Bar, ReviewSettings (defaults: security 90, migrations always ask,
+                                        dependencies / public API 85, other 80), the "asks a human" rule
+   crates/core/src/hold.rs            + Hold::Reviewing | ReviewAsks | ReviewChanges
+   crates/core/src/repo_config.rs     + review: { enabled, bars } in .mergepatrol/mergepatrol.yml
+   crates/store/migrations/0013_agent_reviews.sql   + agent_reviews (one per PR head), review_settings
+   crates/executor/src/protocol.rs    + Task::Review, Task::Question
+   crates/resolver/src/*              + review / question prompts; Claude runs read-only (no Edit/Write)
+   crates/mergepatrol/src/job.rs      + parses the agent's JSON, attaches the diff hunk and related lines
+   crates/mergepatrol/src/review.rs   + the worker: runs reviews and questions, asks CODEOWNERS (users and teams)
+   crates/mergepatrol/src/queue.rs
+     tick_lane                        + review_hold before GitHub's holds (after draft)
+     run_job / Merging                + review_hold on the heads about to merge: an author push mid-job waits
+     rebase / fix publish             + carry_review: the queue's own heads keep the approval
+   crates/web/src/review.rs           + 6 routes, each an MCP tool: get/answer review, ask the agent,
+                                        ask other reviewers, get/set review settings
+   ui/src/AgentReview.tsx             + queue gate, one-finding-at-a-time answer screen (f/c/a/j/k/m/esc)
+   ui/src/ReviewSettings.tsx          + per-kind bars against the agent's track record; repo table → config PRs
+  ```
+
+  - The agent never approves on GitHub, only comments: an App's approval could meet a rule that asks for a human's. A human's answers post as their own review, with each change asked for on its line.
+  - Answering, and asking the agent, need write access to the repo. GitHub takes reviews from readers, but the gate does not.
+  - Fork PRs get no agent: a human reviews the whole PR. The agent never sends a PR back alone.
+  - Review and question runs count as sandbox jobs for fair use, and their spend shows in History as **Reviewing**.
+
+  ## Evidence
+
+  | Before | After |
+  | --- | --- |
+  | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-queue-before.png?raw=true" width="420"> | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-queue-after.png?raw=true" width="420"> |
+  | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-settings-before.png?raw=true" width="420"> | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-settings-after.png?raw=true" width="420"> |
+
+  | Answering, one finding at a time | Ready to submit | Dark |
+  | --- | --- | --- |
+  | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-answer.png?raw=true" width="300"> | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-submit.png?raw=true" width="300"> | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-answer-dark.png?raw=true" width="300"> |
+
+  | Agent reviewing | Sent back | A repo's own bars, as a config PR |
+  | --- | --- | --- |
+  | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-reviewing.png?raw=true" width="300"> | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-sent-back.png?raw=true" width="300"> | <img src="https://github.com/agent-labs-dev/mergepatrol/blob/5e74ec7468116d22c29f2ac8466b945d97069627/pr-shots/auto-review-repo-pr.png?raw=true" width="300"> |
+
+  Captured with headless Playwright against `vite dev` with a stubbed signed-in `/api`, the same stub for `main` (before) and this branch (after). Main has no gate, so the before shows how it renders the same held PRs.
+
+  - **Queue gate**, `loop_tests`:
+    ```text
+    review on, PRs 1 and 2 queued        → both Held(Reviewing), no hold comment
+    agent asks on both                   → Held(ReviewAsks)
+    #2 approved                          → #2 merges, #1 keeps its place
+    #1 changes                           → Held(ReviewChanges)
+    worker saw a lagging head (stale)    → the review restarts
+    author pushes                        → new review, Held(Reviewing) → approved → merges
+    author pushes during checks          → no merge; Held(Reviewing) until reviewed   (fails without the pre-merge check)
+    review off                           → merges, no review started
+    ```
+  - **Job**, `tests/job.rs` runs the real `mergepatrol job` binary with a fake `claude`: the review writes `review.json`, with the hot added line (`line 10 changed`), the removed line, and related lines; a non-JSON answer fails with `unreviewed` spend. A follow-up question writes `answer.md`.
+  - **Store**, against Postgres: one review per head; claimed once; retry waits; a stale review restarts; approvals carry over queue-made heads but not over a send-back; a question asked while another runs isn't claimed twice.
+  - **Routes**: GET review / settings round-trip; an answer or a question without the caller's GitHub token is refused (401) and leaves the review asking; a bar under 50% is 422; another workspace is 404.
+  - `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, `cargo test --workspace`, `pnpm check`, `pnpm build`: pass.
+  - Reviewed with sol-loop: 2 rounds with gpt-6.1-sol. Round 1 found 3 blockers and 4 shoulds, all fixed (pre-merge check, write access for answers and questions, stack layers, question claims, team owners, fair use). Round 2: approved.
+  - Not run: a live review against GitHub and a real model.
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  Off for every workspace until one turns it on. The migration only adds two tables.
+
+  **Blast Radius:** queue-wide
+
+  With the gate off, the queue only gains one settings read per tick. With it on, every queued PR waits for a review, so a stuck worker or a bad model key holds the queue's PRs in place: a failed run retries twice, then hands the whole PR to a human.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/142?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795993659&installation_model_id=434381&pr_number=142&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F142&signature=983fce30ce463cbc6e818afddc59de64dd7fa6956364778988568046d94b2f37"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: crates/executor/src/remote.rs, lines: 133 }
+        - { file: crates/executor/src/remote.rs, lines: 192 }
+        - { file: crates/executor/src/protocol.rs, lines: 9-12 }
+      what: "The hosted executor's upload and mailbox lists omit review.json and answer.md, so every hosted review fails."
+      fixed_by: "#144"
+    - at:
+        - { file: crates/mergepatrol/src/queue.rs, lines: 2558-2560 }
+        - { file: crates/mergepatrol/src/queue.rs, lines: 2635-2637 }
+        - { file: crates/mergepatrol/src/queue.rs, lines: 2658-2668 }
+      what: "An approval carries onto heads the queue's agent wrote, so the agent's fixes merge unreviewed."
+      fixed_by: "#197"
+    - at:
+        - { file: crates/web/src/review.rs, lines: 543-546 }
+      what: "The verdict ignores who answers: GitHub refuses REQUEST_CHANGES and APPROVE from the PR's own author."
+      fixed_by: "#147"

@@ -1,0 +1,62 @@
+repo: agent-labs-dev/mergeloop
+pr: 148
+base: 41bfd1fd5d4e46c4ec52f94114ed18f01b80dabb
+head: 4f8a84240e2046e284040dca25cbfa66766053f6
+title: "fix(review): show an answered review in the queue at once"
+body: |-
+  ## What was wrong
+
+  When you answer the agent's review in the dashboard, the queue keeps the PR on **Needs a human**, even though the answer saved.
+
+  The answer handler stores the answer and wakes the repo's queue. But a lane only sets holds at the start of a tick, and a tick that's running a job (rebase, CI, merge for the PR ahead) saves nobody else's hold until that job ends. Every surface reads the saved hold, so the stale **Needs a human** stays up for as long as the PR ahead takes. In a repo with slow CI, that can be many minutes.
+
+  **Reproduced from GitHub's timeline on agent-labs-dev/nebula#11290:**
+  - 01:48:04: Joaquim answers the review (all "fine as is"), on head `db35c08e`
+  - 01:49:09: agent-labs-dev/nebula#11484, the lane's running job, merges
+  - 01:50:13: the queue takes #11290 and rebases it
+
+  So the answer did let the PR on, but only after the other PR's job ended. The threshold change in the UI doesn't touch this path.
+
+  ## The fix
+
+  Nothing in a lane can start while a job runs, so the queue's behavior was right and only the display was stale. Holds are still set only by the queue. What changes is how the readers show a held PR's review gate: they take it from the PR's newest review, which is updated the moment an answer lands (or the agent finishes).
+
+  - `ReviewStatus::hold` (core): the status → hold mapping. It moves out of `review_hold` in the queue, so the queue and the views share one source.
+  - `Entry::with_review` (core): when an entry is held on a review hold, it swaps that hold for what the newest review says now. If the review was approved, a single PR shows as Waiting. Any later gate it has gets set at the next tick. A stack layer that was approved keeps its hold, because another layer may still be holding the stack.
+  - `api::reviewed` (web): applied in the lanes view (dashboard and `list_lanes`), the You tab's queue spots, and the v1 PR status (tray/extension).
+  - Changelog entry, since this is a fix users hit.
+
+  ## Verification
+
+  - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+  - `cargo test -p mergepatrol-core`: 44 pass. That includes a new table test, `a_review_hold_shows_the_review_as_it_is_now`. I saw it fail on its own assertion (`Held(ReviewAsks) with Some(Approved)`) when `with_review` was a no-op.
+  - `cargo test -p mergepatrol`: 100 pass, queue loop tests included. The 10 `#[sqlx::test]` cases need Postgres, which this machine can't start (no Docker). CI runs them.
+  - No API types changed, so `ui/src/api` is untouched.
+
+  ## Files
+
+  - `content/changelog/2026-10-31-review-answers-show-at-once.md`
+  - `crates/core/src/lane.rs`
+  - `crates/core/src/review.rs`
+  - `crates/mergepatrol/src/queue.rs`
+  - `crates/web/src/api.rs`
+  - `crates/web/src/v1.rs`
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  ---
+  Assisted by [Nebula](https://nebula.gg).
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/148?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1796003951&installation_model_id=434381&pr_number=148&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F148&signature=54f274f9bd62f94b501eb6a9ddf656abb8259352b8d43235b2b3eb09149cf1a1"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith-bot</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected:
+  bugs:
+    - at:
+        - { file: crates/core/src/lane.rs, lines: 139-144 }
+      what: "A cleared review flips a held entry to Waiting though later gates still hold it."
+      fixed_by: "#252"

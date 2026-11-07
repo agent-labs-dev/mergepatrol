@@ -1,0 +1,49 @@
+repo: agent-labs-dev/mergeloop
+pr: 18
+base: c570286618727a6d2c387dc60423ab4bce590210
+head: 34911a459f57c0798d3650bcf0753c93d8f51ac2
+title: "fix: leave no job container behind when a queue stops mid-job"
+body: |-
+  ## Summary
+
+  When a queue stopped mid-job (repo turned off, or the App set up again), it dropped the job without removing the job's container. The container ran on and stayed, now with its `/out` volume (#15).
+
+  ```diff
+   DockerExecutor::run
+     docker rm -f -v <name>              # leftover from a crash, as before
+  +  _container = Removed(<name>)        # on drop: docker rm -f -v <name>
+     docker create … / start / cp
+  -  docker kill (on error); docker rm -f -v <id> (at the end)
+  ```
+
+  `Drop` can't wait, so it spawns `docker rm` and tokio reaps it. The guard owns the name, which is known before `docker create`, so a job cut off during create is covered too. A restart is still covered by the existing remove-by-name, when the same job runs again.
+
+  ## Evidence
+
+  Nothing changes on screen. New ignored Docker test, on the job image: a job that hangs on an address that never answers, cut off while it runs.
+
+  - **Before** (executor from `main`): `a_cut_off_docker_job_leaves_no_container` fails with `the container is still there`
+    **After:** it passes. The existing real-`DockerExecutor` test passes too. Afterwards `docker ps -a --filter name=mergepatrol-job-` is empty, and the volume count is unchanged.
+
+  `cargo test` and clippy are clean, apart from the `type_complexity` warning on `main`, which the label-removal PR fixes.
+
+  Reviewed with sol-loop: 1 round with gpt-6.1-sol. Sol verdict: approved. Its nit (a job cut off during `docker create`) is fixed in the second commit.
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  **Blast Radius:** jobs
+
+  Removal now finishes after `run` returns, not before. Nothing reads the container after that.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+  <!-- codesmith:footer -->
+  ---
+  <a href="https://app.blacksmith.sh/agent-labs-dev/codesmith/mergepatrol/pr/18?autoLogin=true&ref=codesmith_pr_footer"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-light-v3.svg"><img alt="View with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/view-with-codesmith-dark-v3-3x.png" width="162" height="28"></picture></a> <a href="https://backend.blacksmith.sh/track/enable-autofix?expires=1795829798&installation_model_id=434381&pr_number=18&ref=codesmith_pr_footer&repository=agent-labs-dev%2Fmergepatrol&return_to=https%3A%2F%2Fgithub.com%2Fagent-labs-dev%2Fmergepatrol%2Fpull%2F18&signature=b04fd56fee328d639060ee713d097344e75d2ab1375b056c9ebe1e53eac7fabc"><picture><source media="(prefers-color-scheme: dark)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark.svg"><source media="(prefers-color-scheme: light)" srcset="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-light.svg"><img alt="Autofix with [code]smith" src="https://pr-comments-assets.blacksmith.sh/codesmith/autofix-with-codesmith-dark-3x.png" width="190" height="28"></picture></a>
+  <sup>Need help on this PR? Tag <code>@codesmith</code> with what you need.</sup>
+
+  <!-- codesmith:autofix:disabled -->
+  <!-- /codesmith:footer -->
+expected: clean

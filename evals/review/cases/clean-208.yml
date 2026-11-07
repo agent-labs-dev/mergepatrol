@@ -1,0 +1,52 @@
+repo: agent-labs-dev/mergeloop
+pr: 208
+base: afb9923a7e9b07e39b7977c5adf60177d14eb86d
+head: 18f9fac2b3a58afd74383cd9c0cc21639a04d3d3
+title: "fix(queue): keep one queue when a repo is renamed"
+body: |-
+  ## Summary
+
+  Everything is keyed by `owner/name`. GitHub keeps serving a renamed repo's old name, so nothing noticed the rename: the old name's lane stayed in the sidebar beside the new one, and the repo's settings and history stayed under the old name.
+
+  ```diff
+   discover_once (every 5 minutes)
+     gh.repositories()
+  +  follow_renames
+  +    for each name the queue wrote that the installation no longer lists
+  +      gh.current_name(old)            # GET /repos/{old} follows the redirect
+  +      if the installation lists it
+  +        store.rename_repo(old, new)
+     gh.have_file(...)
+     store.replace_has_config(...)
+  ```
+
+  `rename_repo` runs in one transaction. Where both names have a row, the new name's stays, since the queue wrote it later. An on/off setting made under the old name carries over when the new name has none. `events` and `exits` move, and the cached GitHub reads for the old name go.
+
+  There is no migration. The first pass after deploy also cleans up `agent-labs-dev/mergepatrol`.
+
+  ## Evidence
+
+  No after screenshot: the sidebar only changes once prod data is moved, which needs this deployed.
+
+  - **Before:** a lane row left under `o/old` listed a second queue, and its events stayed behind.
+    **After:** `a_renamed_repo_keeps_its_queue_and_history` passes. Both names merge into one, the new name's lane wins on a clash, the other trunk's lane moves, events and exits follow, another workspace's `o/old` is untouched, and a second run does nothing.
+  - `an_old_name_answers_with_the_name_github_uses_now` passes: 200 gives the new name, 404 gives `None`, 500 is an error.
+  - `cargo test` passes for the store, github, web and mergepatrol crates, and clippy and fmt are clean.
+
+  - `only_a_repo_github_says_is_now_a_listed_one_moves` passes: discovery moves a valid rename, and leaves an unlisted destination, an inaccessible old name and another installation's row alone.
+  - `an_old_name_follows_github_s_redirect_with_the_token` passes: a scripted 301 keeps the bearer token.
+
+  Not tested: a real GitHub 301 with an installation token. It is scripted here, and was seen live only through `gh` with a user token.
+
+  ## Merge Danger
+
+  **Door:** one-way
+
+  Reverting the code is easy, but a merge deletes the old name's rows where the new name has one. Those rows are not restored.
+
+  **Blast Radius:** repo-scoped
+
+  Only names the installation no longer lists are touched, and only when GitHub maps them to a repo it does list. A new repo created under an old name before the next pass would inherit the old rows. Recently merged PRs from before a rename drop off the You tab, as they already did, because the inbox reads again under the new name.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+expected: clean

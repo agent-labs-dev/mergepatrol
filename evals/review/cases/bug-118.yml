@@ -1,0 +1,70 @@
+repo: agent-labs-dev/mergeloop
+pr: 118
+base: 09b703d8a0a87bdfd54546dbacc68eebcce05b03
+head: 83e5c4aa93a8141694581af4385c09ee20d169d9
+title: "feat(deploy): stop hosted jobs from reaching any host but GitHub and package registries"
+body: |-
+  ## Summary
+
+  Hosted jobs run untrusted repo code and an agent with a shell, and they could reach any public host. Now their only way out is an in-cluster Squid proxy that tunnels to an allowlist: GitHub plus the package registries.
+
+  ```diff
+   job sandbox (gVisor, mergepatrol-jobs)
+  -  egress: 0.0.0.0/0 minus private, metadata, cluster ranges
+  -  DNS: 8.8.8.8, 1.1.1.1
+  +  egress: mergepatrol-egress:3128, orchestrator:8081
+  +  DNS: none (127.0.0.1); the proxy resolves
+  +  env: HTTPS_PROXY=http://34.118.224.100:3128 (+ https_proxy, NODE_USE_ENV_PROXY, YARN_HTTPS_PROXY)
+  +mergepatrol-egress (Squid ×2, fixed ClusterIP 34.118.224.100)
+  +  CONNECT :443 to deploy/gcp/k8s/squid.conf hosts, else 403
+  +  ingress: job pods only; egress: internet :443 + public DNS
+  ```
+
+  - `deploy.sh` loads `squid.conf` into a ConfigMap and stamps its hash on the Deployment, so a new allowlist rolls the proxy pods.
+  - The allowlist covers GitHub (github.com, api, codeload, the githubusercontent hosts), npm/Yarn, nodejs.org, PyPI, the Go proxy, sumdb and its `storage.googleapis.com` bucket, crates.io, and static.rust-lang.org.
+  - What it doesn't stop, documented in the README: a job that brings its own credentials can still push to GitHub or publish to a registry, and it can write to a bucket that anyone can write to on `storage.googleapis.com`. Closing that takes TLS interception, which is a follow-up.
+
+  ## Evidence
+
+  No visual change.
+
+  Already applied to the live `mergepatrol-jobs` namespace (with your approval) and probed from inside the real warm sandbox:
+
+  | Probe | Result |
+  | --- | --- |
+  | git clone, GitHub API, node fetch | PASS via proxy |
+  | npm install, corepack pnpm 9, corepack yarn 4, pip install, cargo fetch, go get | PASS via proxy |
+  | go module redirected to GCS (go-git-fixtures v4.2.1), `GOTOOLCHAIN=go1.23.4` download | PASS (caught in Sol review round 1) |
+  | example.com, gitlab.com, storage.googleapis.com before the fix | TCP_DENIED/403 in the squid log |
+  | direct TCP to a GitHub IP, 169.254.169.254, k8s API, kube-dns, NodeLocal DNS | blocked |
+  | orchestrator pod :8081 | reachable |
+  | DNS lookup | fails at once, no hang |
+  | new squid.conf | the hash rolled both proxy pods |
+  | CONNECT to a bare IP whose PTR is allowlisted (140.82.112.3 → lb-140-82-112-3-iad.github.com, test config) | allowed (301) without `-n`, refused with `-n`; live: 140.82.112.3 refused, GitHub/npm still 200 (caught in Sol review round 3) |
+
+  Locally (Docker, internal network), the same toolchains passed with the job image, plus `rustup toolchain install`.
+
+  - **Before:** job egress = `0.0.0.0/0` minus private ranges, so `fetch("https://example.com")` succeeded.
+  - **After:** the same fetch fails with 403 from the proxy, and every toolchain above still installs.
+
+  Not yet observed: a real production job under the new config. None has run since the apply at 04:27Z.
+
+  Reviewed with sol-loop: 3 rounds with gpt-6.1-sol. Sol verdict: round 2 approved; round 3's blocker (PTR match on IP literals) fixed in the last commit, not re-reviewed (budget spent).
+
+  ## Merge Danger
+
+  **Door:** two-way
+
+  Re-apply main's `jobs.yaml` to roll back. The proxy objects are inert without the template change.
+
+  **Blast Radius:** jobs
+
+  A verify command that needs a host off the list fails until the host is added to `squid.conf`. The proxy's log names the refused host (`kubectl -n mergepatrol-jobs logs -l app=mergepatrol-egress | grep DENIED`). If both proxy pods are down, every job's network fails.
+
+  🤖 Generated with [Claude Code](https://claude.com/claude-code)
+expected:
+  bugs:
+    - at:
+        - { file: deploy/gcp/k8s/jobs.yaml, lines: 75-83 }
+      what: "Assumes plain-HTTP relay calls skip the proxy; with no NO_PROXY, Squid refuses every agent run."
+      fixed_by: "#128"
