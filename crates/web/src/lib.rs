@@ -2123,7 +2123,7 @@ mod tests {
                 .collect()
         };
         let added = r#"{"added":[".mergeloop/mergeloop.yml"],"removed":[],"modified":[]}"#;
-        let removed = r#"{"added":[],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        let removed = r#"{"added":[],"removed":[".mergeloop/mergeloop.yml"],"modified":[]}"#;
         let other = r#"{"added":["a.txt"],"removed":[],"modified":[]}"#;
 
         // Another branch, or another file, changes nothing.
@@ -2137,16 +2137,34 @@ mod tests {
         )
         .await;
         assert_eq!(on().await, [true]);
+        // The file moved from the old path to the new, in one commit or two.
+        let legacy = r#"{"added":[],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        let moved = r#"{"added":[".mergeloop/mergeloop.yml"],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
+        deliver_push(&router, &push("refs/heads/main", moved)).await;
+        assert_eq!(on().await, [true]);
+        deliver_push(&router, &push("refs/heads/main", removed)).await;
+        deliver_push(
+            &router,
+            &push("refs/heads/main", &format!("{added},{legacy}")),
+        )
+        .await;
+        assert_eq!(on().await, [true]);
+        // Removing one path says nothing of the other.
+        deliver_push(&router, &push("refs/heads/main", legacy)).await;
+        assert_eq!(on().await, [true]);
         deliver_push(
             &router,
             &push("refs/heads/main", &format!("{added},{removed}")),
         )
         .await;
-        assert_eq!(on().await, [false]);
-        // One commit that moves the file from the old path to the new.
-        let moved = r#"{"added":[".mergeloop/mergeloop.yml"],"removed":[".mergepatrol/mergepatrol.yml"],"modified":[]}"#;
-        deliver_push(&router, &push("refs/heads/main", moved)).await;
         assert_eq!(on().await, [true]);
+        // Removing both does.
+        deliver_push(
+            &router,
+            &push("refs/heads/main", &format!("{removed},{legacy}")),
+        )
+        .await;
+        assert_eq!(on().await, [false]);
     }
 
     #[sqlx::test(migrations = false)]
