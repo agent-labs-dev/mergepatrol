@@ -4950,3 +4950,4 @@ async fn a_stack_layer_gets_its_own_missing_check_clock() {
     assert_eq!(run.kinds(2).last().unwrap(), "ejected");
     assert!(last_comment(&run).contains("finished: sift."));
 }
+mod status_comment_regression;

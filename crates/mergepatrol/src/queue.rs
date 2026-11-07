@@ -1217,6 +1217,9 @@ async fn sync_lane(
         .filter(|e| matches!(&e.state, EntryState::Held(h) if h.of_prep()))
         .map(|e| e.number)
         .collect();
+    // Each entry's PRs before the sync: a stack's layers join and leave it while it stays.
+    let before: HashMap<PrNumber, Vec<PrNumber>> =
+        lane.entries.iter().map(|e| (e.number, e.prs())).collect();
     // Each entry's comment, the last its changes call for.
     let mut comments: Vec<(PrNumber, String)> = Vec::new();
     for change in lane.sync(&candidates) {
@@ -1277,8 +1280,36 @@ async fn sync_lane(
             comments.push((number, comment));
         }
     }
+    // The layers that joined or left a stack that stays, which its own changes do not cover.
+    let mut joined_comments: Vec<(Vec<PrNumber>, String)> = Vec::new();
+    for e in lane.entries.clone() {
+        let Some(old) = before.get(&e.number) else {
+            continue;
+        };
+        let now = e.prs();
+        let left: Vec<PrNumber> = old.iter().filter(|n| !now.contains(n)).copied().collect();
+        let joined: Vec<PrNumber> = now.iter().filter(|n| !old.contains(n)).copied().collect();
+        if !left.is_empty() {
+            let left = exit_once(ctx, key, &left, "dequeued", "left the queue").await?;
+            let left: Vec<PrNumber> = left
+                .into_iter()
+                .filter(|n| !queued.contains(n) && !dropped.contains(n))
+                .collect();
+            comment_left(gh, repo, &labels.trigger, &left).await;
+        }
+        if !joined.is_empty() {
+            record_all(ctx, key, &joined, "enqueued", "added to the queue").await?;
+            let covered = comments.iter().any(|(n, _)| *n == e.number);
+            if let Some(comment) = standing(&e.state, gate.as_ref()).filter(|_| !covered) {
+                joined_comments.push((joined, comment));
+            }
+        }
+    }
     for (number, comment) in comments {
         comment_all(gh, repo, &prs_of(number), &comment).await?;
+    }
+    for (prs, comment) in joined_comments {
+        comment_all(gh, repo, &prs, &comment).await?;
     }
     ctx.store.save_lane(key, lane).await?;
     if started {
@@ -1954,6 +1985,19 @@ async fn resume_merge(
     }
     ctx.store.save_lane(key, lane).await?;
     Ok(sha.is_some())
+}
+
+/// What the comment of a PR that joins an entry in `state` says: where the entry stands.
+fn standing(state: &EntryState, gate: Option<&mergepatrol_billing::Hold>) -> Option<String> {
+    match state {
+        EntryState::Waiting => Some(ENQUEUED.to_owned()),
+        EntryState::Held(h) => Some(match gate {
+            Some(g) if g.reason == *h => g.comment.clone(),
+            _ if h.of_prep() => GETTING_READY.to_owned(),
+            _ => on_hold(h),
+        }),
+        EntryState::Active => None,
+    }
 }
 
 /// What a PR's comment says once it joins the queue.
