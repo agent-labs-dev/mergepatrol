@@ -1038,6 +1038,7 @@ mod tests {
                 }),
                 needs_human: false,
                 verified: None,
+                settled: None,
                 code: Vec::new(),
                 related: Vec::new(),
                 also_at: Vec::new(),
@@ -1047,6 +1048,7 @@ mod tests {
             withdrawn: false,
             threaded: false,
             bar: Bar::From(90),
+            outcome: None,
         }
     }
 
@@ -1069,6 +1071,7 @@ mod tests {
             answered_by: None,
             note: String::new(),
             questions: Vec::new(),
+            waited_secs: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

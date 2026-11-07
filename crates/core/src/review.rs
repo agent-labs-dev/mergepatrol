@@ -309,6 +309,10 @@ pub struct Finding {
     /// change that shows nothing MergeLoop ran, whether enough agree it holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified: Option<Verification>,
+    /// On a `fine` finding that reports again one the last review held the PR for: how it was
+    /// settled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled: Option<Settled>,
     /// The lines it is about, from the PR's diff.
     #[serde(default)]
     pub code: Vec<CodeLine>,
@@ -751,6 +755,99 @@ pub struct Judged {
     #[serde(default)]
     pub threaded: bool,
     pub bar: Bar,
+    /// What became of it, once that is known: of a change sent back or asked of a human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
+}
+
+/// What became of a finding that asked for a change, as the blog post on Claude Code's review
+/// sorts a comment by how its author took it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// The code changed to fix it.
+    Fixed,
+    /// The finding was wrong, or did not apply: the author's reply held up in the code.
+    Wrong,
+    /// The code does what its author meant it to, and that holds up.
+    Intended,
+    /// Let go without a fix or a reply that held up: the author resolved its thread with no
+    /// push, or a human called it fine.
+    Dismissed,
+}
+
+/// How the next review says a finding the last held the PR for was settled. Only a person
+/// dismisses one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Settled {
+    Fixed,
+    Wrong,
+    Intended,
+}
+
+impl From<Settled> for Outcome {
+    fn from(s: Settled) -> Self {
+        match s {
+            Settled::Fixed => Outcome::Fixed,
+            Settled::Wrong => Outcome::Wrong,
+            Settled::Intended => Outcome::Intended,
+        }
+    }
+}
+
+impl Judged {
+    /// Records what became of it. The first word on it stands.
+    pub fn settle(&mut self, outcome: Outcome) {
+        self.outcome.get_or_insert(outcome);
+    }
+
+    /// Whether it held the PR for a change, unsettled: sent back, or a change a human asked for.
+    fn open(&self, answers: &BTreeMap<String, Answer>) -> bool {
+        self.outcome.is_none()
+            && (self.sent_back
+                || matches!(answers.get(&self.finding.id), Some(Answer::Change { .. })))
+    }
+}
+
+/// What the next head's review says of the last review's open findings, by id: one it reports
+/// `fine` again, by the same title, was settled as it says, or fixed if it does not say. One
+/// reported again as a change, or not at all, stays open.
+pub fn settled_by(
+    last: &[Judged],
+    answers: &BTreeMap<String, Answer>,
+    now: &[Finding],
+) -> Vec<(String, Outcome)> {
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    last.iter()
+        .filter(|j| j.open(answers))
+        .filter_map(|j| {
+            let again = now.iter().find(|f| same(&f.title, &j.finding.title))?;
+            (again.lean == Lean::Fine).then(|| {
+                let settled = again.settled.unwrap_or(Settled::Fixed);
+                (j.finding.id.clone(), settled.into())
+            })
+        })
+        .collect()
+}
+
+/// What a human's answers settle: a change they called fine is dismissed.
+pub fn settle_answers(findings: &mut [Judged], answers: &BTreeMap<String, Answer>) {
+    for j in findings
+        .iter_mut()
+        .filter(|j| j.finding.lean == Lean::Change)
+    {
+        if let Some(Answer::Fine) = answers.get(&j.finding.id) {
+            j.settle(Outcome::Dismissed);
+        }
+    }
+}
+
+/// The author resolved every thread with no push: what is still sent back was dismissed.
+pub fn dismiss_sent_back(findings: &mut [Judged]) {
+    for j in findings.iter_mut().filter(|j| j.sent_back) {
+        j.settle(Outcome::Dismissed);
+    }
 }
 
 impl ReviewSettings {
@@ -766,6 +863,7 @@ impl ReviewSettings {
                     withdrawn: false,
                     threaded: false,
                     bar: self.bar(finding.kind),
+                    outcome: None,
                     finding,
                 }
             })
@@ -834,6 +932,7 @@ mod tests {
             }),
             needs_human: false,
             verified: None,
+            settled: None,
             code: Vec::new(),
             related: Vec::new(),
             also_at: Vec::new(),
@@ -1067,6 +1166,165 @@ mod tests {
             ..Default::default()
         });
         assert!(!off.enabled);
+    }
+
+    fn judged(id: &str, title: &str, lean: Lean) -> Judged {
+        let mut f = finding(Kind::Other, 90, lean);
+        f.id = id.into();
+        f.title = title.into();
+        Judged {
+            finding: f,
+            asked: false,
+            sent_back: false,
+            withdrawn: false,
+            threaded: false,
+            bar: Bar::From(80),
+            outcome: None,
+        }
+    }
+
+    fn again(title: &str, lean: Lean, settled: Option<Settled>) -> Finding {
+        let mut f = finding(Kind::Other, 90, lean);
+        f.title = title.into();
+        f.settled = settled;
+        f
+    }
+
+    #[test]
+    fn the_next_review_settles_what_the_last_held_the_pr_for() {
+        let back = |id, title| Judged {
+            sent_back: true,
+            ..judged(id, title, Lean::Change)
+        };
+        let asked = |id, title| Judged {
+            asked: true,
+            ..judged(id, title, Lean::Change)
+        };
+        let last = vec![
+            back("f1", "Retry never stops"),
+            back("f2", "The lock races"),
+            back("f3", "The cache leaks"),
+            asked("f4", "The flag is public"),
+            asked("f5", "The schema drops a column"),
+            judged("f6", "Tests pass", Lean::Fine),
+            Judged {
+                outcome: Some(Outcome::Wrong),
+                ..back("f7", "Withdrawn already")
+            },
+            back("f8", "Not raised again"),
+        ];
+        let answers = BTreeMap::from([
+            (
+                "f4".to_owned(),
+                Answer::Change {
+                    note: String::new(),
+                },
+            ),
+            ("f5".to_owned(), Answer::Fine),
+        ]);
+        let now = vec![
+            // The same title, however it is cased or spaced.
+            again(" retry never stops", Lean::Fine, Some(Settled::Fixed)),
+            again("The lock races", Lean::Fine, Some(Settled::Intended)),
+            again("The cache leaks", Lean::Change, None),
+            // Reported fine without saying why: the prompt asks a fixed one be reported so.
+            again("The flag is public", Lean::Fine, None),
+            again(
+                "The schema drops a column",
+                Lean::Fine,
+                Some(Settled::Fixed),
+            ),
+            again("Tests pass", Lean::Fine, Some(Settled::Fixed)),
+            again("Withdrawn already", Lean::Fine, Some(Settled::Fixed)),
+        ];
+        assert_eq!(
+            settled_by(&last, &answers, &now),
+            vec![
+                ("f1".to_owned(), Outcome::Fixed),
+                ("f2".to_owned(), Outcome::Intended),
+                ("f4".to_owned(), Outcome::Fixed),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_outcome_is_set_once() {
+        let mut j = judged("f1", "t", Lean::Change);
+        j.settle(Outcome::Wrong);
+        j.settle(Outcome::Fixed);
+        assert_eq!(j.outcome, Some(Outcome::Wrong));
+    }
+
+    #[test]
+    fn a_human_who_calls_a_change_fine_dismisses_it() {
+        let mut findings = vec![
+            Judged {
+                asked: true,
+                ..judged("f1", "a", Lean::Change)
+            },
+            Judged {
+                asked: true,
+                ..judged("f2", "b", Lean::Change)
+            },
+            // A question about what the agent found fine is no change to dismiss.
+            Judged {
+                asked: true,
+                ..judged("f3", "c", Lean::Fine)
+            },
+        ];
+        let answers = BTreeMap::from([
+            ("f1".to_owned(), Answer::Fine),
+            (
+                "f2".to_owned(),
+                Answer::Change {
+                    note: String::new(),
+                },
+            ),
+            ("f3".to_owned(), Answer::Fine),
+        ]);
+        settle_answers(&mut findings, &answers);
+        let outcomes: Vec<_> = findings.iter().map(|f| f.outcome).collect();
+        assert_eq!(outcomes, vec![Some(Outcome::Dismissed), None, None]);
+    }
+
+    #[test]
+    fn resolving_a_thread_with_no_push_dismisses_what_is_still_sent_back() {
+        let mut findings = vec![
+            Judged {
+                sent_back: true,
+                ..judged("f1", "a", Lean::Change)
+            },
+            Judged {
+                withdrawn: true,
+                outcome: Some(Outcome::Wrong),
+                ..judged("f2", "b", Lean::Change)
+            },
+            judged("f3", "c", Lean::Change),
+        ];
+        dismiss_sent_back(&mut findings);
+        let outcomes: Vec<_> = findings.iter().map(|f| f.outcome).collect();
+        assert_eq!(
+            outcomes,
+            vec![Some(Outcome::Dismissed), Some(Outcome::Wrong), None]
+        );
+    }
+
+    #[test]
+    fn a_settled_finding_reads_as_the_agent_writes_it() {
+        let f: Finding = serde_json::from_value(serde_json::json!({
+            "kind": "other", "title": "t", "confidence": 90, "lean": "fine",
+            "finding": "", "settled": "wrong"
+        }))
+        .unwrap();
+        assert_eq!(f.settled, Some(Settled::Wrong));
+        assert!(
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "kind": "other", "title": "t", "confidence": 90, "lean": "fine",
+                "finding": "", "settled": "dismissed"
+            }))
+            .is_err(),
+            "only a person dismisses"
+        );
     }
 
     #[test]

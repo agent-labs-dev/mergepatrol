@@ -245,6 +245,7 @@ mod tests {
             answered_by: None,
             note: String::new(),
             questions: Vec::new(),
+            waited_secs: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

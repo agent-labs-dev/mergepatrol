@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mergepatrol_core::{
-    Answer, Judged, PrNumber, Question, RepoName, ReviewSettings, ReviewStatus,
+    Answer, Judged, Outcome, PrNumber, Question, RepoName, ReviewSettings, ReviewStatus,
+    dismiss_sent_back, settle_answers,
 };
 use sqlx::Row;
 use sqlx::postgres::PgRow;
@@ -38,6 +39,8 @@ pub struct ReviewRecord {
     pub answered_by: Option<String>,
     pub note: String,
     pub questions: Vec<Question>,
+    /// How long it waited on a human, from asking to their answer. `None` until they answer.
+    pub waited_secs: Option<u32>,
     /// RFC 3339.
     pub created_at: String,
     pub updated_at: String,
@@ -167,14 +170,24 @@ pub trait ReviewStore: Send + Sync {
         question: &str,
         answer: std::result::Result<String, String>,
     ) -> Result<bool>;
-    /// The agent withdrew a finding it sent back to the author, on their reply. A review that
-    /// held the PR for the author alone, and now holds it for nothing, approves it. Returns the
-    /// review's status after, or `None` if the finding was not sent back.
-    async fn withdraw_finding(&self, id: i64, finding: &str) -> Result<Option<ReviewStatus>>;
+    /// The agent withdrew a finding it sent back to the author, on their reply, as `outcome`
+    /// says. A review that held the PR for the author alone, and now holds it for nothing,
+    /// approves it. Returns the review's status after, or `None` if the finding was not sent
+    /// back.
+    async fn withdraw_finding(
+        &self,
+        id: i64,
+        finding: &str,
+        outcome: Outcome,
+    ) -> Result<Option<ReviewStatus>>;
+    /// What became of these findings of the review, by id, as the next head's review says. A
+    /// finding keeps the first outcome it was given.
+    async fn settle_findings(&self, id: i64, outcomes: &[(String, Outcome)]) -> Result<()>;
     /// These findings of the review have a thread on the PR.
     async fn mark_threaded(&self, id: i64, findings: &[String]) -> Result<()>;
     /// The author resolved every thread of a review that held the PR for them alone: it
-    /// approves. False if it no longer holds for them alone.
+    /// approves, and what it still sent back was dismissed. False if it no longer holds for
+    /// them alone.
     async fn approve_resolved(&self, id: i64) -> Result<bool>;
     /// The workspace's reviews of the last `days`, newest first.
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>>;
@@ -192,6 +205,7 @@ macro_rules! columns {
     () => {
         r#"id, installation_id, repo, number, head_sha, since_head, status, claim, error, attempts,
     summary, findings, asked, answers, answered_by, note, questions,
+    EXTRACT(EPOCH FROM answered_at - asked_at)::INT AS waited_secs,
     to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
     to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at"#
     };
@@ -218,6 +232,9 @@ fn record(row: &PgRow) -> Result<ReviewRecord> {
         answered_by: row.get("answered_by"),
         note: row.get("note"),
         questions: serde_json::from_value(row.get("questions"))?,
+        waited_secs: row
+            .get::<Option<i32>, _>("waited_secs")
+            .map(|s| s.max(0) as u32),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -225,6 +242,43 @@ fn record(row: &PgRow) -> Result<ReviewRecord> {
 
 fn records(rows: &[PgRow]) -> Result<Vec<ReviewRecord>> {
     rows.iter().map(record).collect()
+}
+
+impl PgStore {
+    /// Changes a review's findings under its row's lock. `edit` gets them with the review's
+    /// status and whether a human answered it, and returns the status to save with them, or
+    /// `None` to save nothing.
+    async fn edit_findings(
+        &self,
+        id: i64,
+        edit: impl FnOnce(&mut Vec<Judged>, ReviewStatus, bool) -> Option<ReviewStatus> + Send,
+    ) -> Result<Option<ReviewStatus>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT findings, status, answered_by FROM agent_reviews WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
+        let status: String = row.get("status");
+        let status =
+            ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?;
+        let answered = row.get::<Option<String>, _>("answered_by").is_some();
+        let Some(status) = edit(&mut findings, status, answered) else {
+            return Ok(None);
+        };
+        sqlx::query(
+            "UPDATE agent_reviews SET findings = $2, status = $3, updated_at = now() WHERE id = $1",
+        )
+        .bind(id)
+        .bind(serde_json::to_value(&findings)?)
+        .bind(status.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(status))
+    }
 }
 
 #[async_trait]
@@ -357,7 +411,8 @@ impl ReviewStore for PgStore {
     async fn finish_review(&self, id: i64, claim: i64, done: &ReviewDone) -> Result<bool> {
         let updated = sqlx::query(
             "UPDATE agent_reviews SET status = $2, error = $3, summary = $4, findings = $5,
-                 asked = $6, claimed_at = NULL, retry_at = NULL, updated_at = now()
+                 asked = $6, claimed_at = NULL, retry_at = NULL, updated_at = now(),
+                 asked_at = CASE WHEN $2 = 'asks' THEN now() END
              WHERE id = $1 AND status = 'running' AND claim = $7",
         )
         .bind(id)
@@ -479,19 +534,33 @@ impl ReviewStore for PgStore {
     }
 
     async fn answer_review(&self, id: i64, a: &ReviewAnswers) -> Result<bool> {
-        let updated = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT findings FROM agent_reviews WHERE id = $1 AND status = 'asks' FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(false);
+        };
+        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
+        settle_answers(&mut findings, &a.answers);
+        sqlx::query(
             "UPDATE agent_reviews SET status = $2, answers = $3, answered_by = $4, note = $5,
-                 updated_at = now()
-             WHERE id = $1 AND status = 'asks'",
+                 findings = $6, answered_at = now(), updated_at = now()
+             WHERE id = $1",
         )
         .bind(id)
         .bind(a.status.as_str())
         .bind(serde_json::to_value(&a.answers)?)
         .bind(&a.by)
         .bind(&a.note)
-        .execute(&self.pool)
+        .bind(serde_json::to_value(&findings)?)
+        .execute(&mut *tx)
         .await?;
-        Ok(updated.rows_affected() == 1)
+        tx.commit().await?;
+        Ok(true)
     }
 
     async fn nudge_review(&self, id: i64) -> Result<bool> {
@@ -603,74 +672,64 @@ impl ReviewStore for PgStore {
         Ok(true)
     }
 
-    async fn withdraw_finding(&self, id: i64, finding: &str) -> Result<Option<ReviewStatus>> {
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT findings, status, answered_by FROM agent_reviews WHERE id = $1 FOR UPDATE",
-        )
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
-        let status: String = row.get("status");
-        let status =
-            ReviewStatus::parse(&status).with_context(|| format!("bad status {status:?}"))?;
-        let answered_by: Option<String> = row.get("answered_by");
-        let Some(f) = findings
-            .iter_mut()
-            .find(|f| f.finding.id == finding && f.sent_back)
-        else {
-            return Ok(None);
-        };
-        f.sent_back = false;
-        f.withdrawn = true;
-        // Only the agent's own hold lifts: a human's request for changes stands.
-        let status = match status {
-            ReviewStatus::Changes if answered_by.is_none() => {
-                mergepatrol_core::review_status(&findings, false)
-            }
-            other => other,
-        };
-        sqlx::query(
-            "UPDATE agent_reviews SET findings = $2, status = $3, updated_at = now() WHERE id = $1",
-        )
-        .bind(id)
-        .bind(serde_json::to_value(&findings)?)
-        .bind(status.as_str())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(Some(status))
+    async fn withdraw_finding(
+        &self,
+        id: i64,
+        finding: &str,
+        outcome: Outcome,
+    ) -> Result<Option<ReviewStatus>> {
+        self.edit_findings(id, |findings, status, answered| {
+            let f = findings
+                .iter_mut()
+                .find(|f| f.finding.id == finding && f.sent_back)?;
+            f.sent_back = false;
+            f.withdrawn = true;
+            f.settle(outcome);
+            // Only the agent's own hold lifts: a human's request for changes stands.
+            Some(match status {
+                ReviewStatus::Changes if !answered => {
+                    mergepatrol_core::review_status(findings, false)
+                }
+                other => other,
+            })
+        })
+        .await
     }
 
     async fn mark_threaded(&self, id: i64, ids: &[String]) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query("SELECT findings FROM agent_reviews WHERE id = $1 FOR UPDATE")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let mut findings: Vec<Judged> = serde_json::from_value(row.get("findings"))?;
-        for f in findings.iter_mut().filter(|f| ids.contains(&f.finding.id)) {
-            f.threaded = true;
-        }
-        sqlx::query("UPDATE agent_reviews SET findings = $2, updated_at = now() WHERE id = $1")
-            .bind(id)
-            .bind(serde_json::to_value(&findings)?)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+        self.edit_findings(id, |findings, status, _| {
+            for f in findings.iter_mut().filter(|f| ids.contains(&f.finding.id)) {
+                f.threaded = true;
+            }
+            Some(status)
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn settle_findings(&self, id: i64, outcomes: &[(String, Outcome)]) -> Result<()> {
+        self.edit_findings(id, |findings, status, _| {
+            for (finding, outcome) in outcomes {
+                if let Some(f) = findings.iter_mut().find(|f| &f.finding.id == finding) {
+                    f.settle(*outcome);
+                }
+            }
+            Some(status)
+        })
+        .await?;
         Ok(())
     }
 
     async fn approve_resolved(&self, id: i64) -> Result<bool> {
-        let updated = sqlx::query(
-            "UPDATE agent_reviews SET status = 'approved', updated_at = now()
-             WHERE id = $1 AND status = 'changes' AND answered_by IS NULL",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        Ok(updated.rows_affected() == 1)
+        let approved = self
+            .edit_findings(id, |findings, status, answered| {
+                (status == ReviewStatus::Changes && !answered).then(|| {
+                    dismiss_sent_back(findings);
+                    ReviewStatus::Approved
+                })
+            })
+            .await?;
+        Ok(approved.is_some())
     }
 
     async fn reviews_since(&self, installation_id: u64, days: u32) -> Result<Vec<ReviewRecord>> {
@@ -756,6 +815,7 @@ mod tests {
                 }),
                 needs_human: false,
                 verified: None,
+                settled: None,
                 code: Vec::new(),
                 related: Vec::new(),
                 also_at: Vec::new(),
@@ -765,7 +825,107 @@ mod tests {
             withdrawn: false,
             threaded: false,
             bar: Bar::From(90),
+            outcome: None,
         }
+    }
+
+    /// A finished review of `head`, with `findings`.
+    async fn finished(
+        store: &PgStore,
+        head: &str,
+        status: ReviewStatus,
+        findings: Vec<Judged>,
+    ) -> i64 {
+        let r = store.start_review(1, &repo(), 8, head).await.unwrap();
+        let claim = store
+            .claim_review(Duration::from_secs(600))
+            .await
+            .unwrap()
+            .unwrap()
+            .claim;
+        let done = ReviewDone {
+            status,
+            error: None,
+            summary: "s".into(),
+            findings,
+            asked: Vec::new(),
+        };
+        assert!(store.finish_review(r.id, claim, &done).await.unwrap());
+        r.id
+    }
+
+    fn outcomes(r: &ReviewRecord) -> Vec<Option<Outcome>> {
+        r.findings.iter().map(|f| f.outcome).collect()
+    }
+
+    #[sqlx::test(migrations = false)]
+    async fn each_change_keeps_what_became_of_it_and_how_long_a_human_took(pool: PgPool) {
+        let store = PgStore::migrate(pool).await.unwrap();
+        let change = |id: &str, asked: bool| Judged {
+            finding: Finding {
+                lean: Lean::Change,
+                ..judged(id, asked).finding
+            },
+            sent_back: !asked,
+            ..judged(id, asked)
+        };
+        let id = finished(
+            &store,
+            "aaa",
+            ReviewStatus::Asks,
+            vec![change("f1", true), change("f2", true)],
+        )
+        .await;
+        assert_eq!(store.review(id).await.unwrap().unwrap().waited_secs, None);
+        let answers = ReviewAnswers {
+            answers: BTreeMap::from([
+                ("f1".to_owned(), Answer::Fine),
+                (
+                    "f2".to_owned(),
+                    Answer::Change {
+                        note: String::new(),
+                    },
+                ),
+            ]),
+            by: "mona".into(),
+            note: String::new(),
+            status: ReviewStatus::Changes,
+        };
+        assert!(store.answer_review(id, &answers).await.unwrap());
+        let r = store.review(id).await.unwrap().unwrap();
+        assert_eq!(outcomes(&r), [Some(Outcome::Dismissed), None]);
+        assert!(r.waited_secs.is_some(), "a human answered");
+
+        // The next head's review settles the rest, once.
+        let fixed = [("f2".to_owned(), Outcome::Fixed)];
+        store.settle_findings(id, &fixed).await.unwrap();
+        let wrong = [("f2".to_owned(), Outcome::Wrong)];
+        store.settle_findings(id, &wrong).await.unwrap();
+        let r = store.review(id).await.unwrap().unwrap();
+        assert_eq!(
+            outcomes(&r),
+            [Some(Outcome::Dismissed), Some(Outcome::Fixed)]
+        );
+
+        // Withdrawn on the author's reply, and the rest resolved with no push.
+        let id = finished(
+            &store,
+            "bbb",
+            ReviewStatus::Changes,
+            vec![change("f1", false), change("f2", false)],
+        )
+        .await;
+        store
+            .withdraw_finding(id, "f1", Outcome::Intended)
+            .await
+            .unwrap();
+        assert!(store.approve_resolved(id).await.unwrap());
+        let r = store.review(id).await.unwrap().unwrap();
+        assert_eq!(
+            outcomes(&r),
+            [Some(Outcome::Intended), Some(Outcome::Dismissed)]
+        );
+        assert_eq!(r.waited_secs, None, "no human was asked");
     }
 
     #[sqlx::test(migrations = false)]
@@ -802,19 +962,35 @@ mod tests {
             .unwrap();
         assert_eq!((taken.id, q.id.as_str()), (r.id, "q1"));
         // Not sent back: nothing to withdraw.
-        assert_eq!(store.withdraw_finding(r.id, "f3").await.unwrap(), None);
         assert_eq!(
-            store.withdraw_finding(r.id, "f1").await.unwrap(),
+            store
+                .withdraw_finding(r.id, "f3", Outcome::Wrong)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .withdraw_finding(r.id, "f1", Outcome::Wrong)
+                .await
+                .unwrap(),
             Some(ReviewStatus::Changes),
             "f2 still holds it"
         );
         assert_eq!(
-            store.withdraw_finding(r.id, "f2").await.unwrap(),
+            store
+                .withdraw_finding(r.id, "f2", Outcome::Wrong)
+                .await
+                .unwrap(),
             Some(ReviewStatus::Approved)
         );
         let r = store.review(r.id).await.unwrap().unwrap();
         assert_eq!(r.status, ReviewStatus::Approved);
         assert!(r.findings[..2].iter().all(|f| f.withdrawn && !f.sent_back));
+        assert_eq!(
+            outcomes(&r),
+            [Some(Outcome::Wrong), Some(Outcome::Wrong), None]
+        );
     }
 
     #[sqlx::test(migrations = false)]

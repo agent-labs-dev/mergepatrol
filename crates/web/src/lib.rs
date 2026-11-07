@@ -1386,6 +1386,7 @@ mod tests {
             evidence: None,
             needs_human: false,
             verified: None,
+            settled: None,
             code: Vec::new(),
             related: Vec::new(),
             also_at: Vec::new(),
@@ -1402,6 +1403,7 @@ mod tests {
                     withdrawn: false,
                     threaded: false,
                     bar: Bar::From(90),
+                    outcome: None,
                 },
                 Judged {
                     finding: finding("f2", 52),
@@ -1410,6 +1412,7 @@ mod tests {
                     withdrawn: false,
                     threaded: false,
                     bar: Bar::From(90),
+                    outcome: None,
                 },
             ],
             asked: vec!["mona".into()],

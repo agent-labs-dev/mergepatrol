@@ -24,9 +24,10 @@ pub use repo_config::{
     RepoSettings, TaskModel, WorkspaceDefaults,
 };
 pub use review::{
-    Answer, Answered, Bar, CodeLine, Depth, Evidence, Finding, Judged, Kind, Lean, LineKind, Panel,
-    Place, Question, Related, ReviewOverrides, ReviewSettings, ReviewStatus, Route, SentBack,
-    Verdict, Verification, Vote, merge_reviews, most_first, review_status, review_url,
+    Answer, Answered, Bar, CodeLine, Depth, Evidence, Finding, Judged, Kind, Lean, LineKind,
+    Outcome, Panel, Place, Question, Related, ReviewOverrides, ReviewSettings, ReviewStatus, Route,
+    SentBack, Settled, Verdict, Verification, Vote, dismiss_sent_back, merge_reviews, most_first,
+    review_status, review_url, settle_answers, settled_by,
 };
 pub use spend::{Spend, SpendTask};
 pub use steps::{Step, StepTimes, current_step, step_times};

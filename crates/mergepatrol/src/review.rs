@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use mergepatrol_core::{
     Answered, Depth, Evidence, Finding, Judged, Lean, PrNumber, RepoName, RepoSettings,
     ReviewSettings, ReviewStatus, SentBack, Verdict, Verification, review_status, review_url,
+    settled_by,
 };
 use mergepatrol_executor::protocol::{
     ANSWER_FILE, JobOutcome, JobSpec, REVIEW_FILE, ReviewOutput, Task,
@@ -403,6 +404,7 @@ pub(crate) async fn conclude(
     if !ctx.store.finish_review(r.id, r.claim, &done).await? {
         return Ok(());
     }
+    settle_last(ctx, r, &done).await?;
     let (kind, message) = ended(&done);
     record(ctx, key, r.number, kind, &message).await?;
     publish(ctx, gh, key, &now, r, &done).await
@@ -422,8 +424,9 @@ async fn judge(
         Ok(o) => (o.summary, bars.judge(o.findings), None),
         Err(why) => (String::new(), Vec::new(), Some(why)),
     };
+    let earlier = earlier_reviews(ctx, r).await?;
     // The author had their rounds and it still finds what to send back: a human decides.
-    if findings.iter().any(|f| f.sent_back) && rounds_spent(&earlier_reviews(ctx, r).await?) {
+    if findings.iter().any(|f| f.sent_back) && rounds_spent(&earlier) {
         for f in findings.iter_mut().filter(|f| f.sent_back) {
             f.sent_back = false;
             f.asked = true;
@@ -441,6 +444,17 @@ async fn judge(
         findings,
         asked,
     })
+}
+
+/// What became of what the last review held the PR for, as this one says.
+async fn settle_last(ctx: &Ctx, r: &ReviewRecord, done: &ReviewDone) -> Result<()> {
+    let earlier = earlier_reviews(ctx, r).await?;
+    let Some(last) = earlier.first() else {
+        return Ok(());
+    };
+    let found: Vec<Finding> = done.findings.iter().map(|j| j.finding.clone()).collect();
+    let settled = settled_by(&last.findings, &last.answers, &found);
+    ctx.store.settle_findings(last.id, &settled).await
 }
 
 /// How the review ended, as the PR's activity says it.
@@ -994,7 +1008,11 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
         anyhow::Ok(text)
     };
     let answer = answer.await.map_err(|e| format!("{e:#}"));
-    let withdrawn = sent_back && answer.as_deref().is_ok_and(withdraws);
+    let withdrawn = answer
+        .as_deref()
+        .ok()
+        .filter(|_| sent_back)
+        .and_then(withdraws);
     if !ctx
         .store
         .answer_question(r.id, r.claim, &q.id, answer)
@@ -1002,7 +1020,12 @@ async fn question(ctx: &Ctx, r: ReviewRecord, q: mergepatrol_core::Question) -> 
     {
         return Ok(());
     }
-    if withdrawn && let Some(status) = ctx.store.withdraw_finding(r.id, &q.finding).await? {
+    if let Some(outcome) = withdrawn
+        && let Some(status) = ctx
+            .store
+            .withdraw_finding(r.id, &q.finding, outcome)
+            .await?
+    {
         tracing::info!(repo = %r.repo, pr = r.number, finding = %q.finding, status = status.as_str(), "the agent withdrew a finding");
         if let Some(key) = &lane {
             let message = format!("withdrew {} on the author's reply", q.finding);
@@ -1038,6 +1061,7 @@ mod tests {
             }),
             needs_human: false,
             verified: None,
+            settled: None,
             code: Vec::new(),
             related: Vec::new(),
             also_at: Vec::new(),
@@ -1061,12 +1085,14 @@ mod tests {
                 withdrawn: false,
                 threaded: false,
                 bar: Bar::From(80),
+                outcome: None,
             }],
             asked: Vec::new(),
             answers: Default::default(),
             answered_by: answered_by.map(str::to_owned),
             note: String::new(),
             questions: Vec::new(),
+            waited_secs: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
